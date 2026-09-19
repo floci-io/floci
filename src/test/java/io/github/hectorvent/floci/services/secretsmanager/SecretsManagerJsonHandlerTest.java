@@ -11,6 +11,9 @@ import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+import java.util.function.Consumer;
+
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -596,7 +599,7 @@ class SecretsManagerJsonHandlerTest {
         rotateReq.set("RotationRules", rules);
 
         AwsException ex = assertThrows(
-                AwsException.class, 
+                AwsException.class,
                 () -> handler.handle("RotateSecret", rotateReq, REGION)
         );
         assertThat(ex.getErrorCode(), is("InvalidParameterException"));
@@ -879,7 +882,7 @@ class SecretsManagerJsonHandlerTest {
         createSecret("cancel-with-pending");
         String pendingToken = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
         service.putSecretValue("cancel-with-pending", "half-rotated", null,
-                pendingToken, REGION, java.util.List.of("AWSPENDING"));
+                pendingToken, REGION, List.of("AWSPENDING"));
 
         ObjectNode req = MAPPER.createObjectNode();
         req.put("SecretId", "cancel-with-pending");
@@ -904,20 +907,16 @@ class SecretsManagerJsonHandlerTest {
     void cancelRotateSecretOnUnknownSecretThrowsResourceNotFound() {
         ObjectNode req = MAPPER.createObjectNode();
         req.put("SecretId", "nope");
-        AwsException ex =
-                assertThrows(
-                        AwsException.class,
-                        () -> handler.handle("CancelRotateSecret", req, REGION));
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("CancelRotateSecret", req, REGION));
         assertThat(ex.getErrorCode(), is("ResourceNotFoundException"));
     }
 
     // ─── DeleteSecret recovery-window validation ───────────────────────────────
 
     private void assertDeleteSecretRejected(ObjectNode request) {
-        AwsException ex =
-                assertThrows(
-                        AwsException.class,
-                        () -> handler.handle("DeleteSecret", request, REGION));
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("DeleteSecret", request, REGION));
         assertThat(ex.getErrorCode(), is("InvalidParameterException"));
     }
 
@@ -1227,7 +1226,7 @@ class SecretsManagerJsonHandlerTest {
         createSecret("deprecating");
         String pendingToken = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
         service.putSecretValue("deprecating", "pending", null, pendingToken, REGION,
-                java.util.List.of("AWSPENDING"));
+                List.of("AWSPENDING"));
         service.updateSecretVersionStage("deprecating", null, pendingToken, "AWSPENDING", REGION);
 
         ObjectNode stages = (ObjectNode) describe("deprecating").get("VersionIdsToStages");
@@ -1430,7 +1429,7 @@ class SecretsManagerJsonHandlerTest {
         createSecret("deprecated-read");
         String token = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
         service.putSecretValue("deprecated-read", "pending", null, token, REGION,
-                java.util.List.of("AWSPENDING"));
+                List.of("AWSPENDING"));
         service.updateSecretVersionStage("deprecated-read", null, token, "AWSPENDING", REGION);
 
         ObjectNode req = MAPPER.createObjectNode();
@@ -1597,7 +1596,7 @@ class SecretsManagerJsonHandlerTest {
 
     // ─── RotationRules validation ──────────────────────────────────────────────
 
-    private ObjectNode rotateRequest(String secretId, java.util.function.Consumer<ObjectNode> rules) {
+    private ObjectNode rotateRequest(String secretId, Consumer<ObjectNode> rules) {
         ObjectNode req = MAPPER.createObjectNode();
         req.put("SecretId", secretId);
         req.put("RotationLambdaARN", LAMBDA_ARN);
@@ -1723,7 +1722,7 @@ class SecretsManagerJsonHandlerTest {
     private String stageThenDeprecate(String secretName) {
         String token = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
         service.putSecretValue(secretName, "pending", null, token, REGION,
-                java.util.List.of("AWSPENDING"));
+                List.of("AWSPENDING"));
         service.updateSecretVersionStage(secretName, null, token, "AWSPENDING", REGION);
         return token;
     }
@@ -1769,7 +1768,7 @@ class SecretsManagerJsonHandlerTest {
         createSecret("versioned");
         for (int i = 1; i <= 3; i++) {
             service.putSecretValue("versioned", "v" + i, null, null, REGION,
-                    java.util.List.of("stage-" + i));
+                    List.of("stage-" + i));
         }
 
         ObjectNode req = MAPPER.createObjectNode();
@@ -1880,10 +1879,8 @@ class SecretsManagerJsonHandlerTest {
         req.put("SecretString", "value");
         req.put("ClientRequestToken", "too-short");
 
-        AwsException ex =
-                assertThrows(
-                        AwsException.class,
-                        () -> handler.handle("CreateSecret", req, REGION));
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("CreateSecret", req, REGION));
         assertThat(ex.getErrorCode(), is("InvalidParameterException"));
     }
 }

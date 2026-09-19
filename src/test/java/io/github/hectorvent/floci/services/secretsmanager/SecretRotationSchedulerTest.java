@@ -97,12 +97,10 @@ class SecretRotationSchedulerTest {
     @Test
     void anUnparseableScheduleExpressionIsRejected() {
         service.createSecret("bad-cron", "v1", null, null, null, null, REGION);
-        AwsException ex =
-                assertThrows(
-                        AwsException.class,
-                        () -> service.rotateSecret("bad-cron", TOKEN, LAMBDA_ARN,
-                                new Secret.RotationRules(null, null, "every other tuesday"),
-                                false, REGION));
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.rotateSecret("bad-cron", TOKEN, LAMBDA_ARN,
+                        new Secret.RotationRules(null, null, "every other tuesday"),
+                        false, REGION));
         assertEquals("InvalidParameterException", ex.getErrorCode());
     }
 
