@@ -142,7 +142,7 @@ public class Route53Service {
      * leaving the previous comment in place.
      */
     public synchronized HostedZone updateHostedZoneComment(String id, String comment) {
-        HostedZone zone = getHostedZone(id);
+        HostedZone zone = getHostedZoneOwnedByCaller(id);
         zone.setComment(comment);
         zoneStore.put(id, zone);
         return zone;
