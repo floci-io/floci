@@ -556,7 +556,7 @@ class KmsIntegrationTest {
                 .when()
                 .post("/")
                 .then()
-                .statusCode(404)
+                .statusCode(400)
                 .body("__type", equalTo("NotFoundException"));
     }
 
@@ -641,7 +641,7 @@ class KmsIntegrationTest {
                 .when()
                 .post("/")
                 .then()
-                .statusCode(404)
+                .statusCode(400)
                 .body("__type", equalTo("NotFoundException"));
     }
 
@@ -863,7 +863,7 @@ class KmsIntegrationTest {
                 .body("{\"KeyId\":\"non-existent-key\",\"GrantId\":\"some-grant-id\"}")
                 .when().post("/")
                 .then()
-                .statusCode(404)
+                .statusCode(400)
                 .body("__type", equalTo("NotFoundException"));
     }
 
@@ -1354,7 +1354,7 @@ class KmsIntegrationTest {
                 .body("{\"AliasName\":\"alias/non-existent\",\"TargetKeyId\":\"" + keyId + "\"}")
                 .when().post("/")
                 .then()
-                .statusCode(404)
+                .statusCode(400)
                 .body("__type", equalTo("NotFoundException"));
     }
 
@@ -1383,7 +1383,7 @@ class KmsIntegrationTest {
                 .body("{\"AliasName\":\"alias/update-alias-missing-target\",\"TargetKeyId\":\"non-existent-key\"}")
                 .when().post("/")
                 .then()
-                .statusCode(404)
+                .statusCode(400)
                 .body("__type", equalTo("NotFoundException"));
     }
 

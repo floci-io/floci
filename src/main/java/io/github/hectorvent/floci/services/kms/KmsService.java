@@ -1077,7 +1077,7 @@ public class KmsService implements ResourceProvider {
     public void updateAlias(String aliasName, String targetKeyId, String region) {
         String storageKey = region + "::" + aliasName;
         KmsAlias existing = aliasStore.get(storageKey)
-                .orElseThrow(() -> new AwsException("NotFoundException", "Alias not found: " + aliasName, 404));
+                .orElseThrow(() -> new AwsException("NotFoundException", "Alias not found: " + aliasName, 400));
 
         KmsKey currentKey = resolveKey(existing.getTargetKeyId(), region);
         KmsKey newKey = resolveKey(targetKeyId, region); // Validate key exists and normalize to plain key ID
@@ -1098,7 +1098,7 @@ public class KmsService implements ResourceProvider {
     public void deleteAlias(String aliasName, String region) {
         String key = region + "::" + aliasName;
         if (aliasStore.get(key).isEmpty()) {
-            throw new AwsException("NotFoundException", "Alias not found", 404);
+            throw new AwsException("NotFoundException", "Alias not found", 400);
         }
         aliasStore.delete(key);
     }
@@ -1814,7 +1814,7 @@ public class KmsService implements ResourceProvider {
             String aliasKey = region + "::" + aliasName;
             id = aliasStore.get(aliasKey)
                     .map(KmsAlias::getTargetKeyId)
-                    .orElseThrow(() -> new AwsException("NotFoundException", "Alias not found: " + keyIdOrArn, 404));
+                    .orElseThrow(() -> new AwsException("NotFoundException", "Alias not found: " + keyIdOrArn, 400));
         } else if (AwsArnUtils.isArnFor(id, "kms")) {
             // Key arn
             id = id.substring(id.lastIndexOf("/") + 1);
@@ -1823,12 +1823,12 @@ public class KmsService implements ResourceProvider {
             String aliasKey = region + "::" + id;
             id = aliasStore.get(aliasKey)
                     .map(KmsAlias::getTargetKeyId)
-                    .orElseThrow(() -> new AwsException("NotFoundException", "Alias not found: " + keyIdOrArn, 404));
+                    .orElseThrow(() -> new AwsException("NotFoundException", "Alias not found: " + keyIdOrArn, 400));
         }
 
         // Key id
         KmsKey key = keyStore.get(region + "::" + id)
-                .orElseThrow(() -> new AwsException("NotFoundException", "Key not found: " + keyIdOrArn, 404));
+                .orElseThrow(() -> new AwsException("NotFoundException", "Key not found: " + keyIdOrArn, 400));
         key = expireImportedKeyMaterialIfDue(key, region);
         key = ensureBackingKeyMaterial(key, region);
         return key;
