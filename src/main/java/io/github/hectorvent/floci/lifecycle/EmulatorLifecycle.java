@@ -179,6 +179,11 @@ public class EmulatorLifecycle {
         LOG.infof("Region:    %s  Account: %s", config.defaultRegion(), config.defaultAccountId());
         LOG.infov("Storage:   {0}  Path: {1}", config.storage().mode(), config.storage().persistentPath());
         LOG.infov("TLS:       {0}", config.tls().enabled() ? "enabled (HTTPS + HTTP dual mode)" : "disabled (HTTP only)");
+        // Surfaced in the banner because a mistyped flag name (issue #3931) silently leaves
+        // enforcement off, and nothing else in the logs reveals that policies are not evaluated.
+        LOG.infov("IAM:       {0}", config.services().iam().enforcementEnabled()
+                ? "policy enforcement enabled"
+                : "policy enforcement disabled (set FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true to enforce)");
 
         // BOOT hooks run before service initialization — scripts cannot use AWS APIs yet.
         try {
