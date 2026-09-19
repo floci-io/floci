@@ -44,6 +44,7 @@ import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.io.IOException;
+import java.text.MessageFormat;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -100,6 +101,7 @@ class EmulatorLifecycleTest {
     @Mock private InitLifecycleState initLifecycleState;
     @Mock private PersistentPathValidator persistentPathValidator;
     @Mock private EmulatorConfig.TlsConfig tlsConfig;
+    @Mock private EmulatorConfig.IamServiceConfig iamServiceConfig;
     @Mock private SchemaCreationWorker schemaCreationWorker;
     @Mock private StepFunctionsService stepFunctionsService;
     @Mock private Instance<ContainerTeardown> containerTeardowns;
@@ -121,6 +123,8 @@ class EmulatorLifecycleTest {
         Mockito.lenient().when(eksServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(servicesConfig.timestreamInfluxdb()).thenReturn(timestreamInfluxDbServiceConfig);
         Mockito.lenient().when(timestreamInfluxDbServiceConfig.enabled()).thenReturn(true);
+        Mockito.lenient().when(servicesConfig.iam()).thenReturn(iamServiceConfig);
+        Mockito.lenient().when(iamServiceConfig.enforcementEnabled()).thenReturn(false);
         Mockito.lenient().when(config.tls()).thenReturn(tlsConfig);
         Mockito.lenient().when(tlsConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(config.port()).thenReturn(4566);
@@ -522,7 +526,10 @@ class EmulatorLifecycleTest {
         java.util.logging.Handler handler = new java.util.logging.Handler() {
             @Override
             public void publish(java.util.logging.LogRecord logRecord) {
-                messages.add(logRecord.getMessage());
+                Object[] parameters = logRecord.getParameters();
+                messages.add(parameters == null || parameters.length == 0
+                        ? logRecord.getMessage()
+                        : MessageFormat.format(logRecord.getMessage(), parameters));
             }
 
             @Override
@@ -575,6 +582,36 @@ class EmulatorLifecycleTest {
                 "No parity line may be emitted when parity is disabled");
         assertTrue(messages.contains("=== AWS Local Emulator Ready ==="),
                 "The Floci ready banner must still be emitted");
+    }
+
+    @Test
+    @DisplayName("Should report in the banner that IAM enforcement is disabled by default")
+    void shouldReportIamEnforcementDisabledInBanner() {
+        stubStorageConfig();
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        List<String> messages =
+                lifecycleLogMessages(() -> emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class)));
+
+        assertTrue(messages.contains("IAM:       policy enforcement disabled"
+                        + " (set FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true to enforce)"),
+                "The banner must say enforcement is off and name the flag that turns it on");
+    }
+
+    @Test
+    @DisplayName("Should report in the banner that IAM enforcement is enabled when configured")
+    void shouldReportIamEnforcementEnabledInBanner() {
+        stubStorageConfig();
+        when(iamServiceConfig.enforcementEnabled()).thenReturn(true);
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        List<String> messages =
+                lifecycleLogMessages(() -> emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class)));
+
+        assertTrue(messages.contains("IAM:       policy enforcement enabled"),
+                "The banner must say enforcement is on");
     }
 
     @Test
