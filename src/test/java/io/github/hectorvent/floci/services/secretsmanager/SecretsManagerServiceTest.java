@@ -16,6 +16,8 @@ import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
 import org.apache.commons.lang3.RandomStringUtils;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentMatchers;
 import org.mockito.Mockito;
 
@@ -707,8 +709,8 @@ class SecretsManagerServiceTest {
      * commercial partition a secret's own ARN, minus the random suffix AWS lets clients omit,
      * resolved to nothing. Round trip through the ARN the emulator itself minted.
      */
-    @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.CsvSource({
+    @ParameterizedTest
+    @CsvSource({
             "us-east-1,      arn:aws:secretsmanager:",
             "us-gov-west-1,  arn:aws-us-gov:secretsmanager:",
             "cn-north-1,     arn:aws-cn:secretsmanager:"})
