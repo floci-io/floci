@@ -9,6 +9,7 @@ Route53 management-plane emulation. Supports hosted zones, resource record sets,
 | --- | --- |
 | `CreateHostedZone` | `POST /2013-04-01/hostedzone`. A `<VPC>` element in the request creates a private zone and records the first VPC association. |
 | `GetHostedZone` | `GET /2013-04-01/hostedzone/{Id}`. Private zones include their `<VPCs>` list. |
+| `UpdateHostedZoneComment` | `POST /2013-04-01/hostedzone/{Id}` |
 | `DeleteHostedZone` | `DELETE /2013-04-01/hostedzone/{Id}` |
 | `ListHostedZones` | `GET /2013-04-01/hostedzone` |
 | `ListHostedZonesByName` | `GET /2013-04-01/hostedzonesbyname` |

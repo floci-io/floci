@@ -537,4 +537,81 @@ class Route53IntegrationTest {
                 .body("GetAccountLimitResponse.Limit.Type", equalTo("MAX_HOSTED_ZONES_BY_OWNER"))
                 .body("GetAccountLimitResponse.Limit.Value", equalTo("500"));
     }
+
+    @Test
+    @Order(22)
+    void updateHostedZoneComment_replacesTheCommentAndClearsItWhenOmitted() {
+        String ownZoneId = createZoneForCommentTest("comment-zone-1", "before the import");
+
+        given()
+                .contentType(XML)
+                .body("""
+                        <?xml version="1.0" encoding="UTF-8"?>
+                        <UpdateHostedZoneCommentRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                          <Comment>after the import</Comment>
+                        </UpdateHostedZoneCommentRequest>
+                        """)
+                .when().post("/2013-04-01/hostedzone/" + ownZoneId)
+                .then()
+                .statusCode(200)
+                .contentType(XML)
+                .body("UpdateHostedZoneCommentResponse.HostedZone.Id", equalTo("/hostedzone/" + ownZoneId))
+                .body("UpdateHostedZoneCommentResponse.HostedZone.Config.Comment", equalTo("after the import"));
+
+        given()
+                .when().get("/2013-04-01/hostedzone/" + ownZoneId)
+                .then()
+                .statusCode(200)
+                .body("GetHostedZoneResponse.HostedZone.Config.Comment", equalTo("after the import"));
+
+        // AWS deletes the existing comment when the request carries none.
+        given()
+                .contentType(XML)
+                .body("""
+                        <?xml version="1.0" encoding="UTF-8"?>
+                        <UpdateHostedZoneCommentRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/"/>
+                        """)
+                .when().post("/2013-04-01/hostedzone/" + ownZoneId)
+                .then()
+                .statusCode(200)
+                .body(not(containsString("<Comment>")));
+
+        // Cleanup
+        given().when().delete("/2013-04-01/hostedzone/" + ownZoneId).then().statusCode(200);
+    }
+
+    @Test
+    @Order(23)
+    void updateHostedZoneComment_unknownZoneIsNoSuchHostedZone() {
+        given()
+                .contentType(XML)
+                .body("""
+                        <?xml version="1.0" encoding="UTF-8"?>
+                        <UpdateHostedZoneCommentRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                          <Comment>nope</Comment>
+                        </UpdateHostedZoneCommentRequest>
+                        """)
+                .when().post("/2013-04-01/hostedzone/ZNOPE000000000")
+                .then()
+                .statusCode(404)
+                .body(containsString("NoSuchHostedZone"));
+    }
+
+    private String createZoneForCommentTest(String callerReference, String comment) {
+        String location = given()
+                .contentType(XML)
+                .body("""
+                        <?xml version="1.0" encoding="UTF-8"?>
+                        <CreateHostedZoneRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                          <Name>comments.example.com</Name>
+                          <CallerReference>%s</CallerReference>
+                          <HostedZoneConfig>
+                            <Comment>%s</Comment>
+                          </HostedZoneConfig>
+                        </CreateHostedZoneRequest>
+                        """.formatted(callerReference, comment))
+                .when().post("/2013-04-01/hostedzone")
+                .then().statusCode(201).extract().header("Location");
+        return location.substring(location.lastIndexOf('/') + 1);
+    }
 }
