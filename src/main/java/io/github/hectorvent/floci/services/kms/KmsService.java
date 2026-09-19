@@ -32,6 +32,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.regex.Pattern;
 
 import static io.github.hectorvent.floci.services.kms.model.KmsMessageType.RAW;
 
@@ -1827,11 +1828,24 @@ public class KmsService implements ResourceProvider {
         }
 
         // Key id
+        String keyId = id;
         KmsKey key = keyStore.get(region + "::" + id)
-                .orElseThrow(() -> new AwsException("NotFoundException", "Key not found: " + keyIdOrArn, 400));
+                .orElseThrow(() -> keyNotFound(keyIdOrArn, keyId, region));
         key = expireImportedKeyMaterialIfDue(key, region);
         key = ensureBackingKeyMaterial(key, region);
         return key;
+    }
+
+    private static final Pattern KEY_ID_PATTERN = Pattern.compile(
+            "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|mrk-[0-9a-fA-F]{32}");
+
+    private AwsException keyNotFound(String keyIdOrArn, String keyId, String region) {
+        if (!KEY_ID_PATTERN.matcher(keyId).matches()) {
+            String shown = AwsArnUtils.isArnFor(keyIdOrArn, "kms") ? keyId : "'" + keyId + "'";
+            return new AwsException("NotFoundException", "Invalid keyId " + shown, 400);
+        }
+        return new AwsException("NotFoundException",
+                "Key '" + regionResolver.buildArn("kms", region, "key/" + keyId) + "' does not exist", 400);
     }
 
     private static void validateKeyIsUsableForCryptoOperations(KmsKey key) {

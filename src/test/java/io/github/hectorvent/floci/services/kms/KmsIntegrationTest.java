@@ -2002,6 +2002,28 @@ class KmsIntegrationTest {
     }
 
     @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "12345678-1234-1234-1234-123456789012|Key '{arn}12345678-1234-1234-1234-123456789012' does not exist",
+            "786CA7CD-B74B-42B3-B887-902AD7AB6429|Key '{arn}786CA7CD-B74B-42B3-B887-902AD7AB6429' does not exist",
+            "mrk-1234567812341234123412345678901a|Key '{arn}mrk-1234567812341234123412345678901a' does not exist",
+            "{arn}12345678-1234-1234-1234-123456789012|Key '{arn}12345678-1234-1234-1234-123456789012' does not exist",
+            "{arn}foo|Invalid keyId foo",
+            "foo|Invalid keyId 'foo'",
+            "12345678123412341234123456789012|Invalid keyId '12345678123412341234123456789012'",
+            "mrk-1234|Invalid keyId 'mrk-1234'",
+    })
+    void describeKeyNamesAMissingKey(String keyId, String message) {
+        String keyArn = createKeyArn("SYMMETRIC_DEFAULT", "ENCRYPT_DECRYPT");
+        String arnPrefix = keyArn.substring(0, keyArn.lastIndexOf('/') + 1);
+
+        callKms("DescribeKey", "{\"KeyId\":\"%s\"}".formatted(keyId.replace("{arn}", arnPrefix)))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("NotFoundException"))
+                .body("message", equalTo(message.replace("{arn}", arnPrefix)));
+    }
+
+    @ParameterizedTest
     @CsvSource({"Encrypt", "Decrypt"})
     void encryptionAlgorithmValidationListsTheEnumInAwsOrder(String operation) {
         callKms(operation, "{\"KeyId\":\"%s\",\"Plaintext\":\"aGVsbG8=\",\"CiphertextBlob\":\"AAAA\",\"EncryptionAlgorithm\":\"FOO\"}"
