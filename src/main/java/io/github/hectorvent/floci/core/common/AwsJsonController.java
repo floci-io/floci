@@ -101,7 +101,7 @@ public class AwsJsonController {
             String body) {
 
         if (target == null) {
-            return null;
+            return JsonErrorResponseUtils.createUnknownOperationErrorResponse(target);
         }
 
         ServiceCatalog.TargetMatch targetMatch = catalog.matchTarget(target).orElse(null);
