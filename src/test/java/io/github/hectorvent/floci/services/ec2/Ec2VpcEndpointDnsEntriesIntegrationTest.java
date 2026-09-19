@@ -131,7 +131,7 @@ class Ec2VpcEndpointDnsEntriesIntegrationTest {
     @ParameterizedTest
     @CsvSource({
         "com.amazonaws.us-east-1.monitoring, monitoring.us-east-1.amazonaws.com",
-        "com.amazonaws.us-east-1.execute-api, execute-api.us-east-1.amazonaws.com",
+        "com.amazonaws.us-east-1.execute-api, *.execute-api.us-east-1.amazonaws.com",
         "com.amazonaws.us-east-1.ecr.api, api.ecr.us-east-1.amazonaws.com",
         "com.amazonaws.us-east-1.kinesis-streams, kinesis.us-east-1.amazonaws.com",
         "com.amazonaws.us-east-1.kinesis-firehose, firehose.us-east-1.amazonaws.com",

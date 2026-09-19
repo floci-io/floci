@@ -154,6 +154,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             "kinesis-streams", "kinesis",
             "kinesis-firehose", "firehose",
             "dkr.ecr", "*.dkr.ecr",
+            "execute-api", "*.execute-api",
             "data.iot", "");
     // A first launch may need to pull a large AMI-backed image. Keep a finite CloudFormation
     // bound, but allow enough time for that legitimate cold-start path before cancellation.
