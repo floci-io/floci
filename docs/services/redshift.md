@@ -57,8 +57,16 @@ and DynamoDB keys and images as JSON text. Record event ids are unique, so retri
 
 The integration consumer has its own stream checkpoint and does not share Lambda event source
 mapping state. Deleting an integration stops its consumer while retaining the landing table.
-Serverless Redshift targets, backfill, schema inference, and relational projection are not supported
-in this first implementation.
+
+Items already present in the source table when `CreateIntegration` runs are backfilled into the
+landing table with a paginated `Scan`, one page per poll tick, and the scan resumes after a Floci
+restart. While the backfill runs, `DescribeIntegrations` reports `Status` as `syncing`, as real AWS
+zero-ETL integrations do; it becomes `active` once the scan is exhausted. The landing table is an
+append-only log, so an item changed while its table is still being backfilled can appear twice: once
+from the scan and once from the stream.
+
+Serverless Redshift targets, schema inference, and relational projection are not supported in this
+first implementation.
 
 ## CloudFormation
 
