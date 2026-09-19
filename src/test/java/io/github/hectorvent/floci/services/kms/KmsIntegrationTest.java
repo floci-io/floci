@@ -1969,6 +1969,17 @@ class KmsIntegrationTest {
     }
 
     @Test
+    void getPublicKeyRejectsASymmetricKeyWithoutAMessage() {
+        String keyArn = createKeyArn("SYMMETRIC_DEFAULT", "ENCRYPT_DECRYPT");
+
+        callKms("GetPublicKey", "{\"KeyId\":\"%s\"}".formatted(keyArn))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("UnsupportedOperationException"))
+                .body("message", nullValue());
+    }
+
+    @Test
     void getPublicKeyWorksOnADisabledKey() {
         String keyArn = createKeyArn("RSA_2048", "SIGN_VERIFY");
         callKms("DisableKey", "{\"KeyId\":\"%s\"}".formatted(keyArn)).then().statusCode(200);
