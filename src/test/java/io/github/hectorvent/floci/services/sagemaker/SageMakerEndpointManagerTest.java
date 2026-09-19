@@ -18,22 +18,24 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 
 /**
- * A state reset runs the container teardown, which shuts the worker pool down, and then
- * {@code clear()}. Shutdown runs only the teardown.
+ * A state reset runs the container teardown, which shuts the worker pool down, then
+ * {@code clear()}, and {@code afterReset()} last, even when the wipe or a {@code clear()}
+ * failed. Shutdown runs only the teardown.
  */
 class SageMakerEndpointManagerTest {
 
     @Test
-    void teardownStopsThePoolAndClearRestoresIt() {
+    void teardownStopsThePoolAndAfterResetRestoresIt() {
         SageMakerEndpointManager manager = manager();
         assertTrue(manager.acceptsWork());
 
         manager.stopManagedContainers();
         assertFalse(manager.acceptsWork());
 
-        manager.clear();
+        // A reset whose wipe threw skips clear(); afterReset() alone must bring the pool back.
+        manager.afterReset();
         assertTrue(manager.acceptsWork());
-        manager.clear();
+        manager.afterReset();
         assertTrue(manager.acceptsWork());
 
         manager.stopManagedContainers();
@@ -44,6 +46,7 @@ class SageMakerEndpointManagerTest {
         SageMakerEndpointManager manager = manager();
         manager.stopManagedContainers();
         manager.clear();
+        manager.afterReset();
 
         SageMakerService service = mock(SageMakerService.class);
         CountDownLatch published = new CountDownLatch(1);

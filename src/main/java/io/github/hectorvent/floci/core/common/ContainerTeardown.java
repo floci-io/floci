@@ -16,8 +16,10 @@ package io.github.hectorvent.floci.core.common;
  *
  * <p>Implementations must be idempotent; they may also be invoked from {@code @PreDestroy}
  * as a fallback. An implementation that shuts down its own executor here must also implement
- * {@link Resettable} and replace that executor in {@code clear()}: a reset runs this hook
- * too, and {@code clear()} runs after it on a reset but never on shutdown.
+ * {@link Resettable} and replace that executor in {@code afterReset()}: a reset runs this hook
+ * too, and {@code afterReset()} runs at the end of a reset, even one whose storage wipe or
+ * {@code clear()} failed, but never on shutdown. {@code clear()} is not enough, since the
+ * controller skips it once an earlier step threw and the pool would stay terminated for good.
  */
 public interface ContainerTeardown {
 
