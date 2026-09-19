@@ -1613,9 +1613,6 @@ public class GlueService {
         validateRequired(name, "JobName");
         // Jobs and crawlers skip normalizeName because AWS preserves their case
         String normalizedName = name;
-        if (jobStore.get(normalizedName).isEmpty()) {
-            throw new AwsException("EntityNotFoundException", "Job " + name + " not found.", 400);
-        }
         jobStore.delete(normalizedName);
         resourceGroupsTaggingService.deleteResources(List.of(jobArn(region, normalizedName)), region);
         LOG.infov("Deleted Glue Job: {0}", name);

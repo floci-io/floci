@@ -1124,6 +1124,9 @@ class GlueServiceTest {
         AwsException ex = assertThrows(AwsException.class, () -> glueService.getJob("my-job"));
         assertEquals("EntityNotFoundException", ex.getErrorCode());
         assertTrue(glueService.getJobs().isEmpty());
+
+        glueService.deleteJob("my-job", REGION);
+        assertTrue(glueService.getJobs().isEmpty());
     }
 
     @Test
