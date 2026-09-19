@@ -23,8 +23,14 @@ final class JsonLinesToCsvConverter {
 
     static void convert(InputStream in, List<String> targetColumns, OutputStream out) throws IOException {
         if (targetColumns == null || targetColumns.isEmpty()) {
+            // Catalog-based column discovery for FORMAT AS JSON 'auto' only runs over the Simple
+            // Query protocol; over Extended Query the column list is fixed at Parse time, before
+            // any backend round trip is possible. This is the only way targetColumns ever arrives
+            // empty here, so the message names Extended Query directly instead of guessing.
             throw new S3CopySimulator.S3TransferException(SQLSTATE_INTERNAL,
-                    "Cannot convert JSON to CSV without target columns", null);
+                    "COPY ... FORMAT AS JSON 'auto' requires an explicit column list over the "
+                            + "Extended Query protocol; specify columns, or connect with "
+                            + "preferQueryMode=simple to use catalog-based column discovery", null);
         }
         BufferedReader reader = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8));
         List<String> lowerColumns = targetColumns.stream().map(String::toLowerCase).toList();

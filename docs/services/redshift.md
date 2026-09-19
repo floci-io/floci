@@ -214,8 +214,13 @@ order) through its own S3 service and streams the rows into the backing PostgreS
   a comma default delimiter.
 - `FORMAT AS JSON 'auto'` (or `JSON 'auto'`) loads Newline-Delimited JSON (NDJSON) records, mapping
   JSON keys to table columns case-insensitively. When columns are not specified in the COPY statement,
-  table column names and order are automatically discovered from the database catalog. Nested objects
-  and arrays are serialized as JSON strings.
+  table column names and order are automatically discovered from the database catalog, but only over
+  the **Simple Query protocol**. Over Extended Query (the default for a JDBC `PreparedStatement`, and
+  for a plain `Statement` under recent pgjdbc versions) the column list is fixed by the time `Parse`
+  is sent, before any backend round trip is possible, so catalog discovery cannot run there: omitting
+  the column list fails the COPY with a clear error instead of silently guessing. Specify the column
+  list explicitly for Extended Query, or connect with `preferQueryMode=simple` to use discovery.
+  Nested objects and arrays are serialized as JSON strings.
 - `MANIFEST` resolves file keys from a JSON manifest file (`{"entries": [{"url": "s3://...", "mandatory": boolean}]}`),
   compatible with output from `UNLOAD ... MANIFEST`. Missing files marked `mandatory: true` abort the load.
 - `IGNOREHEADER` and `HEADER` skip lines from the first resolved object only.

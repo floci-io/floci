@@ -90,6 +90,16 @@ class RedshiftInterceptorIntegrationTest {
         return jdbcUrl(cluster) + "?prepareThreshold=1";
     }
 
+    /**
+     * Catalog-based column discovery for {@code FORMAT AS JSON 'auto'} without an explicit column
+     * list only runs over the Simple Query protocol (see {@code docs/services/redshift.md}), so
+     * tests exercising that discovery must force it explicitly: pgjdbc's default query mode is
+     * Extended even for a plain {@link java.sql.Statement}.
+     */
+    private static String simpleQueryJdbcUrl(Cluster cluster) {
+        return jdbcUrl(cluster) + "?preferQueryMode=simple";
+    }
+
     private static Connection waitForConnection(Cluster cluster, String username, String password) throws SQLException {
         return waitForConnection(jdbcUrl(cluster), username, password);
     }
@@ -477,7 +487,9 @@ class RedshiftInterceptorIntegrationTest {
                 + "{\"id\": 20, \"name\": \"David\", \"note\": \"world\"}\n";
         s3.putObject(bucket, "data/items.json", ndjson.getBytes(StandardCharsets.UTF_8), "application/json", Map.of());
 
-        try (Connection c = waitForConnection(cluster, "admin", "Secret123")) {
+        // Column discovery only runs over Simple Query; force it explicitly since pgjdbc's
+        // default query mode is Extended even for a plain Statement.
+        try (Connection c = waitForConnection(simpleQueryJdbcUrl(cluster), "admin", "Secret123")) {
             c.createStatement().execute("CREATE TABLE items (id int, name text, note text)");
             c.createStatement().execute("COPY items FROM 's3://" + bucket + "/data/items.json' FORMAT AS JSON 'auto'");
             try (ResultSet rs = c.createStatement().executeQuery("SELECT count(*), max(id) FROM items")) {
@@ -485,6 +497,26 @@ class RedshiftInterceptorIntegrationTest {
                 assertEquals(2, rs.getInt(1));
                 assertEquals(20, rs.getInt(2));
             }
+        }
+    }
+
+    @Test
+    void copyFromS3JsonAutoWithoutColumnsOverExtendedQueryFailsClearly() throws Exception {
+        clusterId = "it-copy-json-auto-extended-rejects";
+        Cluster cluster = service.createCluster(clusterId, "dc2.large", "admin", "Secret123");
+
+        String bucket = "redshift-copy-json-auto-extended";
+        s3.createBucket(bucket, "us-east-1");
+        s3.putObject(bucket, "data/items.json",
+                "{\"id\": 1}\n".getBytes(StandardCharsets.UTF_8), "application/json", Map.of());
+
+        // Default connection: pgjdbc's default query mode is Extended even for a plain Statement,
+        // where the column list is fixed at Parse time and catalog discovery cannot run.
+        try (Connection c = waitForConnection(cluster, "admin", "Secret123")) {
+            c.createStatement().execute("CREATE TABLE ext_items (id int)");
+            SQLException ex = assertThrows(SQLException.class, () -> c.createStatement().execute(
+                    "COPY ext_items FROM 's3://" + bucket + "/data/items.json' FORMAT AS JSON 'auto'"));
+            assertTrue(ex.getMessage().contains("explicit column list"));
         }
     }
 
@@ -501,7 +533,9 @@ class RedshiftInterceptorIntegrationTest {
         }
         s3.putObject(bucket, "data/compressed.json.gz", raw.toByteArray(), "application/gzip", Map.of());
 
-        try (Connection c = waitForConnection(cluster, "admin", "Secret123")) {
+        // Column discovery only runs over Simple Query; force it explicitly since pgjdbc's
+        // default query mode is Extended even for a plain Statement.
+        try (Connection c = waitForConnection(simpleQueryJdbcUrl(cluster), "admin", "Secret123")) {
             c.createStatement().execute("CREATE TABLE gz_items (id int, val text)");
             c.createStatement().execute("COPY gz_items FROM 's3://" + bucket + "/data/compressed.json.gz' GZIP FORMAT AS JSON 'auto'");
             try (ResultSet rs = c.createStatement().executeQuery("SELECT count(*), max(val) FROM gz_items")) {
