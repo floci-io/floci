@@ -13,11 +13,13 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Random;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiPredicate;
@@ -103,6 +105,7 @@ import io.github.hectorvent.floci.services.ec2.model.Vpc;
 import io.github.hectorvent.floci.services.ec2.model.VpcCidrBlockAssociation;
 import io.github.hectorvent.floci.services.ec2.model.VpcIpv6CidrBlockAssociation;
 import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
+import io.github.hectorvent.floci.services.ec2.model.VpcEndpointDnsEntry;
 import io.github.hectorvent.floci.services.ec2.model.VpcEndpointSubnetConfiguration;
 import io.github.hectorvent.floci.services.ec2.model.VpcPeeringConnection;
 import io.github.hectorvent.floci.services.ec2.model.VpcPeeringConnectionStateReason;
@@ -3977,6 +3980,79 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 (endpointId + "|" + subnetId).getBytes(StandardCharsets.UTF_8))
                 .toString().replace("-", "");
         return "eni-" + hex.substring(0, 17);
+    }
+
+    /**
+     * The {@code DnsEntries} an interface endpoint reports. The names and zones are synthesized
+     * deterministically rather than persisted, so a restart keeps answering with what the caller
+     * first saw, and the private-DNS entry carries its own zone because AWS creates one per
+     * endpoint. Two classes AWS also serves are not modelled, both needing per-service metadata
+     * floci does not hold: the wildcard entry, and the several private names a service such as
+     * S3 answers to.
+     */
+    public List<VpcEndpointDnsEntry> endpointDnsEntries(VpcEndpoint endpoint) {
+        if (!"Interface".equalsIgnoreCase(endpoint.getVpcEndpointType())) {
+            return List.of();
+        }
+        String region = endpoint.getRegion();
+        String serviceToken = endpointServiceToken(endpoint.getServiceName(), region);
+        String name = endpoint.getVpcEndpointId() + "-" + endpointDnsDiscriminator(endpoint.getVpcEndpointId());
+        String domain = serviceToken + "." + region + ".vpce.amazonaws.com";
+        String hostedZoneId = vpceHostedZoneId(region);
+
+        List<VpcEndpointDnsEntry> entries = new ArrayList<>();
+        entries.add(new VpcEndpointDnsEntry(name + "." + domain, hostedZoneId));
+        endpoint.getSubnetIds().stream()
+                .map(subnetId -> subnets.get(key(region, subnetId)).orElse(null))
+                .filter(Objects::nonNull)
+                .map(Subnet::getAvailabilityZone)
+                .filter(az -> az != null && !az.isBlank())
+                .distinct()
+                .sorted()
+                .forEach(az -> entries.add(new VpcEndpointDnsEntry(name + "-" + az + "." + domain, hostedZoneId)));
+        if (endpoint.isPrivateDnsEnabled() && !serviceToken.startsWith("vpce-svc-")) {
+            entries.add(new VpcEndpointDnsEntry(serviceToken + "." + region + ".amazonaws.com",
+                    privateDnsHostedZoneId(endpoint.getVpcEndpointId())));
+        }
+        return entries;
+    }
+
+    private static String endpointDnsDiscriminator(String endpointId) {
+        String hex = UUID.nameUUIDFromBytes(("vpce-dns|" + endpointId).getBytes(StandardCharsets.UTF_8))
+                .toString().replace("-", "");
+        return hex.substring(0, 8);
+    }
+
+    /**
+     * The service segment of the name. AWS drops the {@code com.amazonaws.<region>} prefix and
+     * reverses what is left, so {@code com.amazonaws.us-east-1.ecr.api} is reached at
+     * {@code api.ecr.<region>.vpce.amazonaws.com}. An endpoint service carries its
+     * {@code vpce-svc-*} identifier as the one trailing segment, which the same rule returns.
+     */
+    private static String endpointServiceToken(String serviceName, String region) {
+        if (serviceName == null || serviceName.isBlank()) {
+            return "unknown";
+        }
+        List<String> parts = List.of(serviceName.split("\\."));
+        int regionAt = region == null ? -1 : parts.indexOf(region);
+        if (regionAt < 0 || regionAt == parts.size() - 1) {
+            return parts.get(parts.size() - 1);
+        }
+        List<String> serviceParts = new ArrayList<>(parts.subList(regionAt + 1, parts.size()));
+        Collections.reverse(serviceParts);
+        return String.join(".", serviceParts);
+    }
+
+    private static String vpceHostedZoneId(String region) {
+        String hex = UUID.nameUUIDFromBytes(("vpce-zone|" + region).getBytes(StandardCharsets.UTF_8))
+                .toString().replace("-", "").toUpperCase(Locale.ROOT);
+        return "Z" + hex.substring(0, 13);
+    }
+
+    private static String privateDnsHostedZoneId(String endpointId) {
+        String hex = UUID.nameUUIDFromBytes(("vpce-private-zone|" + endpointId).getBytes(StandardCharsets.UTF_8))
+                .toString().replace("-", "").toUpperCase(Locale.ROOT);
+        return "Z" + hex.substring(0, 13);
     }
 
     /**

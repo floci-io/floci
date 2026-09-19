@@ -5460,6 +5460,17 @@ public class Ec2QueryHandler {
             xml.start("item").elem("groupId", securityGroupId).end("item");
         }
         xml.end("groupSet");
+        List<VpcEndpointDnsEntry> dnsEntries = service.endpointDnsEntries(endpoint);
+        if (!dnsEntries.isEmpty()) {
+            xml.start("dnsEntrySet");
+            for (VpcEndpointDnsEntry entry : dnsEntries) {
+                xml.start("item")
+                        .elem("dnsName", entry.dnsName())
+                        .elem("hostedZoneId", entry.hostedZoneId())
+                        .end("item");
+            }
+            xml.end("dnsEntrySet");
+        }
         xml.raw(tagSetXml(endpoint.getTags()));
         return xml.build();
     }

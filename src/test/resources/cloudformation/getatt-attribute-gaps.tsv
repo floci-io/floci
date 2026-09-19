@@ -16,7 +16,6 @@ AWS::EC2::Subnet	NetworkAclAssociationId	the subnet's default network ACL associ
 AWS::EC2::VPC	CidrBlockAssociations	needs association ids Floci's VPC model does not track
 AWS::EC2::VPC	DefaultNetworkAcl	needs a default network ACL Floci does not create with the VPC
 AWS::EC2::VPC	Ipv6CidrBlocks	IPv6 CIDR association is not emulated
-AWS::EC2::VPCEndpoint	DnsEntries	endpoint DNS entries are not emulated
 AWS::EC2::VPCEndpoint	NetworkInterfaceIds	endpoint ENIs are not created
 AWS::EC2::VPCGatewayAttachment	AttachmentType	the exact literal AWS returns (internet vs vpn gateway) is not given by the schema
 AWS::Kinesis::Stream	WarmThroughputObject	warm throughput is not an emulated Kinesis feature
