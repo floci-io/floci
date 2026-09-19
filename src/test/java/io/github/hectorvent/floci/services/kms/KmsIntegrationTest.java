@@ -2077,6 +2077,33 @@ class KmsIntegrationTest {
     }
 
     @Test
+    void rotateKeyOnDemandNeedsNewKeyMaterialForAnExternalKey() throws Exception {
+        String keyId = createExternalSymmetricKey();
+        importFreshMaterial(keyId);
+        String keyArn = describeKey(keyId).extract().path("KeyMetadata.Arn");
+
+        callKms("RotateKeyOnDemand", "{\"KeyId\":\"%s\"}".formatted(keyArn))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("KMSInvalidStateException"))
+                .body("message", equalTo("No available key material pending rotation for the key: " + keyArn + "."));
+    }
+
+    /** The key spec is checked before the key material. */
+    @Test
+    void rotateKeyOnDemandRejectsAnExternalHmacKeyForItsKeySpec() throws Exception {
+        String keyId = callKms("CreateKey", "{\"Origin\":\"EXTERNAL\",\"KeySpec\":\"HMAC_256\",\"KeyUsage\":\"GENERATE_VERIFY_MAC\"}")
+                .then().statusCode(200).extract().path("KeyMetadata.KeyId");
+        importFreshMaterial(keyId);
+
+        callKms("RotateKeyOnDemand", "{\"KeyId\":\"%s\"}".formatted(keyId))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("UnsupportedOperationException"))
+                .body("message", nullValue());
+    }
+
+    @Test
     void rotateKeyOnDemandRejectsAKeyPendingImport() {
         String keyArn = callKms("CreateKey", "{\"Origin\":\"EXTERNAL\"}")
                 .then().statusCode(200).extract().path("KeyMetadata.Arn");

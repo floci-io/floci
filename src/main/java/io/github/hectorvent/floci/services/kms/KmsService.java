@@ -716,8 +716,11 @@ public class KmsService implements ResourceProvider {
         synchronized (backingKeyMaterialLock) {
             KmsKey key = resolveKey(keyId, region);
             validateKeyIsUsableForCryptoOperations(key);
-            validateRotationOrigin(key);
             validateRotationKeySpec(key);
+            if (EXTERNAL_ORIGIN.equals(key.getOrigin())) {
+                throw new AwsException("KMSInvalidStateException",
+                        "No available key material pending rotation for the key: " + key.getArn() + ".", 400);
+            }
             if (key.getOnDemandRotationCount() >= ON_DEMAND_ROTATION_LIMIT) {
                 throw new AwsException("LimitExceededException",
                         "On-demand rotation quota for KMS key " + key.getKeyId() + " is exceeded.", 400);
