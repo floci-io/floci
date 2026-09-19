@@ -415,4 +415,54 @@ class S3VirtualHostIntegrationTest {
         .then()
             .statusCode(204);
     }
+
+    // A key may contain the bucket's own name as a path segment. choudoufu's record keys are
+    // "tofu-records/<estate>/...", and naming a bucket after the estate it serves is ordinary.
+    // The raw request path of a virtual-hosted request is the key alone, so the "/<bucket>/"
+    // inside it is part of the key and not the path-style bucket prefix.
+    @Test
+    @Order(90)
+    void keyContainingTheBucketNameAsASegmentIsStoredWhole() {
+        // Its own bucket: the shared one is deleted by an earlier ordered test, and a 404 on
+        // the PUT below would fail this test without saying anything about keys.
+        String segmentBucket = "vhost-key-segment";
+        String segmentHost = segmentBucket + ".localhost";
+        given().header("Host", segmentHost).when().put("/").then().statusCode(200);
+
+        String key = "tofu-records/" + segmentBucket + "/.store-sentinel";
+        given()
+            .header("Host", segmentHost)
+            .contentType("text/plain")
+            .body("sentinel")
+        .when()
+            .put("/" + key)
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Host", segmentHost)
+            .queryParam("list-type", "2")
+            .queryParam("prefix", "tofu-records/" + segmentBucket + "/")
+        .when()
+            .get("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Key>" + key + "</Key>"));
+
+        given()
+            .header("Host", segmentHost)
+        .when()
+            .get("/" + key)
+        .then()
+            .statusCode(200)
+            .body(equalTo("sentinel"));
+
+        // And nothing was stored under the truncated key.
+        given()
+            .header("Host", segmentHost)
+        .when()
+            .get("/.store-sentinel")
+        .then()
+            .statusCode(404);
+    }
 }
