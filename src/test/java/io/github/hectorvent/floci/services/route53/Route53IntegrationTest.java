@@ -597,6 +597,38 @@ class Route53IntegrationTest {
                 .body(containsString("NoSuchHostedZone"));
     }
 
+    @Test
+    @Order(24)
+    void updateHostedZoneComment_rejectsABodyThatIsNotAnUpdateRequest() {
+        String zoneId = createZoneForCommentTest("comment-zone-2", "keep me");
+
+        // A truncated document parses to no root, so it must not read as "no Comment given".
+        given()
+                .contentType(XML)
+                .body("<UpdateHostedZoneCommentRequest><Comment>gone</Comment>")
+                .when().post("/2013-04-01/hostedzone/" + zoneId)
+                .then()
+                .statusCode(400)
+                .body(containsString("InvalidInput"));
+
+        given()
+                .contentType(XML)
+                .body("<DeleteHostedZoneRequest/>")
+                .when().post("/2013-04-01/hostedzone/" + zoneId)
+                .then()
+                .statusCode(400)
+                .body(containsString("InvalidInput"));
+
+        given()
+                .when().get("/2013-04-01/hostedzone/" + zoneId)
+                .then()
+                .statusCode(200)
+                .body("GetHostedZoneResponse.HostedZone.Config.Comment", equalTo("keep me"));
+
+        // Cleanup
+        given().when().delete("/2013-04-01/hostedzone/" + zoneId).then().statusCode(200);
+    }
+
     private String createZoneForCommentTest(String callerReference, String comment) {
         String location = given()
                 .contentType(XML)
