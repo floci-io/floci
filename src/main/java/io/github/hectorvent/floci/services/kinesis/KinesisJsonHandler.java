@@ -709,7 +709,14 @@ public class KinesisJsonHandler {
         }
 
         int maxResults = request.has("MaxResults") ? request.path("MaxResults").asInt(1000) : 1000;
-        List<KinesisShard> page = paginateShards(shards, maxResults);
+        String nextToken = request.hasNonNull("NextToken") ? request.path("NextToken").asText() : null;
+
+        List<KinesisShard> snapshot = List.copyOf(shards);
+        int start = nextToken == null ? 0 : resumeShardIndex(nextToken, resolvedStreamName, snapshot);
+        List<KinesisShard> page = paginateShards(snapshot.subList(start, snapshot.size()), maxResults);
+        String nextCursor = start + page.size() < snapshot.size() && !page.isEmpty()
+                ? encodeShardToken(resolvedStreamName, page.get(page.size() - 1).getShardId())
+                : null;
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode shardsArray = response.putArray("Shards");
@@ -732,9 +739,49 @@ public class KinesisJsonHandler {
             }
         }
 
-        response.putNull("NextToken");
+        if (nextCursor != null) {
+            response.put("NextToken", nextCursor);
+        }
 
         return Response.ok(response).build();
+    }
+
+    /**
+     * Opaque, stream-bound cursor for ListShards. It carries the stream name and the last shard id of
+     * the emitted page, so resuming never depends on a shard's position in the live (reshardable) list.
+     */
+    static String encodeShardToken(String streamName, String lastShardId) {
+        String raw = streamName + "|" + lastShardId;
+        return Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(raw.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static int resumeShardIndex(String nextToken, String streamName, List<KinesisShard> shards) {
+        String decoded;
+        try {
+            decoded = new String(Base64.getUrlDecoder().decode(nextToken), StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException e) {
+            throw invalidNextToken();
+        }
+        int separator = decoded.indexOf('|');
+        if (separator < 0) {
+            throw invalidNextToken();
+        }
+        String tokenStream = decoded.substring(0, separator);
+        String afterShardId = decoded.substring(separator + 1);
+        if (!streamName.equals(tokenStream)) {
+            throw invalidNextToken();
+        }
+        for (int i = 0; i < shards.size(); i++) {
+            if (shards.get(i).getShardId().equals(afterShardId)) {
+                return i + 1;
+            }
+        }
+        throw invalidNextToken();
+    }
+
+    private static AwsException invalidNextToken() {
+        return new AwsException("InvalidArgumentException", "The NextToken is not valid.", 400);
     }
 
     /**
