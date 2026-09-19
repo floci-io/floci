@@ -208,6 +208,16 @@ uniformly between zero and the computed delay, as on AWS. One deviation. The del
 between attempts is capped at 30 seconds, the same cap Floci applies to `Wait` states,
 so emulated runs stay fast.
 
+## Wait states
+
+A `Wait` state honors `Seconds`, `SecondsPath`, `Timestamp`, and `TimestampPath`. The two
+`Seconds` forms pause for the given number of seconds. The two `Timestamp` forms parse an
+ISO-8601 instant and pause until it, or return promptly when it has already passed. An
+unparseable timestamp fails the execution with `States.Runtime`.
+
+One deviation. Every pause is capped at 30 seconds so emulated runs stay fast, where AWS
+sleeps the full duration.
+
 ## Timeouts
 
 ASL carries two `TimeoutSeconds` fields and Floci enforces both, in the two terminal shapes

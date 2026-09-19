@@ -79,9 +79,12 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
@@ -246,6 +249,9 @@ public class AslExecutor {
     private final WebClient webClient;
     private final EmulatorConfig config;
     private final CustomResourceLiveness customResourceLiveness;
+    private final Clock clock;
+    private final Sleeper sleeper;
+    private final int maxWaitSeconds;
     private final Map<String, ActiveMockExecution> activeMocks = new ConcurrentHashMap<>();
     private final ExecutorService executor = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "sfn-executor");
@@ -265,6 +271,26 @@ public class AslExecutor {
                        ObjectMapper objectMapper, JsonataEvaluator jsonataEvaluator,
                        Instance<StepFunctionsService> sfnService, EmulatorConfig config, Vertx vertx,
                        CustomResourceLiveness customResourceLiveness) {
+        this(lambdaExecutor, functionStore, dynamoDbService, dynamoDbJsonHandler,
+                sqsJsonHandler, snsJsonHandler, cloudFormationHandler,
+                ec2Service, s3Service, ecsService, ecsJsonHandler,
+                eventBridgeHandler, schedulerService, schedulerController,
+                objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
+                Clock.systemUTC(), TimeUnit.NANOSECONDS::sleep, MAX_WAIT_SECONDS);
+    }
+
+    AslExecutor(LambdaExecutorService lambdaExecutor, LambdaFunctionStore functionStore,
+                DynamoDbService dynamoDbService, DynamoDbJsonHandler dynamoDbJsonHandler,
+                SqsJsonHandler sqsJsonHandler, SnsJsonHandler snsJsonHandler,
+                CloudFormationQueryHandler cloudFormationHandler,
+                Ec2Service ec2Service, S3Service s3Service,
+                EcsService ecsService, EcsJsonHandler ecsJsonHandler,
+                EventBridgeHandler eventBridgeHandler, SchedulerService schedulerService,
+                SchedulerController schedulerController,
+                ObjectMapper objectMapper, JsonataEvaluator jsonataEvaluator,
+                Instance<StepFunctionsService> sfnService, EmulatorConfig config, Vertx vertx,
+                CustomResourceLiveness customResourceLiveness,
+                Clock clock, Sleeper sleeper, int maxWaitSeconds) {
         this.customResourceLiveness = customResourceLiveness;
         this.lambdaExecutor = lambdaExecutor;
         this.functionStore = functionStore;
@@ -290,6 +316,9 @@ public class AslExecutor {
         this.jsonataEvaluator = jsonataEvaluator;
         this.sfnService = sfnService;
         this.config = config;
+        this.clock = clock;
+        this.sleeper = sleeper;
+        this.maxWaitSeconds = maxWaitSeconds;
         if (vertx != null) {
             // This can be optimized further
             // TODO Set WebclientOptions useragent to Amazon|StepFunctions|HttpInvoke|{{{{region}}}}
@@ -297,6 +326,12 @@ public class AslExecutor {
         } else {
             webClient = null;
         }
+    }
+
+    /** Test seam: lets Wait states be exercised without real time passing. */
+    @FunctionalInterface
+    interface Sleeper {
+        void sleep(long nanos) throws InterruptedException;
     }
 
     @PreDestroy
@@ -2098,7 +2133,7 @@ public class AslExecutor {
     private StateResult executeWaitState(JsonNode stateDef, JsonNode input, boolean jsonata, JsonNode context,
                                          ObjectNode variables, long executionDeadlineNanos)
             throws InterruptedException {
-        int seconds = 0;
+        long waitNanos = 0;
         JsonNode effectiveInput = input;
         if (jsonata) {
             if (stateDef.has("Seconds")) {
@@ -2107,23 +2142,27 @@ public class AslExecutor {
                     JsonNode statesVar = buildStatesVar(input, null, context);
                     JsonNode result = jsonataEvaluator.evaluateField(
                             secondsNode.asText(), "Seconds", statesVar, variables);
-                    seconds = Math.min(result.asInt(), MAX_WAIT_SECONDS);
+                    waitNanos = secondsToNanos(result.asLong());
                 } else {
-                    seconds = Math.min(secondsNode.asInt(), MAX_WAIT_SECONDS);
+                    waitNanos = secondsToNanos(secondsNode.asLong());
                 }
             }
         } else {
             effectiveInput = applyInputPath(stateDef, input);
             if (stateDef.has("Seconds")) {
-                seconds = Math.min(stateDef.get("Seconds").asInt(), MAX_WAIT_SECONDS);
+                waitNanos = secondsToNanos(stateDef.get("Seconds").asLong());
             } else if (stateDef.has("SecondsPath")) {
                 JsonNode val = resolvePath(stateDef.get("SecondsPath").asText(), effectiveInput);
-                seconds = Math.min(val.asInt(), MAX_WAIT_SECONDS);
+                waitNanos = secondsToNanos(val.asLong());
+            } else if (stateDef.has("Timestamp")) {
+                waitNanos = nanosUntil(stateDef.get("Timestamp").asText());
+            } else if (stateDef.has("TimestampPath")) {
+                JsonNode val = resolvePath(stateDef.get("TimestampPath").asText(), effectiveInput);
+                waitNanos = nanosUntil(val.asText());
             }
         }
-        // Timestamp and TimestampPath: wait until that time or now, whichever is sooner
-        if (seconds > 0) {
-            sleepOrTimeOutExecution(TimeUnit.SECONDS.toNanos(seconds), executionDeadlineNanos);
+        if (waitNanos > 0) {
+            sleepOrTimeOutExecution(waitNanos, executionDeadlineNanos);
         }
         if (jsonata) {
             JsonNode output = applyJsonataOutput(stateDef, input, null, context, variables);
@@ -2131,6 +2170,33 @@ public class AslExecutor {
         }
         JsonNode output = applyOutputPath(stateDef, input, effectiveInput);
         return new StateResult(output, stateDef.path("Next").asText(null));
+    }
+
+    private long secondsToNanos(long seconds) {
+        if (seconds <= 0) {
+            return 0;
+        }
+        return TimeUnit.SECONDS.toNanos(Math.min(seconds, maxWaitSeconds));
+    }
+
+    /**
+     * Remaining pause for an absolute ASL {@code Timestamp}, floored at zero. The standard says to
+     * sleep until that instant; the emulator caps the pause at {@link #maxWaitSeconds} so a future
+     * date cannot hold a worker for days. Tests raise that cap or inject a {@link Sleeper} to
+     * exercise longer waits without real time passing.
+     */
+    private long nanosUntil(String timestamp) {
+        Instant target;
+        try {
+            target = Instant.parse(timestamp);
+        } catch (DateTimeParseException e) {
+            throw new FailStateException("States.Runtime", "Invalid Timestamp: " + timestamp);
+        }
+        long remainingNanos = Duration.between(clock.instant(), target).toNanos();
+        if (remainingNanos <= 0) {
+            return 0;
+        }
+        return Math.min(remainingNanos, TimeUnit.SECONDS.toNanos(maxWaitSeconds));
     }
 
     /**
@@ -2143,10 +2209,10 @@ public class AslExecutor {
             throws InterruptedException {
         long remainingNanos = executionDeadlineNanos - System.nanoTime();
         if (pauseNanos < remainingNanos) {
-            TimeUnit.NANOSECONDS.sleep(pauseNanos);
+            sleeper.sleep(pauseNanos);
             return;
         }
-        TimeUnit.NANOSECONDS.sleep(Math.max(remainingNanos, 0));
+        sleeper.sleep(Math.max(remainingNanos, 0));
         throw new ExecutionTimedOutException();
     }
 
