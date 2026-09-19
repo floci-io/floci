@@ -4,6 +4,8 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.List;
 
@@ -120,6 +122,38 @@ class Ec2VpcEndpointDnsEntriesIntegrationTest {
         assertThat(names.get(0), endsWith(".vpce-svc-0123456789abcdef0.us-east-1.vpce.amazonaws.com"));
         assertThat(names.get(1),
                 endsWith("-us-east-1a.vpce-svc-0123456789abcdef0.us-east-1.vpce.amazonaws.com"));
+    }
+
+    /**
+     * The private DNS name AWS answers for each service floci advertises. Most are the service
+     * token, a few are not, and the IoT data plane has no private name at all.
+     */
+    @ParameterizedTest
+    @CsvSource({
+        "com.amazonaws.us-east-1.monitoring, monitoring.us-east-1.amazonaws.com",
+        "com.amazonaws.us-east-1.execute-api, execute-api.us-east-1.amazonaws.com",
+        "com.amazonaws.us-east-1.ecr.api, api.ecr.us-east-1.amazonaws.com",
+        "com.amazonaws.us-east-1.kinesis-streams, kinesis.us-east-1.amazonaws.com",
+        "com.amazonaws.us-east-1.kinesis-firehose, firehose.us-east-1.amazonaws.com",
+        "com.amazonaws.us-east-1.ecr.dkr, *.dkr.ecr.us-east-1.amazonaws.com",
+        "com.amazonaws.us-east-1.iot.data, ''",
+    })
+    void thePrivateDnsNameIsTheOneAwsAnswersFor(String serviceName, String expectedPrivateName) {
+        String vpcId = createVpc("10.76.0.0/16");
+        String subnetId = createSubnet(vpcId, "10.76.1.0/24", "us-east-1a");
+
+        String endpointId = ec2Value("CreateVpcEndpoint",
+                "CreateVpcEndpointResponse.vpcEndpoint.vpcEndpointId",
+                "VpcId", vpcId, "ServiceName", serviceName,
+                "VpcEndpointType", "Interface", "SubnetId.1", subnetId);
+
+        List<String> names = dnsNamesOf(endpointId);
+        if (expectedPrivateName.isEmpty()) {
+            assertEquals(2, names.size(), "regional and one zone, no private name, got " + names);
+        } else {
+            assertEquals(3, names.size(), "regional, one zone, then private name, got " + names);
+            assertEquals(expectedPrivateName, names.get(2));
+        }
     }
 
     @Test

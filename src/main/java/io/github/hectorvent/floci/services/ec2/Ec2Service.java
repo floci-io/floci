@@ -146,6 +146,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             Pattern.compile("^tgw-attach-[0-9a-f]{8}([0-9a-f]{9})?$");
     private static final Set<String> ROUTE_TABLE_MEMBERSHIP_FILTER_NAMES =
             Set.of("resource-id", "resource-type", "transit-gateway-attachment-id");
+    /**
+     * Private DNS names that are not the token in the endpoint service name, empty for the
+     * services AWS serves no private name for.
+     */
+    private static final Map<String, String> PRIVATE_DNS_NAMES = Map.of(
+            "kinesis-streams", "kinesis",
+            "kinesis-firehose", "firehose",
+            "dkr.ecr", "*.dkr.ecr",
+            "data.iot", "");
     // A first launch may need to pull a large AMI-backed image. Keep a finite CloudFormation
     // bound, but allow enough time for that legitimate cold-start path before cancellation.
     private static final Duration CONTAINER_LAUNCH_TIMEOUT = Duration.ofMinutes(5);
@@ -4012,8 +4021,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 .sorted()
                 .forEach(az -> entries.add(new VpcEndpointDnsEntry(name + "-" + az + "." + domain, hostedZoneId)));
         if (endpoint.isPrivateDnsEnabled() && !serviceToken.startsWith("vpce-svc-")) {
-            entries.add(new VpcEndpointDnsEntry(serviceToken + "." + region + "." + dnsSuffix,
-                    privateDnsHostedZoneId(endpoint.getVpcEndpointId())));
+            String privateName = PRIVATE_DNS_NAMES.getOrDefault(serviceToken, serviceToken);
+            if (!privateName.isEmpty()) {
+                entries.add(new VpcEndpointDnsEntry(privateName + "." + region + "." + dnsSuffix,
+                        privateDnsHostedZoneId(endpoint.getVpcEndpointId())));
+            }
         }
         return entries;
     }
