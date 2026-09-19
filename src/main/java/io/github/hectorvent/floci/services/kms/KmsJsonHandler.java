@@ -530,6 +530,10 @@ public class KmsJsonHandler {
     }
 
     private Response handleEnableKeyRotation(JsonNode request, String region) {
+        JsonNode rotationPeriod = request.path("RotationPeriodInDays");
+        if (rotationPeriod.isNumber()) {
+            validateRange("rotationPeriodInDays", rotationPeriod.asInt(), 90, 2560);
+        }
         service.enableKeyRotation(request.path("KeyId").asText(), region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
@@ -614,6 +618,17 @@ public class KmsJsonHandler {
             response.put("KeyMaterialId", key.getKeyMaterialId());
         }
         return Response.ok(response).build();
+    }
+
+    private static void validateRange(String member, int value, int min, int max) {
+        if (value < min) {
+            throw new AwsException("ValidationException", "1 validation error detected: Value '" + value + "' at '"
+                    + member + "' failed to satisfy constraint: Member must have value greater than or equal to " + min, 400);
+        }
+        if (max < value) {
+            throw new AwsException("ValidationException", "1 validation error detected: Value '" + value + "' at '"
+                    + member + "' failed to satisfy constraint: Member must have value less than or equal to " + max, 400);
+        }
     }
 
     private static String requireKeyId(JsonNode request) {

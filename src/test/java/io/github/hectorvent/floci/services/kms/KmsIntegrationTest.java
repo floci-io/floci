@@ -2103,6 +2103,21 @@ class KmsIntegrationTest {
                 .body("message", nullValue());
     }
 
+    @ParameterizedTest
+    @CsvSource({
+            "89, greater than or equal to 90",
+            "2561, less than or equal to 2560",
+    })
+    void enableKeyRotationValidatesTheRotationPeriodBeforeLookingUpTheKey(int days, String constraint) {
+        callKms("EnableKeyRotation", "{\"KeyId\":\"00000000-0000-0000-0000-000000000000\",\"RotationPeriodInDays\":%d}"
+                .formatted(days))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("1 validation error detected: Value '" + days + "' at 'rotationPeriodInDays' "
+                        + "failed to satisfy constraint: Member must have value " + constraint));
+    }
+
     @Test
     void rotateKeyOnDemandRejectsAKeyPendingImport() {
         String keyArn = callKms("CreateKey", "{\"Origin\":\"EXTERNAL\"}")
