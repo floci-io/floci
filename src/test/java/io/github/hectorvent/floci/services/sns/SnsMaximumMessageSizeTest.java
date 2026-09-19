@@ -50,6 +50,17 @@ class SnsMaximumMessageSizeTest {
         return arn;
     }
 
+    /**
+     * Write a value straight onto the stored topic, the way one persisted before this attribute
+     * was validated carries it: the old generic {@code SetTopicAttributes} wrote anything
+     * through. {@code createTopic} returns the stored instance for a name that already exists,
+     * so this is the same topic the service reads back.
+     */
+    private void persistUnvalidated(String name, String value) {
+        snsService.createTopic(name, null, null, REGION)
+                .getAttributes().put("MaximumMessageSize", value);
+    }
+
     // --- The attribute itself ---
 
     /** AWS omits the attribute entirely until it is set; it does not report the default. */
@@ -179,6 +190,31 @@ class SnsMaximumMessageSizeTest {
                 "x".repeat(DEFAULT), null, null, REGION));
         assertThrows(AwsException.class, () -> snsService.publish(null, null, "+819012345678",
                 "x".repeat(DEFAULT + 1), null, null, REGION));
+    }
+
+    /**
+     * A persisted value outside the AWS range is not honoured on the way back out. Validation
+     * only guards new writes, so a topic stored before the attribute existed could otherwise
+     * lift a publish past the 1 MiB ceiling, or -- at zero or below -- reject every publish.
+     */
+    @Test
+    void publish_persistedValueOutsideRange_fallsBackToTheDefault() {
+        String arn = topic("legacy");
+        for (String value : List.of("5242880", "0", "-1", "abc")) {
+            persistUnvalidated("legacy", value);
+            assertNotNull(snsService.publish(arn, null, "x".repeat(DEFAULT), null, REGION));
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    snsService.publish(arn, null, "x".repeat(DEFAULT + 1), null, REGION));
+            assertEquals("Invalid parameter: Message too long", ex.getMessage());
+        }
+    }
+
+    /** It does not gate subscriptions either: the topic counts as sitting at the default. */
+    @Test
+    void subscribe_persistedValueOutsideRange_appliesNoProtocolConstraint() {
+        String arn = topic("legacy-gate");
+        persistUnvalidated("legacy-gate", "5242880");
+        assertNotNull(snsService.subscribe(arn, "email", "nobody@example.com", REGION, Map.of()));
     }
 
     // --- PublishBatch ---

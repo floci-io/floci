@@ -354,16 +354,28 @@ public class SnsService implements Resettable, ResourceProvider {
                 .orElse(DEFAULT_MAX_MESSAGE_SIZE);
     }
 
+    /**
+     * The read path is deliberately more forgiving than {@link #validateMaximumMessageSize}: a
+     * topic persisted before the attribute was known holds whatever the old generic setter
+     * accepted, and an out-of-range value there is as unusable as a nonnumeric one. Above the
+     * AWS ceiling it would wave a publish past the limit AWS enforces; at zero or below it
+     * would reject every publish and silently gate subscriptions. Both fall back to the
+     * default rather than being honoured.
+     */
     private static int maxMessageSize(Topic topic) {
         String value = topic.getAttributes().get(MAXIMUM_MESSAGE_SIZE);
         if (value == null) {
             return DEFAULT_MAX_MESSAGE_SIZE;
         }
         try {
-            return Integer.parseInt(value);
+            int parsed = Integer.parseInt(value);
+            if (parsed >= MIN_MAX_MESSAGE_SIZE && parsed <= MAX_MAX_MESSAGE_SIZE) {
+                return parsed;
+            }
         } catch (NumberFormatException ignored) {
-            return DEFAULT_MAX_MESSAGE_SIZE;
+            // Not a number at all: same treatment as out of range, handled below.
         }
+        return DEFAULT_MAX_MESSAGE_SIZE;
     }
 
     private static void requireWithinMaxMessageSize(int payloadSize, int maxMessageSize) {
