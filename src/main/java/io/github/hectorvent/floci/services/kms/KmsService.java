@@ -733,10 +733,7 @@ public class KmsService implements ResourceProvider {
 
     private static void validateRotationOrigin(KmsKey key) {
         if (EXTERNAL_ORIGIN.equals(key.getOrigin())) {
-            throw new AwsException(
-                    "UnsupportedOperationException",
-                    "You cannot enable automatic rotation of imported key material.",
-                    400);
+            throw invalidOrigin(key);
         }
     }
 
@@ -755,7 +752,7 @@ public class KmsService implements ResourceProvider {
     public ImportParameters getParametersForImport(String keyId, String wrappingAlgorithm,
                                                    String wrappingKeySpec, String region) {
         KmsKey key = resolveKey(keyId, region);
-        requireExternalOrigin(key, "GetParametersForImport");
+        requireExternalOrigin(key);
         requireNotPendingDeletion(key);
         KmsKeyImport.validateWrappingAlgorithm(wrappingAlgorithm);
 
@@ -781,7 +778,7 @@ public class KmsService implements ResourceProvider {
     public KmsKey importKeyMaterial(String keyId, String importToken, byte[] encryptedKeyMaterial,
                                     String expirationModel, Long validTo, String importType, String region) {
         KmsKey key = resolveKey(keyId, region);
-        requireExternalOrigin(key, "ImportKeyMaterial");
+        requireExternalOrigin(key);
         requireNotPendingDeletion(key);
         validateImportType(importType, key);
 
@@ -835,7 +832,7 @@ public class KmsService implements ResourceProvider {
      */
     public KmsKey deleteImportedKeyMaterial(String keyId, String region) {
         KmsKey key = resolveKey(keyId, region);
-        requireExternalOrigin(key, "DeleteImportedKeyMaterial");
+        requireExternalOrigin(key);
         clearImportedKeyMaterial(key);
         keyStore.put(region + "::" + key.getKeyId(), key);
         LOG.infov("Deleted imported key material for KMS key {0} in {1}", key.getKeyId(), region);
@@ -1033,12 +1030,15 @@ public class KmsService implements ResourceProvider {
         return EXTERNAL_ORIGIN;
     }
 
-    private static void requireExternalOrigin(KmsKey key, String operation) {
+    private static void requireExternalOrigin(KmsKey key) {
         if (!EXTERNAL_ORIGIN.equals(key.getOrigin())) {
-            throw new AwsException("UnsupportedOperationException",
-                    operation + " is only supported for KMS keys with Origin EXTERNAL; key "
-                            + key.getKeyId() + " has origin " + key.getOrigin() + ".", 400);
+            throw invalidOrigin(key);
         }
+    }
+
+    private static AwsException invalidOrigin(KmsKey key) {
+        return new AwsException("UnsupportedOperationException",
+                key.getArn() + " origin is " + key.getOrigin() + " which is not valid for this operation.", 400);
     }
 
     private static void requireNotPendingDeletion(KmsKey key) {

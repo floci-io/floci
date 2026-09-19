@@ -2057,6 +2057,25 @@ class KmsIntegrationTest {
         callKms("DisableKeyRotation", "{\"KeyId\":\"%s\"}".formatted(keyArn)).then().statusCode(200);
     }
 
+    @ParameterizedTest
+    @CsvSource({
+            "EnableKeyRotation, EXTERNAL",
+            "DisableKeyRotation, EXTERNAL",
+            "GetParametersForImport, AWS_KMS",
+            "ImportKeyMaterial, AWS_KMS",
+            "DeleteImportedKeyMaterial, AWS_KMS",
+    })
+    void operationsRejectAKeyWithTheWrongOrigin(String operation, String origin) {
+        String keyArn = callKms("CreateKey", "{\"Origin\":\"%s\"}".formatted(origin))
+                .then().statusCode(200).extract().path("KeyMetadata.Arn");
+
+        callKms(operation, keyManagementRequest(operation, keyArn))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("UnsupportedOperationException"))
+                .body("message", equalTo(keyArn + " origin is " + origin + " which is not valid for this operation."));
+    }
+
     @Test
     void rotateKeyOnDemandRejectsAKeyPendingImport() {
         String keyArn = callKms("CreateKey", "{\"Origin\":\"EXTERNAL\"}")
