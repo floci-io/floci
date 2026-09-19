@@ -26,7 +26,42 @@ public final class CopyStatementParser {
             boolean gzip,
             boolean csv,
             String nullAs,
-            String iamRoleArn) implements S3Statement {
+            String iamRoleArn,
+            boolean jsonAuto,
+            boolean jsonAutoIgnoreCase,
+            boolean manifest) implements S3Statement {
+
+        public S3CopyFrom(
+                String targetTable,
+                List<String> columns,
+                String bucket,
+                String keyOrPrefix,
+                String delimiter,
+                int headerLines,
+                boolean gzip,
+                boolean csv,
+                String nullAs,
+                String iamRoleArn,
+                boolean jsonAuto,
+                boolean manifest) {
+            this(targetTable, columns, bucket, keyOrPrefix, delimiter, headerLines, gzip, csv,
+                    nullAs, iamRoleArn, jsonAuto, false, manifest);
+        }
+
+        public S3CopyFrom(
+                String targetTable,
+                List<String> columns,
+                String bucket,
+                String keyOrPrefix,
+                String delimiter,
+                int headerLines,
+                boolean gzip,
+                boolean csv,
+                String nullAs,
+                String iamRoleArn) {
+            this(targetTable, columns, bucket, keyOrPrefix, delimiter, headerLines, gzip, csv,
+                    nullAs, iamRoleArn, false, false, false);
+        }
     }
 
     public record S3Unload(
@@ -88,6 +123,8 @@ public final class CopyStatementParser {
     private static final Pattern HEADER_PATTERN = Pattern.compile("(?i)\\bHEADER\\b");
     private static final Pattern GZIP_PATTERN = Pattern.compile("(?i)\\bGZIP\\b");
     private static final Pattern CSV_PATTERN = Pattern.compile("(?i)\\b(?:FORMAT\\s+(?:AS\\s+)?)?CSV\\b");
+    private static final Pattern JSON_AUTO_PATTERN = Pattern.compile(
+            "(?i)\\b(?:FORMAT\\s+(?:AS\\s+)?)?JSON(?:\\s+AS)?\\s+['\"]auto(?:\\s+(ignorecase))?['\"]");
 
     /**
      * Options this simulator does not implement. A COPY carrying any of these is not intercepted:
@@ -95,7 +132,7 @@ public final class CopyStatementParser {
      * silently loading the data with the wrong framing.
      */
     private static final Pattern UNSUPPORTED_CLAUSE = Pattern.compile(
-            "(?i)\\b(FIXEDWIDTH|PARQUET|AVRO|ORC|JSON|SHAPEFILE|BZIP2|LZOP|ZSTD|MANIFEST|MAXERROR"
+            "(?i)\\b(FIXEDWIDTH|PARQUET|AVRO|ORC|SHAPEFILE|BZIP2|LZOP|ZSTD|MAXERROR"
                     + "|DATEFORMAT|TIMEFORMAT|ENCRYPTED|ENCODING|REGION|CREDENTIALS"
                     + "|ACCESS_KEY_ID|SECRET_ACCESS_KEY|SESSION_TOKEN|MASTER_SYMMETRIC_KEY|KMS_KEY_ID"
                     + "|ACCEPTINVCHARS|ACCEPTANYDATE|BLANKSASNULL|EMPTYASNULL|FILLRECORD|TRIMBLANKS"
@@ -329,14 +366,18 @@ public final class CopyStatementParser {
 
         boolean csv = false;
         boolean gzip = false;
+        boolean jsonAuto = false;
+        boolean jsonAutoIgnoreCase = false;
+        boolean manifest = false;
         String nullAs = null;
         String delimiter = null;
         int headerLines = 0;
-
         String iamRoleArn = null;
 
         boolean seenCsv = false;
         boolean seenGzip = false;
+        boolean seenJson = false;
+        boolean seenManifest = false;
         boolean seenNull = false;
         boolean seenDelimiter = false;
         boolean seenHeader = false;
@@ -344,6 +385,8 @@ public final class CopyStatementParser {
 
         Matcher csvMatcher = CSV_PATTERN.matcher(options);
         Matcher gzipMatcher = GZIP_PATTERN.matcher(options);
+        Matcher jsonAutoMatcher = JSON_AUTO_PATTERN.matcher(options);
+        Matcher manifestMatcher = MANIFEST_PATTERN.matcher(options);
         Matcher ignoreHeaderMatcher = IGNOREHEADER_PATTERN.matcher(options);
         Matcher headerMatcher = HEADER_PATTERN.matcher(options);
         Matcher delimiterMatcher = DELIMITER_PATTERN.matcher(options);
@@ -361,12 +404,27 @@ public final class CopyStatementParser {
             }
 
             if (matchClause(csvMatcher, offset, len)) {
-                if (seenCsv) {
+                if (seenCsv || seenJson) {
                     return null;
                 }
                 seenCsv = true;
                 csv = true;
                 offset = csvMatcher.end();
+            } else if (matchClause(jsonAutoMatcher, offset, len)) {
+                if (seenJson || seenCsv) {
+                    return null;
+                }
+                seenJson = true;
+                jsonAuto = true;
+                jsonAutoIgnoreCase = jsonAutoMatcher.group(1) != null;
+                offset = jsonAutoMatcher.end();
+            } else if (matchClause(manifestMatcher, offset, len)) {
+                if (seenManifest) {
+                    return null;
+                }
+                seenManifest = true;
+                manifest = true;
+                offset = manifestMatcher.end();
             } else if (matchClause(gzipMatcher, offset, len)) {
                 if (seenGzip) {
                     return null;
@@ -418,7 +476,8 @@ public final class CopyStatementParser {
             delimiter = csv ? "," : "|";
         }
 
-        return new S3CopyFrom(table, columns, bucket, keyOrPrefix, delimiter, headerLines, gzip, csv, nullAs, iamRoleArn);
+        return new S3CopyFrom(table, columns, bucket, keyOrPrefix, delimiter, headerLines, gzip, csv,
+                nullAs, iamRoleArn, jsonAuto, jsonAutoIgnoreCase, manifest);
     }
 
     private static boolean matchClause(Matcher m, int start, int end) {

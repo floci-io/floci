@@ -57,8 +57,16 @@ and DynamoDB keys and images as JSON text. Record event ids are unique, so retri
 
 The integration consumer has its own stream checkpoint and does not share Lambda event source
 mapping state. Deleting an integration stops its consumer while retaining the landing table.
-Serverless Redshift targets, backfill, schema inference, and relational projection are not supported
-in this first implementation.
+
+Items already present in the source table when `CreateIntegration` runs are backfilled into the
+landing table with a paginated `Scan`, one page per poll tick, and the scan resumes after a Floci
+restart. While the backfill runs, `DescribeIntegrations` reports `Status` as `syncing` (as a Floci
+approximation to indicate that initial backfill is in progress); it becomes `active` once the scan is
+exhausted. The landing table is an append-only log, so an item changed while its table is still being
+backfilled can appear twice: once from the scan and once from the stream.
+
+Serverless Redshift targets, schema inference, and relational projection are not supported in this
+first implementation.
 
 ## CloudFormation
 
@@ -209,9 +217,25 @@ order) through its own S3 service and streams the rows into the backing PostgreS
 `COPY ... FROM STDIN`.
 
 - Supported options: `DELIMITER`, `FORMAT CSV` (or a bare `CSV`), `GZIP`, `IGNOREHEADER <n>` and
-  `HEADER`, `NULL AS`, and an explicit column list.
+  `HEADER`, `NULL AS`, `FORMAT AS JSON 'auto'`, `FORMAT AS JSON 'auto ignorecase'` (or bare `JSON 'auto'`),
+  `MANIFEST`, and an explicit column list.
 - The default framing is pipe-delimited text, matching Redshift. `FORMAT CSV` switches to CSV with
   a comma default delimiter.
+- `FORMAT AS JSON 'auto'` loads JSON objects, mapping JSON keys to table columns with exact case
+  sensitivity. `FORMAT AS JSON 'auto ignorecase'` performs case-insensitive key matching. Input
+  objects can be separated by any whitespace, including multiline pretty-printed JSON. Non-object root
+  values abort the load. When columns are not specified in the COPY statement, table column names and
+  order are automatically discovered from the database catalog, but only over the **Simple Query
+  protocol**. Over Extended Query (the default for a JDBC `PreparedStatement`, and for a plain
+  `Statement` under recent pgjdbc versions) the column list is fixed by the time `Parse` is sent,
+  before any backend round trip is possible, so catalog discovery cannot run there: omitting the column
+  list fails the COPY with a clear error instead of silently guessing. Specify the column list explicitly
+  for Extended Query, or connect with `preferQueryMode=simple` to use discovery. Nested objects and
+  arrays are serialized as JSON strings.
+- `MANIFEST` resolves file keys from a JSON manifest file (`{"entries": [{"url": "s3://...", "mandatory": boolean}]}`),
+  compatible with output from `UNLOAD ... MANIFEST`. Missing files marked `mandatory: true` abort the load.
+  When `mandatory` is omitted, it defaults to `false`. All entries in the manifest must reside in the same S3
+  bucket as the manifest file itself; cross-bucket manifest entries are rejected as an intentional deviation.
 - `IGNOREHEADER` and `HEADER` skip lines from the first resolved object only.
 - `GZIP` is the only input compression recognized; `BZIP2`, `LZOP` and `ZSTD` are not.
 - `IAM_ROLE '<role-arn>'` is supported. The role must be associated with the cluster, exist in
@@ -219,7 +243,7 @@ order) through its own S3 service and streams the rows into the backing PostgreS
   `FLOCI_SERVICES_S3_ENFORCE_AUTH` off, S3 policy checks are skipped. With it on, the role's
   identity policy must allow the required S3 actions, and any bucket policy must not deny the
   request. `IAM_ROLE default` is not supported.
-- Any other clause (`FIXEDWIDTH`, `JSON`, `PARQUET`, `AVRO`, `ORC`, `MANIFEST`, `MAXERROR`,
+- Any other clause (`FIXEDWIDTH`, `PARQUET`, `AVRO`, `ORC`, `MAXERROR`,
   `DATEFORMAT`, `TIMEFORMAT`, `REGION`, `ENCODING`, `ESCAPE`, `REMOVEQUOTES`, `BLANKSASNULL`,
   `EMPTYASNULL`, `TRUNCATECOLUMNS`, `ACCEPTINVCHARS`, `CREDENTIALS`, and so on) is not
   recognized: the statement is forwarded unchanged and PostgreSQL returns its own error.

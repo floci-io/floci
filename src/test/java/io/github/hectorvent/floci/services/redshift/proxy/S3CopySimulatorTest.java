@@ -969,7 +969,7 @@ class S3CopySimulatorTest {
         joinBackend(backend);
 
         String sql = fabricated.get();
-        assertTrue(sql.contains("COPY t (a, b) FROM STDIN"), sql);
+        assertTrue(sql.contains("COPY t (\"a\", \"b\") FROM STDIN"), sql);
         assertTrue(sql.toUpperCase().contains("FORMAT TEXT"), sql);
         assertTrue(sql.contains("DELIMITER '|'"), sql);
         assertFalse(sql.toUpperCase().contains("HEADER"), sql);
@@ -990,7 +990,7 @@ class S3CopySimulatorTest {
         joinBackend(backend);
 
         String sql = fabricated.get();
-        assertTrue(sql.contains("COPY t (a, b) FROM STDIN"), sql);
+        assertTrue(sql.contains("COPY t (\"a\", \"b\") FROM STDIN"), sql);
         assertTrue(sql.toUpperCase().contains("FORMAT CSV"), sql);
         assertTrue(sql.contains("DELIMITER ','"), sql);
     }
@@ -1327,4 +1327,245 @@ class S3CopySimulatorTest {
         assertNull(in.nextMessage(), "Client must not receive an unconfirmed ReadyForQuery");
     }
 
+    @Test
+    void prepareCopy_withManifest_resolvesManifestKeys() {
+        String manifestJson = "{\"entries\": [{\"url\": \"s3://wh/data1.csv\", \"mandatory\": true}]}";
+        S3Object manifestObj = new S3Object("wh", "manifest.json", manifestJson.getBytes(StandardCharsets.UTF_8), "application/json");
+        when(s3.getObject("wh", "manifest.json")).thenReturn(manifestObj);
+        when(s3.objectExists("wh", "data1.csv")).thenReturn(true);
+
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "t", List.of(), "wh", "manifest.json", ",", 0, false, true, null, null, false, true);
+
+        S3CopySimulator.CopyInput input = S3CopySimulator.prepareCopy(spec, s3, null);
+        assertEquals(List.of("data1.csv"), input.keys());
+    }
+
+    @Test
+    void copyBackendSql_and_stream_withJsonAuto() throws Exception {
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "users", List.of("id", "name"), "wh", "users.json", null, 0, false, false, null, null, true, false);
+
+        assertEquals("COPY users (id, name) FROM STDIN WITH (FORMAT csv, DELIMITER ',')",
+                S3CopySimulator.copyBackendSql(spec));
+
+        String ndjson = "{\"id\": 1, \"name\": \"Alice\"}\n{\"id\": 2, \"name\": \"Bob\"}\n";
+        S3Object dataObj = new S3Object("wh", "users.json", ndjson.getBytes(StandardCharsets.UTF_8), "application/json");
+        when(s3.getObject("wh", "users.json")).thenReturn(dataObj);
+
+        S3CopySimulator.CopyInput input = new S3CopySimulator.CopyInput(spec, List.of("users.json"), s3, null, null);
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        S3CopySimulator.streamCopyInput(input, out);
+
+        byte[] rawBytes = out.toByteArray();
+        // The output is framed as Postgres 'd' CopyData messages
+        assertTrue(rawBytes.length > 0);
+        assertEquals('d', rawBytes[0]);
+    }
+
+    @Test
+    void copyBackendSql_quotesDiscoveredColumnIdentifiers() {
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "orders", List.of(), "wh", "orders.csv", ",", 0, false, true, null, null);
+        assertEquals("COPY orders (\"order\", \"user\", \"col\"\"name\") FROM STDIN WITH (FORMAT csv, DELIMITER ',')",
+                S3CopySimulator.copyBackendSql(spec, List.of("order", "user", "col\"name")));
+    }
+
+    @Test
+    void copyBackendSql_passesUserSuppliedColumnListThroughAsWritten() {
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "orders", List.of("\"col one\"", "MixedCase", "\"User\""), "wh", "orders.csv", ",", 0, false, true, null, null);
+        assertEquals("COPY orders (\"col one\", MixedCase, \"User\") FROM STDIN WITH (FORMAT csv, DELIMITER ',')",
+                S3CopySimulator.copyBackendSql(spec));
+    }
+
+    @Test
+    void copyBackendSql_withJsonAuto_forcesCommaDelimiter() {
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "users", List.of("id"), "wh", "users.json", "\t", 0, false, false, null, null, true, false);
+
+        assertEquals("COPY users (id) FROM STDIN WITH (FORMAT csv, DELIMITER ',')",
+                S3CopySimulator.copyBackendSql(spec));
+    }
+
+    @Test
+    void streamCopyInput_withJsonAuto_unquotesQuotedColumnIdentifiers() throws Exception {
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "users", List.of("\"col one\"", "Id"), "wh", "users.json", null, 0, false, false, null, null, true, false);
+
+        String ndjson = "{\"col one\": \"Alice\", \"Id\": 10}\n";
+        S3Object dataObj = new S3Object("wh", "users.json", ndjson.getBytes(StandardCharsets.UTF_8), "application/json");
+        when(s3.getObject("wh", "users.json")).thenReturn(dataObj);
+
+        S3CopySimulator.CopyInput input = new S3CopySimulator.CopyInput(spec, List.of("users.json"), s3, null, null);
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        S3CopySimulator.streamCopyInput(input, out);
+
+        byte[] rawBytes = out.toByteArray();
+        assertTrue(rawBytes.length > 5);
+        assertEquals('d', rawBytes[0]);
+        String payload = new String(rawBytes, 5, rawBytes.length - 5, StandardCharsets.UTF_8);
+        assertEquals("Alice,10\n", payload);
+    }
+
+    @Test
+    void streamCopyInput_withJsonAutoAndGzip() throws Exception {
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "users", List.of("id", "name"), "wh", "users.json.gz", null, 0, true, false, null, null, true, false);
+
+        String ndjson = "{\"id\": 1, \"name\": \"Alice\"}\n";
+        ByteArrayOutputStream gzippedOut = new ByteArrayOutputStream();
+        try (java.util.zip.GZIPOutputStream gzip = new java.util.zip.GZIPOutputStream(gzippedOut)) {
+            gzip.write(ndjson.getBytes(StandardCharsets.UTF_8));
+        }
+
+        S3Object dataObj = new S3Object("wh", "users.json.gz", gzippedOut.toByteArray(), "application/gzip");
+        when(s3.getObject("wh", "users.json.gz")).thenReturn(dataObj);
+
+        S3CopySimulator.CopyInput input = new S3CopySimulator.CopyInput(spec, List.of("users.json.gz"), s3, null, null);
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        S3CopySimulator.streamCopyInput(input, out);
+
+        byte[] rawBytes = out.toByteArray();
+        assertTrue(rawBytes.length > 0);
+        assertEquals('d', rawBytes[0]);
+    }
+
+    @Test
+    void runCopyFrom_withJsonAutoWithoutColumns_discoversSchemaAndCopies() throws Exception {
+        String ndjson = "{\"id\": 10, \"name\": \"Alice\"}\n";
+        S3Object dataObj = new S3Object("wh", "data.json", ndjson.getBytes(StandardCharsets.UTF_8), "application/json");
+        when(s3.objectExists("wh", "data.json")).thenReturn(true);
+        when(s3.getObject("wh", "data.json")).thenReturn(dataObj);
+
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "public.items", List.of(), "wh", "data.json", null, 0, false, false, null, null, true, false);
+
+        Thread backend = backendThread(() -> {
+            PostgresWireDecoder in = new PostgresWireDecoder(testBackend.getInputStream());
+            OutputStream out = testBackend.getOutputStream();
+
+            PostgresWireDecoder.FrontendMessage q1 = in.nextMessage();
+            assertEquals('Q', q1.type());
+            assertTrue(q1.getSql().contains("pg_catalog.pg_attribute"));
+            assertTrue(q1.getSql().contains("items"));
+
+            writeSingleColumnDataRow(out, "id");
+            writeSingleColumnDataRow(out, "name");
+            writeCommandComplete(out, "SELECT 2");
+            writeReadyForQuery(out, 'I');
+
+            PostgresWireDecoder.FrontendMessage q2 = in.nextMessage();
+            assertEquals('Q', q2.type());
+            assertEquals("COPY public.items (\"id\", \"name\") FROM STDIN WITH (FORMAT csv, DELIMITER ',')", q2.getSql());
+
+            out.write(new byte[]{'G', 0, 0, 0, 4});
+            out.flush();
+
+            PostgresWireDecoder.FrontendMessage d = in.nextMessage();
+            assertEquals('d', d.type());
+
+            PostgresWireDecoder.FrontendMessage c = in.nextMessage();
+            assertEquals('c', c.type());
+
+            writeCommandComplete(out, "COPY 1");
+            writeReadyForQuery(out, 'I');
+        });
+
+        boolean handled = S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, null, 'I');
+        joinBackend(backend);
+        assertTrue(handled);
+
+        PostgresWireDecoder clientIn = new PostgresWireDecoder(testClient.getInputStream());
+        PostgresWireDecoder.FrontendMessage msg1 = clientIn.nextMessage();
+        assertEquals('C', msg1.type());
+        PostgresWireDecoder.FrontendMessage msg2 = clientIn.nextMessage();
+        assertEquals('Z', msg2.type());
+    }
+
+    @Test
+    void runCopyFrom_withJsonAuto_releasesIamSessionEvenWhenCatalogDiscoveryFails() throws Exception {
+        when(s3.objectExists("wh", "data.json")).thenReturn(true);
+        IamService iamService = mock(IamService.class);
+        IamRole role = mock(IamRole.class);
+        when(role.getAssumeRolePolicyDocument()).thenReturn(
+                "{\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"redshift.amazonaws.com\"}}]}");
+        when(iamService.findRole("000000000000", "Role")).thenReturn(java.util.Optional.of(role));
+
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "missing_table", List.of(), "wh", "data.json", null, 0, false, false, null,
+                "arn:aws:iam::000000000000:role/Role", true, false);
+
+        Thread backend = backendThread(() -> {
+            PostgresWireDecoder in = new PostgresWireDecoder(testBackend.getInputStream());
+            OutputStream out = testBackend.getOutputStream();
+
+            PostgresWireDecoder.FrontendMessage q1 = in.nextMessage();
+            assertEquals('Q', q1.type());
+            writeCommandComplete(out, "SELECT 0");
+            writeReadyForQuery(out, 'I');
+        });
+
+        boolean handled = S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, iamService, 'I');
+        joinBackend(backend);
+        assertTrue(handled);
+
+        verify(iamService, times(1)).registerSessionForAccount(eq("000000000000"), any(), any(), any(), any(), any(), any());
+        verify(iamService, times(1)).unregisterSession(eq("000000000000"), any());
+    }
+
+    @Test
+    void runCopyFrom_withJsonAutoWithoutColumns_whenTableNotFound_sendsError() throws Exception {
+        when(s3.objectExists("wh", "data.json")).thenReturn(true);
+
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "missing_table", List.of(), "wh", "data.json", null, 0, false, false, null, null, true, false);
+
+        Thread backend = backendThread(() -> {
+            PostgresWireDecoder in = new PostgresWireDecoder(testBackend.getInputStream());
+            OutputStream out = testBackend.getOutputStream();
+
+            PostgresWireDecoder.FrontendMessage q1 = in.nextMessage();
+            assertEquals('Q', q1.type());
+            assertTrue(q1.getSql().contains("missing_table"));
+
+            writeCommandComplete(out, "SELECT 0");
+            writeReadyForQuery(out, 'I');
+        });
+
+        boolean handled = S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, null, 'I');
+        joinBackend(backend);
+        assertTrue(handled);
+
+        PostgresWireDecoder clientIn = new PostgresWireDecoder(testClient.getInputStream());
+        PostgresWireDecoder.FrontendMessage err = clientIn.nextMessage();
+        assertEquals('E', err.type());
+        PostgresWireDecoder.FrontendMessage ready = clientIn.nextMessage();
+        assertEquals('Z', ready.type());
+    }
+
+    private static void writeSingleColumnDataRow(OutputStream out, String val) throws IOException {
+        byte[] b = val.getBytes(StandardCharsets.UTF_8);
+        int len = 4 + 2 + 4 + b.length;
+        out.write('D');
+        out.write(intBytes(len));
+        out.write(new byte[]{0, 1});
+        out.write(intBytes(b.length));
+        out.write(b);
+        out.flush();
+    }
+
+    private static void writeCommandComplete(OutputStream out, String tag) throws IOException {
+        byte[] b = (tag + "\0").getBytes(StandardCharsets.US_ASCII);
+        out.write('C');
+        out.write(intBytes(4 + b.length));
+        out.write(b);
+        out.flush();
+    }
+
+    private static void writeReadyForQuery(OutputStream out, char status) throws IOException {
+        out.write(new byte[]{'Z', 0, 0, 0, 5, (byte) status});
+        out.flush();
+    }
 }
+

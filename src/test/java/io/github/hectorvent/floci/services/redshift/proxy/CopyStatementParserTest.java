@@ -163,11 +163,12 @@ class CopyStatementParserTest {
     @Test
     void returnsNullForUnsupportedClauses() {
         assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' FORMAT AS PARQUET"));
-        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' JSON 'auto'"));
+        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' JSON 's3://mybucket/jsonpaths.json'"));
         assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' FIXEDWIDTH 'a:1,b:2'"));
         assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' GZIP MAXERROR 10"));
         assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' DATEFORMAT 'YYYY-MM-DD'"));
     }
+
 
     @Test
     void returnsNullWhenAStatementFollowsTheCopy() {
@@ -325,4 +326,67 @@ class CopyStatementParserTest {
         assertFalse(u.csv());
         assertEquals("csv", u.nullAs());
     }
+
+    @Test
+    void parseCopy_jsonAuto_explicitColumns() {
+        CopyStatementParser.S3CopyFrom c = copyFrom("COPY users (id, name) FROM 's3://mybucket/users.json' "
+                + "IAM_ROLE 'arn:aws:iam::123456789012:role/RedshiftRole' "
+                + "FORMAT AS JSON 'auto'");
+        assertEquals("users", c.targetTable());
+        assertEquals(List.of("id", "name"), c.columns());
+        assertEquals("mybucket", c.bucket());
+        assertEquals("users.json", c.keyOrPrefix());
+        assertTrue(c.jsonAuto());
+        assertFalse(c.manifest());
+    }
+
+    @Test
+    void parseCopy_jsonAuto_variations() {
+        CopyStatementParser.S3CopyFrom c1 = copyFrom("COPY tbl FROM 's3://b/data.json' JSON 'auto'");
+        assertTrue(c1.jsonAuto());
+        assertFalse(c1.jsonAutoIgnoreCase());
+
+        CopyStatementParser.S3CopyFrom c2 = copyFrom("COPY tbl FROM 's3://b/data.json' JSON AS 'auto'");
+        assertTrue(c2.jsonAuto());
+        assertFalse(c2.jsonAutoIgnoreCase());
+
+        CopyStatementParser.S3CopyFrom c3 = copyFrom("COPY tbl FROM 's3://b/data.json' FORMAT JSON 'auto'");
+        assertTrue(c3.jsonAuto());
+        assertFalse(c3.jsonAutoIgnoreCase());
+
+        CopyStatementParser.S3CopyFrom c4 = copyFrom("COPY tbl FROM 's3://b/data.json' JSON 'auto ignorecase'");
+        assertTrue(c4.jsonAuto());
+        assertTrue(c4.jsonAutoIgnoreCase());
+
+        CopyStatementParser.S3CopyFrom c5 = copyFrom("COPY tbl FROM 's3://b/data.json' FORMAT AS JSON 'auto ignorecase'");
+        assertTrue(c5.jsonAuto());
+        assertTrue(c5.jsonAutoIgnoreCase());
+    }
+
+    @Test
+    void parseCopy_manifest_gzip() {
+        CopyStatementParser.S3CopyFrom c = copyFrom("COPY sales FROM 's3://mybucket/manifest.json' "
+                + "IAM_ROLE 'arn:aws:iam::123456789012:role/RedshiftRole' "
+                + "MANIFEST GZIP CSV");
+        assertTrue(c.manifest());
+        assertTrue(c.gzip());
+        assertTrue(c.csv());
+        assertFalse(c.jsonAuto());
+    }
+
+    @Test
+    void parseCopy_jsonAutoAndManifest() {
+        CopyStatementParser.S3CopyFrom c = copyFrom("COPY tbl FROM 's3://b/manifest' "
+                + "MANIFEST FORMAT AS JSON 'auto'");
+        assertTrue(c.manifest());
+        assertTrue(c.jsonAuto());
+    }
+
+    @Test
+    void parseCopy_rejectsUnsupportedJsonPathsAndParquet() {
+        // Only JSON 'auto' is supported; jsonpaths or bare JSON must be rejected
+        assertNull(CopyStatementParser.parse("COPY tbl FROM 's3://b/k' JSON 's3://b/paths.json'"));
+        assertNull(CopyStatementParser.parse("COPY tbl FROM 's3://b/k' PARQUET"));
+    }
 }
+

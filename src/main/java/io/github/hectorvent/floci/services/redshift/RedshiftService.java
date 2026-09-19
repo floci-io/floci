@@ -371,8 +371,8 @@ public class RedshiftService {
         integration.setRetryCount(0);
         integration.setLastError(null);
         integration.setPollingEnabled(true);
-        // Real integrations pass through creating before settling; nothing here has work to do.
-        integration.setStatus("active");
+        // Floci approximation: report `syncing` while the backfill scan runs, then `active`.
+        integration.setStatus("syncing");
         integration.setKmsKeyId(kmsKeyId);
         integration.setCreateTime(DateTimeFormatter.ISO_INSTANT.format(Instant.now()));
         integration.setDescription(description);
@@ -474,6 +474,26 @@ public class RedshiftService {
                 integration.setLastError(error);
                 integration.setStatus("failed");
             }
+            integrations.putForAccount(accountId, key, integration);
+            return;
+        }
+        throw new AwsException("IntegrationNotFoundFault", "The requested integration doesn't exist.", 404);
+    }
+
+    public synchronized void updateIntegrationBackfillProgress(String accountId, String integrationArn,
+                                                                String backfillLastEvaluatedKey,
+                                                                boolean backfillCompleted) {
+        for (String key : integrations.keysForAccount(accountId)) {
+            Optional<Integration> stored = integrations.getForAccount(accountId, key);
+            if (stored.isEmpty() || !integrationArn.equals(stored.get().getIntegrationArn())) {
+                continue;
+            }
+            Integration integration = stored.get();
+            integration.setBackfillLastEvaluatedKey(backfillLastEvaluatedKey);
+            integration.setBackfillCompleted(backfillCompleted);
+            integration.setRetryCount(0);
+            integration.setLastError(null);
+            integration.setStatus(backfillCompleted ? "active" : "syncing");
             integrations.putForAccount(accountId, key, integration);
             return;
         }

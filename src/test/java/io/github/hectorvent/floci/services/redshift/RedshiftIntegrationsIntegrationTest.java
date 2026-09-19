@@ -1,7 +1,16 @@
 package io.github.hectorvent.floci.services.redshift;
 
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import org.awaitility.Awaitility;
 import io.restassured.RestAssured;
 import io.restassured.response.Response;
 import io.quarkus.test.junit.QuarkusTest;
@@ -115,9 +124,79 @@ class RedshiftIntegrationsIntegrationTest {
                 .body(containsString("zetl-described"))
                 .body(containsString(source))
                 .body(containsString(TARGET))
-                // Lower case on real Redshift, not ACTIVE.
-                .body(containsString("<Status>active</Status>"))
+                // Lower case on real Redshift, not ACTIVE. `syncing` right after creation: the
+                // zero-ETL consumer has not yet confirmed the backfill scan of the source table.
+                .body(containsString("<Status>syncing</Status>"))
                 .body(containsString("<Errors></Errors>"));
+    }
+
+    @Test
+    void anEmptySourceTableEventuallyReachesActiveStatus() {
+        String arn = arnOf(createIntegration("zetl-eventually-active"));
+
+        Awaitility.await()
+                .atMost(Duration.ofSeconds(30))
+                .pollInterval(Duration.ofMillis(500))
+                .untilAsserted(() -> query("Action", "DescribeIntegrations", "IntegrationArn", arn)
+                        .then().statusCode(200)
+                        .body(containsString("<Status>active</Status>")));
+    }
+
+    @Test
+    void preExistingDynamoDbItemsAreBackfilledIntoTheLandingTable() {
+        RestAssuredJsonUtils.configureAwsContentTypes();
+        String tableName = "keystone-backfill-" + System.nanoTime();
+        String streamArn = createDynamoTable(tableName);
+        given()
+                .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+                .contentType("application/x-amz-json-1.0")
+                .body("""
+                        {
+                          "TableName": "%s",
+                          "Item": {"id": {"S": "pre-existing-1"}, "note": {"S": "seeded before integration"}}
+                        }
+                        """.formatted(tableName))
+                .when().post("/")
+                .then().statusCode(200);
+
+        String createResponse = query("Action", "CreateIntegration", "IntegrationName", "zetl-backfill-proof",
+                "SourceArn", streamArn, "TargetArn", TARGET)
+                .then().statusCode(200)
+                .extract().body().asString();
+        String arn = arnOf(createResponse);
+        String landingTable = "floci_zetl_" + arn.substring(arn.lastIndexOf(':') + 1).replace('-', '_');
+        int port = clusterPort("zero-etl-cluster");
+
+        Awaitility.await()
+                .atMost(Duration.ofSeconds(30))
+                .pollInterval(Duration.ofMillis(500))
+                .ignoreExceptions()
+                .untilAsserted(() -> assertTrue(
+                        landingTableHasBackfilledRow(port, landingTable, "pre-existing-1")));
+    }
+
+    private static int clusterPort(String clusterIdentifier) {
+        String xml = query("Action", "DescribeClusters", "ClusterIdentifier", clusterIdentifier)
+                .then().statusCode(200).extract().body().asString();
+        Matcher matcher = Pattern.compile("<Endpoint>.*?<Port>(\\d+)</Port>", Pattern.DOTALL).matcher(xml);
+        assertTrue(matcher.find(), "DescribeClusters returned no endpoint port: " + xml);
+        return Integer.parseInt(matcher.group(1));
+    }
+
+    private static boolean landingTableHasBackfilledRow(int port, String landingTable, String itemId)
+            throws SQLException {
+        String url = "jdbc:postgresql://127.0.0.1:" + port + "/dev";
+        try (Connection connection = DriverManager.getConnection(url, "admin", "password123");
+             Statement statement = connection.createStatement();
+             ResultSet rows = statement.executeQuery("SELECT new_image_json FROM " + landingTable
+                     + " WHERE event_id LIKE 'backfill#%'")) {
+            while (rows.next()) {
+                if (rows.getString(1).contains(itemId)) {
+                    return true;
+                }
+            }
+            return false;
+        }
     }
 
     @Test
