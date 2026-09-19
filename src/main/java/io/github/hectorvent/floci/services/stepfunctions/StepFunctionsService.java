@@ -2397,7 +2397,7 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
         if ("Map".equals(stateType)) {
             validateMapConcurrency(statePath, stateDef, stateIsJsonata, errors);
             if (stateDef.has("ItemReader")) {
-                validateItemReader(statePath, stateDef, errors);
+                validateItemReader(statePath, stateDef, stateIsJsonata, errors);
             }
             if (stateDef.has("ResultWriter")) {
                 validateResultWriter(statePath, stateDef.get("ResultWriter"), stateIsJsonata, errors);
@@ -2605,6 +2605,73 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
                         + " at " + statePath);
             }
         }
+
+        JsonNode itemBatcher = stateDef.path("ItemBatcher");
+        if (itemBatcher.isObject()) {
+            validateMapNumberField(statePath + "/ItemBatcher", itemBatcher, jsonata,
+                    statePath, "MaxItemsPerBatch", "MaxItemsPerBatchPath", false, null, errors);
+            validateMapNumberField(statePath + "/ItemBatcher", itemBatcher, jsonata,
+                    statePath, "MaxInputBytesPerBatch", "MaxInputBytesPerBatchPath", false, 262_144, errors);
+        }
+
+        validateMapNumberField(statePath, stateDef, jsonata,
+                statePath, "ToleratedFailureCount", "ToleratedFailureCountPath", false, null, errors);
+        validateMapNumberField(statePath, stateDef, jsonata,
+                statePath, "ToleratedFailurePercentage", "ToleratedFailurePercentagePath", true, 100, errors);
+    }
+
+    /**
+     * Validates one Map numeric field and its mutually-exclusive JSONPath spelling. AWS treats
+     * these fields as JSONPath-only when the effective language is JSONata, while JSONata numeric
+     * expressions are accepted in the literal spelling. The explicit markers preserve the exact
+     * diagnostic location for nested ItemBatcher fields and messages that do not name a field.
+     */
+    private static void validateMapNumberField(String containerPath, JsonNode container,
+                                               boolean jsonata, String languageLocation,
+                                               String literalField,
+                                               String pathField, boolean decimal, Integer maximum,
+                                               List<String> errors) {
+        boolean hasLiteral = container.has(literalField);
+        boolean hasPath = container.has(pathField);
+        if (hasLiteral && hasPath) {
+            errors.add(EXPLICIT_LOCATION_MARKER
+                    + "There should only be one of the following fields: [" + literalField + ", "
+                    + pathField + "]" + MARKER_PAYLOAD_SEPARATOR + containerPath + "/" + literalField);
+        }
+
+        if (jsonata && hasPath) {
+            errors.add(EXPLICIT_LOCATION_MARKER + "The QueryLanguage is set to 'JSONata', but field '"
+                    + pathField + "' is only supported for the 'JSONPath' QueryLanguage"
+                    + MARKER_PAYLOAD_SEPARATOR + languageLocation);
+        }
+
+        if (hasLiteral) {
+            JsonNode value = container.get(literalField);
+            boolean expression = jsonata && value.isTextual()
+                    && JsonataEvaluator.isExpression(value.asText());
+            boolean numeric = decimal ? value.isNumber() : value.isIntegralNumber();
+            if (!numeric && !expression) {
+                errors.add(EXPLICIT_LOCATION_MARKER + "Expected value of type ["
+                        + (decimal ? "NUMBER" : "INTEGER") + "]"
+                        + MARKER_PAYLOAD_SEPARATOR + containerPath + "/" + literalField);
+            } else if (numeric && value.decimalValue().signum() < 0) {
+                errors.add(EXPLICIT_LOCATION_MARKER + "Minimum value is "
+                        + (decimal ? "0.0" : "0") + MARKER_PAYLOAD_SEPARATOR
+                        + containerPath + "/" + literalField);
+            } else if (numeric && maximum != null
+                    && value.decimalValue().compareTo(java.math.BigDecimal.valueOf(maximum)) > 0) {
+                errors.add(EXPLICIT_LOCATION_MARKER + "Maximum value is " + maximum
+                        + MARKER_PAYLOAD_SEPARATOR + containerPath + "/" + literalField);
+            }
+        }
+
+        if (!jsonata && hasPath) {
+            JsonNode value = container.get(pathField);
+            if (!value.isTextual() || !isReferencePath(value.asText())) {
+                errors.add(EXPLICIT_LOCATION_MARKER + "Value is not a Reference Path"
+                        + MARKER_PAYLOAD_SEPARATOR + containerPath + "/" + pathField);
+            }
+        }
     }
 
     private static boolean isReferencePath(String path) {
@@ -2672,7 +2739,8 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
         return true;
     }
 
-    private void validateItemReader(String statePath, JsonNode stateDef, List<String> errors) {
+    private void validateItemReader(String statePath, JsonNode stateDef, boolean jsonata,
+                                    List<String> errors) {
         JsonNode itemReader = stateDef.get("ItemReader");
         String resource = itemReader.path("Resource").asText(null);
         if (resource != null && !ITEM_READER_RESOURCES.contains(resource)) {
@@ -2686,6 +2754,12 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
             errors.add("The field 'InputType' should have one of these values: "
                     + "[MANIFEST, JSON, CSV, JSONL, PARQUET]"
                     + " at " + statePath + "/ItemReader/ReaderConfig/InputType");
+        }
+
+        JsonNode readerConfig = itemReader.path("ReaderConfig");
+        if (readerConfig.isObject()) {
+            validateMapNumberField(statePath + "/ItemReader/ReaderConfig", readerConfig, jsonata,
+                    statePath, "MaxItems", "MaxItemsPath", false, 100_000_000, errors);
         }
     }
 
