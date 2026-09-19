@@ -48,6 +48,8 @@ import java.security.Security;
 import java.security.Signature;
 import java.security.cert.X509Certificate;
 import java.security.interfaces.ECKey;
+import java.security.interfaces.ECPublicKey;
+import java.security.interfaces.RSAPublicKey;
 import java.security.spec.ECGenParameterSpec;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -58,6 +60,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.regex.Pattern;
 import javax.crypto.Cipher;
+import javax.crypto.SecretKey;
 import javax.crypto.SecretKeyFactory;
 import javax.crypto.spec.PBEKeySpec;
 import javax.crypto.spec.PBEParameterSpec;
@@ -451,18 +454,18 @@ public class CertificateGenerator {
             // salt and iteration count are passed explicitly so the output does not depend
             // on provider defaults. The ASN.1 below only wraps the result, so it needs no
             // provider either.
-            var secretKey = SecretKeyFactory.getInstance(PBE_ALGORITHM)
+            SecretKey secretKey = SecretKeyFactory.getInstance(PBE_ALGORITHM)
                 .generateSecret(new PBEKeySpec(passphrase.toCharArray()));
-            var salt = new byte[PBE_SALT_BYTES];
+            byte[] salt = new byte[PBE_SALT_BYTES];
             SECURE_RANDOM.nextBytes(salt);
-            var cipher = Cipher.getInstance(PBE_ALGORITHM);
+            Cipher cipher = Cipher.getInstance(PBE_ALGORITHM);
             cipher.init(Cipher.ENCRYPT_MODE, secretKey, new PBEParameterSpec(salt, PBE_ITERATIONS));
-            var ciphertext = cipher.doFinal(privateKey.getEncoded());
+            byte[] ciphertext = cipher.doFinal(privateKey.getEncoded());
 
-            var scheme = new AlgorithmIdentifier(
+            AlgorithmIdentifier scheme = new AlgorithmIdentifier(
                 PKCSObjectIdentifiers.id_PBES2,
                 ASN1Primitive.fromByteArray(cipher.getParameters().getEncoded()));
-            var encryptedInfo =
+            PKCS8EncryptedPrivateKeyInfo encryptedInfo =
                 new PKCS8EncryptedPrivateKeyInfo(new EncryptedPrivateKeyInfo(scheme, ciphertext));
 
             StringWriter sw = new StringWriter();
@@ -521,7 +524,7 @@ public class CertificateGenerator {
         String algorithm = publicKey.getAlgorithm();
         if ("RSA".equals(algorithm)) {
             try {
-                java.security.interfaces.RSAPublicKey rsaKey = (java.security.interfaces.RSAPublicKey) publicKey;
+                RSAPublicKey rsaKey = (RSAPublicKey) publicKey;
                 int keySize = rsaKey.getModulus().bitLength();
                 return switch (keySize) {
                     case 1024 -> KeyAlgorithm.RSA_1024;
@@ -534,7 +537,7 @@ public class CertificateGenerator {
             }
         } else if ("EC".equals(algorithm)) {
             try {
-                java.security.interfaces.ECPublicKey ecKey = (java.security.interfaces.ECPublicKey) publicKey;
+                ECPublicKey ecKey = (ECPublicKey) publicKey;
                 int fieldSize = ecKey.getParams().getCurve().getField().getFieldSize();
                 return switch (fieldSize) {
                     case 384 -> KeyAlgorithm.EC_secp384r1;

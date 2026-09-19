@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.acm;
 
+import io.github.hectorvent.floci.services.acm.CertificateGenerator.GeneratedCertificate;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.junit.jupiter.api.BeforeAll;
@@ -31,7 +32,7 @@ class CertificateGeneratorSelfSignedTest {
 
     @Test
     void selfSignedCertificateIsItsOwnIssuerAndACa() throws Exception {
-        var generated = generator.generateSelfSignedCertificate(
+        GeneratedCertificate generated = generator.generateSelfSignedCertificate(
                 "localhost", List.of("localhost", "localhost.floci.io"), KeyAlgorithm.RSA_2048);
 
         X509Certificate cert = generator.parseCertificate(generated.certificatePem());
