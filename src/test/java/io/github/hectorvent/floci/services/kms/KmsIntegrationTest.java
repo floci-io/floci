@@ -1958,6 +1958,41 @@ class KmsIntegrationTest {
                 .body("message", equalTo(keyArn + " is pending deletion."));
     }
 
+    /** Checked against real AWS in us-east-1. The key state is checked before the key spec. */
+    @ParameterizedTest
+    @CsvSource({
+            "ECC_NIST_P256, SIGN_VERIFY, AWS_KMS, is pending deletion.",
+            "HMAC_256, GENERATE_VERIFY_MAC, AWS_KMS, is pending deletion.",
+            "SYMMETRIC_DEFAULT, ENCRYPT_DECRYPT, EXTERNAL, is pending import.",
+    })
+    void getPublicKeyRejectsAKeyPendingDeletionOrImport(String keySpec, String keyUsage, String origin,
+                                                        String state) {
+        String keyArn = callKms("CreateKey", "{\"Origin\":\"%s\",\"KeySpec\":\"%s\",\"KeyUsage\":\"%s\"}"
+                .formatted(origin, keySpec, keyUsage)).then().statusCode(200).extract().path("KeyMetadata.Arn");
+        if ("AWS_KMS".equals(origin)) {
+            callKms("ScheduleKeyDeletion", "{\"KeyId\":\"%s\",\"PendingWindowInDays\":7}".formatted(keyArn))
+                    .then().statusCode(200);
+        }
+
+        callKms("GetPublicKey", "{\"KeyId\":\"%s\"}".formatted(keyArn))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("KMSInvalidStateException"))
+                .body("message", equalTo(keyArn + " " + state));
+    }
+
+    /** Checked against real AWS in us-east-1. */
+    @Test
+    void getPublicKeyWorksOnADisabledKey() {
+        String keyArn = createKeyArn("RSA_2048", "SIGN_VERIFY");
+        callKms("DisableKey", "{\"KeyId\":\"%s\"}".formatted(keyArn)).then().statusCode(200);
+
+        callKms("GetPublicKey", "{\"KeyId\":\"%s\"}".formatted(keyArn))
+                .then()
+                .statusCode(200)
+                .body("KeyId", equalTo(keyArn));
+    }
+
     private static String keyManagementRequest(String operation, String keyArn) {
         return switch (operation) {
             case "UpdateAlias" -> {

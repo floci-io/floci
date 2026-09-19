@@ -250,6 +250,8 @@ public class KmsService implements ResourceProvider {
 
     public KmsKey getPublicKey(String keyId, String region) {
         KmsKey key = resolveKey(keyId, region);
+        requireNotPendingDeletion(key);
+        requireImportedKeyMaterial(key);
         KmsKeySpec spec = key.getKeySpec();
         if (KmsKeySpec.SYMMETRIC_DEFAULT == spec || isHmac(spec)) {
             throw new AwsException("UnsupportedOperationException", "GetPublicKey is not supported for symmetric keys.", 400);
