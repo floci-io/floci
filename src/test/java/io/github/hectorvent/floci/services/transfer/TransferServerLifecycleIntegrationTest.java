@@ -6,6 +6,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.anEmptyMap;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.startsWith;
 
@@ -90,6 +91,90 @@ class TransferServerLifecycleIntegrationTest {
         .then()
             .statusCode(200)
             .body("Server.Domain", equalTo("EFS"));
+    }
+
+    @Test
+    void describeAndUpdateServerPreserveDetailStructures() {
+        String serverId = given()
+            .header("X-Amz-Target", "TransferService.CreateServer")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {
+                    "EndpointType": "VPC",
+                    "EndpointDetails": {"VpcId": "vpc-123"},
+                    "IdentityProviderType": "API_GATEWAY",
+                    "IdentityProviderDetails": {
+                        "Url": "https://idp.example.com",
+                        "InvocationRole": "arn:aws:iam::000000000000:role/transfer-idp"
+                    }
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().jsonPath().getString("ServerId");
+
+        given()
+            .header("X-Amz-Target", "TransferService.DescribeServer")
+            .contentType(CONTENT_TYPE)
+            .body("{\"ServerId\": \"" + serverId + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Server.EndpointDetails.VpcId", equalTo("vpc-123"))
+            .body("Server.IdentityProviderDetails.Url", equalTo("https://idp.example.com"))
+            .body("Server.IdentityProviderDetails.InvocationRole",
+                    equalTo("arn:aws:iam::000000000000:role/transfer-idp"));
+
+        given()
+            .header("X-Amz-Target", "TransferService.UpdateServer")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {
+                    "ServerId": "%s",
+                    "IdentityProviderDetails": {"Url": "https://other.example.com"}
+                }
+                """.formatted(serverId))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ServerId", equalTo(serverId));
+
+        given()
+            .header("X-Amz-Target", "TransferService.DescribeServer")
+            .contentType(CONTENT_TYPE)
+            .body("{\"ServerId\": \"" + serverId + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Server.EndpointDetails.VpcId", equalTo("vpc-123"))
+            .body("Server.IdentityProviderDetails.Url", equalTo("https://other.example.com"));
+
+        given()
+            .header("X-Amz-Target", "TransferService.UpdateServer")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"ServerId": "%s", "IdentityProviderDetails": {}}
+                """.formatted(serverId))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "TransferService.DescribeServer")
+            .contentType(CONTENT_TYPE)
+            .body("{\"ServerId\": \"" + serverId + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Server.EndpointDetails.VpcId", equalTo("vpc-123"))
+            .body("Server.IdentityProviderDetails", anEmptyMap());
     }
 
     @Test
