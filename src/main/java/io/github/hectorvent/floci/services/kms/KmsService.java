@@ -395,6 +395,7 @@ public class KmsService implements ResourceProvider {
         validateGrantConstraints(constraints);
 
         KmsKey key = resolveKey(keyId, region);
+        requireNotPendingDeletion(key);
         String grantId = UUID.randomUUID().toString();
         byte[] tokenBytes = new byte[32];
         ThreadLocalRandom.current().nextBytes(tokenBytes);
@@ -587,6 +588,7 @@ public class KmsService implements ResourceProvider {
 
     public void scheduleKeyDeletion(String keyId, int pendingWindowInDays, String region) {
         KmsKey key = resolveKey(keyId, region);
+        requireNotPendingDeletion(key);
         key.setKeyState("PendingDeletion");
         key.setDeletionDate(Instant.now().plusSeconds((long) pendingWindowInDays * 86400).getEpochSecond());
         keyStore.put(region + "::" + key.getKeyId(), key);
@@ -651,6 +653,7 @@ public class KmsService implements ResourceProvider {
 
     public void updateKeyDescription(String keyId, String description, String region) {
         KmsKey key = resolveKey(keyId, region);
+        requireNotPendingDeletion(key);
         key.setDescription(description);
         keyStore.put(region + "::" + key.getKeyId(), key);
         LOG.infov("Updated description for KMS key: {0} in {1}", key.getKeyId(), region);
@@ -695,6 +698,7 @@ public class KmsService implements ResourceProvider {
 
     public void disableKey(String keyId, String region) {
         KmsKey key = resolveKey(keyId, region);
+        requireNotPendingDeletion(key);
         requireImportedKeyMaterial(key);
         key.setEnabled(false);
         key.setKeyState("Disabled");
@@ -1053,6 +1057,7 @@ public class KmsService implements ResourceProvider {
             throw new AwsException("InvalidAliasNameException", "Alias name must begin with 'alias/'", 400);
         }
         KmsKey key = resolveKey(targetKeyId, region); // Validate key exists and normalize to plain key ID
+        requireNotPendingDeletion(key);
 
         String aliasArn = regionResolver.buildArn("kms", region, aliasName);
         KmsAlias alias = new KmsAlias(aliasName, aliasArn, key.getKeyId());
@@ -1755,6 +1760,7 @@ public class KmsService implements ResourceProvider {
 
     public void tagResource(String keyId, Map<String, String> tags, String region) {
         KmsKey key = resolveKey(keyId, region);
+        requireNotPendingDeletion(key);
         ReservedTags.rejectReservedTagsOnUpdate(tags);
         key.getTags().putAll(tags);
         keyStore.put(region + "::" + key.getKeyId(), key);
@@ -1762,6 +1768,7 @@ public class KmsService implements ResourceProvider {
 
     public void untagResource(String keyId, List<String> tagKeys, String region) {
         KmsKey key = resolveKey(keyId, region);
+        requireNotPendingDeletion(key);
         tagKeys.forEach(key.getTags()::remove);
         keyStore.put(region + "::" + key.getKeyId(), key);
     }

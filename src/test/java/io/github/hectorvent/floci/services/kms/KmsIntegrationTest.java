@@ -1933,6 +1933,13 @@ class KmsIntegrationTest {
     @ParameterizedTest
     @CsvSource({
             "EnableKey, AWS_KMS",
+            "DisableKey, AWS_KMS",
+            "UpdateKeyDescription, AWS_KMS",
+            "TagResource, AWS_KMS",
+            "UntagResource, AWS_KMS",
+            "CreateGrant, AWS_KMS",
+            "ScheduleKeyDeletion, AWS_KMS",
+            "CreateAlias, AWS_KMS",
             "UpdateAlias, AWS_KMS",
             "GetParametersForImport, EXTERNAL",
             "ImportKeyMaterial, EXTERNAL",
@@ -1965,6 +1972,14 @@ class KmsIntegrationTest {
                             .formatted(keyArn);
             case "ImportKeyMaterial" -> ("{\"KeyId\":\"%s\",\"ImportToken\":\"AAAA\",\"EncryptedKeyMaterial\":\"AAAA\","
                     + "\"ExpirationModel\":\"KEY_MATERIAL_DOES_NOT_EXPIRE\"}").formatted(keyArn);
+            case "UpdateKeyDescription" -> "{\"KeyId\":\"%s\",\"Description\":\"x\"}".formatted(keyArn);
+            case "TagResource" -> "{\"KeyId\":\"%s\",\"Tags\":[{\"TagKey\":\"a\",\"TagValue\":\"b\"}]}".formatted(keyArn);
+            case "UntagResource" -> "{\"KeyId\":\"%s\",\"TagKeys\":[\"a\"]}".formatted(keyArn);
+            case "CreateGrant" -> ("{\"KeyId\":\"%s\",\"GranteePrincipal\":\"arn:aws:iam::000000000000:root\","
+                    + "\"Operations\":[\"Encrypt\"]}").formatted(keyArn);
+            case "ScheduleKeyDeletion" -> "{\"KeyId\":\"%s\",\"PendingWindowInDays\":7}".formatted(keyArn);
+            case "CreateAlias" -> "{\"AliasName\":\"alias/pending-deletion-%s\",\"TargetKeyId\":\"%s\"}"
+                    .formatted(keyArn.substring(keyArn.lastIndexOf('/') + 1), keyArn);
             default -> "{\"KeyId\":\"%s\"}".formatted(keyArn);
         };
     }
