@@ -54,7 +54,7 @@ public class SageMakerEndpointManager implements ContainerTeardown, Resettable {
     private final EmulatorConfig config;
     private final ContainerDetector containerDetector;
     private final S3Service s3Service;
-    // Replaced by clear() after a state reset, whose container teardown shuts this pool down.
+    // Replaced by afterReset() after a state reset, whose container teardown shuts this pool down.
     private volatile ExecutorService executor = Executors.newCachedThreadPool();
     private final ConcurrentHashMap<String, String> containers = new ConcurrentHashMap<>();
     private final HttpClient httpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build();
@@ -152,13 +152,20 @@ public class SageMakerEndpointManager implements ContainerTeardown, Resettable {
         executor.shutdownNow();
     }
 
+    @Override
+    public void clear() {
+        // Nothing to wipe: the store holds the endpoints and afterReset() restores the pool.
+    }
+
     /**
-     * Runs after a state reset has torn the containers down and wiped the store, never on
-     * shutdown. The teardown shut the worker pool down, so without a new one every later
-     * CreateEndpoint and UpdateEndpoint would be rejected until the emulator restarted.
+     * Runs at the end of every state reset, never on shutdown. The teardown shut the worker
+     * pool down, so without a new one every later CreateEndpoint and UpdateEndpoint would be
+     * rejected until the emulator restarted. This hook rather than {@code clear()} because the
+     * controller runs it even when the storage wipe or another service's {@code clear()} threw,
+     * and a failed reset must not leave the pool terminated for good.
      */
     @Override
-    public synchronized void clear() {
+    public synchronized void afterReset() {
         if (executor.isShutdown()) {
             executor = Executors.newCachedThreadPool();
         }
