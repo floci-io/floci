@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
@@ -17,6 +18,7 @@ import io.github.hectorvent.floci.services.sns.SnsMessageAttributes;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
+import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -29,7 +31,7 @@ import java.util.Map;
 
 /**
  * Delivers an EventBridge Scheduler target invocation to the underlying service.
- * Supports templated SQS, Lambda, SNS, and EventBridge PutEvents targets, plus
+ * Supports templated SQS, Lambda, SNS, Step Functions, and EventBridge PutEvents targets, plus
  * universal targets ({@code arn:aws:scheduler:::aws-sdk:<service>:<action>}) for
  * {@code sns:publish} and {@code sqs:sendMessage}. Mirrors the subset handled by
  * {@code EventBridgeInvoker} but using Scheduler's {@link Target} model (raw
@@ -45,6 +47,7 @@ public class ScheduleInvoker {
     private final SnsService snsService;
     private final EventBridgeService eventBridgeService;
     private final EcsService ecsService;
+    private final StepFunctionsService stepFunctionsService;
     private final ObjectMapper objectMapper;
     private final String baseUrl;
 
@@ -54,6 +57,7 @@ public class ScheduleInvoker {
                            SnsService snsService,
                            EventBridgeService eventBridgeService,
                            EcsService ecsService,
+                           StepFunctionsService stepFunctionsService,
                            ObjectMapper objectMapper,
                            EmulatorConfig config) {
         this.sqsService = sqsService;
@@ -61,6 +65,7 @@ public class ScheduleInvoker {
         this.snsService = snsService;
         this.eventBridgeService = eventBridgeService;
         this.ecsService = ecsService;
+        this.stepFunctionsService = stepFunctionsService;
         this.objectMapper = objectMapper;
         this.baseUrl = config.baseUrl();
     }
@@ -99,6 +104,11 @@ public class ScheduleInvoker {
         } else if (arn.contains(":ecs:") && target.getEcsParameters() != null) {
             deliverToEcsRunTask(target, targetRegion);
             LOG.debugv("Scheduler delivered to ECS RunTask: {0}", arn);
+        } else if (isStateMachineArn(arn)) {
+            String targetAccount = AwsArnUtils.parse(arn).accountId();
+            RequestScopes.runAs(targetAccount,
+                    () -> stepFunctionsService.startExecution(arn, null, payload, targetRegion));
+            LOG.debugv("Scheduler started Step Functions execution: {0}", arn);
         } else if (isEventBridgePutEventsArn(arn)) {
             deliverToEventBridge(target, payload, targetRegion);
             LOG.debugv("Scheduler delivered to EventBridge: {0}", arn);
@@ -275,6 +285,15 @@ public class ScheduleInvoker {
 
     private boolean isEventBridgePutEventsArn(String arn) {
         return arn.contains(":events:") && arn.contains(":event-bus/");
+    }
+
+    private static boolean isStateMachineArn(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "states")) {
+            return false;
+        }
+        String resource = AwsArnUtils.parse(arn).resource();
+        String prefix = "stateMachine:";
+        return resource.startsWith(prefix) && resource.indexOf(':', prefix.length()) < 0;
     }
 
     private void deliverToEventBridge(Target target, String payload, String region) {

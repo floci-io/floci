@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.services.scheduler.model.Target;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
+import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -50,6 +51,7 @@ class ScheduleInvokerTest {
     private SnsService snsService;
     private EventBridgeService eventBridgeService;
     private EcsService ecsService;
+    private StepFunctionsService stepFunctionsService;
     private ScheduleInvoker invoker;
 
     @BeforeEach
@@ -59,10 +61,11 @@ class ScheduleInvokerTest {
         snsService = mock(SnsService.class);
         eventBridgeService = mock(EventBridgeService.class);
         ecsService = mock(EcsService.class);
+        stepFunctionsService = mock(StepFunctionsService.class);
         EmulatorConfig config = mock(EmulatorConfig.class);
         when(config.baseUrl()).thenReturn("http://localhost:4566");
         invoker = new ScheduleInvoker(sqsService, lambdaService, snsService,
-                eventBridgeService, ecsService, new ObjectMapper(), config);
+                eventBridgeService, ecsService, stepFunctionsService, new ObjectMapper(), config);
     }
 
     @Test
@@ -277,6 +280,55 @@ class ScheduleInvokerTest {
 
         verify(snsService).publish(eq(TOPIC_ARN), isNull(), eq("{\"hello\":\"world\"}"),
                 eq("Scheduler"), eq("us-east-1"));
+    }
+
+    @Test
+    void stateMachineTargetStartsExecutionWithInputAndArnRegion() {
+        String stateMachineArn = "arn:aws:states:eu-west-1:000000000000:stateMachine:scheduled-workflow";
+        String input = "{\"order\":{\"id\":42}}";
+        Target target = new Target();
+        target.setArn(stateMachineArn);
+        target.setRoleArn("arn:aws:iam::000000000000:role/scheduler-role");
+        target.setInput(input);
+
+        invoker.invoke(target, "us-east-1");
+
+        verify(stepFunctionsService).startExecution(stateMachineArn, null, input, "eu-west-1");
+    }
+
+    @Test
+    void stateMachineTargetWithoutInputUsesEmptyObject() {
+        String stateMachineArn = "arn:aws:states:us-east-1:000000000000:stateMachine:scheduled-workflow";
+        Target target = new Target();
+        target.setArn(stateMachineArn);
+
+        invoker.invoke(target, "us-east-1");
+
+        verify(stepFunctionsService).startExecution(stateMachineArn, null, "{}", "us-east-1");
+    }
+
+    @Test
+    void stateMachineStartFailurePropagatesToSchedulerDeliveryHandling() {
+        String stateMachineArn = "arn:aws:states:us-east-1:000000000000:stateMachine:missing";
+        Target target = new Target();
+        target.setArn(stateMachineArn);
+        when(stepFunctionsService.startExecution(stateMachineArn, null, "{}", "us-east-1"))
+                .thenThrow(new AwsException("StateMachineDoesNotExist", "State machine does not exist", 400));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> invoker.invoke(target, "us-east-1"));
+
+        assertEquals("StateMachineDoesNotExist", error.getErrorCode());
+    }
+
+    @Test
+    void qualifiedStateMachineTargetRemainsUnsupported() {
+        Target target = new Target();
+        target.setArn("arn:aws:states:us-east-1:000000000000:stateMachine:scheduled-workflow:PROD");
+
+        assertThrows(UnsupportedOperationException.class,
+                () -> invoker.invoke(target, "us-east-1"));
+        verifyNoInteractions(stepFunctionsService);
     }
 
     @Test
