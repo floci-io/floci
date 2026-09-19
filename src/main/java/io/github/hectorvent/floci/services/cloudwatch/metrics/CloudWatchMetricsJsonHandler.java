@@ -127,9 +127,11 @@ public class CloudWatchMetricsJsonHandler {
             statsNode.forEach(s -> statistics.add(s.asText()));
         }
 
+        String unit = request.hasNonNull("Unit") ? request.path("Unit").asText() : null;
+
         List<CloudWatchMetricsService.Datapoint> datapoints =
                 metricsService.getMetricStatistics(namespace, metricName, dimensions,
-                        startTime, endTime, period, statistics, null, region);
+                        startTime, endTime, period, statistics, unit, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.put("Label", metricName);
