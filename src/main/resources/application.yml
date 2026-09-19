@@ -54,6 +54,7 @@ quarkus:
       includes:
         - pricing-snapshots/**
         - ui/*.html
+        - appsync/*.mjs
         - ec2/*.yaml
         - i18n/*.properties
         - org/apache/velocity/runtime/defaults/*.properties
@@ -701,6 +702,10 @@ floci:
       # graphql-url: http://floci-graphql:8181  # set to skip sidecar container management
       # Exact version on purpose: a cached :latest is never re-pulled. Published from floci-io/floci-sidecars.
       graphql-image: "floci/floci-sidecar-graphql:0.2.0"
+      js-runtime:
+        # The Node image that evaluates APPSYNC_JS resolver code. Pinned here rather than only in
+        # EmulatorConfig so CI can prefetch it the same way it does the sidecar pins.
+        image: "node:22-alpine"
     s3vectors:
       enabled: true
     s3tables:

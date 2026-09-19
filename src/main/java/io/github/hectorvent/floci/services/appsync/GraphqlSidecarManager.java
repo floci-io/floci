@@ -133,6 +133,9 @@ public class GraphqlSidecarManager {
                 .withDynamicPort(GRAPHQL_PORT)
                 .withDockerNetwork(config.services().dockerNetwork())
                 .withEmbeddedDns()
+                // The sidecar calls Floci back for every field that has a resolver, so it needs a
+                // route to the host even when the embedded DNS server is not the one answering.
+                .withHostDockerInternalOnLinux()
                 .withLogRotation()
                 .build();
         ContainerInfo info = lifecycleManager.createAndStart(spec);

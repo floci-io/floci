@@ -134,4 +134,37 @@ class AppSyncErrorFormatterTest {
         }
         return error;
     }
+
+    @Test
+    void aResolverErrorReportsTheTypeInfoAndDataTheResolverChose() {
+        // util.error("...", "BadRequest", data, errorInfo) travels back through the sidecar's
+        // resolver callback, which copies it onto the error's extensions as type/data/info.
+        Map<String, Object> result = new AppSyncErrorFormatter().format(Map.of("errors", List.of(Map.of(
+                "message", "orgNo is required",
+                "path", List.of("getMessages"),
+                "extensions", Map.of(
+                        "type", "BadRequest",
+                        "data", Map.of("field", "orgNo"),
+                        "info", Map.of("hint", "pass one"))))));
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> error = ((List<Map<String, Object>>) result.get("errors")).get(0);
+        assertEquals("BadRequest", error.get("errorType"));
+        assertEquals(Map.of("hint", "pass one"), error.get("errorInfo"));
+        assertEquals(Map.of("field", "orgNo"), error.get("data"));
+        assertEquals(List.of("getMessages"), error.get("path"));
+    }
+
+    @Test
+    void anErrorWithNoResolverTypeKeepsTheClassificationDerivedOne() {
+        Map<String, Object> result = new AppSyncErrorFormatter().format(Map.of("errors", List.of(Map.of(
+                "message", "bad query",
+                "extensions", Map.of("classification", "InvalidSyntax")))));
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> error = ((List<Map<String, Object>>) result.get("errors")).get(0);
+        assertEquals("SyntaxError", error.get("errorType"));
+        assertNull(error.get("errorInfo"));
+        assertFalse(error.containsKey("data"));
+    }
 }

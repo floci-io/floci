@@ -28,4 +28,9 @@ grep -q '/verifiedpermissions/' "$SHARD_FILE" && [ -n "$CEDAR_IMAGE" ] && pull "
 # services/cloudformation/, so it needs its own token alongside the /appsync/ path match.
 GRAPHQL_IMAGE="$(grep -oE 'graphql-image: *"[^"]+"' src/main/resources/application.yml | grep -oE '"[^"]+"' | tr -d '"')"
 grep -qE '/appsync/|AppSyncCfnIntegrationTest' "$SHARD_FILE" && [ -n "$GRAPHQL_IMAGE" ] && pull "$GRAPHQL_IMAGE"
+# The Node sidecar that evaluates APPSYNC_JS resolver code; the pin lives in application.yml too.
+# Matched on the one class that starts it rather than on /appsync/, since every other test in that
+# package is a unit test: a path match would have all four shards pull an image one of them uses.
+JS_RUNTIME_IMAGE="$(grep -oE 'image: *"node:[^"]+"' src/main/resources/application.yml | grep -oE '"[^"]+"' | tr -d '"')"
+grep -q 'AppSyncJsResolverDockerIntegrationTest' "$SHARD_FILE" && [ -n "$JS_RUNTIME_IMAGE" ] && pull "$JS_RUNTIME_IMAGE"
 exit 0

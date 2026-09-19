@@ -6,6 +6,8 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import io.github.hectorvent.floci.services.appsync.GraphqlSidecarClient.DenyField;
 import io.github.hectorvent.floci.services.appsync.GraphqlSidecarClient.PlanResult;
+import io.github.hectorvent.floci.services.appsync.GraphqlSidecarClient.ResolveField;
+import io.github.hectorvent.floci.services.appsync.GraphqlSidecarClient.ResolveSpec;
 import io.github.hectorvent.floci.services.appsync.graphql.AppSyncTransportException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -64,6 +66,37 @@ class GraphqlSidecarClientTest {
         assertThat(lastPath.get(), equalTo("/v1/schema/validate"));
         assertThat(lastBody.get().get("sdl").asText(), equalTo("type Query { hello: String }"));
         assertThat(lastBody.get().get("scalars").get("AWSDateTime").asText(), equalTo("date-time"));
+    }
+
+    @Test
+    void executeWiresTheResolverCallbackForTheFieldsThatHaveResolvers() {
+        answer("/v1/execute", 200, "{\"data\":{\"getPost\":null}}");
+
+        client.execute("type Query { getPost: String }", Map.of(), "{ getPost }", Map.of(), null,
+                List.of(), new ResolveSpec("http://floci:4566/appsync-resolve", "tok-1",
+                        List.of(new ResolveField("Query", "getPost")), 100));
+
+        JsonNode resolve = lastBody.get().get("resolve");
+        assertThat(resolve.get("url").asText(), equalTo("http://floci:4566/appsync-resolve"));
+        assertThat(resolve.get("token").asText(), equalTo("tok-1"));
+        assertThat(resolve.get("maxBatch").asInt(), equalTo(100));
+        assertThat(resolve.get("fields").size(), equalTo(1));
+        assertThat(resolve.get("fields").get(0).get("typeName").asText(), equalTo("Query"));
+        assertThat(resolve.get("fields").get(0).get("fieldName").asText(), equalTo("getPost"));
+    }
+
+    @Test
+    void executeOmitsTheResolverCallbackWhenNoFieldHasOne() {
+        answer("/v1/execute", 200, "{\"data\":{\"hello\":null}}");
+
+        // Both spellings of "nothing to call back for": no spec at all, and a spec with no fields.
+        // Either must leave the sidecar resolving over its own null root value, as it did before.
+        client.execute("type Query { hello: String }", Map.of(), "{ hello }", Map.of(), null, List.of());
+        assertThat(lastBody.get().has("resolve"), is(false));
+
+        client.execute("type Query { hello: String }", Map.of(), "{ hello }", Map.of(), null, List.of(),
+                new ResolveSpec("http://floci:4566/appsync-resolve", "tok-2", List.of(), 100));
+        assertThat(lastBody.get().has("resolve"), is(false));
     }
 
     @Test
