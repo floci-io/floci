@@ -4,13 +4,16 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.TagHandler;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.model.IpPermission;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
+import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
 import io.github.hectorvent.floci.services.eks.model.CertificateAuthority;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
 import io.github.hectorvent.floci.services.eks.model.AccessConfig;
@@ -227,6 +230,14 @@ public class EksService implements TagHandler, ResourceProvider {
                 new Tag("aws:eks:cluster-name", clusterName)
         );
         ec2Service.createTags(region, List.of(sg.getGroupId()), tags);
+
+        UserIdGroupPair selfPair = new UserIdGroupPair();
+        selfPair.setGroupId(sg.getGroupId());
+        IpPermission selfIngress = new IpPermission();
+        selfIngress.setIpProtocol("-1");
+        selfIngress.setUserIdGroupPairs(List.of(selfPair));
+        ec2Service.authorizeSecurityGroupIngress(region, sg.getGroupId(), List.of(selfIngress));
+
         return sg;
     }
 
@@ -272,12 +283,19 @@ public class EksService implements TagHandler, ResourceProvider {
                 continue;
             }
 
-            String region = resolveClusterRegion(cluster);
-            SecurityGroup sg = createClusterSecurityGroup(region, cluster.getName(), vpcConfig.getVpcId());
-            vpcConfig.setClusterSecurityGroupId(sg.getGroupId());
-            putClusterForAccount(accountId, cluster);
-            LOG.infov("Backfilled cluster security group {0} for existing EKS cluster {1} in account {2}",
-                    sg.getGroupId(), cluster.getName(), accountId);
+            try {
+                RequestScopes.runAs(accountId, () -> {
+                    String region = resolveClusterRegion(cluster);
+                    SecurityGroup sg = createClusterSecurityGroup(region, cluster.getName(), vpcConfig.getVpcId());
+                    vpcConfig.setClusterSecurityGroupId(sg.getGroupId());
+                    putClusterForAccount(accountId, cluster);
+                    LOG.infov("Backfilled cluster security group {0} for existing EKS cluster {1} in account {2}",
+                            sg.getGroupId(), cluster.getName(), accountId);
+                });
+            } catch (Exception e) {
+                LOG.warnv("Could not backfill cluster security group for existing EKS cluster {0} in account {1}: {2}",
+                        cluster.getName(), accountId, e.getMessage());
+            }
         }
     }
 
@@ -351,9 +369,18 @@ public class EksService implements TagHandler, ResourceProvider {
         cluster.setVersion(request.getVersion() != null ? request.getVersion() : "1.29");
         cluster.setRoleArn(request.getRoleArn());
         ResourcesVpcConfig vpcConfig = buildVpcConfigResponse(request.getResourcesVpcConfig(), resolvedVpcId);
+        SecurityGroup clusterSg = null;
         if (ec2Service != null && !vpcConfig.getVpcId().isBlank()) {
-            SecurityGroup sg = createClusterSecurityGroup(region, name, vpcConfig.getVpcId());
-            vpcConfig.setClusterSecurityGroupId(sg.getGroupId());
+            try {
+                clusterSg = createClusterSecurityGroup(region, name, vpcConfig.getVpcId());
+                vpcConfig.setClusterSecurityGroupId(clusterSg.getGroupId());
+            } catch (AwsException e) {
+                if ("InvalidVpcID.NotFound".equals(e.getErrorCode())) {
+                    throw new AwsException("InvalidParameterException",
+                            "VPC '" + vpcConfig.getVpcId() + "' does not exist", 400);
+                }
+                throw e;
+            }
         }
         cluster.setResourcesVpcConfig(vpcConfig);
         cluster.setKubernetesNetworkConfig(buildNetworkConfig(request.getKubernetesNetworkConfig()));
@@ -362,27 +389,40 @@ public class EksService implements TagHandler, ResourceProvider {
         cluster.setPlatformVersion("eks.1");
         cluster.setCertificateAuthority(new CertificateAuthority(""));
 
-        String issuer = oidcService.newIssuerUrl(region);
-        cluster.setIdentity(new ClusterIdentity(new OidcIdentity(issuer)));
-        oidcService.ensureKey(name, issuer);
+        try {
+            String issuer = oidcService.newIssuerUrl(region);
+            cluster.setIdentity(new ClusterIdentity(new OidcIdentity(issuer)));
+            oidcService.ensureKey(name, issuer);
 
-        if (config.services().eks().mock()) {
-            markMetadataOnlyActive(cluster);
-        } else {
-            try {
-                if (!clusterManager.tryStartCluster(cluster)) {
-                    // No Docker daemon: the k3s control plane cannot run, but the cluster record is
-                    // metadata that stands on its own. FAILED is reserved for provisioning errors
-                    // AWS would also report, and would strand every IaC apply that polls for ACTIVE.
-                    markMetadataOnlyActive(cluster);
+            if (config.services().eks().mock()) {
+                markMetadataOnlyActive(cluster);
+            } else {
+                try {
+                    if (!clusterManager.tryStartCluster(cluster)) {
+                        // No Docker daemon: the k3s control plane cannot run, but the cluster record is
+                        // metadata that stands on its own. FAILED is reserved for provisioning errors
+                        // AWS would also report, and would strand every IaC apply that polls for ACTIVE.
+                        markMetadataOnlyActive(cluster);
+                    }
+                } catch (Exception e) {
+                    LOG.errorv("Failed to start k3s container for cluster {0}: {1}", name, e.getMessage());
+                    cluster.setStatus(ClusterStatus.FAILED);
                 }
-            } catch (Exception e) {
-                LOG.errorv("Failed to start k3s container for cluster {0}: {1}", name, e.getMessage());
-                cluster.setStatus(ClusterStatus.FAILED);
             }
+
+            storage.put(name, cluster);
+        } catch (RuntimeException e) {
+            if (clusterSg != null) {
+                try {
+                    ec2Service.deleteSecurityGroup(region, clusterSg.getGroupId());
+                } catch (Exception cleanupEx) {
+                    LOG.warnv("Failed to clean up cluster security group {0} after cluster creation failure: {1}",
+                            clusterSg.getGroupId(), cleanupEx.getMessage());
+                }
+            }
+            throw e;
         }
 
-        storage.put(name, cluster);
         return cluster;
     }
 
@@ -696,7 +736,6 @@ public class EksService implements TagHandler, ResourceProvider {
                     request.getEndpointPrivateAccess() != null ? request.getEndpointPrivateAccess() : Boolean.FALSE);
             response.setPublicAccessCidrs(
                     request.getPublicAccessCidrs() != null ? request.getPublicAccessCidrs() : List.of("0.0.0.0/0"));
-            response.setClusterSecurityGroupId("");
         } else {
             response.setSubnetIds(List.of());
             response.setSecurityGroupIds(List.of());
@@ -704,7 +743,6 @@ public class EksService implements TagHandler, ResourceProvider {
             response.setEndpointPublicAccess(Boolean.TRUE);
             response.setEndpointPrivateAccess(Boolean.FALSE);
             response.setPublicAccessCidrs(List.of("0.0.0.0/0"));
-            response.setClusterSecurityGroupId("");
         }
         return response;
     }

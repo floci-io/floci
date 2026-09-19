@@ -9,6 +9,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -86,7 +87,11 @@ class EksClusterSecurityGroupIntegrationTest {
                 .body("DescribeSecurityGroupsResponse.securityGroupInfo.item.tagSet.item.find { it.key == 'aws:eks:cluster-name' }.value",
                         equalTo(CLUSTER))
                 .body("DescribeSecurityGroupsResponse.securityGroupInfo.item.tagSet.item.find { it.key == 'kubernetes.io/cluster/" + CLUSTER + "' }.value",
-                        equalTo("owned"));
+                        equalTo("owned"))
+                .body("DescribeSecurityGroupsResponse.securityGroupInfo.item.ipPermissions.item.ipProtocol",
+                        equalTo("-1"))
+                .body("DescribeSecurityGroupsResponse.securityGroupInfo.item.ipPermissions.item.groups.item.groupId",
+                        equalTo(clusterSecurityGroupId));
     }
 
     @Test
@@ -109,5 +114,27 @@ class EksClusterSecurityGroupIntegrationTest {
                 .when().post("/")
                 .then().statusCode(400)
                 .body("Response.Errors.Error.Code", equalTo("InvalidGroup.NotFound"));
+    }
+
+    @Test
+    @Order(6)
+    void createClusterWithoutVpcOmitsClusterSecurityGroupId() {
+        String noVpcCluster = "no-vpc-it-cluster";
+        given().contentType(JSON)
+                .body("{\"name\":\"" + noVpcCluster + "\",\"roleArn\":\"arn:aws:iam::000000000000:role/eks-role\"}")
+                .when().post("/clusters")
+                .then().statusCode(200)
+                .body("cluster.name", equalTo(noVpcCluster))
+                .body("cluster.resourcesVpcConfig.clusterSecurityGroupId", nullValue());
+
+        given().contentType(JSON)
+                .when().get("/clusters/" + noVpcCluster)
+                .then().statusCode(200)
+                .body("cluster.name", equalTo(noVpcCluster))
+                .body("cluster.resourcesVpcConfig.clusterSecurityGroupId", nullValue());
+
+        given().contentType(JSON)
+                .when().delete("/clusters/" + noVpcCluster)
+                .then().statusCode(200);
     }
 }

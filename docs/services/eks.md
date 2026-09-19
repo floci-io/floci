@@ -95,10 +95,10 @@ Floci tags the cluster security group with the standard AWS system tags:
 
 ### Lifecycle management and rules
 
-- **Creation**: The security group is created in the resolved cluster VPC when the cluster is created. Both real and mock clusters receive a security group. If a cluster is created without any VPC or subnets, `clusterSecurityGroupId` defaults to an empty string.
+- **Creation**: The security group is created in the resolved cluster VPC when the cluster is created. Both real and mock clusters receive a security group. If a cluster is created without any VPC or subnets, `clusterSecurityGroupId` is omitted from the response.
 - **Deletion**: When the cluster is deleted via `DeleteCluster`, Floci deletes the associated cluster security group from EC2. If the security group was already removed out-of-band, the deletion succeeds idempotently without error.
 - **Backfill**: Existing persisted clusters that were created before this feature receive an auto-generated cluster security group during startup backfill if their VPC is present.
-- **Rules**: In accordance with EC2 security group defaults, the group is created with the standard outbound rule. Floci does not synthesize custom ingress or egress rules on the cluster security group.
+- **Rules**: In accordance with AWS EKS behavior, the cluster security group includes a self-referencing inbound rule allowing all traffic from members of the same security group to enable control plane and node communication, alongside the standard EC2 outbound rule.
 
 ## Modes
 
