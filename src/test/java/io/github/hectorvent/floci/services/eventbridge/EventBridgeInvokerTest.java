@@ -1,7 +1,7 @@
 package io.github.hectorvent.floci.services.eventbridge;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.batch.BatchService;
 import io.github.hectorvent.floci.services.ecs.EcsService;
@@ -19,12 +19,12 @@ import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mockito;
 
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
-
-import org.mockito.ArgumentCaptor;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.AdditionalMatchers.aryEq;
@@ -57,7 +57,7 @@ class EventBridgeInvokerTest {
                 .thenReturn(new EventBridgeService.PutEventsResult(0, List.of()));
         io.github.hectorvent.floci.config.EmulatorConfig emulatorConfig =
                 mock(io.github.hectorvent.floci.config.EmulatorConfig.class,
-                        org.mockito.Mockito.RETURNS_DEEP_STUBS);
+                        Mockito.RETURNS_DEEP_STUBS);
         invoker = new EventBridgeInvoker(
                 lambdaService,
                 sqsService,
