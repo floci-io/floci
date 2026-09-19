@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.iam;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.response.ValidatableResponse;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;
@@ -10,6 +12,7 @@ import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.not;
 
 /**
  * Regression guard for issue #3931: an IAM user whose only policy grants S3 permissions must
@@ -68,7 +71,7 @@ class IamManagementActionsEnforcementIntegrationTest {
         adminIam("GetUser", Map.of("UserName", "should-fail-" + suffix)).statusCode(404);
         adminIam("ListAttachedUserPolicies", Map.of("UserName", developer))
                 .statusCode(200)
-                .body(org.hamcrest.Matchers.not(containsString("AdministratorAccess")));
+                .body(not(containsString("AdministratorAccess")));
     }
 
     @Test
@@ -91,16 +94,16 @@ class IamManagementActionsEnforcementIntegrationTest {
                 .body(containsString("AccessDenied"));
     }
 
-    private static io.restassured.response.ValidatableResponse adminIam(String action, Map<String, String> params) {
+    private static ValidatableResponse adminIam(String action, Map<String, String> params) {
         return iamCall(ACCOUNT_ID, action, params);
     }
 
-    private static io.restassured.response.ValidatableResponse userIam(String akid, String action, Map<String, String> params) {
+    private static ValidatableResponse userIam(String akid, String action, Map<String, String> params) {
         return iamCall(akid, action, params);
     }
 
-    private static io.restassured.response.ValidatableResponse iamCall(String akid, String action, Map<String, String> params) {
-        var spec = given()
+    private static ValidatableResponse iamCall(String akid, String action, Map<String, String> params) {
+        RequestSpecification spec = given()
                 .header("Authorization", auth(akid, "iam"))
                 .contentType("application/x-www-form-urlencoded")
                 .formParam("Action", action)
