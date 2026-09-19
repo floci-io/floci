@@ -437,7 +437,6 @@ public class SesImportJobService implements Resettable {
         // contact services, which clear their own stores.
     }
 
-
     // A job interrupted by a restart would otherwise stay CREATED/PROCESSING forever, since no
     // worker survives the process.
     private void recoverInterruptedJobs() {

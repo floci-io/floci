@@ -257,5 +257,4 @@ final class CsvRecordReader implements RecordReader {
         fields.add(current.toString());
         return fields;
     }
-
 }
