@@ -1879,6 +1879,26 @@ class KmsIntegrationTest {
                 .body("message", equalTo(keyArn + " is pending import."));
     }
 
+    @ParameterizedTest
+    @CsvSource({
+            "RSA_2048, ENCRYPT_DECRYPT, AWS_KMS",
+            "RSA_2048, SIGN_VERIFY, AWS_KMS",
+            "SYMMETRIC_DEFAULT, ENCRYPT_DECRYPT, EXTERNAL",
+    })
+    void decryptRejectsAKeyIdThatDidNotEncryptTheCiphertext(String keySpec, String keyUsage, String origin) {
+        String sourceArn = createKeyArn("SYMMETRIC_DEFAULT", "ENCRYPT_DECRYPT");
+        String otherArn = callKms("CreateKey", "{\"Origin\":\"%s\",\"KeySpec\":\"%s\",\"KeyUsage\":\"%s\"}"
+                .formatted(origin, keySpec, keyUsage)).then().statusCode(200).extract().path("KeyMetadata.Arn");
+        String ciphertext = callKms("Encrypt", "{\"KeyId\":\"%s\",\"Plaintext\":\"aGVsbG8=\"}".formatted(sourceArn))
+                .then().statusCode(200).extract().path("CiphertextBlob");
+
+        callKms("Decrypt", "{\"CiphertextBlob\":\"%s\",\"KeyId\":\"%s\"}".formatted(ciphertext, otherArn))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("IncorrectKeyException"))
+                .body("message", equalTo("The key ID in the request does not identify a CMK that can perform this operation."));
+    }
+
     @Test
     void reEncryptRejectsADestinationKeyPendingImport() {
         String sourceArn = createKeyArn("SYMMETRIC_DEFAULT", "ENCRYPT_DECRYPT");

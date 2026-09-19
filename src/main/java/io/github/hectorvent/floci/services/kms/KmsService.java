@@ -1254,7 +1254,7 @@ public class KmsService implements ResourceProvider {
                 if (!requestKey.getKeyId().equals(key.getKeyId())) {
                     throw new AwsException(
                             "IncorrectKeyException",
-                            "The request was rejected because the specified KMS key cannot decrypt the data.",
+                            "The key ID in the request does not identify a CMK that can perform this operation.",
                             400
                     );
                 }
@@ -1281,7 +1281,7 @@ public class KmsService implements ResourceProvider {
             if (!requestKey.getKeyId().equals(parsed.keyId)) {
                 throw new AwsException(
                         "IncorrectKeyException",
-                        "The request was rejected because the specified KMS key cannot decrypt the data.",
+                        "The key ID in the request does not identify a CMK that can perform this operation.",
                         400
                 );
             }
