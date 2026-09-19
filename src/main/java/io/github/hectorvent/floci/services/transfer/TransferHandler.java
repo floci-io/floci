@@ -125,7 +125,7 @@ public class TransferHandler {
         List<String> protocols = jsonStringList(req.path("Protocols"));
         String endpointType = textOrNull(req, "EndpointType");
         Map<String, Object> endpointDetails = jsonObjectMap(req.path("EndpointDetails"));
-        String identityProviderDetails = textOrNull(req, "IdentityProviderDetails");
+        Map<String, String> identityProviderDetails = jsonStringMap(req.path("IdentityProviderDetails"));
         String loggingRole = textOrNull(req, "LoggingRole");
         String securityPolicyName = textOrNull(req, "SecurityPolicyName");
 
@@ -291,6 +291,12 @@ public class TransferHandler {
             ArrayNode protocols = node.putArray("Protocols");
             s.getProtocols().forEach(protocols::add);
         }
+        if (s.getEndpointDetails() != null) {
+            node.set("EndpointDetails", objectMapper.valueToTree(s.getEndpointDetails()));
+        }
+        if (s.getIdentityProviderDetails() != null) {
+            node.set("IdentityProviderDetails", objectMapper.valueToTree(s.getIdentityProviderDetails()));
+        }
         if (s.getTags() != null && !s.getTags().isEmpty()) {
             ArrayNode tags = node.putArray("Tags");
             s.getTags().forEach((k, v) -> {
@@ -385,8 +391,11 @@ public class TransferHandler {
     }
 
     private Map<String, String> jsonStringMap(JsonNode node) {
+        if (node == null || node.isMissingNode() || node.isNull()) {
+            return null;
+        }
         Map<String, String> map = new HashMap<>();
-        if (node != null && node.isObject()) {
+        if (node.isObject()) {
             node.fields().forEachRemaining(e -> map.put(e.getKey(), e.getValue().asText()));
         }
         return map;
@@ -398,7 +407,7 @@ public class TransferHandler {
         }
         Map<String, Object> map = new HashMap<>();
         node.fields().forEachRemaining(e -> map.put(e.getKey(), e.getValue().asText()));
-        return map.isEmpty() ? null : map;
+        return map;
     }
 
     private Map<String, String> parseTags(JsonNode node) {

@@ -149,7 +149,7 @@ public class TransferService {
                                List<String> protocols,
                                String endpointType,
                                Map<String, Object> endpointDetails,
-                               String identityProviderDetails,
+                               Map<String, String> identityProviderDetails,
                                String loggingRole,
                                String securityPolicyName) {
         Server server = getServer(serverId);
@@ -161,6 +161,9 @@ public class TransferService {
         }
         if (endpointDetails != null) {
             server.setEndpointDetails(endpointDetails);
+        }
+        if (identityProviderDetails != null) {
+            server.setIdentityProviderDetails(identityProviderDetails);
         }
         if (loggingRole != null) {
             server.setLoggingRole(loggingRole);
