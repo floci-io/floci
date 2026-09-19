@@ -1327,4 +1327,72 @@ class S3CopySimulatorTest {
         assertNull(in.nextMessage(), "Client must not receive an unconfirmed ReadyForQuery");
     }
 
+    @Test
+    void prepareCopy_withManifest_resolvesManifestKeys() {
+        String manifestJson = "{\"entries\": [{\"url\": \"s3://wh/data1.csv\", \"mandatory\": true}]}";
+        S3Object manifestObj = new S3Object("wh", "manifest.json", manifestJson.getBytes(StandardCharsets.UTF_8), "application/json");
+        when(s3.getObject("wh", "manifest.json")).thenReturn(manifestObj);
+        when(s3.objectExists("wh", "data1.csv")).thenReturn(true);
+
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "t", List.of(), "wh", "manifest.json", ",", 0, false, true, null, null, false, true);
+
+        S3CopySimulator.CopyInput input = S3CopySimulator.prepareCopy(spec, s3, null);
+        assertEquals(List.of("data1.csv"), input.keys());
+    }
+
+    @Test
+    void copyBackendSql_and_stream_withJsonAuto() throws Exception {
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "users", List.of("id", "name"), "wh", "users.json", null, 0, false, false, null, null, true, false);
+
+        assertEquals("COPY users (id, name) FROM STDIN WITH (FORMAT csv, DELIMITER ',')",
+                S3CopySimulator.copyBackendSql(spec));
+
+        String ndjson = "{\"id\": 1, \"name\": \"Alice\"}\n{\"id\": 2, \"name\": \"Bob\"}\n";
+        S3Object dataObj = new S3Object("wh", "users.json", ndjson.getBytes(StandardCharsets.UTF_8), "application/json");
+        when(s3.getObject("wh", "users.json")).thenReturn(dataObj);
+
+        S3CopySimulator.CopyInput input = new S3CopySimulator.CopyInput(spec, List.of("users.json"), s3, null, null);
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        S3CopySimulator.streamCopyInput(input, out);
+
+        byte[] rawBytes = out.toByteArray();
+        // The output is framed as Postgres 'd' CopyData messages
+        assertTrue(rawBytes.length > 0);
+        assertEquals('d', rawBytes[0]);
+    }
+
+    @Test
+    void copyBackendSql_withJsonAuto_forcesCommaDelimiter() {
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "users", List.of("id"), "wh", "users.json", "\t", 0, false, false, null, null, true, false);
+
+        assertEquals("COPY users (id) FROM STDIN WITH (FORMAT csv, DELIMITER ',')",
+                S3CopySimulator.copyBackendSql(spec));
+    }
+
+    @Test
+    void streamCopyInput_withJsonAutoAndGzip() throws Exception {
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "users", List.of("id", "name"), "wh", "users.json.gz", null, 0, true, false, null, null, true, false);
+
+        String ndjson = "{\"id\": 1, \"name\": \"Alice\"}\n";
+        ByteArrayOutputStream gzippedOut = new ByteArrayOutputStream();
+        try (java.util.zip.GZIPOutputStream gzip = new java.util.zip.GZIPOutputStream(gzippedOut)) {
+            gzip.write(ndjson.getBytes(StandardCharsets.UTF_8));
+        }
+
+        S3Object dataObj = new S3Object("wh", "users.json.gz", gzippedOut.toByteArray(), "application/gzip");
+        when(s3.getObject("wh", "users.json.gz")).thenReturn(dataObj);
+
+        S3CopySimulator.CopyInput input = new S3CopySimulator.CopyInput(spec, List.of("users.json.gz"), s3, null, null);
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        S3CopySimulator.streamCopyInput(input, out);
+
+        byte[] rawBytes = out.toByteArray();
+        assertTrue(rawBytes.length > 0);
+        assertEquals('d', rawBytes[0]);
+    }
 }
+

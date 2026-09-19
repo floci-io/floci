@@ -209,9 +209,15 @@ order) through its own S3 service and streams the rows into the backing PostgreS
 `COPY ... FROM STDIN`.
 
 - Supported options: `DELIMITER`, `FORMAT CSV` (or a bare `CSV`), `GZIP`, `IGNOREHEADER <n>` and
-  `HEADER`, `NULL AS`, and an explicit column list.
+  `HEADER`, `NULL AS`, `FORMAT AS JSON 'auto'` (or `JSON 'auto'`), `MANIFEST`, and an explicit column list.
 - The default framing is pipe-delimited text, matching Redshift. `FORMAT CSV` switches to CSV with
   a comma default delimiter.
+- `FORMAT AS JSON 'auto'` (or `JSON 'auto'`) loads Newline-Delimited JSON (NDJSON) records, mapping
+  JSON keys to table columns case-insensitively. When columns are not specified in the COPY statement,
+  table column names and order are automatically discovered from the database catalog. Nested objects
+  and arrays are serialized as JSON strings.
+- `MANIFEST` resolves file keys from a JSON manifest file (`{"entries": [{"url": "s3://...", "mandatory": boolean}]}`),
+  compatible with output from `UNLOAD ... MANIFEST`. Missing files marked `mandatory: true` abort the load.
 - `IGNOREHEADER` and `HEADER` skip lines from the first resolved object only.
 - `GZIP` is the only input compression recognized; `BZIP2`, `LZOP` and `ZSTD` are not.
 - `IAM_ROLE '<role-arn>'` is supported. The role must be associated with the cluster, exist in
@@ -219,7 +225,7 @@ order) through its own S3 service and streams the rows into the backing PostgreS
   `FLOCI_SERVICES_S3_ENFORCE_AUTH` off, S3 policy checks are skipped. With it on, the role's
   identity policy must allow the required S3 actions, and any bucket policy must not deny the
   request. `IAM_ROLE default` is not supported.
-- Any other clause (`FIXEDWIDTH`, `JSON`, `PARQUET`, `AVRO`, `ORC`, `MANIFEST`, `MAXERROR`,
+- Any other clause (`FIXEDWIDTH`, `PARQUET`, `AVRO`, `ORC`, `MAXERROR`,
   `DATEFORMAT`, `TIMEFORMAT`, `REGION`, `ENCODING`, `ESCAPE`, `REMOVEQUOTES`, `BLANKSASNULL`,
   `EMPTYASNULL`, `TRUNCATECOLUMNS`, `ACCEPTINVCHARS`, `CREDENTIALS`, and so on) is not
   recognized: the statement is forwarded unchanged and PostgreSQL returns its own error.

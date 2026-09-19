@@ -231,11 +231,20 @@ public final class S3CopySimulator {
                 : null;
         try {
             try {
-                if (roleSession != null) {
-                    authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:ListBucket", bucketArn(spec.bucket()));
-                    s3.authorizeSignedListBucket(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket());
+                if (spec.manifest()) {
+                    if (roleSession != null) {
+                        authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:GetObject", objectArn(spec.bucket(), spec.keyOrPrefix()));
+                        s3.authorizeSignedGetObject(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket(), spec.keyOrPrefix());
+                    } else {
+                        s3.authorizeAnonymousGetObject(spec.bucket(), spec.keyOrPrefix());
+                    }
                 } else {
-                    s3.authorizeAnonymousListBucket(spec.bucket());
+                    if (roleSession != null) {
+                        authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:ListBucket", bucketArn(spec.bucket()));
+                        s3.authorizeSignedListBucket(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket());
+                    } else {
+                        s3.authorizeAnonymousListBucket(spec.bucket());
+                    }
                 }
             } catch (AwsException e) {
                 throw new S3TransferException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
@@ -275,14 +284,23 @@ public final class S3CopySimulator {
     }
 
     static String copyBackendSql(CopyStatementParser.S3CopyFrom spec) {
-        return fabricateCopy(spec);
+        return fabricateCopy(spec, null);
+    }
+
+    static String copyBackendSql(CopyStatementParser.S3CopyFrom spec, List<String> effectiveColumns) {
+        return fabricateCopy(spec, effectiveColumns);
     }
 
     static void streamCopyInput(CopyInput input, OutputStream backendOut) throws IOException {
-        streamObjects(input.spec(), input.s3(), input.iamService(), input.roleSession(), input.keys(), backendOut);
+        streamCopyInput(input, null, backendOut);
+    }
+
+    static void streamCopyInput(CopyInput input, List<String> effectiveColumns, OutputStream backendOut) throws IOException {
+        streamObjects(input.spec(), effectiveColumns, input.s3(), input.iamService(), input.roleSession(), input.keys(), backendOut);
     }
 
     static void releaseCopySession(CopyInput input) {
+
         releaseRoleSession(input.roleSession(), input.spec().iamRoleArn(), input.iamService());
     }
 
@@ -397,9 +415,17 @@ public final class S3CopySimulator {
             return true;
         }
 
+        List<String> effectiveColumns = spec.columns();
+        if (spec.jsonAuto() && (effectiveColumns == null || effectiveColumns.isEmpty())) {
+            effectiveColumns = discoverTableColumns(client, backend, spec, txStatus, onStatusChange);
+            if (effectiveColumns == null) {
+                return true;
+            }
+        }
+
         try {
             OutputStream backendOut = backend.getOutputStream();
-            backendOut.write(PostgresWireDecoder.encodeQuery(copyBackendSql(spec)));
+            backendOut.write(PostgresWireDecoder.encodeQuery(copyBackendSql(spec, effectiveColumns)));
             backendOut.flush();
 
             PostgresWireDecoder backendDecoder = new PostgresWireDecoder(backend.getInputStream());
@@ -432,7 +458,7 @@ public final class S3CopySimulator {
             // a CopyFail to the backend, whose ErrorResponse/ReadyForQuery is relayed to the client;
             // or, if the backend is unreachable, one synthesized ErrorResponse/ReadyForQuery.
             try {
-                streamCopyInput(input, backendOut);
+                streamCopyInput(input, effectiveColumns, backendOut);
                 writeCopyDone(backendOut);
                 drainToReadyForQuery(backendDecoder, client, onStatusChange);
             } catch (RuntimeException | IOException e) {
@@ -444,6 +470,7 @@ public final class S3CopySimulator {
             releaseCopySession(input);
         }
     }
+
 
     private static void abortOpenCopyIn(Socket client, Socket backend, OutputStream backendOut,
                                         PostgresWireDecoder backendDecoder, Exception cause,
@@ -461,6 +488,9 @@ public final class S3CopySimulator {
     }
 
     private static List<String> resolveKeys(CopyStatementParser.S3CopyFrom spec, S3Service s3) {
+        if (spec.manifest()) {
+            return ManifestReader.resolveManifestKeys(spec.bucket(), spec.keyOrPrefix(), s3);
+        }
         List<String> keys = new ArrayList<>();
         if (s3.objectExists(spec.bucket(), spec.keyOrPrefix())) {
             keys.add(spec.keyOrPrefix());
@@ -482,13 +512,17 @@ public final class S3CopySimulator {
         return keys;
     }
 
-    private static String fabricateCopy(CopyStatementParser.S3CopyFrom spec) {
+    private static String fabricateCopy(CopyStatementParser.S3CopyFrom spec, List<String> effectiveColumns) {
         StringBuilder sql = new StringBuilder("COPY ").append(spec.targetTable());
-        if (spec.columns() != null && !spec.columns().isEmpty()) {
-            sql.append(" (").append(String.join(", ", spec.columns())).append(")");
+        List<String> cols = (effectiveColumns != null && !effectiveColumns.isEmpty())
+                ? effectiveColumns
+                : spec.columns();
+        if (cols != null && !cols.isEmpty()) {
+            sql.append(" (").append(String.join(", ", cols)).append(")");
         }
-        sql.append(" FROM STDIN WITH (FORMAT ").append(spec.csv() ? "csv" : "text");
-        String delimiter = spec.delimiter() != null ? spec.delimiter() : (spec.csv() ? "," : "|");
+        boolean csv = spec.csv() || spec.jsonAuto();
+        sql.append(" FROM STDIN WITH (FORMAT ").append(csv ? "csv" : "text");
+        String delimiter = spec.jsonAuto() ? "," : (spec.delimiter() != null ? spec.delimiter() : (csv ? "," : "|"));
         sql.append(", DELIMITER '").append(quoteLiteral(delimiter)).append("'");
         if (spec.nullAs() != null) {
             sql.append(", NULL '").append(quoteLiteral(spec.nullAs())).append("'");
@@ -506,40 +540,141 @@ public final class S3CopySimulator {
         return value.replace("'", "''");
     }
 
-    private static void streamObjects(CopyStatementParser.S3CopyFrom spec, S3Service s3,
-                                      IamService iamService, RoleSession roleSession,
+    private static void streamObjects(CopyStatementParser.S3CopyFrom spec, List<String> effectiveColumns,
+                                      S3Service s3, IamService iamService, RoleSession roleSession,
                                       List<String> keys, OutputStream backendOut) throws IOException {
         byte[] buffer = new byte[CHUNK];
         for (int i = 0; i < keys.size(); i++) {
             if (roleSession != null) {
                 authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:GetObject", objectArn(spec.bucket(), keys.get(i)));
                 s3.authorizeSignedGetObject(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket(), keys.get(i));
+            } else {
+                s3.authorizeAnonymousGetObject(spec.bucket(), keys.get(i));
             }
             S3Object object = s3.getObject(spec.bucket(), keys.get(i));
             byte[] data = object != null && object.getData() != null ? object.getData() : new byte[0];
-            InputStream in = new ByteArrayInputStream(data);
-            if (spec.gzip()) {
-                in = new GZIPInputStream(in);
-            }
-            if (i == 0 && spec.headerLines() > 0) {
-                skipLines(in, spec.headerLines());
-            }
-            int read;
-            boolean endsWithNewline = false;
-            boolean hasData = false;
-            while ((read = in.read(buffer)) != -1) {
-                if (read > 0) {
-                    hasData = true;
-                    endsWithNewline = (buffer[read - 1] == '\n');
-                    writeCopyData(backendOut, buffer, read);
+            InputStream rawIn = new ByteArrayInputStream(data);
+            try (InputStream in = spec.gzip() ? new GZIPInputStream(rawIn) : rawIn) {
+                if (spec.jsonAuto()) {
+                    List<String> targetCols = (effectiveColumns != null && !effectiveColumns.isEmpty())
+                            ? effectiveColumns
+                            : spec.columns();
+                    CopyDataOutputStream copyDataOut = new CopyDataOutputStream(backendOut);
+                    JsonLinesToCsvConverter.convert(in, targetCols, copyDataOut);
+                    copyDataOut.flush();
+                } else {
+                    if (i == 0 && spec.headerLines() > 0) {
+                        skipLines(in, spec.headerLines());
+                    }
+                    int read;
+                    boolean endsWithNewline = false;
+                    boolean hasData = false;
+                    while ((read = in.read(buffer)) != -1) {
+                        if (read > 0) {
+                            hasData = true;
+                            endsWithNewline = (buffer[read - 1] == '\n');
+                            writeCopyData(backendOut, buffer, read);
+                        }
+                    }
+                    if (hasData && !endsWithNewline) {
+                        writeCopyData(backendOut, new byte[]{'\n'}, 1);
+                    }
                 }
-            }
-            in.close();
-            if (hasData && !endsWithNewline) {
-                writeCopyData(backendOut, new byte[]{'\n'}, 1);
             }
         }
         backendOut.flush();
+    }
+
+    private static List<String> discoverTableColumns(Socket client, Socket backend,
+                                                     CopyStatementParser.S3CopyFrom spec,
+                                                     char txStatus, IntConsumer onStatusChange) throws IOException {
+        String query = "SELECT attname FROM pg_attribute WHERE attrelid = '"
+                + quoteLiteral(spec.targetTable())
+                + "'::regclass AND attnum > 0 AND NOT attisdropped ORDER BY attnum";
+
+        OutputStream backendOut = backend.getOutputStream();
+        backendOut.write(PostgresWireDecoder.encodeQuery(query));
+        backendOut.flush();
+
+        PostgresWireDecoder backendDecoder = new PostgresWireDecoder(backend.getInputStream());
+        List<String> cols = new ArrayList<>();
+        PostgresWireDecoder.FrontendMessage msg;
+        while ((msg = backendDecoder.nextMessage()) != null) {
+            char type = msg.type();
+            if (type == 'D') {
+                byte[] body = msg.body();
+                if (body.length >= 6) {
+                    int colCount = ((body[0] & 0xFF) << 8) | (body[1] & 0xFF);
+                    if (colCount >= 1) {
+                        int colLen = ((body[2] & 0xFF) << 24) | ((body[3] & 0xFF) << 16)
+                                | ((body[4] & 0xFF) << 8) | (body[5] & 0xFF);
+                        if (colLen > 0 && 6 + colLen <= body.length) {
+                            cols.add(new String(body, 6, colLen, StandardCharsets.UTF_8));
+                        }
+                    }
+                }
+            } else if (type == 'E') {
+                forward(client, msg);
+                drainToReadyForQuery(backendDecoder, client, onStatusChange);
+                return null;
+            } else if (type == 'N' || type == 'A' || type == 'S') {
+                forward(client, msg);
+            } else if (type == 'Z') {
+                if (onStatusChange != null && msg.body().length > 0) {
+                    onStatusChange.accept(msg.body()[0]);
+                }
+                break;
+            }
+        }
+        return cols;
+    }
+
+    private static final class CopyDataOutputStream extends OutputStream {
+        private final OutputStream backendOut;
+        private final byte[] chunkBuf = new byte[CHUNK];
+        private int count = 0;
+
+        CopyDataOutputStream(OutputStream backendOut) {
+            this.backendOut = backendOut;
+        }
+
+        @Override
+        public void write(int b) throws IOException {
+            chunkBuf[count++] = (byte) b;
+            if (count == chunkBuf.length) {
+                flushChunk();
+            }
+        }
+
+        @Override
+        public void write(byte[] b, int off, int len) throws IOException {
+            int remaining = len;
+            int offset = off;
+            while (remaining > 0) {
+                int space = chunkBuf.length - count;
+                int toCopy = Math.min(remaining, space);
+                System.arraycopy(b, offset, chunkBuf, count, toCopy);
+                count += toCopy;
+                offset += toCopy;
+                remaining -= toCopy;
+                if (count == chunkBuf.length) {
+                    flushChunk();
+                }
+            }
+        }
+
+        private void flushChunk() throws IOException {
+            if (count > 0) {
+                writeCopyData(backendOut, chunkBuf, count);
+                count = 0;
+            }
+        }
+
+        @Override
+        public void flush() throws IOException {
+            flushChunk();
+            backendOut.flush();
+        }
     }
 
     private static void skipLines(InputStream in, int lines) throws IOException {
