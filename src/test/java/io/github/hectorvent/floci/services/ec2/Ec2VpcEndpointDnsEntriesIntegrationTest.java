@@ -5,9 +5,12 @@ import io.restassured.path.xml.XmlPath;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.List;
+import java.util.Map;
+import java.util.stream.Stream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -125,19 +128,67 @@ class Ec2VpcEndpointDnsEntriesIntegrationTest {
     }
 
     /**
-     * The private DNS name AWS answers for each service floci advertises. Most are the service
-     * token, a few are not, and the IoT data plane has no private name at all.
+     * What AWS puts in front of {@code .<region>.amazonaws.com} in each advertised service's
+     * private DNS name, empty for a service with no private name. S3 is absent deliberately:
+     * it answers to several, the one class {@code endpointDnsEntries} does not model.
      */
-    @ParameterizedTest
-    @CsvSource({
-        "com.amazonaws.us-east-1.monitoring, monitoring.us-east-1.amazonaws.com",
-        "com.amazonaws.us-east-1.execute-api, *.execute-api.us-east-1.amazonaws.com",
-        "com.amazonaws.us-east-1.ecr.api, api.ecr.us-east-1.amazonaws.com",
-        "com.amazonaws.us-east-1.kinesis-streams, kinesis.us-east-1.amazonaws.com",
-        "com.amazonaws.us-east-1.kinesis-firehose, firehose.us-east-1.amazonaws.com",
-        "com.amazonaws.us-east-1.ecr.dkr, *.dkr.ecr.us-east-1.amazonaws.com",
-        "com.amazonaws.us-east-1.iot.data, ''",
-    })
+    private static final Map<String, String> PRIVATE_DNS_PREFIX_BY_SERVICE = Map.ofEntries(
+            Map.entry("ec2", "ec2"),
+            Map.entry("ec2messages", "ec2messages"),
+            Map.entry("ssm", "ssm"),
+            Map.entry("ssmmessages", "ssmmessages"),
+            Map.entry("logs", "logs"),
+            Map.entry("monitoring", "monitoring"),
+            Map.entry("sts", "sts"),
+            Map.entry("secretsmanager", "secretsmanager"),
+            Map.entry("kms", "kms"),
+            Map.entry("ecr.api", "api.ecr"),
+            Map.entry("ecr.dkr", "*.dkr.ecr"),
+            Map.entry("ecs", "ecs"),
+            Map.entry("ecs-agent", "ecs-a"),
+            Map.entry("ecs-telemetry", "ecs-t"),
+            Map.entry("elasticloadbalancing", "elasticloadbalancing"),
+            Map.entry("sns", "sns"),
+            Map.entry("sqs", "sqs"),
+            Map.entry("kinesis-streams", "kinesis"),
+            Map.entry("kinesis-firehose", "firehose"),
+            Map.entry("states", "states"),
+            Map.entry("events", "events"),
+            Map.entry("lambda", "lambda"),
+            Map.entry("glue", "glue"),
+            Map.entry("athena", "athena"),
+            Map.entry("iot.data", ""),
+            Map.entry("execute-api", "*.execute-api"));
+
+    static Stream<Arguments> advertisedServicePrivateDnsNames() {
+        return PRIVATE_DNS_PREFIX_BY_SERVICE.entrySet().stream()
+                .sorted(Map.Entry.comparingByKey())
+                .map(entry -> Arguments.of(
+                        "com.amazonaws.us-east-1." + entry.getKey(),
+                        entry.getValue().isEmpty() ? "" : entry.getValue() + ".us-east-1.amazonaws.com"));
+    }
+
+    @Test
+    void everyAdvertisedServiceHasAPrivateDnsNameDecision() {
+        List<String> advertised = given()
+            .formParam("Action", "DescribeVpcEndpointServices")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().xmlPath()
+            .getList("DescribeVpcEndpointServicesResponse.serviceNameSet.item", String.class);
+
+        List<String> undecided = advertised.stream()
+                .map(name -> name.replace("com.amazonaws.us-east-1.", ""))
+                .filter(name -> !name.equals("s3"))
+                .filter(name -> !PRIVATE_DNS_PREFIX_BY_SERVICE.containsKey(name))
+                .toList();
+        assertEquals(List.of(), undecided,
+                "add these to PRIVATE_DNS_PREFIX_BY_SERVICE with the prefix AWS answers for them");
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("advertisedServicePrivateDnsNames")
     void thePrivateDnsNameIsTheOneAwsAnswersFor(String serviceName, String expectedPrivateName) {
         String vpcId = createVpc("10.76.0.0/16");
         String subnetId = createSubnet(vpcId, "10.76.1.0/24", "us-east-1a");

@@ -6,6 +6,10 @@ import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * End-to-end check that CloudFormation provisions AWS::EC2::VPCEndpoint for
@@ -67,9 +71,9 @@ class CloudFormationVpcEndpointIntegrationTest {
         .then()
             .statusCode(200)
             .extract().asString();
-        org.junit.jupiter.api.Assertions.assertTrue(stackDescription.contains("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+        assertTrue(stackDescription.contains("<StackStatus>CREATE_COMPLETE</StackStatus>"));
         String endpointId = XmlParser.extractFirst(stackDescription, "OutputValue", null);
-        org.junit.jupiter.api.Assertions.assertNotNull(endpointId);
+        assertNotNull(endpointId);
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -89,7 +93,7 @@ class CloudFormationVpcEndpointIntegrationTest {
         .then()
             .statusCode(200)
             .extract().asString();
-        org.junit.jupiter.api.Assertions.assertFalse(endpointsAfterDelete.contains(endpointId));
+        assertFalse(endpointsAfterDelete.contains(endpointId));
     }
 
     @Test
@@ -147,14 +151,12 @@ class CloudFormationVpcEndpointIntegrationTest {
             .extract().asString();
 
         String entries = XmlParser.extractFirst(stackDescription, "OutputValue", null);
-        org.junit.jupiter.api.Assertions.assertNotNull(entries);
+        assertNotNull(entries);
         String[] pairs = entries.split(",");
-        org.junit.jupiter.api.Assertions.assertEquals(3, pairs.length,
-                "regional, one zone, then private DNS, got " + entries);
-        org.junit.jupiter.api.Assertions.assertTrue(
-                pairs[0].matches("Z[0-9A-Z]+:vpce-[0-9a-f]+-[0-9a-f]+\\.api\\.ecr\\.us-east-1\\.vpce\\.amazonaws\\.com"),
+        assertEquals(3, pairs.length, "regional, one zone, then private DNS, got " + entries);
+        assertTrue(pairs[0].matches("Z[0-9A-Z]+:vpce-[0-9a-f]+-[0-9a-f]+\\.api\\.ecr\\.us-east-1\\.vpce\\.amazonaws\\.com"),
                 "first entry should be hostedZoneId:regionalName, got " + pairs[0]);
-        org.junit.jupiter.api.Assertions.assertTrue(pairs[1].contains("-us-east-1a."),
+        assertTrue(pairs[1].contains("-us-east-1a."),
                 "second entry should be the zonal name, got " + pairs[1]);
 
         given()

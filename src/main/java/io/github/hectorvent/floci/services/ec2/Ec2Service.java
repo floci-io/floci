@@ -155,6 +155,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             "kinesis-firehose", "firehose",
             "dkr.ecr", "*.dkr.ecr",
             "execute-api", "*.execute-api",
+            "ecs-agent", "ecs-a",
+            "ecs-telemetry", "ecs-t",
             "data.iot", "");
     // A first launch may need to pull a large AMI-backed image. Keep a finite CloudFormation
     // bound, but allow enough time for that legitimate cold-start path before cancellation.
@@ -3996,9 +3998,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
      * The {@code DnsEntries} an interface endpoint reports. The names and zones are synthesized
      * deterministically rather than persisted, so a restart keeps answering with what the caller
      * first saw, and the private-DNS entry carries its own zone because AWS creates one per
-     * endpoint. Two classes AWS also serves are not modelled, both needing per-service metadata
-     * floci does not hold: the wildcard entry, and the several private names a service such as
-     * S3 answers to.
+     * endpoint. One class AWS also serves is not modelled, needing per-service metadata floci
+     * does not hold: the several private names a service such as S3 answers to.
      */
     public List<VpcEndpointDnsEntry> endpointDnsEntries(VpcEndpoint endpoint) {
         if (!"Interface".equalsIgnoreCase(endpoint.getVpcEndpointType())) {
