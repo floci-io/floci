@@ -9,7 +9,11 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.glue.model.Column;
 import io.github.hectorvent.floci.services.glue.model.Database;
+import io.github.hectorvent.floci.services.glue.model.Connection;
+import io.github.hectorvent.floci.services.glue.model.ConnectionInput;
 import io.github.hectorvent.floci.services.glue.model.Crawler;
+import io.github.hectorvent.floci.services.glue.model.AuthenticationConfiguration;
+import io.github.hectorvent.floci.services.glue.model.PhysicalConnectionRequirements;
 import io.github.hectorvent.floci.services.glue.model.CrawlerTargets;
 import io.github.hectorvent.floci.services.glue.model.Job;
 import io.github.hectorvent.floci.services.glue.model.JobCommand;
@@ -86,6 +90,7 @@ class GlueServiceTest {
                 new InMemoryStorage<String, UserDefinedFunction>(),
                 new InMemoryStorage<String, Job>(),
                 new InMemoryStorage<String, Crawler>(),
+                new InMemoryStorage<String, Connection>(),
                 schemaRegistryService, regionResolver, new ResourceGroupsTaggingService(null));
         glueService.createDatabase(new Database("db1"));
     }
@@ -1476,6 +1481,235 @@ class GlueServiceTest {
         GlueService.Page<Table> second = glueService.searchTables(null, null, null, 2, first.nextToken());
         assertEquals(List.of("xxlinkyy"), names(second));
         assertNull(second.nextToken());
+    }
+
+    // ---- Connections -----------------------------------------------------------------------
+
+    private static ConnectionInput jdbcConnection(String name) {
+        ConnectionInput input = new ConnectionInput();
+        input.setName(name);
+        input.setConnectionType("JDBC");
+        input.setDescription("orders db");
+        input.setMatchCriteria(List.of("orders", "reporting"));
+        Map<String, String> properties = new LinkedHashMap<>();
+        properties.put("JDBC_CONNECTION_URL", "jdbc:postgresql://db.internal:5432/orders");
+        properties.put("USERNAME", "app");
+        properties.put("PASSWORD", "s3cret");
+        input.setConnectionProperties(properties);
+        PhysicalConnectionRequirements placement = new PhysicalConnectionRequirements();
+        placement.setSubnetId("subnet-0123456789abcdef0");
+        placement.setSecurityGroupIdList(List.of("sg-0123456789abcdef0"));
+        placement.setAvailabilityZone("us-east-1a");
+        input.setPhysicalConnectionRequirements(placement);
+        return input;
+    }
+
+    @Test
+    void connectionCanBeCreatedFetchedUpdatedAndDeleted() {
+        assertEquals("READY", glueService.createConnection(jdbcConnection("orders"), null, REGION));
+
+        Connection fetched = glueService.getConnection("orders", false);
+        assertEquals("orders", fetched.getName());
+        assertEquals("JDBC", fetched.getConnectionType());
+        assertEquals("orders db", fetched.getDescription());
+        assertEquals("s3cret", fetched.getConnectionProperties().get("PASSWORD"));
+        assertEquals("subnet-0123456789abcdef0", fetched.getPhysicalConnectionRequirements().getSubnetId());
+        assertEquals("READY", fetched.getStatus());
+        assertEquals(1, fetched.getConnectionSchemaVersion());
+        assertNotNull(fetched.getCreationTime());
+        assertEquals(fetched.getCreationTime(), fetched.getLastUpdatedTime());
+
+        // UpdateConnection redefines the connection: the description left out of the input is
+        // gone afterwards, the name and creation time survive, and the update time moves.
+        ConnectionInput redefinition = new ConnectionInput();
+        redefinition.setName("orders");
+        redefinition.setConnectionType("JDBC");
+        redefinition.setConnectionProperties(Map.of("JDBC_CONNECTION_URL", "jdbc:postgresql://db2.internal:5432/orders"));
+        glueService.updateConnection("orders", redefinition);
+
+        Connection updated = glueService.getConnection("orders", false);
+        assertEquals("jdbc:postgresql://db2.internal:5432/orders", updated.getConnectionProperties().get("JDBC_CONNECTION_URL"));
+        assertNull(updated.getConnectionProperties().get("PASSWORD"));
+        assertNull(updated.getDescription());
+        assertNull(updated.getPhysicalConnectionRequirements());
+        assertEquals(fetched.getCreationTime(), updated.getCreationTime());
+        assertFalse(updated.getLastUpdatedTime().isBefore(fetched.getLastUpdatedTime()));
+
+        glueService.deleteConnection("orders", REGION);
+
+        AwsException ex = assertThrows(AwsException.class, () -> glueService.getConnection("orders", false));
+        assertEquals("EntityNotFoundException", ex.getErrorCode());
+    }
+
+    @Test
+    void connectionRejectsDuplicateCreationAndUpdateOfAMissingOne() {
+        glueService.createConnection(jdbcConnection("dup"), null, REGION);
+
+        AwsException duplicate = assertThrows(AwsException.class,
+                () -> glueService.createConnection(jdbcConnection("dup"), null, REGION));
+        assertEquals("AlreadyExistsException", duplicate.getErrorCode());
+
+        AwsException missing = assertThrows(AwsException.class,
+                () -> glueService.updateConnection("absent", jdbcConnection("absent")));
+        assertEquals("EntityNotFoundException", missing.getErrorCode());
+
+        AwsException missingDelete = assertThrows(AwsException.class,
+                () -> glueService.deleteConnection("absent", REGION));
+        assertEquals("EntityNotFoundException", missingDelete.getErrorCode());
+    }
+
+    @Test
+    void connectionInputIsValidatedAgainstTheApiReference() {
+        ConnectionInput noName = jdbcConnection("x");
+        noName.setName(" ");
+        assertEquals("InvalidInputException",
+                assertThrows(AwsException.class, () -> glueService.createConnection(noName, null, REGION)).getErrorCode());
+
+        ConnectionInput longName = jdbcConnection("n".repeat(256));
+        assertEquals("InvalidInputException",
+                assertThrows(AwsException.class, () -> glueService.createConnection(longName, null, REGION)).getErrorCode());
+
+        ConnectionInput unknownType = jdbcConnection("t");
+        unknownType.setConnectionType("FTP");
+        assertEquals("InvalidInputException",
+                assertThrows(AwsException.class, () -> glueService.createConnection(unknownType, null, REGION)).getErrorCode());
+
+        ConnectionInput noProperties = jdbcConnection("p");
+        noProperties.setConnectionProperties(null);
+        assertEquals("InvalidInputException",
+                assertThrows(AwsException.class, () -> glueService.createConnection(noProperties, null, REGION)).getErrorCode());
+
+        ConnectionInput unknownKey = jdbcConnection("k");
+        unknownKey.setConnectionProperties(Map.of("HOSTNAME", "db"));
+        assertEquals("InvalidInputException",
+                assertThrows(AwsException.class, () -> glueService.createConnection(unknownKey, null, REGION)).getErrorCode());
+
+        ConnectionInput tooManyCriteria = jdbcConnection("m");
+        tooManyCriteria.setMatchCriteria(List.of("a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k"));
+        assertEquals("InvalidInputException",
+                assertThrows(AwsException.class, () -> glueService.createConnection(tooManyCriteria, null, REGION)).getErrorCode());
+
+        // A NETWORK connection carries no properties at all, only VPC placement.
+        ConnectionInput network = jdbcConnection("vpc-only");
+        network.setConnectionType("NETWORK");
+        network.setConnectionProperties(Map.of());
+        assertEquals("READY", glueService.createConnection(network, null, REGION));
+    }
+
+    @Test
+    void hidePasswordDropsThePasswordPropertiesAndNothingElse() {
+        ConnectionInput input = jdbcConnection("hidden");
+        Map<String, String> properties = new LinkedHashMap<>(input.getConnectionProperties());
+        properties.put("ENCRYPTED_PASSWORD", "AQICAHg...");
+        properties.put("SECRET_ID", "prod/orders");
+        input.setConnectionProperties(properties);
+        glueService.createConnection(input, null, REGION);
+
+        Connection hidden = glueService.getConnection("hidden", true);
+        assertNull(hidden.getConnectionProperties().get("PASSWORD"));
+        assertNull(hidden.getConnectionProperties().get("ENCRYPTED_PASSWORD"));
+        assertEquals("app", hidden.getConnectionProperties().get("USERNAME"));
+        assertEquals("prod/orders", hidden.getConnectionProperties().get("SECRET_ID"));
+
+        // The stored connection is untouched: a later read without the flag has the password.
+        assertEquals("s3cret", glueService.getConnection("hidden", false).getConnectionProperties().get("PASSWORD"));
+        assertEquals("s3cret",
+                glueService.getConnections(null, null, null, false, null, null).items().get(0)
+                        .getConnectionProperties().get("PASSWORD"));
+        assertNull(glueService.getConnections(null, null, null, true, null, null).items().get(0)
+                        .getConnectionProperties().get("PASSWORD"));
+    }
+
+    @Test
+    void getConnectionsFiltersByCriteriaTypeAndSchemaVersionAndPages() {
+        glueService.createConnection(jdbcConnection("b-orders"), null, REGION);
+        ConnectionInput kafka = jdbcConnection("a-events");
+        kafka.setConnectionType("KAFKA");
+        kafka.setMatchCriteria(List.of("events"));
+        kafka.setConnectionProperties(Map.of("KAFKA_BOOTSTRAP_SERVERS", "broker:9092"));
+        glueService.createConnection(kafka, null, REGION);
+        ConnectionInput saas = jdbcConnection("c-crm");
+        saas.setConnectionType("SALESFORCE");
+        saas.setMatchCriteria(null);
+        saas.setConnectionProperties(Map.of("ROLE_ARN", "arn:aws:iam::000000000000:role/crm"));
+        AuthenticationConfiguration auth = new AuthenticationConfiguration();
+        auth.setAuthenticationType("OAUTH2");
+        auth.setSecretArn("arn:aws:secretsmanager:us-east-1:000000000000:secret:crm");
+        auth.setBasicAuthenticationCredentials(Map.of("Username", "u", "Password", "p"));
+        saas.setAuthenticationConfiguration(auth);
+        glueService.createConnection(saas, null, REGION);
+
+        List<Connection> all = glueService.getConnections(null, null, null, false, null, null).items();
+        assertEquals(List.of("a-events", "b-orders", "c-crm"), all.stream().map(Connection::getName).toList());
+
+        assertEquals(List.of("b-orders"),
+                glueService.getConnections(List.of("orders", "reporting"), null, null, false, null, null)
+                        .items().stream().map(Connection::getName).toList());
+        assertTrue(glueService.getConnections(List.of("orders", "missing"), null, null, false, null, null)
+                .items().isEmpty());
+        assertEquals(List.of("a-events"),
+                glueService.getConnections(null, "KAFKA", null, false, null, null)
+                        .items().stream().map(Connection::getName).toList());
+        assertEquals(List.of("c-crm"),
+                glueService.getConnections(null, null, 2, false, null, null)
+                        .items().stream().map(Connection::getName).toList());
+
+        // A credential given on create never comes back on a read.
+        Connection crm = glueService.getConnection("c-crm", false);
+        assertEquals("OAUTH2", crm.getAuthenticationConfiguration().getAuthenticationType());
+        assertNull(crm.getAuthenticationConfiguration().getBasicAuthenticationCredentials());
+
+        GlueService.Page<Connection> first = glueService.getConnections(null, null, null, false, 2, null);
+        assertEquals(2, first.items().size());
+        assertNotNull(first.nextToken());
+        GlueService.Page<Connection> second = glueService.getConnections(null, null, null, false, 2, first.nextToken());
+        assertEquals(List.of("c-crm"), second.items().stream().map(Connection::getName).toList());
+        assertNull(second.nextToken());
+    }
+
+    @Test
+    void batchDeleteConnectionReportsTheMissingNamesAndDeletesTheRest() {
+        glueService.createConnection(jdbcConnection("keep-a"), null, REGION);
+        glueService.createConnection(jdbcConnection("keep-b"), null, REGION);
+
+        GlueService.BatchDeleteConnectionResult result =
+                glueService.batchDeleteConnections(List.of("keep-a", "absent", "keep-b"), REGION);
+
+        assertEquals(List.of("keep-a", "keep-b"), result.succeeded());
+        assertEquals(1, result.errors().size());
+        assertEquals("EntityNotFoundException", result.errors().get("absent").errorCode());
+        assertTrue(glueService.getConnections(null, null, null, false, null, null).items().isEmpty());
+    }
+
+    @Test
+    void testConnectionAcceptsAnExistingNameOrAWellFormedInlineDefinition() {
+        glueService.createConnection(jdbcConnection("probe"), null, REGION);
+        glueService.testConnection("probe", null, null);
+        glueService.testConnection(null, "JDBC", Map.of("JDBC_CONNECTION_URL", "jdbc:mysql://h:3306/d"));
+
+        assertEquals("EntityNotFoundException",
+                assertThrows(AwsException.class, () -> glueService.testConnection("absent", null, null)).getErrorCode());
+        assertEquals("InvalidInputException",
+                assertThrows(AwsException.class, () -> glueService.testConnection(null, "JDBC", null)).getErrorCode());
+        assertEquals("InvalidInputException",
+                assertThrows(AwsException.class, () -> glueService.testConnection(null, null, Map.of())).getErrorCode());
+    }
+
+    @Test
+    void connectionTagsAreKeptUnderTheConnectionArnAndRemovedOnDelete() {
+        glueService.createConnection(jdbcConnection("tagged"), Map.of("env", "dev"), REGION);
+
+        String arn = "arn:aws:glue:" + REGION + ":" + ACCOUNT_ID + ":connection/tagged";
+        assertEquals("dev", glueService.getTags(arn, REGION).get("env"));
+
+        glueService.tagResource(arn, Map.of("team", "data"), REGION);
+        assertEquals("data", glueService.getTags(arn, REGION).get("team"));
+        glueService.untagResource(arn, List.of("env"), REGION);
+        assertNull(glueService.getTags(arn, REGION).get("env"));
+
+        glueService.deleteConnection("tagged", REGION);
+        assertEquals("EntityNotFoundException",
+                assertThrows(AwsException.class, () -> glueService.getTags(arn, REGION)).getErrorCode());
     }
 
     private static List<String> names(GlueService.Page<Table> page) {

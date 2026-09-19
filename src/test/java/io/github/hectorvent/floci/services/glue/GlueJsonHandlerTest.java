@@ -19,6 +19,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -496,5 +497,117 @@ class GlueJsonHandlerTest {
                                                      TypeReference<Map<String, V>> typeReference) {
             return AccountAwareStorageBackend.inMemory("000000000000");
         }
+    }
+
+    private ObjectNode connectionInput(String name) {
+        ObjectNode input = mapper.createObjectNode();
+        input.put("Name", name);
+        input.put("ConnectionType", "JDBC");
+        input.put("Description", "orders db");
+        input.putArray("MatchCriteria").add("orders");
+        ObjectNode properties = input.putObject("ConnectionProperties");
+        properties.put("JDBC_CONNECTION_URL", "jdbc:postgresql://db.internal:5432/orders");
+        properties.put("USERNAME", "app");
+        properties.put("PASSWORD", "s3cret");
+        ObjectNode placement = input.putObject("PhysicalConnectionRequirements");
+        placement.put("SubnetId", "subnet-0123456789abcdef0");
+        placement.putArray("SecurityGroupIdList").add("sg-0123456789abcdef0");
+        placement.put("AvailabilityZone", "us-east-1a");
+        return input;
+    }
+
+    /**
+     * The wire shape a Glue client reads back: CreateConnection answers with its status, and
+     * GetConnection returns the definition under "Connection" with numeric timestamps and no
+     * null-valued members, which is how the AWS SDK and the Terraform provider expect it.
+     */
+    @Test
+    void createAndGetConnectionRoundTripTheDefinitionOnTheWire() throws Exception {
+        ObjectNode create = mapper.createObjectNode();
+        create.set("ConnectionInput", connectionInput("orders"));
+        create.putObject("Tags").put("env", "dev");
+
+        Response created = handler.handle("CreateConnection", create, REGION);
+        assertEquals(200, created.getStatus());
+        assertEquals("READY", mapper.valueToTree(created.getEntity()).get("CreateConnectionStatus").asText());
+
+        Response got = handler.handle("GetConnection", mapper.createObjectNode().put("Name", "orders"), REGION);
+        assertEquals(200, got.getStatus());
+        JsonNode connection = mapper.valueToTree(got.getEntity()).get("Connection");
+        assertEquals("orders", connection.get("Name").asText());
+        assertEquals("JDBC", connection.get("ConnectionType").asText());
+        assertEquals("s3cret", connection.get("ConnectionProperties").get("PASSWORD").asText());
+        assertEquals("subnet-0123456789abcdef0", connection.get("PhysicalConnectionRequirements").get("SubnetId").asText());
+        assertEquals("READY", connection.get("Status").asText());
+        assertEquals(1, connection.get("ConnectionSchemaVersion").asInt());
+        assertTrue(connection.get("CreationTime").isNumber());
+        assertTrue(connection.get("LastUpdatedTime").isNumber());
+        assertFalse(connection.has("LastUpdatedBy"));
+        assertFalse(connection.has("AuthenticationConfiguration"));
+
+        ObjectNode tags = mapper.createObjectNode();
+        tags.put("ResourceArn", "arn:aws:glue:" + REGION + ":" + ACCOUNT_ID + ":connection/orders");
+        JsonNode tagBody = mapper.valueToTree(handler.handle("GetTags", tags, REGION).getEntity());
+        assertEquals("dev", tagBody.get("Tags").get("env").asText());
+    }
+
+    @Test
+    void getConnectionsHonoursHidePasswordAndTheFilter() throws Exception {
+        ObjectNode create = mapper.createObjectNode();
+        create.set("ConnectionInput", connectionInput("orders"));
+        handler.handle("CreateConnection", create, REGION);
+        ObjectNode kafkaInput = connectionInput("events");
+        kafkaInput.put("ConnectionType", "KAFKA");
+        kafkaInput.putObject("ConnectionProperties").put("KAFKA_BOOTSTRAP_SERVERS", "broker:9092");
+        ObjectNode createKafka = mapper.createObjectNode();
+        createKafka.set("ConnectionInput", kafkaInput);
+        handler.handle("CreateConnection", createKafka, REGION);
+
+        ObjectNode list = mapper.createObjectNode();
+        list.put("HidePassword", true);
+        list.putObject("Filter").put("ConnectionType", "JDBC");
+        JsonNode body = mapper.valueToTree(handler.handle("GetConnections", list, REGION).getEntity());
+        assertEquals(1, body.get("ConnectionList").size());
+        JsonNode orders = body.get("ConnectionList").get(0);
+        assertEquals("orders", orders.get("Name").asText());
+        assertFalse(orders.get("ConnectionProperties").has("PASSWORD"));
+        assertEquals("app", orders.get("ConnectionProperties").get("USERNAME").asText());
+        assertFalse(body.has("NextToken"));
+    }
+
+    @Test
+    void updateDeleteAndBatchDeleteConnectionAnswerWithTheDocumentedBodies() throws Exception {
+        ObjectNode create = mapper.createObjectNode();
+        create.set("ConnectionInput", connectionInput("orders"));
+        handler.handle("CreateConnection", create, REGION);
+
+        ObjectNode update = mapper.createObjectNode();
+        update.put("Name", "orders");
+        ObjectNode redefinition = connectionInput("orders");
+        redefinition.remove("Description");
+        update.set("ConnectionInput", redefinition);
+        Response updated = handler.handle("UpdateConnection", update, REGION);
+        assertEquals(200, updated.getStatus());
+        assertEquals(0, mapper.valueToTree(updated.getEntity()).size());
+        JsonNode afterUpdate = mapper.valueToTree(
+                handler.handle("GetConnection", mapper.createObjectNode().put("Name", "orders"), REGION).getEntity())
+                .get("Connection");
+        assertFalse(afterUpdate.has("Description"));
+
+        ObjectNode batch = mapper.createObjectNode();
+        batch.putArray("ConnectionNameList").add("orders").add("absent");
+        JsonNode batchBody = mapper.valueToTree(handler.handle("BatchDeleteConnection", batch, REGION).getEntity());
+        assertEquals("orders", batchBody.get("Succeeded").get(0).asText());
+        assertEquals("EntityNotFoundException", batchBody.get("Errors").get("absent").get("ErrorCode").asText());
+
+        AwsException gone = assertThrows(AwsException.class, () -> handler.handle(
+                "DeleteConnection", mapper.createObjectNode().put("ConnectionName", "orders"), REGION));
+        assertEquals("EntityNotFoundException", gone.getErrorCode());
+
+        ObjectNode test = mapper.createObjectNode();
+        ObjectNode inline = test.putObject("TestConnectionInput");
+        inline.put("ConnectionType", "JDBC");
+        inline.putObject("ConnectionProperties").put("JDBC_CONNECTION_URL", "jdbc:mysql://h:3306/d");
+        assertEquals(200, handler.handle("TestConnection", test, REGION).getStatus());
     }
 }
