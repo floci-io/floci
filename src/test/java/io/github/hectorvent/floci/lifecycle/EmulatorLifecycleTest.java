@@ -1,35 +1,40 @@
 package io.github.hectorvent.floci.lifecycle;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.ServiceRegistry;
 import io.github.hectorvent.floci.core.storage.PersistentPathValidator;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.lifecycle.InitLifecycleState;
 import io.github.hectorvent.floci.lifecycle.inithook.InitializationHook;
 import io.github.hectorvent.floci.lifecycle.inithook.InitializationHooksRunner;
+import io.github.hectorvent.floci.services.appsync.graphql.SchemaCreationWorker;
+import io.github.hectorvent.floci.services.docdb.container.DocDbContainerManager;
+import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
+import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.elasticache.ElastiCacheService;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerManager;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheMemcachedContainerManager;
 import io.github.hectorvent.floci.services.elasticache.proxy.ElastiCacheProxyManager;
-import io.github.hectorvent.floci.services.docdb.container.DocDbContainerManager;
-import io.github.hectorvent.floci.services.neptune.container.NeptuneContainerManager;
-import io.github.hectorvent.floci.services.neptune.proxy.NeptuneProxyManager;
+import io.github.hectorvent.floci.services.floci.ui.FlociUiManager;
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.lambda.DynamoDbStreamsEventSourcePoller;
 import io.github.hectorvent.floci.services.lambda.KinesisEventSourcePoller;
 import io.github.hectorvent.floci.services.lambda.SqsEventSourcePoller;
-import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
-import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
-import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.neptune.container.NeptuneContainerManager;
+import io.github.hectorvent.floci.services.neptune.proxy.NeptuneProxyManager;
 import io.github.hectorvent.floci.services.pipes.PipesService;
 import io.github.hectorvent.floci.services.rds.RdsService;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
+import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService;
 import io.github.hectorvent.floci.services.timestreaminfluxdb.TimestreamInfluxDbService;
 import io.quarkus.runtime.ShutdownDelayInitiatedEvent;
 import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.StartupEvent;
 import io.quarkus.vertx.http.HttpServerStart;
 import io.vertx.core.http.HttpServerOptions;
+import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -91,13 +96,13 @@ class EmulatorLifecycleTest {
     @Mock private PipesService pipesService;
     @Mock private Ec2MetadataServer ec2MetadataServer;
     @Mock private EcrRegistryManager ecrRegistryManager;
-    @Mock private io.github.hectorvent.floci.services.floci.ui.FlociUiManager flociUiManager;
+    @Mock private FlociUiManager flociUiManager;
     @Mock private InitLifecycleState initLifecycleState;
     @Mock private PersistentPathValidator persistentPathValidator;
     @Mock private EmulatorConfig.TlsConfig tlsConfig;
-    @Mock private io.github.hectorvent.floci.services.appsync.graphql.SchemaCreationWorker schemaCreationWorker;
-    @Mock private io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService stepFunctionsService;
-    @Mock private jakarta.enterprise.inject.Instance<io.github.hectorvent.floci.core.common.ContainerTeardown> containerTeardowns;
+    @Mock private SchemaCreationWorker schemaCreationWorker;
+    @Mock private StepFunctionsService stepFunctionsService;
+    @Mock private Instance<ContainerTeardown> containerTeardowns;
 
     private EmulatorLifecycle emulatorLifecycle;
 
@@ -413,7 +418,7 @@ class EmulatorLifecycleTest {
             emulatorLifecycle.onPreShutdown(Mockito.mock(ShutdownDelayInitiatedEvent.class));
             // The thread must NOT be left interrupted: ShutdownEvent cleanup runs next and
             // interruptible I/O inside stopAll()/shutdownAll() would short-circuit otherwise.
-            org.junit.jupiter.api.Assertions.assertFalse(Thread.currentThread().isInterrupted(),
+            assertFalse(Thread.currentThread().isInterrupted(),
                     "Interrupt flag must not leak into ShutdownEvent cleanup");
         } finally {
             Thread.interrupted();

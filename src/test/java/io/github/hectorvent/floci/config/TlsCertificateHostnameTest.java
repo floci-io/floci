@@ -1,7 +1,9 @@
 package io.github.hectorvent.floci.config;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
+import org.bouncycastle.asn1.x500.X500Name;
 import org.bouncycastle.asn1.x509.GeneralName;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.junit.jupiter.api.AfterEach;
@@ -14,6 +16,8 @@ import org.junit.jupiter.params.provider.MethodSource;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
 import java.security.Security;
 import java.security.cert.X509Certificate;
 import java.util.*;
@@ -409,7 +413,7 @@ class TlsCertificateHostnameTest {
         Files.writeString(tlsDir.resolve("floci-server.crt"), legacy.certificatePem());
         Files.writeString(tlsDir.resolve("floci-server.key"), legacy.privateKeyPem());
         Files.writeString(tlsDir.resolve("floci-server.metadata.json"),
-                new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(
+                new ObjectMapper().writeValueAsString(
                         CertificateMetadata.create(sans, "dev")));
 
         new TlsConfigSource();
@@ -429,16 +433,16 @@ class TlsCertificateHostnameTest {
         FlociCertificateAuthority ca = FlociCertificateAuthority.loadOrCreate(tlsDir);
         CertificateGenerator gen = new CertificateGenerator();
         List<String> sans = TlsConfigSource.DEFAULT_SAN_HOSTNAMES;
-        java.security.KeyPair keyPair = java.security.KeyPairGenerator.getInstance("RSA").generateKeyPair();
+        KeyPair keyPair = KeyPairGenerator.getInstance("RSA").generateKeyPair();
         // Issued by the current CA with a validity that ended a day ago: only the expiry check can trigger.
-        X509Certificate expired = gen.signCertificate(new org.bouncycastle.asn1.x500.X500Name("CN=localhost"),
-                keyPair.getPublic(), org.bouncycastle.asn1.x500.X500Name.getInstance(
+        X509Certificate expired = gen.signCertificate(new X500Name("CN=localhost"),
+                keyPair.getPublic(), X500Name.getInstance(
                         ca.certificate().getSubjectX500Principal().getEncoded()), ca.key(), sans, false,
                 CertificateGenerator.LeafUsage.SERVER, -1);
         Files.writeString(tlsDir.resolve("floci-server.crt"), gen.toPem(expired));
         Files.writeString(tlsDir.resolve("floci-server.key"), gen.toPem(keyPair.getPrivate()));
         Files.writeString(tlsDir.resolve("floci-server.metadata.json"),
-                new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(CertificateMetadata.create(sans, "dev")));
+                new ObjectMapper().writeValueAsString(CertificateMetadata.create(sans, "dev")));
         assertTrue(ca.isIssuedByUs(expired), "the expired leaf is ours, so only validity can reject it");
 
         new TlsConfigSource();

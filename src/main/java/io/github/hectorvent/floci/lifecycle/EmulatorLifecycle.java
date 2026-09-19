@@ -43,6 +43,7 @@ import io.quarkus.vertx.http.HttpServerStart;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.enterprise.event.ObservesAsync;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
@@ -99,7 +100,7 @@ public class EmulatorLifecycle {
     private final InitLifecycleState initLifecycleState;
     private final SchemaCreationWorker schemaCreationWorker;
     private final StepFunctionsService stepFunctionsService;
-    private final jakarta.enterprise.inject.Instance<ContainerTeardown> containerTeardowns;
+    private final Instance<ContainerTeardown> containerTeardowns;
     private final PersistentPathValidator persistentPathValidator;
 
     @Inject
@@ -134,7 +135,7 @@ public class EmulatorLifecycle {
                              InitLifecycleState initLifecycleState,
                              SchemaCreationWorker schemaCreationWorker,
                              StepFunctionsService stepFunctionsService,
-                             jakarta.enterprise.inject.Instance<ContainerTeardown> containerTeardowns,
+                             Instance<ContainerTeardown> containerTeardowns,
                              PersistentPathValidator persistentPathValidator) {
         this.storageFactory = storageFactory;
         this.serviceRegistry = serviceRegistry;

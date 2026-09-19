@@ -5,6 +5,7 @@ import io.restassured.RestAssured;
 import io.restassured.config.EncoderConfig;
 import io.restassured.http.ContentType;
 import io.restassured.parsing.Parser;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -36,7 +37,7 @@ class JsonMalformedInputIntegrationTest {
         RestAssured.registerParser(JSON_1_0, Parser.JSON);
     }
 
-    private static io.restassured.specification.RequestSpecification req(String contentType, String target, String body) {
+    private static RequestSpecification req(String contentType, String target, String body) {
         // RestAssured has no built-in serializer for the x-amz-json content types; send the raw body as text.
         return given()
                 .config(RestAssured.config().encoderConfig(EncoderConfig.encoderConfig()

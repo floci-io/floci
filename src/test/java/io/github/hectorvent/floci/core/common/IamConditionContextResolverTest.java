@@ -19,8 +19,10 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.io.ByteArrayInputStream;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
@@ -248,7 +250,7 @@ class IamConditionContextResolverTest {
 
         resolver.resolve("s3", "s3:PutBucketTagging", containerRequest);
 
-        var restored = org.mockito.ArgumentCaptor.forClass(java.io.InputStream.class);
+        ArgumentCaptor<InputStream> restored = ArgumentCaptor.forClass(InputStream.class);
         verify(containerRequest).setEntityStream(restored.capture());
         assertArrayEquals(body.getBytes(StandardCharsets.UTF_8), restored.getValue().readAllBytes());
     }

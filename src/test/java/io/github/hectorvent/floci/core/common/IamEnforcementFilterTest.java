@@ -36,6 +36,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -90,8 +91,8 @@ class IamEnforcementFilterTest {
 
     private IamEnforcementFilter newFilter() {
         @SuppressWarnings("unchecked")
-        jakarta.enterprise.inject.Instance<io.github.hectorvent.floci.services.iam.ScpProvider> scpProvider =
-                mock(jakarta.enterprise.inject.Instance.class);
+        Instance<ScpProvider> scpProvider =
+                mock(Instance.class);
         when(scpProvider.isResolvable()).thenReturn(false);
         return new IamEnforcementFilter(
                 config, accountResolver, iamService, evaluator, actionRegistry, arnBuilder,
@@ -394,7 +395,7 @@ class IamEnforcementFilterTest {
 
         newFilter().filter(containerRequest);
 
-        verify(evaluator, org.mockito.Mockito.times(2))
+        verify(evaluator, times(2))
                 .evaluateResolvedResourcePolicy(
                         any(),
                         eq(ResourcePolicyDecision.NEUTRAL),
@@ -1075,13 +1076,13 @@ class IamEnforcementFilterTest {
         ResourcePolicyProvider provider = (scope, arn) ->
                 List.of(new ResourcePolicyProvider.ResourcePolicy(null, ownerAccountId));
         @SuppressWarnings("unchecked")
-        jakarta.enterprise.inject.Instance<ResourcePolicyProvider> providers =
-                mock(jakarta.enterprise.inject.Instance.class);
+        Instance<ResourcePolicyProvider> providers =
+                mock(Instance.class);
         when(providers.isUnsatisfied()).thenReturn(false);
         when(providers.iterator()).thenReturn(List.of(provider).iterator());
         @SuppressWarnings("unchecked")
-        jakarta.enterprise.inject.Instance<io.github.hectorvent.floci.services.iam.ScpProvider> scpProvider =
-                mock(jakarta.enterprise.inject.Instance.class);
+        Instance<ScpProvider> scpProvider =
+                mock(Instance.class);
         when(scpProvider.isResolvable()).thenReturn(false);
         return new IamEnforcementFilter(
                 config, accountResolver, iamService, evaluator, actionRegistry, arnBuilder,
