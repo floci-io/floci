@@ -61,7 +61,17 @@ public class SnsService implements Resettable, ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(SnsService.class);
     private static final Duration FIFO_DEDUP_WINDOW = Duration.ofMinutes(5);
-    private static final int MAX_PUBLISH_SIZE = 262_144;
+    /** Default value of the {@code MaximumMessageSize} topic attribute, and the ceiling below
+     *  which a topic carries no subscription restrictions. AWS raised the maximum to 1 MiB in
+     *  September 2026 but left the default at 256 KiB, so an unconfigured topic is unchanged. */
+    public static final int DEFAULT_MAX_MESSAGE_SIZE = 262_144;
+    private static final int MIN_MAX_MESSAGE_SIZE = 1_024;
+    private static final int MAX_MAX_MESSAGE_SIZE = 1_048_576;
+    /** The only protocols allowed on a topic above {@link #DEFAULT_MAX_MESSAGE_SIZE}. */
+    private static final Set<String> LARGE_PAYLOAD_PROTOCOLS = Set.of("sqs", "firehose", "lambda");
+    /** How many subscriptions a topic above {@link #DEFAULT_MAX_MESSAGE_SIZE} may carry. */
+    private static final int LARGE_PAYLOAD_SUBSCRIPTION_LIMIT = 100;
+    private static final String MAXIMUM_MESSAGE_SIZE = "MaximumMessageSize";
     private static final int PUSH_CAPTURE_LIMIT = 1000;
     private static final String CONTROL_TOWER_AGGREGATE_SECURITY_TOPIC =
             "aws-controltower-AggregateSecurityNotifications";
@@ -186,6 +196,9 @@ public class SnsService implements Resettable, ResourceProvider {
         if (name == null || name.isBlank()) {
             throw new AwsException("InvalidParameter", "Topic name is required.", 400);
         }
+        if (attributes != null && attributes.containsKey(MAXIMUM_MESSAGE_SIZE)) {
+            validateMaximumMessageSize(attributes.get(MAXIMUM_MESSAGE_SIZE), true);
+        }
         String topicArn = regionResolver.buildArn("sns", region, name);
         String key = topicKey(region, topicArn);
 
@@ -269,8 +282,95 @@ public class SnsService implements Resettable, ResourceProvider {
         String key = topicKey(region, topicArn);
         Topic topic = topicStore.get(key)
                 .orElseThrow(() -> new AwsException("NotFound", "Topic does not exist.", 404));
+        if (MAXIMUM_MESSAGE_SIZE.equals(attributeName)
+                && validateMaximumMessageSize(attributeValue, false) > DEFAULT_MAX_MESSAGE_SIZE) {
+            requireLargePayloadSubscriptions(topicArn, region);
+        }
         topic.getAttributes().put(attributeName, attributeValue);
         topicStore.put(key, topic);
+    }
+
+    /**
+     * Parse and range-check a {@code MaximumMessageSize} attribute value, returning it. AWS
+     * parses strictly: surrounding whitespace, a decimal point and an empty value are all
+     * rejected rather than trimmed, coerced or treated as a reset -- which is where this
+     * differs from the SQS attribute of the same name. {@code CreateTopic} reports the same
+     * reason behind its own prefix.
+     */
+    private static int validateMaximumMessageSize(String value, boolean onCreate) {
+        int parsed = -1;
+        if (value != null) {
+            try {
+                parsed = Integer.parseInt(value);
+            } catch (NumberFormatException ignored) {
+                parsed = -1;
+            }
+        }
+        if (parsed < MIN_MAX_MESSAGE_SIZE || parsed > MAX_MAX_MESSAGE_SIZE) {
+            throw new AwsException("InvalidParameter",
+                    "Invalid parameter: " + (onCreate ? "Attributes Reason: " : "")
+                            + MAXIMUM_MESSAGE_SIZE + ": " + (value == null ? "" : value)
+                            + " is not an integer between " + MIN_MAX_MESSAGE_SIZE + " and "
+                            + MAX_MAX_MESSAGE_SIZE + " bytes", 400);
+        }
+        return parsed;
+    }
+
+    /**
+     * Enforce what AWS asks of a topic carrying payloads above 256 KiB: at most 100
+     * subscriptions, every one of them Amazon SQS, Amazon Data Firehose or Lambda. Pending
+     * confirmations count towards both. Only the protocol half is also checked on Subscribe --
+     * AWS lets the count drift past 100 once the attribute is already raised, and catches it
+     * the next time the attribute is set.
+     */
+    private void requireLargePayloadSubscriptions(String topicArn, String region) {
+        List<Subscription> subs = subscriptionsByTopic(topicArn, region);
+        for (Subscription sub : subs) {
+            requireLargePayloadProtocol(sub.getProtocol());
+        }
+        if (subs.size() > LARGE_PAYLOAD_SUBSCRIPTION_LIMIT) {
+            throw new AwsException("InvalidParameter",
+                    "Invalid parameter: A topic with " + MAXIMUM_MESSAGE_SIZE + " greater than "
+                            + DEFAULT_MAX_MESSAGE_SIZE + " bytes supports a maximum of "
+                            + LARGE_PAYLOAD_SUBSCRIPTION_LIMIT + " subscriptions", 400);
+        }
+    }
+
+    private static void requireLargePayloadProtocol(String protocol) {
+        if (protocol != null && LARGE_PAYLOAD_PROTOCOLS.contains(protocol)) {
+            return;
+        }
+        throw new AwsException("InvalidParameter",
+                "Invalid parameter: " + MAXIMUM_MESSAGE_SIZE + " greater than "
+                        + DEFAULT_MAX_MESSAGE_SIZE
+                        + " bytes is not supported for the following protocol: ["
+                        + protocol + "]", 400);
+    }
+
+    /** The topic's configured {@code MaximumMessageSize}, or the AWS default when unset. */
+    private int topicMaxMessageSize(String topicArn, String region) {
+        return topicStore.get(topicKey(region, topicArn))
+                .map(SnsService::maxMessageSize)
+                .orElse(DEFAULT_MAX_MESSAGE_SIZE);
+    }
+
+    private static int maxMessageSize(Topic topic) {
+        String value = topic.getAttributes().get(MAXIMUM_MESSAGE_SIZE);
+        if (value == null) {
+            return DEFAULT_MAX_MESSAGE_SIZE;
+        }
+        try {
+            return Integer.parseInt(value);
+        } catch (NumberFormatException ignored) {
+            return DEFAULT_MAX_MESSAGE_SIZE;
+        }
+    }
+
+    private static void requireWithinMaxMessageSize(int payloadSize, int maxMessageSize) {
+        if (payloadSize > maxMessageSize) {
+            throw new AwsException("InvalidParameter",
+                    "Invalid parameter: Message too long", 400);
+        }
     }
 
     public Subscription subscribe(String topicArn, String protocol, String endpoint, String region, Map<String, String> attributes) {
@@ -285,6 +385,9 @@ public class SnsService implements Resettable, ResourceProvider {
                 || ("https".equals(protocol) && endpoint != null && !endpoint.startsWith("https://"))) {
             throw new AwsException("InvalidParameter",
                     "Invalid parameter: Endpoint scheme does not match protocol '" + protocol + "'.", 400);
+        }
+        if (topicMaxMessageSize(topicArn, region) > DEFAULT_MAX_MESSAGE_SIZE) {
+            requireLargePayloadProtocol(protocol);
         }
 
         for (Subscription existing : subscriptionsByTopic(topicArn, region)) {
@@ -394,14 +497,13 @@ public class SnsService implements Resettable, ResourceProvider {
                           Map<String, MessageAttributeValue> messageAttributes,
                           String messageGroupId, String messageDeduplicationId, String region) {
         int messageBytes = message == null ? 0 : message.getBytes(StandardCharsets.UTF_8).length;
-        int payloadSize = computePublishSize(messageBytes, subject, messageAttributes);
-        if (payloadSize > MAX_PUBLISH_SIZE) {
-            throw new AwsException("InvalidParameter",
-                    "Invalid parameter: Message too long", 400);
-        }
+        // The limit is a per-topic attribute, so it cannot be applied until the topic is in
+        // hand. SMS and mobile-push publishes never reach a topic and keep the AWS default.
+        int payloadSize = computePublishSize(messageBytes, messageAttributes);
 
         // Send SMS
         if (phoneNumber != null) {
+            requireWithinMaxMessageSize(payloadSize, DEFAULT_MAX_MESSAGE_SIZE);
             String messageId = UUID.randomUUID().toString();
             String effectiveRegion = region != null ? region : "us-east-1";
             SentSms sms = new SentSms(messageId, effectiveRegion, phoneNumber,
@@ -421,6 +523,7 @@ public class SnsService implements Resettable, ResourceProvider {
         }
 
         if (isEndpointArn(effectiveArn)) {
+            requireWithinMaxMessageSize(payloadSize, DEFAULT_MAX_MESSAGE_SIZE);
             return publishToEndpoint(effectiveArn, message, subject, messageStructure,
                     messageAttributes, region);
         }
@@ -433,6 +536,8 @@ public class SnsService implements Resettable, ResourceProvider {
         String topicStoreKey = topicKey(region, effectiveArn);
         Topic topic = topicStore.get(topicStoreKey)
                 .orElseThrow(() -> new AwsException("NotFound", "Topic does not exist.", 404));
+
+        requireWithinMaxMessageSize(payloadSize, maxMessageSize(topic));
 
         validateTopicMessageStructure(message, messageStructure);
 
@@ -840,16 +945,15 @@ public class SnsService implements Resettable, ResourceProvider {
         int batchSize = 0;
         for (Map<String, Object> entry : entries) {
             String message = (String) entry.get("Message");
-            String subject = (String) entry.get("Subject");
             @SuppressWarnings("unchecked")
             Map<String, MessageAttributeValue> attrs =
                     (Map<String, MessageAttributeValue>) entry.get("MessageAttributes");
             int entryMessageBytes = message == null ? 0 : message.getBytes(StandardCharsets.UTF_8).length;
-            batchSize += computePublishSize(entryMessageBytes, subject, attrs);
+            batchSize += computePublishSize(entryMessageBytes, attrs);
         }
-        if (batchSize > MAX_PUBLISH_SIZE) {
+        if (batchSize > maxMessageSize(topic)) {
             throw new AwsException("BatchRequestTooLong",
-                    "Batch requests cannot be longer than " + MAX_PUBLISH_SIZE + " bytes.", 400);
+                    "The length of all the messages put together is more than the limit.", 400);
         }
 
         boolean isFifo = "true".equals(topic.getAttributes().get("FifoTopic"));
@@ -1592,13 +1696,13 @@ public class SnsService implements Resettable, ResourceProvider {
             }
         } catch (Exception e) {
             // Delivery failures are per-subscriber and never reported to the publisher, which
-            // matches AWS. SNS caps a publish at MAX_PUBLISH_SIZE (262144 bytes) while SQS
-            // accepts up to 1048576 bytes, so for ordinary text the non-raw sqs envelope stays
-            // under the queue limit. That is not a guarantee: the envelope is serialized as
-            // JSON, and escaping expands every control character below 0x20 to six bytes, so a
-            // publish made largely of them can serialize several times larger and cross the
-            // limit. A queue configured with a smaller MaximumMessageSize crosses it more
-            // easily still. Either way the message is dropped here.
+            // matches AWS. Both SNS and SQS now top out at 1048576 bytes, so a publish at the
+            // SNS limit no longer fits a queue at all: the non-raw sqs envelope wraps the body
+            // in a few hundred bytes of JSON, and escaping expands every control character
+            // below 0x20 to six bytes, so a publish made largely of them can serialize several
+            // times larger. A topic left at the 262144-byte default clears an ordinary queue
+            // with room to spare; a queue configured with a smaller MaximumMessageSize crosses
+            // the limit more easily. Either way the message is dropped here.
             LOG.warnv("Failed to deliver SNS message to {0}: {1}", sub.getEndpoint(), e.getMessage());
         }
     }
@@ -1810,12 +1914,14 @@ public class SnsService implements Resettable, ResourceProvider {
         return AwsArnUtils.arnToQueueUrl(arn, baseUrl);
     }
 
-    private static int computePublishSize(int messageBytes, String subject,
+    /**
+     * Payload size as AWS counts it against {@code MaximumMessageSize}: UTF-8 body bytes plus,
+     * per attribute, its name, data type and value. {@code Subject} is excluded -- a publish of
+     * exactly the limit succeeds however long its subject is.
+     */
+    private static int computePublishSize(int messageBytes,
                                           Map<String, MessageAttributeValue> attributes) {
         int total = messageBytes;
-        if (subject != null) {
-            total += subject.getBytes(StandardCharsets.UTF_8).length;
-        }
         if (attributes != null) {
             for (Map.Entry<String, MessageAttributeValue> entry : attributes.entrySet()) {
                 total += entry.getKey().getBytes(StandardCharsets.UTF_8).length;
