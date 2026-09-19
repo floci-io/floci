@@ -2024,6 +2024,26 @@ class KmsIntegrationTest {
     }
 
     @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "DescribeKey|{\"KeyId\":\"alias/floci-missing\"}|alias/floci-missing",
+            "DescribeKey|{\"KeyId\":\"{arn}alias/floci-missing\"}|alias/floci-missing",
+            "DescribeKey|{\"KeyId\":\"alias/aws/floci-missing\"}|alias/aws/floci-missing",
+            "Encrypt|{\"KeyId\":\"alias/floci-missing\",\"Plaintext\":\"AAAA\"}|alias/floci-missing",
+            "UpdateAlias|{\"AliasName\":\"alias/floci-missing\",\"TargetKeyId\":\"{key}\"}|alias/floci-missing",
+            "DeleteAlias|{\"AliasName\":\"alias/floci-missing\"}|alias/floci-missing",
+    })
+    void operationsNameAMissingAlias(String operation, String body, String aliasName) {
+        String keyArn = createKeyArn("SYMMETRIC_DEFAULT", "ENCRYPT_DECRYPT");
+        String arnPrefix = keyArn.substring(0, keyArn.lastIndexOf(':') + 1);
+
+        callKms(operation, body.replace("{arn}", arnPrefix).replace("{key}", keyArn))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("NotFoundException"))
+                .body("message", equalTo("Alias " + arnPrefix + aliasName + " is not found."));
+    }
+
+    @ParameterizedTest
     @CsvSource({"Encrypt", "Decrypt"})
     void encryptionAlgorithmValidationListsTheEnumInAwsOrder(String operation) {
         callKms(operation, "{\"KeyId\":\"%s\",\"Plaintext\":\"aGVsbG8=\",\"CiphertextBlob\":\"AAAA\",\"EncryptionAlgorithm\":\"FOO\"}"
