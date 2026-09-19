@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.sqs;
 
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.services.sqs.GuardedMessageQueue.ClaimResult;
+import io.github.hectorvent.floci.services.sqs.GuardedMessageQueue.MessageCounts;
 import io.github.hectorvent.floci.services.sqs.model.Message;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -40,7 +42,7 @@ class GuardedMessageQueueTest {
     void addAndClaimSingleMessage() {
         queue.addMessage(new Message("hello"));
 
-        var result = queue.claimVisibleMessages(1, 30, false, -1, null);
+        ClaimResult result = queue.claimVisibleMessages(1, 30, false, -1, null);
         assertEquals(1, result.claimed().size());
         assertEquals("hello", result.claimed().get(0).getBody());
         assertNotNull(result.claimed().get(0).getReceiptHandle());
@@ -50,7 +52,7 @@ class GuardedMessageQueueTest {
 
     @Test
     void claimEmptyQueueReturnsEmpty() {
-        var result = queue.claimVisibleMessages(1, 30, false, -1, null);
+        ClaimResult result = queue.claimVisibleMessages(1, 30, false, -1, null);
         assertTrue(result.claimed().isEmpty());
         assertTrue(result.dlqCandidates().isEmpty());
     }
@@ -59,10 +61,10 @@ class GuardedMessageQueueTest {
     void claimedMessageBecomesInvisible() {
         queue.addMessage(new Message("msg1"));
 
-        var first = queue.claimVisibleMessages(1, 30, false, -1, null);
+        ClaimResult first = queue.claimVisibleMessages(1, 30, false, -1, null);
         assertEquals(1, first.claimed().size());
 
-        var second = queue.claimVisibleMessages(1, 30, false, -1, null);
+        ClaimResult second = queue.claimVisibleMessages(1, 30, false, -1, null);
         assertTrue(second.claimed().isEmpty());
     }
 
@@ -72,7 +74,7 @@ class GuardedMessageQueueTest {
         queue.addMessage(new Message("msg2"));
         queue.addMessage(new Message("msg3"));
 
-        var result = queue.claimVisibleMessages(3, 30, false, -1, null);
+        ClaimResult result = queue.claimVisibleMessages(3, 30, false, -1, null);
         assertEquals(3, result.claimed().size());
     }
 
@@ -82,7 +84,7 @@ class GuardedMessageQueueTest {
         queue.addMessage(new Message("msg2"));
         queue.addMessage(new Message("msg3"));
 
-        var result = queue.claimVisibleMessages(2, 30, false, -1, null);
+        ClaimResult result = queue.claimVisibleMessages(2, 30, false, -1, null);
         assertEquals(2, result.claimed().size());
     }
 
@@ -90,13 +92,13 @@ class GuardedMessageQueueTest {
     void removeByReceiptHandle() {
         queue.addMessage(new Message("to-delete"));
 
-        var claimed = queue.claimVisibleMessages(1, 30, false, -1, null);
+        ClaimResult claimed = queue.claimVisibleMessages(1, 30, false, -1, null);
         String handle = claimed.claimed().get(0).getReceiptHandle();
 
         assertTrue(queue.removeByReceiptHandle(handle).isPresent());
 
         // Message should be gone even with visibility timeout 0
-        var result = queue.claimVisibleMessages(1, 0, false, -1, null);
+        ClaimResult result = queue.claimVisibleMessages(1, 0, false, -1, null);
         assertTrue(result.claimed().isEmpty());
     }
 
@@ -109,13 +111,13 @@ class GuardedMessageQueueTest {
     void changeVisibility() {
         queue.addMessage(new Message("msg"));
 
-        var claimed = queue.claimVisibleMessages(1, 30, false, -1, null);
+        ClaimResult claimed = queue.claimVisibleMessages(1, 30, false, -1, null);
         String handle = claimed.claimed().get(0).getReceiptHandle();
 
         // Set visibility to 0 — message becomes visible immediately
         assertTrue(queue.changeVisibility(handle, 0));
 
-        var reClaimed = queue.claimVisibleMessages(1, 30, false, -1, null);
+        ClaimResult reClaimed = queue.claimVisibleMessages(1, 30, false, -1, null);
         assertEquals(1, reClaimed.claimed().size());
     }
 
@@ -131,7 +133,7 @@ class GuardedMessageQueueTest {
 
         queue.purge();
 
-        var result = queue.claimVisibleMessages(10, 30, false, -1, null);
+        ClaimResult result = queue.claimVisibleMessages(10, 30, false, -1, null);
         assertTrue(result.claimed().isEmpty());
     }
 
@@ -144,17 +146,17 @@ class GuardedMessageQueueTest {
         assertEquals(2, drained.size());
         assertTrue(queue.isEmpty());
 
-        var target = new GuardedMessageQueue(null, null);
+        GuardedMessageQueue target = new GuardedMessageQueue(null, null);
         target.addAll(drained);
 
-        var result = target.claimVisibleMessages(10, 30, false, -1, null);
+        ClaimResult result = target.claimVisibleMessages(10, 30, false, -1, null);
         assertEquals(2, result.claimed().size());
     }
 
     @Test
     void addAllRollsBackTheInMemoryAddWhenPersistFails() {
         AtomicBoolean storeDown = new AtomicBoolean();
-        var store = new InMemoryStorage<String, List<Message>>() {
+        InMemoryStorage<String, List<Message>> store = new InMemoryStorage<String, List<Message>>() {
             @Override
             public void put(String key, List<Message> value) {
                 if (storeDown.get()) {
@@ -163,7 +165,7 @@ class GuardedMessageQueueTest {
                 super.put(key, value);
             }
         };
-        var target = new GuardedMessageQueue(store, "us-east-1::/000000000000/target");
+        GuardedMessageQueue target = new GuardedMessageQueue(store, "us-east-1::/000000000000/target");
         target.addMessage(new Message("already-there"));
         storeDown.set(true);
 
@@ -182,7 +184,7 @@ class GuardedMessageQueueTest {
         delayedMessage.setVisibleAt(Instant.now().plusSeconds(60));
         queue.addMessage(delayedMessage);
 
-        var counts = queue.messageCounts();
+        MessageCounts counts = queue.messageCounts();
         assertEquals(3, counts.visible());
         assertEquals(0, counts.inFlight());
         assertEquals(1, counts.delayed(),
@@ -190,7 +192,7 @@ class GuardedMessageQueueTest {
 
         queue.claimVisibleMessages(2, 30, false, -1, null);
 
-        var afterClaim = queue.messageCounts();
+        MessageCounts afterClaim = queue.messageCounts();
         assertEquals(1, afterClaim.visible());
         assertEquals(2, afterClaim.inFlight(),
                 "Claimed messages are in flight, not delayed");
@@ -203,7 +205,7 @@ class GuardedMessageQueueTest {
         delayedMessage.setVisibleAt(Instant.now().minusSeconds(1));
         queue.addMessage(delayedMessage);
 
-        var counts = queue.messageCounts();
+        MessageCounts counts = queue.messageCounts();
         assertEquals(1, counts.visible(),
                 "A message whose delay has elapsed counts as visible");
         assertEquals(0, counts.delayed());
@@ -227,7 +229,7 @@ class GuardedMessageQueueTest {
         queue.addMessage(g1m2);
         queue.addMessage(g2m1);
 
-        var first = queue.claimVisibleMessages(10, 30, true, -1, null);
+        ClaimResult first = queue.claimVisibleMessages(10, 30, true, -1, null);
         assertEquals(3, first.claimed().size(),
                 "Single FIFO ReceiveMessage should return all visible messages up to MaxNumberOfMessages");
         List<String> bodies = first.claimed().stream().map(Message::getBody).toList();
@@ -239,7 +241,7 @@ class GuardedMessageQueueTest {
         assertTrue(g1m1Idx < g1m2Idx, "group1 messages must be in insertion order");
 
         // All groups now have in-flight messages — second call returns empty
-        var second = queue.claimVisibleMessages(10, 30, true, -1, null);
+        ClaimResult second = queue.claimVisibleMessages(10, 30, true, -1, null);
         assertTrue(second.claimed().isEmpty());
     }
 
@@ -258,7 +260,7 @@ class GuardedMessageQueueTest {
         queue.addMessage(visible);
         queue.addMessage(delayed);
 
-        var result = queue.claimVisibleMessages(10, 30, true, -1, null);
+        ClaimResult result = queue.claimVisibleMessages(10, 30, true, -1, null);
         assertEquals(1, result.claimed().size(),
                 "A delayed message must not block its message group");
         assertEquals("visible", result.claimed().get(0).getBody());
@@ -271,11 +273,11 @@ class GuardedMessageQueueTest {
         queue.addMessage(new Message("msg"));
 
         // Claim and release (visibility=0) to bump receiveCount
-        var r1 = queue.claimVisibleMessages(1, 0, false, -1, null);
+        ClaimResult r1 = queue.claimVisibleMessages(1, 0, false, -1, null);
         assertEquals(1, r1.claimed().get(0).getReceiveCount());
 
         // Claim again — now receiveCount = 2, maxReceiveCount = 1 → DLQ candidate
-        var r2 = queue.claimVisibleMessages(1, 0, false, 1, "arn:aws:sqs:us-east-1:000000000000:dlq");
+        ClaimResult r2 = queue.claimVisibleMessages(1, 0, false, 1, "arn:aws:sqs:us-east-1:000000000000:dlq");
         assertTrue(r2.claimed().isEmpty());
         assertEquals(1, r2.dlqCandidates().size());
 
@@ -310,12 +312,12 @@ class GuardedMessageQueueTest {
                     } catch (Exception e) {
                         throw new RuntimeException(e);
                     }
-                    var result = queue.claimVisibleMessages(messageCount, 30, false, -1, null);
+                    ClaimResult result = queue.claimVisibleMessages(messageCount, 30, false, -1, null);
                     allClaimed.addAll(result.claimed());
                 }));
             }
 
-            for (var f : futures) {
+            for (Future<?> f : futures) {
                 f.get(10, TimeUnit.SECONDS);
             }
 
@@ -362,19 +364,19 @@ class GuardedMessageQueueTest {
                         throw new RuntimeException(e);
                     }
                     if (threadIdx % 2 == 0) {
-                        var result = queue.claimVisibleMessages(messageCount, 30, false, -1, null);
+                        ClaimResult result = queue.claimVisibleMessages(messageCount, 30, false, -1, null);
                         claimedCount.addAndGet(result.claimed().size());
                         for (Message m : result.claimed()) {
                             queue.removeByReceiptHandle(m.getReceiptHandle());
                         }
                     } else {
-                        var result = queue.claimVisibleMessages(messageCount, 30, false, -1, null);
+                        ClaimResult result = queue.claimVisibleMessages(messageCount, 30, false, -1, null);
                         claimedCount.addAndGet(result.claimed().size());
                     }
                 }));
             }
 
-            for (var f : futures) {
+            for (Future<?> f : futures) {
                 f.get(10, TimeUnit.SECONDS);
             }
 

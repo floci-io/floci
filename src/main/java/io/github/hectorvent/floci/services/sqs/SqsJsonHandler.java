@@ -100,31 +100,23 @@ public class SqsJsonHandler {
         if (all || requested.contains("ApproximateReceiveCount")) {
             attrs.put("ApproximateReceiveCount", String.valueOf(msg.getReceiveCount()));
         }
-        if (all || requested.contains("ApproximateFirstReceiveTimestamp")) {
-            if (msg.getFirstReceiveTimestamp() != null) {
-                attrs.put("ApproximateFirstReceiveTimestamp",
-                        String.valueOf(msg.getFirstReceiveTimestamp().toEpochMilli()));
-            }
+        if ((all || requested.contains("ApproximateFirstReceiveTimestamp"))
+                && msg.getFirstReceiveTimestamp() != null) {
+            attrs.put("ApproximateFirstReceiveTimestamp",
+                    String.valueOf(msg.getFirstReceiveTimestamp().toEpochMilli()));
         }
-        if (all || requested.contains("SequenceNumber")) {
-            if (msg.getSequenceNumber() > 0) {
-                attrs.put("SequenceNumber", String.valueOf(msg.getSequenceNumber()));
-            }
+        if (msg.getMessageGroupId() != null && (all || requested.contains("MessageGroupId"))) {
+            attrs.put("MessageGroupId", msg.getMessageGroupId());
         }
-        if (all || requested.contains("MessageDeduplicationId")) {
-            if (msg.getMessageDeduplicationId() != null) {
-                attrs.put("MessageDeduplicationId", msg.getMessageDeduplicationId());
-            }
+        if (msg.getSequenceNumber() > 0 && (all || requested.contains("SequenceNumber"))) {
+            attrs.put("SequenceNumber", String.valueOf(msg.getSequenceNumber()));
         }
-        if (all || requested.contains("MessageGroupId")) {
-            if (msg.getMessageGroupId() != null) {
-                attrs.put("MessageGroupId", msg.getMessageGroupId());
-            }
+        if (msg.getMessageDeduplicationId() != null
+                && (all || requested.contains("MessageDeduplicationId"))) {
+            attrs.put("MessageDeduplicationId", msg.getMessageDeduplicationId());
         }
-        if (all || requested.contains("AWSTraceHeader")) {
-            if (msg.getAwsTraceHeader() != null) {
-                attrs.put("AWSTraceHeader", msg.getAwsTraceHeader());
-            }
+        if (msg.getAwsTraceHeader() != null && (all || requested.contains("AWSTraceHeader"))) {
+            attrs.put("AWSTraceHeader", msg.getAwsTraceHeader());
         }
         if (!attrs.isEmpty()) {
             msgNode.set("Attributes", attrs);

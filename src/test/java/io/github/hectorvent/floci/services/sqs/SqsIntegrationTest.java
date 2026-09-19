@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.sqs;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.xml.XmlPath;
 import org.junit.jupiter.api.*;
 
 import java.util.LinkedHashMap;
@@ -832,7 +833,7 @@ class SqsIntegrationTest {
     }
 
     private static Map<String, String> allQueueAttributes(String url) {
-        var xml = given()
+        XmlPath xml = given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "GetQueueAttributes")
             .formParam("QueueUrl", url)
