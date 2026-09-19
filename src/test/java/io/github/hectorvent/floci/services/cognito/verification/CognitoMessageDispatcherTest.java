@@ -93,6 +93,24 @@ class CognitoMessageDispatcherTest {
     }
 
     @Test
+    void dispatch_smsOtpFlow_usesSmsAuthenticationMessageTemplate() {
+        // Per AWS: SmsAuthenticationMessage covers "SMS OTP and MFA authentication", not just MFA.
+        UserPool pool = pool(Map.of("SmsMessage", "Signup: {####}"));
+        pool.setSmsAuthenticationMessage("Auth code: {####}");
+        CognitoUser user = user("alice@example.com", "+5215551234567");
+
+        dispatcher.dispatch(pool, user, VerificationCode.Purpose.SMS_OTP,
+            "654321", List.of("SMS"));
+
+        verify(sns).publish(
+            isNull(), isNull(),
+            eq("+5215551234567"),
+            eq("Auth code: 654321"),
+            isNull(), isNull(), eq("us-east-1"));
+        verifyNoInteractions(ses);
+    }
+
+    @Test
     void dispatch_emptyTemplate_usesDefaults() {
         UserPool pool = pool(Map.of());
         CognitoUser user = user("alice@example.com", null);

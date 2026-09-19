@@ -4417,6 +4417,52 @@ public class CognitoService implements ResourceProvider {
         };
     }
 
+    /** Whether the sign-in verification-code path (EMAIL_OTP/SMS_OTP under USER_AUTH) is wired up. */
+    boolean verificationServicesConfigured() {
+        return verificationCodeService != null && messageDispatcher != null;
+    }
+
+    /**
+     * Issues and delivers a one-time code for a USER_AUTH EMAIL_OTP/SMS_OTP challenge, mirroring
+     * the SignUp/ForgotPassword code-delivery path. Returns the masked CODE_DELIVERY challenge
+     * parameters for the InitiateAuth/RespondToAuthChallenge response.
+     */
+    Map<String, String> issueSignInOtp(UserPool pool, CognitoUser user, VerificationCode.Purpose purpose,
+            String attributeName, String deliveryMedium, Map<String, Object> customMessageResponse) {
+        ensureVerificationWiring();
+        String destination = user.getAttributes().get(attributeName);
+        String code;
+        try {
+            code = verificationCodeService.issue(pool.getId(), user.getUsername(), purpose, Duration.ofMinutes(5));
+            messageDispatcher.dispatch(pool, user, purpose, code, List.of(deliveryMedium), customMessageResponse);
+        } catch (VerificationCodeException e) {
+            throw mapVerificationCodeException(e);
+        } catch (RuntimeException e) {
+            // The code was already issued and stored before dispatch failed; invalidate it so
+            // the rate limiter doesn't block an immediate retry for a code the user never
+            // received, matching how signUp's rollback treats the same failure shape.
+            verificationCodeService.invalidatePrevious(pool.getId(), user.getUsername(), purpose);
+            LOG.warnv(e, "Failed to deliver a USER_AUTH {0} code for pool {1}: {2}",
+                    purpose, pool.getId(), e.getMessage());
+            throw new AwsException("CodeDeliveryFailureException", "Failed to deliver the message.", 400);
+        }
+        String masked = "email".equals(attributeName) ? maskEmail(destination) : maskPhoneNumber(destination);
+        Map<String, String> details = new LinkedHashMap<>();
+        details.put("CODE_DELIVERY_DELIVERY_MEDIUM", deliveryMedium);
+        details.put("CODE_DELIVERY_DESTINATION", masked);
+        return details;
+    }
+
+    /** Consumes a USER_AUTH EMAIL_OTP/SMS_OTP code, translating a wrong/expired code to the AWS shape. */
+    void consumeSignInOtp(String userPoolId, String username, VerificationCode.Purpose purpose, String code) {
+        ensureVerificationWiring();
+        try {
+            verificationCodeService.consume(userPoolId, username, purpose, code);
+        } catch (VerificationCodeException e) {
+            throw mapVerificationCodeException(e);
+        }
+    }
+
     private boolean matchesAliasOrUsernameAttribute(UserPool pool, CognitoUser user,
             String username) {
         if (username.equals(user.getAttributes().get("sub"))) {
