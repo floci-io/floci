@@ -685,10 +685,7 @@ public class KmsService implements ResourceProvider {
 
     public void enableKey(String keyId, String region) {
         KmsKey key = resolveKey(keyId, region);
-        if (PENDING_DELETION.equals(key.getKeyState())) {
-            throw new AwsException("KMSInvalidStateException",
-                    "KMS key " + key.getKeyId() + " is pending deletion.", 400);
-        }
+        requireNotPendingDeletion(key);
         requireImportedKeyMaterial(key);
         key.setEnabled(true);
         key.setKeyState("Enabled");
@@ -1039,8 +1036,7 @@ public class KmsService implements ResourceProvider {
 
     private static void requireNotPendingDeletion(KmsKey key) {
         if (PENDING_DELETION.equals(key.getKeyState())) {
-            throw new AwsException("KMSInvalidStateException",
-                    "KMS key " + key.getKeyId() + " is pending deletion.", 400);
+            throw new AwsException("KMSInvalidStateException", key.getArn() + " is pending deletion.", 400);
         }
     }
 
@@ -1072,10 +1068,7 @@ public class KmsService implements ResourceProvider {
         KmsKey currentKey = resolveKey(existing.getTargetKeyId(), region);
         KmsKey newKey = resolveKey(targetKeyId, region); // Validate key exists and normalize to plain key ID
 
-        if ("PendingDeletion".equals(newKey.getKeyState())) {
-            throw new AwsException("KMSInvalidStateException",
-                    "KMS key " + newKey.getKeyId() + " is pending deletion.", 400);
-        }
+        requireNotPendingDeletion(newKey);
         if (currentKey.getKeyUsage() != newKey.getKeyUsage() || !sameKeyFamily(currentKey.getKeySpec(), newKey.getKeySpec())) {
             throw new AwsException("ValidationException",
                     "The replacement KMS key must have the same key usage and key type "

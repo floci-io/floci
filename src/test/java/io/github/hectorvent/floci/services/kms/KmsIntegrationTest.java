@@ -1929,6 +1929,46 @@ class KmsIntegrationTest {
                 .body("message", equalTo(keyArn + " is pending import."));
     }
 
+    /** Checked against real AWS in us-east-1. */
+    @ParameterizedTest
+    @CsvSource({
+            "EnableKey, AWS_KMS",
+            "UpdateAlias, AWS_KMS",
+            "GetParametersForImport, EXTERNAL",
+            "ImportKeyMaterial, EXTERNAL",
+    })
+    void keyManagementRejectsAKeyPendingDeletion(String operation, String origin) {
+        String keyArn = callKms("CreateKey", "{\"Origin\":\"%s\"}".formatted(origin))
+                .then().statusCode(200).extract().path("KeyMetadata.Arn");
+        String request = keyManagementRequest(operation, keyArn);
+        callKms("ScheduleKeyDeletion", "{\"KeyId\":\"%s\",\"PendingWindowInDays\":7}".formatted(keyArn))
+                .then().statusCode(200);
+
+        callKms(operation, request)
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("KMSInvalidStateException"))
+                .body("message", equalTo(keyArn + " is pending deletion."));
+    }
+
+    private static String keyManagementRequest(String operation, String keyArn) {
+        return switch (operation) {
+            case "UpdateAlias" -> {
+                String aliasName = "alias/pending-deletion-" + keyArn.substring(keyArn.lastIndexOf('/') + 1);
+                callKms("CreateAlias", "{\"AliasName\":\"%s\",\"TargetKeyId\":\"%s\"}"
+                        .formatted(aliasName, createKeyArn("SYMMETRIC_DEFAULT", "ENCRYPT_DECRYPT")))
+                        .then().statusCode(200);
+                yield "{\"AliasName\":\"%s\",\"TargetKeyId\":\"%s\"}".formatted(aliasName, keyArn);
+            }
+            case "GetParametersForImport" ->
+                    "{\"KeyId\":\"%s\",\"WrappingAlgorithm\":\"RSAES_OAEP_SHA_256\",\"WrappingKeySpec\":\"RSA_2048\"}"
+                            .formatted(keyArn);
+            case "ImportKeyMaterial" -> ("{\"KeyId\":\"%s\",\"ImportToken\":\"AAAA\",\"EncryptedKeyMaterial\":\"AAAA\","
+                    + "\"ExpirationModel\":\"KEY_MATERIAL_DOES_NOT_EXPIRE\"}").formatted(keyArn);
+            default -> "{\"KeyId\":\"%s\"}".formatted(keyArn);
+        };
+    }
+
     /** Checked against real AWS in us-east-1. The key usage is checked before the key state. */
     @ParameterizedTest
     @CsvSource({
