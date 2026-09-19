@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.elasticache;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.xml.XmlPath;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
@@ -52,8 +53,7 @@ class ElastiCacheMemcachedIntegrationTest {
     @Test
     @Order(1)
     void createCacheCluster() {
-        var response =
-                given()
+        XmlPath response = given()
                     .formParam("Action", "CreateCacheCluster")
                     .formParam("CacheClusterId", CLUSTER_ID)
                     .formParam("Engine", "memcached")
