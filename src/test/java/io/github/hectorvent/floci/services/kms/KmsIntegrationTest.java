@@ -1866,6 +1866,69 @@ class KmsIntegrationTest {
                 .body("message", equalTo(keyArn + " is pending deletion."));
     }
 
+    /** Checked against real AWS in us-east-1. */
+    @ParameterizedTest
+    @CsvSource({
+            "SYMMETRIC_DEFAULT, ENCRYPT_DECRYPT, Encrypt, SYMMETRIC_DEFAULT",
+            "SYMMETRIC_DEFAULT, ENCRYPT_DECRYPT, GenerateDataKey, SYMMETRIC_DEFAULT",
+            "SYMMETRIC_DEFAULT, ENCRYPT_DECRYPT, GenerateDataKeyWithoutPlaintext, SYMMETRIC_DEFAULT",
+            "SYMMETRIC_DEFAULT, ENCRYPT_DECRYPT, EnableKey, SYMMETRIC_DEFAULT",
+            "SYMMETRIC_DEFAULT, ENCRYPT_DECRYPT, DisableKey, SYMMETRIC_DEFAULT",
+            "HMAC_256, GENERATE_VERIFY_MAC, GenerateMac, HMAC_SHA_256",
+            "HMAC_256, GENERATE_VERIFY_MAC, VerifyMac, HMAC_SHA_256",
+            "HMAC_256, GENERATE_VERIFY_MAC, GenerateMac, HMAC_SHA_512",
+    })
+    void operationsRejectAKeyPendingImport(String keySpec, String keyUsage, String operation, String algorithm) {
+        String keyArn = callKms("CreateKey", "{\"Origin\":\"EXTERNAL\",\"KeySpec\":\"%s\",\"KeyUsage\":\"%s\"}"
+                .formatted(keySpec, keyUsage)).then().statusCode(200).extract().path("KeyMetadata.Arn");
+
+        callKms(operation, cryptoRequest(operation, keyArn, algorithm))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("KMSInvalidStateException"))
+                .body("message", equalTo(keyArn + " is pending import."));
+    }
+
+    /** Checked against real AWS in us-east-1. */
+    @Test
+    void reEncryptRejectsADestinationKeyPendingImport() {
+        String sourceArn = createKeyArn("SYMMETRIC_DEFAULT", "ENCRYPT_DECRYPT");
+        String destinationArn = callKms("CreateKey", "{\"Origin\":\"EXTERNAL\"}")
+                .then().statusCode(200).extract().path("KeyMetadata.Arn");
+        String ciphertext = callKms("Encrypt", "{\"KeyId\":\"%s\",\"Plaintext\":\"aGVsbG8=\"}".formatted(sourceArn))
+                .then().statusCode(200).extract().path("CiphertextBlob");
+
+        callKms("ReEncrypt", "{\"CiphertextBlob\":\"%s\",\"DestinationKeyId\":\"%s\"}".formatted(ciphertext, destinationArn))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("KMSInvalidStateException"))
+                .body("message", equalTo(destinationArn + " is pending import."));
+    }
+
+    /** Checked against real AWS in us-east-1. */
+    @ParameterizedTest
+    @CsvSource({"Decrypt, false", "Decrypt, true", "ReEncrypt, false"})
+    void ciphertextOfDeletedKeyMaterialReportsPendingImport(String operation, boolean withKeyId) throws Exception {
+        String keyId = createExternalSymmetricKey();
+        importFreshMaterial(keyId);
+        String keyArn = describeKey(keyId).extract().path("KeyMetadata.Arn");
+        String ciphertext = callKms("Encrypt", "{\"KeyId\":\"%s\",\"Plaintext\":\"aGVsbG8=\"}".formatted(keyArn))
+                .then().statusCode(200).extract().path("CiphertextBlob");
+        callKms("DeleteImportedKeyMaterial", "{\"KeyId\":\"%s\"}".formatted(keyArn)).then().statusCode(200);
+        String body = "ReEncrypt".equals(operation)
+                ? "{\"CiphertextBlob\":\"%s\",\"DestinationKeyId\":\"%s\"}"
+                        .formatted(ciphertext, createKeyArn("SYMMETRIC_DEFAULT", "ENCRYPT_DECRYPT"))
+                : withKeyId
+                        ? "{\"CiphertextBlob\":\"%s\",\"KeyId\":\"%s\"}".formatted(ciphertext, keyArn)
+                        : "{\"CiphertextBlob\":\"%s\"}".formatted(ciphertext);
+
+        callKms(operation, body)
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("KMSInvalidStateException"))
+                .body("message", equalTo(keyArn + " is pending import."));
+    }
+
     /** Checked against real AWS in us-east-1. The key usage is checked before the key state. */
     @ParameterizedTest
     @CsvSource({
@@ -2007,7 +2070,9 @@ class KmsIntegrationTest {
                     .formatted(keyArn, algorithm);
             case "Decrypt" -> "{\"KeyId\":\"%s\",\"CiphertextBlob\":\"%s\",\"EncryptionAlgorithm\":\"%s\"}"
                     .formatted(keyArn, blob, algorithm);
-            case "GenerateDataKey" -> "{\"KeyId\":\"%s\",\"KeySpec\":\"AES_256\"}".formatted(keyArn);
+            case "GenerateDataKey", "GenerateDataKeyWithoutPlaintext" ->
+                    "{\"KeyId\":\"%s\",\"KeySpec\":\"AES_256\"}".formatted(keyArn);
+            case "EnableKey", "DisableKey" -> "{\"KeyId\":\"%s\"}".formatted(keyArn);
             default -> throw new IllegalArgumentException(operation);
         };
     }

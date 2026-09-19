@@ -689,7 +689,7 @@ public class KmsService implements ResourceProvider {
             throw new AwsException("KMSInvalidStateException",
                     "KMS key " + key.getKeyId() + " is pending deletion.", 400);
         }
-        requireImportedKeyMaterial(key, "EnableKey");
+        requireImportedKeyMaterial(key);
         key.setEnabled(true);
         key.setKeyState("Enabled");
         keyStore.put(region + "::" + key.getKeyId(), key);
@@ -698,7 +698,7 @@ public class KmsService implements ResourceProvider {
 
     public void disableKey(String keyId, String region) {
         KmsKey key = resolveKey(keyId, region);
-        requireImportedKeyMaterial(key, "DisableKey");
+        requireImportedKeyMaterial(key);
         key.setEnabled(false);
         key.setKeyState("Disabled");
         keyStore.put(region + "::" + key.getKeyId(), key);
@@ -1044,11 +1044,9 @@ public class KmsService implements ResourceProvider {
         }
     }
 
-    private static void requireImportedKeyMaterial(KmsKey key, String operation) {
+    private static void requireImportedKeyMaterial(KmsKey key) {
         if (PENDING_IMPORT.equals(key.getKeyState())) {
-            throw new AwsException("KMSInvalidStateException",
-                    operation + " is not valid for KMS key " + key.getKeyId()
-                            + " because it has no key material. Its state is PendingImport.", 400);
+            throw new AwsException("KMSInvalidStateException", key.getArn() + " is pending import.", 400);
         }
     }
 
@@ -1244,7 +1242,7 @@ public class KmsService implements ResourceProvider {
             KmsKey key = resolveEnvelopeKey(envelope.keyId(), region);
             // A key whose imported material was deleted or expired no longer holds the backing
             // key this blob names; answer with the key's state, as AWS does, not "invalid ciphertext".
-            requireImportedKeyMaterial(key, "Decrypt");
+            requireImportedKeyMaterial(key);
             byte[] plaintext = decryptEnvelopeV3(envelope, key, encryptionContext);
 
             if (requestKeyId != null && !requestKeyId.isBlank()) {
@@ -1718,7 +1716,6 @@ public class KmsService implements ResourceProvider {
         validateEnumMember("macAlgorithm", algorithm, MAC_ALGORITHMS);
         KmsKey kmsKey = resolveKey(keyId, region);
         validateKeyUsage(kmsKey, KmsKeyUsage.GENERATE_VERIFY_MAC, operation);
-        requireImportedKeyMaterial(kmsKey, "MAC operations");
         validateKeyIsUsableForCryptoOperations(kmsKey);
         validateAlgorithmForSpec(KmsKeySpec.Algorithm.valueOf(algorithm), kmsKey.getKeySpec());
         return kmsKey;
@@ -1814,7 +1811,7 @@ public class KmsService implements ResourceProvider {
                     400
             );
         }
-        requireImportedKeyMaterial(key, "This operation");
+        requireImportedKeyMaterial(key);
         if (!key.isEnabled()) {
             throw new AwsException(
                     "DisabledException",
