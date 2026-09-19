@@ -22,6 +22,7 @@ import java.security.Signature;
 import java.security.spec.RSAPublicKeySpec;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Spliterators;
@@ -2594,6 +2595,118 @@ class CognitoIntegrationTest {
                 """.formatted(pinnedId))
                 .then()
                 .statusCode(200);
+    }
+
+    // ── Issue #3926: USER_AUTH choice-based flow ────────────────────────
+    // Self-contained pool/user rather than the suite's shared USERNAME: by this point in the
+    // ordered sequence several earlier tests have changed alice's password, so PASSWORD no
+    // longer matches what AdminSetUserPassword set up in @BeforeAll.
+
+    @Test
+    @Order(105)
+    void initiateAuthWithUserAuthNoPreferredChallengeReturnsSelectChallengeOverTheWire() throws Exception {
+        String userAuthPoolId = cognitoJson("CreateUserPool", """
+                { "PoolName": "UserAuthWirePool" }
+                """).path("UserPool").path("Id").asText();
+        String userAuthClientId = cognitoJson("CreateUserPoolClient", """
+                { "UserPoolId": "%s", "ClientName": "user-auth-client" }
+                """.formatted(userAuthPoolId)).path("UserPoolClient").path("ClientId").asText();
+        cognitoAction("AdminCreateUser", """
+                { "UserPoolId": "%s", "Username": "dana",
+                  "UserAttributes": [{ "Name": "email", "Value": "dana@example.com" }] }
+                """.formatted(userAuthPoolId))
+                .then().statusCode(200);
+        cognitoAction("AdminSetUserPassword", """
+                { "UserPoolId": "%s", "Username": "dana", "Password": "Dana1234!", "Permanent": true }
+                """.formatted(userAuthPoolId))
+                .then().statusCode(200);
+
+        JsonNode result = cognitoJson("InitiateAuth", """
+                {
+                  "ClientId": "%s",
+                  "AuthFlow": "USER_AUTH",
+                  "AuthParameters": { "USERNAME": "dana" }
+                }
+                """.formatted(userAuthClientId));
+
+        assertEquals("SELECT_CHALLENGE", result.path("ChallengeName").asText());
+        assertFalse(result.path("Session").asText().isBlank());
+        List<String> available = new ArrayList<>();
+        result.path("AvailableChallenges").forEach(n -> available.add(n.asText()));
+        assertTrue(available.contains("PASSWORD"), "expected PASSWORD in " + available);
+    }
+
+    @Test
+    @Order(106)
+    void initiateAuthWithUserAuthPreferredChallengePasswordCompletesOverTheWire() throws Exception {
+        String userAuthPoolId = cognitoJson("CreateUserPool", """
+                { "PoolName": "UserAuthWirePasswordPool" }
+                """).path("UserPool").path("Id").asText();
+        String userAuthClientId = cognitoJson("CreateUserPoolClient", """
+                { "UserPoolId": "%s", "ClientName": "user-auth-client" }
+                """.formatted(userAuthPoolId)).path("UserPoolClient").path("ClientId").asText();
+        cognitoAction("AdminCreateUser", """
+                { "UserPoolId": "%s", "Username": "erin",
+                  "UserAttributes": [{ "Name": "email", "Value": "erin@example.com" }] }
+                """.formatted(userAuthPoolId))
+                .then().statusCode(200);
+        cognitoAction("AdminSetUserPassword", """
+                { "UserPoolId": "%s", "Username": "erin", "Password": "Erin1234!", "Permanent": true }
+                """.formatted(userAuthPoolId))
+                .then().statusCode(200);
+
+        JsonNode challenge = cognitoJson("InitiateAuth", """
+                {
+                  "ClientId": "%s",
+                  "AuthFlow": "USER_AUTH",
+                  "AuthParameters": { "USERNAME": "erin", "PREFERRED_CHALLENGE": "PASSWORD" }
+                }
+                """.formatted(userAuthClientId));
+        assertEquals("PASSWORD", challenge.path("ChallengeName").asText());
+        String session = challenge.path("Session").asText();
+
+        JsonNode result = cognitoJson("RespondToAuthChallenge", """
+                {
+                  "ClientId": "%s",
+                  "ChallengeName": "PASSWORD",
+                  "Session": "%s",
+                  "ChallengeResponses": { "USERNAME": "erin", "PASSWORD": "Erin1234!" }
+                }
+                """.formatted(userAuthClientId, session));
+
+        assertFalse(result.path("AuthenticationResult").path("AccessToken").asText().isBlank(),
+                "responding to the PASSWORD challenge with the right password should issue tokens");
+    }
+
+    @Test
+    @Order(107)
+    void initiateAuthWithUserAuthRejectsALiteTierPoolOverTheWire() throws Exception {
+        String liteTierPoolId = cognitoJson("CreateUserPool", """
+                { "PoolName": "UserAuthLiteTierPool", "UserPoolTier": "LITE" }
+                """).path("UserPool").path("Id").asText();
+        String liteTierClientId = cognitoJson("CreateUserPoolClient", """
+                { "UserPoolId": "%s", "ClientName": "user-auth-client" }
+                """.formatted(liteTierPoolId)).path("UserPoolClient").path("ClientId").asText();
+        cognitoAction("AdminCreateUser", """
+                { "UserPoolId": "%s", "Username": "finn",
+                  "UserAttributes": [{ "Name": "email", "Value": "finn@example.com" }] }
+                """.formatted(liteTierPoolId))
+                .then().statusCode(200);
+        cognitoAction("AdminSetUserPassword", """
+                { "UserPoolId": "%s", "Username": "finn", "Password": "Finn1234!", "Permanent": true }
+                """.formatted(liteTierPoolId))
+                .then().statusCode(200);
+
+        cognitoAction("InitiateAuth", """
+                {
+                  "ClientId": "%s",
+                  "AuthFlow": "USER_AUTH",
+                  "AuthParameters": { "USERNAME": "finn" }
+                }
+                """.formatted(liteTierClientId))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterException"));
     }
 
     private static JsonNode decodeJwtPayload(String token) throws Exception {
