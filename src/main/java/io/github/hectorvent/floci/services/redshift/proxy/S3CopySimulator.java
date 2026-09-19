@@ -536,7 +536,8 @@ public final class S3CopySimulator {
     }
 
     private static String unquoteIdentifier(String identifier) {
-        if (identifier != null && identifier.length() >= 2 && identifier.startsWith("\"") && identifier.endsWith("\"")) {
+        if (identifier != null && identifier.length() >= 2
+                && identifier.startsWith("\"") && identifier.endsWith("\"")) {
             return identifier.substring(1, identifier.length() - 1).replace("\"\"", "\"");
         }
         return identifier;
