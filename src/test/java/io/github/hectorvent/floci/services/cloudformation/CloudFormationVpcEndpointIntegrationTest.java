@@ -91,4 +91,80 @@ class CloudFormationVpcEndpointIntegrationTest {
             .extract().asString();
         org.junit.jupiter.api.Assertions.assertFalse(endpointsAfterDelete.contains(endpointId));
     }
+
+    @Test
+    void createStackPublishesTheDnsEntriesAttribute() {
+        String stackName = "cfn-vpce-dns-" + Long.toString(System.nanoTime(), 36);
+
+        String template = """
+                {
+                  "Resources": {
+                    "Vpc": {"Type": "AWS::EC2::VPC", "Properties": {"CidrBlock": "10.62.0.0/16"}},
+                    "Subnet": {
+                      "Type": "AWS::EC2::Subnet",
+                      "Properties": {
+                        "VpcId": {"Ref": "Vpc"},
+                        "CidrBlock": "10.62.1.0/24",
+                        "AvailabilityZone": "us-east-1a"
+                      }
+                    },
+                    "Endpoint": {
+                      "Type": "AWS::EC2::VPCEndpoint",
+                      "Properties": {
+                        "VpcId": {"Ref": "Vpc"},
+                        "ServiceName": "com.amazonaws.us-east-1.ecr.api",
+                        "VpcEndpointType": "Interface",
+                        "SubnetIds": [{"Ref": "Subnet"}]
+                      }
+                    }
+                  },
+                  "Outputs": {
+                    "Entries": {"Value": {"Fn::GetAtt": ["Endpoint", "DnsEntries"]}}
+                  }
+                }
+                """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String stackDescription = given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+
+        String entries = XmlParser.extractFirst(stackDescription, "OutputValue", null);
+        org.junit.jupiter.api.Assertions.assertNotNull(entries);
+        String[] pairs = entries.split(",");
+        org.junit.jupiter.api.Assertions.assertEquals(3, pairs.length,
+                "regional, one zone, then private DNS, got " + entries);
+        org.junit.jupiter.api.Assertions.assertTrue(
+                pairs[0].matches("Z[0-9A-Z]+:vpce-[0-9a-f]+-[0-9a-f]+\\.api\\.ecr\\.us-east-1\\.vpce\\.amazonaws\\.com"),
+                "first entry should be hostedZoneId:regionalName, got " + pairs[0]);
+        org.junit.jupiter.api.Assertions.assertTrue(pairs[1].contains("-us-east-1a."),
+                "second entry should be the zonal name, got " + pairs[1]);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
 }

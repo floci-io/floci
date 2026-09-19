@@ -3997,7 +3997,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         String region = endpoint.getRegion();
         String serviceToken = endpointServiceToken(endpoint.getServiceName(), region);
         String name = endpoint.getVpcEndpointId() + "-" + endpointDnsDiscriminator(endpoint.getVpcEndpointId());
-        String domain = serviceToken + "." + region + ".vpce.amazonaws.com";
+        String dnsSuffix = AwsRegions.dnsSuffixFor(region);
+        String domain = serviceToken + "." + region + ".vpce." + dnsSuffix;
         String hostedZoneId = vpceHostedZoneId(region);
 
         List<VpcEndpointDnsEntry> entries = new ArrayList<>();
@@ -4011,7 +4012,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 .sorted()
                 .forEach(az -> entries.add(new VpcEndpointDnsEntry(name + "-" + az + "." + domain, hostedZoneId)));
         if (endpoint.isPrivateDnsEnabled() && !serviceToken.startsWith("vpce-svc-")) {
-            entries.add(new VpcEndpointDnsEntry(serviceToken + "." + region + ".amazonaws.com",
+            entries.add(new VpcEndpointDnsEntry(serviceToken + "." + region + "." + dnsSuffix,
                     privateDnsHostedZoneId(endpoint.getVpcEndpointId())));
         }
         return entries;

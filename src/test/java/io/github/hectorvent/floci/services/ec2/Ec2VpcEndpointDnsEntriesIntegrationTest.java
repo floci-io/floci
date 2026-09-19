@@ -11,6 +11,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.endsWith;
+import static org.hamcrest.Matchers.everyItem;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -33,12 +34,19 @@ class Ec2VpcEndpointDnsEntriesIntegrationTest {
     private static final String AUTH_HEADER =
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/ec2/aws4_request";
 
+    private static final String CN_AUTH_HEADER =
+            "AWS4-HMAC-SHA256 Credential=test/20260205/cn-north-1/ec2/aws4_request";
+
     private static final String ENTRIES =
             "DescribeVpcEndpointsResponse.vpcEndpointSet.item.dnsEntrySet.item";
 
     private String ec2Value(String action, String element, String... formParams) {
+        return ec2ValueWithHeader(AUTH_HEADER, action, element, formParams);
+    }
+
+    private String ec2ValueWithHeader(String authHeader, String action, String element, String... formParams) {
         RequestSpecification req = given().formParam("Action", action)
-                .header("Authorization", AUTH_HEADER);
+                .header("Authorization", authHeader);
         for (int i = 0; i < formParams.length; i += 2) {
             req = req.formParam(formParams[i], formParams[i + 1]);
         }
@@ -112,6 +120,29 @@ class Ec2VpcEndpointDnsEntriesIntegrationTest {
         assertThat(names.get(0), endsWith(".vpce-svc-0123456789abcdef0.us-east-1.vpce.amazonaws.com"));
         assertThat(names.get(1),
                 endsWith("-us-east-1a.vpce-svc-0123456789abcdef0.us-east-1.vpce.amazonaws.com"));
+    }
+
+    @Test
+    void aChinaRegionEndpointUsesItsPartitionDnsSuffix() {
+        String vpcId = ec2ValueWithHeader(CN_AUTH_HEADER, "CreateVpc", "CreateVpcResponse.vpc.vpcId",
+                "CidrBlock", "10.95.0.0/16");
+        String subnetId = ec2ValueWithHeader(CN_AUTH_HEADER, "CreateSubnet", "CreateSubnetResponse.subnet.subnetId",
+                "VpcId", vpcId, "CidrBlock", "10.95.1.0/24", "AvailabilityZone", "cn-north-1a");
+
+        List<String> names = given()
+            .formParam("Action", "CreateVpcEndpoint")
+            .formParam("VpcId", vpcId)
+            .formParam("ServiceName", "com.amazonaws.cn-north-1.monitoring")
+            .formParam("VpcEndpointType", "Interface")
+            .formParam("SubnetId.1", subnetId)
+            .header("Authorization", CN_AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().xmlPath()
+            .getList("CreateVpcEndpointResponse.vpcEndpoint.dnsEntrySet.item.dnsName", String.class);
+
+        assertEquals(3, names.size(), "regional, one zone, then private DNS, got " + names);
+        assertThat(names, everyItem(endsWith(".amazonaws.com.cn")));
     }
 
     @Test
