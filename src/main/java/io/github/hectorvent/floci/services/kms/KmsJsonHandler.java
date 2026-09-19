@@ -44,9 +44,20 @@ public class KmsJsonHandler {
             "DisableKeyRotation", "EnableKey", "DisableKey", "RotateKeyOnDemand", "GetParametersForImport",
             "ImportKeyMaterial", "DeleteImportedKeyMaterial");
 
+    private static final Set<String> KEY_ONLY_OPERATIONS = Set.of(
+            "CreateGrant", "ListGrants", "RevokeGrant", "ScheduleKeyDeletion", "CancelKeyDeletion", "TagResource",
+            "UntagResource", "ListResourceTags", "GetKeyPolicy", "PutKeyPolicy", "ListKeyPolicies",
+            "UpdateKeyDescription", "GetKeyRotationStatus", "EnableKeyRotation", "DisableKeyRotation", "EnableKey",
+            "DisableKey", "RotateKeyOnDemand", "GetParametersForImport", "ImportKeyMaterial",
+            "DeleteImportedKeyMaterial");
+
     public Response handle(String action, JsonNode request, String region) {
         if (KEY_ID_OPERATIONS.contains(action)) {
             validateKeyIdMember(request, "KeyId");
+            String keyId = request.path("KeyId").asText();
+            if (KEY_ONLY_OPERATIONS.contains(action) && (keyId.startsWith("alias/") || keyId.contains(":alias/"))) {
+                throw new AwsException("InvalidArnException", "Key Aliases are not supported for this operation.", 400);
+            }
         } else if ("ReEncrypt".equals(action)) {
             validateKeyIdMember(request, "DestinationKeyId");
         } else if ("CreateAlias".equals(action) || "UpdateAlias".equals(action)) {

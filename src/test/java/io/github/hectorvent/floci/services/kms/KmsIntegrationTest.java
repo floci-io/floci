@@ -2080,6 +2080,26 @@ class KmsIntegrationTest {
                 .body("message", equalTo("1 validation error detected: " + error));
     }
 
+    @ParameterizedTest
+    @CsvSource({
+            "ScheduleKeyDeletion", "CancelKeyDeletion", "EnableKey", "DisableKey", "TagResource", "UntagResource",
+            "ListResourceTags", "UpdateKeyDescription", "GetKeyPolicy", "PutKeyPolicy", "ListKeyPolicies",
+            "GetKeyRotationStatus", "EnableKeyRotation", "DisableKeyRotation", "RotateKeyOnDemand", "CreateGrant",
+            "ListGrants", "RevokeGrant", "GetParametersForImport", "ImportKeyMaterial", "DeleteImportedKeyMaterial",
+    })
+    void keyOnlyOperationsRejectAnAliasBeforeLookingItUp(String operation) {
+        String keyArn = createKeyArn("SYMMETRIC_DEFAULT", "ENCRYPT_DECRYPT");
+        String aliasArn = keyArn.substring(0, keyArn.lastIndexOf(':') + 1) + "alias/floci-missing";
+
+        for (String alias : List.of("alias/floci-missing", aliasArn)) {
+            callKms(operation, "{\"KeyId\":\"%s\"}".formatted(alias))
+                    .then()
+                    .statusCode(400)
+                    .body("__type", equalTo("InvalidArnException"))
+                    .body("message", equalTo("Key Aliases are not supported for this operation."));
+        }
+    }
+
     @Test
     void decryptRequiresACiphertextBlob() {
         callKms("Decrypt", "{}")
