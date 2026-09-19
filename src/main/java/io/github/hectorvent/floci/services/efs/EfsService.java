@@ -1,23 +1,24 @@
 package io.github.hectorvent.floci.services.efs;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
-import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.services.efs.model.*;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import io.github.hectorvent.floci.core.common.RegionResolver;
+import org.jboss.logging.Logger;
 
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Date;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
-import java.util.stream.Collectors;
 import java.util.concurrent.ConcurrentHashMap;
-
-import org.jboss.logging.Logger;
+import java.util.stream.Collectors;
 
 @ApplicationScoped
 public class EfsService implements Resettable {
@@ -41,17 +42,17 @@ public class EfsService implements Resettable {
     public EfsService(StorageFactory storageFactory, RegionResolver regionResolver) {
         this.regionResolver = regionResolver;
         this.fileSystemStore = storageFactory.create("efs", "efs-filesystems.json",
-                new com.fasterxml.jackson.core.type.TypeReference<java.util.Map<String, FileSystem>>() {});
+                new TypeReference<Map<String, FileSystem>>() {});
         this.mountTargetStore = storageFactory.create("efs", "efs-mounttargets.json",
-                new com.fasterxml.jackson.core.type.TypeReference<java.util.Map<String, MountTarget>>() {});
+                new TypeReference<Map<String, MountTarget>>() {});
         this.accessPointStore = storageFactory.create("efs", "efs-accesspoints.json",
-                new com.fasterxml.jackson.core.type.TypeReference<java.util.Map<String, AccessPointDescription>>() {});
+                new TypeReference<Map<String, AccessPointDescription>>() {});
         this.fileSystemPolicyStore = storageFactory.create("efs", "efs-policies.json",
-                new com.fasterxml.jackson.core.type.TypeReference<java.util.Map<String, String>>() {});
+                new TypeReference<Map<String, String>>() {});
         this.backupPolicyStore = storageFactory.create("efs", "efs-backuppolicies.json",
-                new com.fasterxml.jackson.core.type.TypeReference<java.util.Map<String, BackupPolicy>>() {});
+                new TypeReference<Map<String, BackupPolicy>>() {});
         this.lifecycleConfigurationStore = storageFactory.create("efs", "efs-lifecycle.json",
-                new com.fasterxml.jackson.core.type.TypeReference<java.util.Map<String, List<LifecyclePolicy>>>() {});
+                new TypeReference<Map<String, List<LifecyclePolicy>>>() {});
     }
 
     @Override

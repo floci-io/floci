@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.efs;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.efs.model.*;
 import jakarta.inject.Inject;
+import jakarta.ws.rs.BeanParam;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.GET;
@@ -11,10 +12,14 @@ import jakarta.ws.rs.PUT;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+
+import java.util.ArrayList;
+import java.util.List;
 
 @Path("/2015-02-01")
 @Produces(MediaType.APPLICATION_JSON)
@@ -42,7 +47,7 @@ public class EfsController {
 
     @GET
     @Path("/file-systems")
-    public Response describeFileSystems(@Context HttpHeaders headers, @jakarta.ws.rs.BeanParam DescribeFileSystemsRequest request) {
+    public Response describeFileSystems(@Context HttpHeaders headers, @BeanParam DescribeFileSystemsRequest request) {
         String region = regionResolver.resolveRegion(headers);
         DescribeFileSystemsResponse response = efsService.describeFileSystems(region, request);
         return Response.ok(response).build();
@@ -84,11 +89,11 @@ public class EfsController {
 
     @GET
     @Path("/tags/{FileSystemId}")
-    public Response describeTags(@Context HttpHeaders headers, @PathParam("FileSystemId") String fileSystemId, @jakarta.ws.rs.BeanParam DescribeTagsRequest request) {
+    public Response describeTags(@Context HttpHeaders headers, @PathParam("FileSystemId") String fileSystemId, @BeanParam DescribeTagsRequest request) {
         String region = regionResolver.resolveRegion(headers);
         FileSystem fs = efsService.getFileSystem(region, fileSystemId);
         
-        java.util.List<Tag> tags = fs.getTags() != null ? fs.getTags() : new java.util.ArrayList<>();
+        List<Tag> tags = fs.getTags() != null ? fs.getTags() : new ArrayList<>();
         int maxItems = request.getMaxItems() != null ? request.getMaxItems() : 100;
         int startIndex = 0;
         if (request.getMarker() != null && !request.getMarker().isEmpty()) {
@@ -100,7 +105,7 @@ public class EfsController {
             }
         }
         
-        java.util.List<Tag> paginated = new java.util.ArrayList<>();
+        List<Tag> paginated = new ArrayList<>();
         String nextMarker = null;
         for (int i = startIndex; i < tags.size(); i++) {
             if (paginated.size() >= maxItems) {
@@ -136,7 +141,7 @@ public class EfsController {
 
     @DELETE
     @Path("/resource-tags/{ResourceId}")
-    public Response untagResource(@Context HttpHeaders headers, @PathParam("ResourceId") String resourceId, @jakarta.ws.rs.BeanParam UntagResourceRequest request) {
+    public Response untagResource(@Context HttpHeaders headers, @PathParam("ResourceId") String resourceId, @BeanParam UntagResourceRequest request) {
         String region = regionResolver.resolveRegion(headers);
         efsService.untagResource(region, resourceId, request.getTagKeys());
         return Response.ok().build();
@@ -161,7 +166,7 @@ public class EfsController {
 
     @GET
     @Path("/mount-targets")
-    public Response describeMountTargets(@Context HttpHeaders headers, @jakarta.ws.rs.BeanParam DescribeMountTargetsRequest request) {
+    public Response describeMountTargets(@Context HttpHeaders headers, @BeanParam DescribeMountTargetsRequest request) {
         String region = regionResolver.resolveRegion(headers);
         DescribeMountTargetsResponse response = efsService.describeMountTargets(region, request);
         return Response.ok(response).build();
@@ -202,7 +207,7 @@ public class EfsController {
 
     @GET
     @Path("/access-points")
-    public Response describeAccessPoints(@Context HttpHeaders headers, @jakarta.ws.rs.QueryParam("FileSystemId") String fileSystemId, @jakarta.ws.rs.QueryParam("AccessPointId") String accessPointId) {
+    public Response describeAccessPoints(@Context HttpHeaders headers, @QueryParam("FileSystemId") String fileSystemId, @QueryParam("AccessPointId") String accessPointId) {
         String region = regionResolver.resolveRegion(headers);
         DescribeAccessPointsResponse res = new DescribeAccessPointsResponse();
         res.setAccessPoints(efsService.describeAccessPoints(region, fileSystemId, accessPointId));
