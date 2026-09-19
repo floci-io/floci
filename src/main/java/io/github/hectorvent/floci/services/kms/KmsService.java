@@ -1144,12 +1144,8 @@ public class KmsService implements ResourceProvider {
     private static final int AES_KEY_BYTES = KmsKeySpec.SYMMETRIC_DEFAULT.materialByteLength();
     private static final String BLOB_PREFIX_V2 = "kms:v2:";
     private static final String BLOB_PREFIX_V1 = "kms:";
-    private static final int MIN_MAC_MESSAGE_BYTES = 1;
-    private static final int MAX_MAC_MESSAGE_BYTES = 4096;
-    private static final int MIN_ENCRYPT_PLAINTEXT_BYTES = 1;
-    private static final int MAX_ENCRYPT_PLAINTEXT_BYTES = 4096;
-    private static final int MIN_MAC_BYTES = 1;
-    private static final int MAX_MAC_BYTES = 6144;
+    static final int MAX_PLAINTEXT_BYTES = 4096;
+    static final int MAX_CIPHERTEXT_BYTES = 6144;
     private static final SecureRandom SECURE_RANDOM = new SecureRandom();
 
     public byte[] encrypt(String keyId, byte[] plaintext, String region) {
@@ -1168,7 +1164,7 @@ public class KmsService implements ResourceProvider {
     private EncryptResult encrypt(String keyId, byte[] plaintext, Map<String, String> encryptionContext,
                                   String encryptionAlgorithm, String region, String operation) {
         KmsKeySpec.Algorithm algorithm = resolveEncryptionAlgorithm(encryptionAlgorithm);
-        validatePlaintextLength(plaintext, operation);
+        validateBlobLength("plaintext", plaintext, MAX_PLAINTEXT_BYTES);
         KmsKey kmsKey = resolveKey(keyId, region);
         validateKeyUsage(kmsKey, KmsKeyUsage.ENCRYPT_DECRYPT, operation);
         validateKeyIsUsableForCryptoOperations(kmsKey);
@@ -1568,11 +1564,15 @@ public class KmsService implements ResourceProvider {
         }
     }
 
-    private static void validatePlaintextLength(byte[] plaintext, String operation) {
-        int length = plaintext == null ? 0 : plaintext.length;
-        if (length < MIN_ENCRYPT_PLAINTEXT_BYTES || length > MAX_ENCRYPT_PLAINTEXT_BYTES) {
-            throw new AwsException("ValidationException",
-                    "Plaintext must be between 1 and 4096 bytes for " + operation + ".", 400);
+    static void validateBlobLength(String member, byte[] value, int max) {
+        int length = value == null ? 0 : value.length;
+        if (length < 1) {
+            throw new AwsException("ValidationException", "1 validation error detected: Value at '" + member
+                    + "' failed to satisfy constraint: Member must have length greater than or equal to 1", 400);
+        }
+        if (max < length) {
+            throw new AwsException("ValidationException", "1 validation error detected: Value at '" + member
+                    + "' failed to satisfy constraint: Member must have length less than or equal to " + max, 400);
         }
     }
 
@@ -1689,7 +1689,7 @@ public class KmsService implements ResourceProvider {
     }
 
     private byte[] generateMac(KmsKey kmsKey, byte[] message, String algorithm) {
-        validateMacMessageLength(message);
+        validateBlobLength("message", message, MAX_PLAINTEXT_BYTES);
 
         try {
             return keyTypes.of(kmsKey.getKeySpec()).generateMac(kmsKey, message, algorithm);
@@ -1701,13 +1701,13 @@ public class KmsService implements ResourceProvider {
     }
 
     public void verifyMac(String keyId, byte[] message, byte[] mac, String algorithm, String region) {
-        validateMacLength(mac);
+        validateBlobLength("mac", mac, MAX_CIPHERTEXT_BYTES);
         KmsKey kmsKey = validateMacOperationKey(keyId, algorithm, "VerifyMac", region);
         verifyMac(kmsKey, message, mac, algorithm);
     }
 
     public VerifyMacResult verifyMacAndResolveKey(String keyId, byte[] message, byte[] mac, String algorithm, String region) {
-        validateMacLength(mac);
+        validateBlobLength("mac", mac, MAX_CIPHERTEXT_BYTES);
         KmsKey kmsKey = validateMacOperationKey(keyId, algorithm, "VerifyMac", region);
         verifyMac(kmsKey, message, mac, algorithm);
         return new VerifyMacResult(kmsKey.getArn());
@@ -1729,21 +1729,6 @@ public class KmsService implements ResourceProvider {
         return kmsKey;
     }
 
-    private static void validateMacMessageLength(byte[] message) {
-        int length = message == null ? 0 : message.length;
-        if (length < MIN_MAC_MESSAGE_BYTES || length > MAX_MAC_MESSAGE_BYTES) {
-            throw new AwsException("ValidationException",
-                    "Message must be between 1 and 4096 bytes for MAC operations.", 400);
-        }
-    }
-
-    private static void validateMacLength(byte[] mac) {
-        int length = mac == null ? 0 : mac.length;
-        if (length < MIN_MAC_BYTES || length > MAX_MAC_BYTES) {
-            throw new AwsException("ValidationException",
-                    "Mac must be between 1 and 6144 bytes for VerifyMac.", 400);
-        }
-    }
 
     public Map<String, Object> generateDataKey(String keyId, String keySpec, Integer numberOfBytes, String region) {
         return generateDataKey(keyId, keySpec, numberOfBytes, Map.of(), region);

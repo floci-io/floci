@@ -266,7 +266,7 @@ public class KmsJsonHandler {
 
     private Response handleEncrypt(JsonNode request, String region) {
         String keyId = request.path("KeyId").asText();
-        byte[] plaintext = decodeBlob(request, "Plaintext");
+        byte[] plaintext = requireSizedBlob(request, "Plaintext", true, KmsService.MAX_PLAINTEXT_BYTES);
         Map<String, String> context = readEncryptionContext(request.path("EncryptionContext"));
         String algorithm = request.path("EncryptionAlgorithm").asText(null);
 
@@ -280,7 +280,7 @@ public class KmsJsonHandler {
     }
 
     private Response handleDecrypt(JsonNode request, String region) {
-        byte[] ciphertext = decodeBlob(request, "CiphertextBlob");
+        byte[] ciphertext = requireSizedBlob(request, "CiphertextBlob", false, KmsService.MAX_CIPHERTEXT_BYTES);
         Map<String, String> context = readEncryptionContext(request.path("EncryptionContext"));
         String requestKeyId = request.path("KeyId").asText(null);
         String algorithm = request.path("EncryptionAlgorithm").asText(null);
@@ -326,7 +326,7 @@ public class KmsJsonHandler {
     }
 
     private Response handleReEncrypt(JsonNode request, String region) {
-        byte[] ciphertext = decodeBlob(request, "CiphertextBlob");
+        byte[] ciphertext = requireSizedBlob(request, "CiphertextBlob", false, KmsService.MAX_CIPHERTEXT_BYTES);
         String destKeyId = request.path("DestinationKeyId").asText();
         Map<String, String> sourceContext = readEncryptionContext(request.path("SourceEncryptionContext"));
         Map<String, String> destContext = readEncryptionContext(request.path("DestinationEncryptionContext"));
@@ -359,7 +359,7 @@ public class KmsJsonHandler {
 
     private Response handleSign(JsonNode request, String region) {
         String keyId = request.path("KeyId").asText();
-        byte[] message = decodeBlob(request, "Message");
+        byte[] message = requireSizedBlob(request, "Message", true, KmsService.MAX_PLAINTEXT_BYTES);
         String algorithm = request.path("SigningAlgorithm").asText(null);
         KmsMessageType messageType = KmsMessageType.fromString(request.path("MessageType").asText("RAW"));
 
@@ -374,8 +374,8 @@ public class KmsJsonHandler {
 
     private Response handleVerify(JsonNode request, String region) {
         String keyId = request.path("KeyId").asText();
-        byte[] message = decodeBlob(request, "Message");
-        byte[] signature = decodeBlob(request, "Signature");
+        byte[] signature = requireSizedBlob(request, "Signature", false, KmsService.MAX_CIPHERTEXT_BYTES);
+        byte[] message = requireSizedBlob(request, "Message", true, KmsService.MAX_PLAINTEXT_BYTES);
         String algorithm = request.path("SigningAlgorithm").asText(null);
         KmsMessageType messageType = KmsMessageType.fromString(request.path("MessageType").asText("RAW"));
 
@@ -390,7 +390,7 @@ public class KmsJsonHandler {
 
     private Response handleGenerateMac(JsonNode request, String region) {
         String keyId = request.path("KeyId").asText();
-        byte[] message = decodeBlob(request, "Message");
+        byte[] message = requireSizedBlob(request, "Message", true, KmsService.MAX_PLAINTEXT_BYTES);
         String algorithm = request.path("MacAlgorithm").asText(null);
 
         KmsService.GenerateMacResult result = service.generateMacAndResolveKey(keyId, message, algorithm, region);
@@ -404,8 +404,8 @@ public class KmsJsonHandler {
 
     private Response handleVerifyMac(JsonNode request, String region) {
         String keyId = request.path("KeyId").asText();
-        byte[] message = decodeBlob(request, "Message");
-        byte[] mac = decodeBlob(request, "Mac");
+        byte[] mac = requireSizedBlob(request, "Mac", false, KmsService.MAX_CIPHERTEXT_BYTES);
+        byte[] message = requireSizedBlob(request, "Message", true, KmsService.MAX_PLAINTEXT_BYTES);
         String algorithm = request.path("MacAlgorithm").asText(null);
 
         KmsService.VerifyMacResult result = service.verifyMacAndResolveKey(keyId, message, mac, algorithm, region);
@@ -688,6 +688,19 @@ public class KmsJsonHandler {
         if (!keyId.chars().allMatch(c -> c < 128)) {
             throw new AwsException("ValidationException", "1 validation error detected: " + pattern, 400);
         }
+    }
+
+    // KMS hides the value of a sensitive member, even when it is null.
+    private static byte[] requireSizedBlob(JsonNode request, String member, boolean sensitive, int max) {
+        String name = Character.toLowerCase(member.charAt(0)) + member.substring(1);
+        JsonNode value = request.path(member);
+        if (value.isMissingNode() || value.isNull()) {
+            throw new AwsException("ValidationException", "1 validation error detected: Value " + (sensitive ? "" : "null ")
+                    + "at '" + name + "' failed to satisfy constraint: Member must not be null", 400);
+        }
+        byte[] blob = decodeBlob(request, member);
+        KmsService.validateBlobLength(name, blob, max);
+        return blob;
     }
 
     private static String requireKeyId(JsonNode request) {

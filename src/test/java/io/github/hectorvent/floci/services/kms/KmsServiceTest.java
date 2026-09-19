@@ -1168,7 +1168,8 @@ class KmsServiceTest {
                     kmsService.encrypt(key.getKeyId(), new byte[0], Map.of(), "RSAES_OAEP_SHA_256", REGION));
 
             assertEquals("ValidationException", ex.getErrorCode());
-            assertEquals("Plaintext must be between 1 and 4096 bytes for Encrypt.", ex.getMessage());
+            assertEquals("1 validation error detected: Value at 'plaintext' failed to satisfy constraint: "
+                    + "Member must have length greater than or equal to 1", ex.getMessage());
         }
 
         @Test

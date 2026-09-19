@@ -2042,6 +2042,55 @@ class KmsIntegrationTest {
     }
 
     @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "Encrypt|\"Plaintext\":\"\"|Value at 'plaintext' failed to satisfy constraint: Member must have length greater than or equal to 1",
+            "Encrypt|\"Plaintext\":\"{4097}\"|Value at 'plaintext' failed to satisfy constraint: Member must have length less than or equal to 4096",
+            "Encrypt||Value at 'plaintext' failed to satisfy constraint: Member must not be null",
+            "Sign|\"Message\":\"\",\"SigningAlgorithm\":\"ECDSA_SHA_256\"|Value at 'message' failed to satisfy constraint: Member must have length greater than or equal to 1",
+            "Sign|\"Message\":\"{4097}\",\"SigningAlgorithm\":\"ECDSA_SHA_256\"|Value at 'message' failed to satisfy constraint: Member must have length less than or equal to 4096",
+            "Sign|\"SigningAlgorithm\":\"ECDSA_SHA_256\"|Value at 'message' failed to satisfy constraint: Member must not be null",
+            "Verify|\"Message\":\"bWVzc2FnZQ==\",\"Signature\":\"\",\"SigningAlgorithm\":\"ECDSA_SHA_256\"|Value at 'signature' failed to satisfy constraint: Member must have length greater than or equal to 1",
+            "Verify|\"Message\":\"bWVzc2FnZQ==\",\"Signature\":\"{6145}\",\"SigningAlgorithm\":\"ECDSA_SHA_256\"|Value at 'signature' failed to satisfy constraint: Member must have length less than or equal to 6144",
+            "Verify|\"Message\":\"bWVzc2FnZQ==\",\"SigningAlgorithm\":\"ECDSA_SHA_256\"|Value null at 'signature' failed to satisfy constraint: Member must not be null",
+            "Verify|\"Message\":\"{4097}\",\"Signature\":\"AAAA\",\"SigningAlgorithm\":\"ECDSA_SHA_256\"|Value at 'message' failed to satisfy constraint: Member must have length less than or equal to 4096",
+            "Verify|\"Signature\":\"AAAA\",\"SigningAlgorithm\":\"ECDSA_SHA_256\"|Value at 'message' failed to satisfy constraint: Member must not be null",
+            "GenerateMac|\"Message\":\"\",\"MacAlgorithm\":\"HMAC_SHA_256\"|Value at 'message' failed to satisfy constraint: Member must have length greater than or equal to 1",
+            "GenerateMac|\"Message\":\"{4097}\",\"MacAlgorithm\":\"HMAC_SHA_256\"|Value at 'message' failed to satisfy constraint: Member must have length less than or equal to 4096",
+            "GenerateMac|\"MacAlgorithm\":\"HMAC_SHA_256\"|Value at 'message' failed to satisfy constraint: Member must not be null",
+            "VerifyMac|\"Message\":\"bWVzc2FnZQ==\",\"Mac\":\"\",\"MacAlgorithm\":\"HMAC_SHA_256\"|Value at 'mac' failed to satisfy constraint: Member must have length greater than or equal to 1",
+            "VerifyMac|\"Message\":\"bWVzc2FnZQ==\",\"Mac\":\"{6145}\",\"MacAlgorithm\":\"HMAC_SHA_256\"|Value at 'mac' failed to satisfy constraint: Member must have length less than or equal to 6144",
+            "VerifyMac|\"Message\":\"bWVzc2FnZQ==\",\"MacAlgorithm\":\"HMAC_SHA_256\"|Value null at 'mac' failed to satisfy constraint: Member must not be null",
+            "VerifyMac|\"Message\":\"\",\"Mac\":\"AAAA\",\"MacAlgorithm\":\"HMAC_SHA_256\"|Value at 'message' failed to satisfy constraint: Member must have length greater than or equal to 1",
+            "VerifyMac|\"Mac\":\"AAAA\",\"MacAlgorithm\":\"HMAC_SHA_256\"|Value at 'message' failed to satisfy constraint: Member must not be null",
+            "Decrypt|\"CiphertextBlob\":\"\"|Value at 'ciphertextBlob' failed to satisfy constraint: Member must have length greater than or equal to 1",
+            "Decrypt|\"CiphertextBlob\":\"{6145}\"|Value at 'ciphertextBlob' failed to satisfy constraint: Member must have length less than or equal to 6144",
+            "ReEncrypt|\"DestinationKeyId\":\"alias/floci-missing\",\"CiphertextBlob\":\"\"|Value at 'ciphertextBlob' failed to satisfy constraint: Member must have length greater than or equal to 1",
+            "ReEncrypt|\"DestinationKeyId\":\"alias/floci-missing\"|Value null at 'ciphertextBlob' failed to satisfy constraint: Member must not be null",
+    })
+    void blobMembersAreValidatedBeforeTheKeyIsLookedUp(String operation, String members, String error) {
+        String blobs = members == null ? "" : members
+                .replace("{4097}", Base64.getEncoder().encodeToString(new byte[4097]))
+                .replace("{6145}", Base64.getEncoder().encodeToString(new byte[6145]));
+        String body = "{\"KeyId\":\"00000000-0000-0000-0000-000000000000\"" + (blobs.isEmpty() ? "" : "," + blobs) + "}";
+
+        callKms(operation, body)
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("1 validation error detected: " + error));
+    }
+
+    @Test
+    void decryptRequiresACiphertextBlob() {
+        callKms("Decrypt", "{}")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("1 validation error detected: Value null at 'ciphertextBlob' failed to satisfy "
+                        + "constraint: Member must not be null"));
+    }
+
+    @ParameterizedTest
     @CsvSource({"key/", "alias/floci-missing"})
     void describeKeyRejectsAnArnFromAnotherRegion(String resource) {
         String keyArn = createKeyArn("SYMMETRIC_DEFAULT", "ENCRYPT_DECRYPT");
