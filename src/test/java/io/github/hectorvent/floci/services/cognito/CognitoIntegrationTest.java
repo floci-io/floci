@@ -80,7 +80,8 @@ class CognitoIntegrationTest {
         JsonNode clientResponse = cognitoJson("CreateUserPoolClient", """
                 {
                   "UserPoolId": "%s",
-                  "ClientName": "jwt-client"
+                  "ClientName": "jwt-client",
+                  "ExplicitAuthFlows": ["ALLOW_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"]
                 }
                 """.formatted(poolId));
         clientId = clientResponse.path("UserPoolClient").path("ClientId").asText();
@@ -257,7 +258,8 @@ class CognitoIntegrationTest {
         JsonNode clientResponse = cognitoJson("CreateUserPoolClient", """
                 {
                   "UserPoolId": "%s",
-                  "ClientName": "forgot-password-client"
+                  "ClientName": "forgot-password-client",
+                  "ExplicitAuthFlows": ["ALLOW_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"]
                 }
                 """.formatted(forgotPasswordPoolId));
         String forgotPasswordClientId = clientResponse.path("UserPoolClient").path("ClientId").asText();
@@ -326,7 +328,8 @@ class CognitoIntegrationTest {
         Response clientResponse = cognitoAction("CreateUserPoolClient", """
                 {
                   "UserPoolId": "%s",
-                  "ClientName": "signup-phone-preferred-client"
+                  "ClientName": "signup-phone-preferred-client",
+                  "ExplicitAuthFlows": ["ALLOW_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"]
                 }
                 """.formatted(userPoolId));
 
@@ -378,7 +381,8 @@ class CognitoIntegrationTest {
         JsonNode clientResponse = cognitoJson("CreateUserPoolClient", """
                 {
                   "UserPoolId": "%s",
-                  "ClientName": "strict-password-policy-client"
+                  "ClientName": "strict-password-policy-client",
+                  "ExplicitAuthFlows": ["ALLOW_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"]
                 }
                 """.formatted(strictPoolId));
         String strictClientId = clientResponse.path("UserPoolClient").path("ClientId").asText();
@@ -421,7 +425,8 @@ class CognitoIntegrationTest {
         JsonNode clientResponse = cognitoJson("CreateUserPoolClient", """
                 {
                   "UserPoolId": "%s",
-                  "ClientName": "confirm-sign-up-client"
+                  "ClientName": "confirm-sign-up-client",
+                  "ExplicitAuthFlows": ["ALLOW_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"]
                 }
                 """.formatted(signUpPoolId));
         String signUpClientId = clientResponse.path("UserPoolClient").path("ClientId").asText();
@@ -485,7 +490,8 @@ class CognitoIntegrationTest {
         JsonNode clientResponse = cognitoJson("CreateUserPoolClient", """
                 {
                   "UserPoolId": "%s",
-                  "ClientName": "confirm-sign-up-success-client"
+                  "ClientName": "confirm-sign-up-success-client",
+                  "ExplicitAuthFlows": ["ALLOW_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"]
                 }
                 """.formatted(signUpPoolId));
         String signUpClientId = clientResponse.path("UserPoolClient").path("ClientId").asText();
@@ -540,7 +546,8 @@ class CognitoIntegrationTest {
         JsonNode clientResponse = cognitoJson("CreateUserPoolClient", """
                 {
                   "UserPoolId": "%s",
-                  "ClientName": "resend-confirmation-code-client"
+                  "ClientName": "resend-confirmation-code-client",
+                  "ExplicitAuthFlows": ["ALLOW_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"]
                 }
                 """.formatted(resendPoolId));
         String resendClientId = clientResponse.path("UserPoolClient").path("ClientId").asText();
@@ -624,7 +631,8 @@ class CognitoIntegrationTest {
         JsonNode clientResponse = cognitoJson("CreateUserPoolClient", """
                 {
                   "UserPoolId": "%s",
-                  "ClientName": "forgot-password-client"
+                  "ClientName": "forgot-password-client",
+                  "ExplicitAuthFlows": ["ALLOW_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"]
                 }
                 """.formatted(pool));
         String client = clientResponse.path("UserPoolClient").path("ClientId").asText();
@@ -673,7 +681,8 @@ class CognitoIntegrationTest {
         JsonNode clientResponse = cognitoJson("CreateUserPoolClient", """
                 {
                   "UserPoolId": "%s",
-                  "ClientName": "forgot-password-client"
+                  "ClientName": "forgot-password-client",
+                  "ExplicitAuthFlows": ["ALLOW_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"]
                 }
                 """.formatted(pool));
         String client = clientResponse.path("UserPoolClient").path("ClientId").asText();
@@ -1686,7 +1695,8 @@ class CognitoIntegrationTest {
         JsonNode clientResponse = cognitoJson("CreateUserPoolClient", """
                 {
                   "UserPoolId": "%s",
-                  "ClientName": "admin-confirm-sign-up-client"
+                  "ClientName": "admin-confirm-sign-up-client",
+                  "ExplicitAuthFlows": ["ALLOW_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"]
                 }
                 """.formatted(localPoolId));
         String localClientId = clientResponse.path("UserPoolClient").path("ClientId").asText();
@@ -1927,7 +1937,8 @@ class CognitoIntegrationTest {
         JsonNode clientResponse = cognitoJson("CreateUserPoolClient", """
                 {
                   "UserPoolId": "%s",
-                  "ClientName": "del-client"
+                  "ClientName": "del-client",
+                  "ExplicitAuthFlows": ["ALLOW_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"]
                 }
                 """.formatted(delPoolId));
         String delClientId = clientResponse.path("UserPoolClient").path("ClientId").asText();

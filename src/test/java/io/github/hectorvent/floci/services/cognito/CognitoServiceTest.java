@@ -95,6 +95,12 @@ class CognitoServiceTest {
         return pool;
     }
 
+    private UserPoolClient createClientWithAuthFlows(UserPool pool, List<String> authFlows) {
+        return service.createUserPoolClient(pool.getId(), "c", false, false,
+                List.of(), List.of(), null, List.of(), null, authFlows, null, null, List.of(), null,
+                List.of(), null, List.of(), null, List.of(), null, null);
+    }
+
     private UserPool createPoolWithStrictPasswordPolicy() {
         return service.createUserPool(Map.of(
                 "PoolName", "StrictPasswordPool",
@@ -1902,6 +1908,109 @@ class CognitoServiceTest {
     }
 
     @Test
+    void initiateAuthRejectsUnknownFlowBeforeIssuingTokens() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false,
+                List.of(), List.of());
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.initiateAuth(client.getClientId(), "NOT_A_REAL_FLOW",
+                        Map.of("USERNAME", "alice")));
+
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+    }
+
+    @Test
+    void adminInitiateAuthRejectsUnknownFlowBeforeIssuingTokens() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false,
+                List.of(), List.of());
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.adminInitiateAuth(pool.getId(), client.getClientId(), "NOT_A_REAL_FLOW",
+                        Map.of("USERNAME", "alice"), Map.of()));
+
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+    }
+
+    @Test
+    void adminInitiateAuthSupportsAdminNoSrpAuth() {
+        UserPool pool = createPoolAndUser();
+        service.adminSetUserPassword(pool.getId(), "alice", "Perm1234!", true);
+        UserPoolClient client = createClientWithAuthFlows(pool, List.of("ADMIN_NO_SRP_AUTH"));
+
+        Map<String, Object> result = service.adminInitiateAuth(pool.getId(), client.getClientId(),
+                "ADMIN_NO_SRP_AUTH", Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"), Map.of());
+
+        assertNotNull(result.get("AuthenticationResult"));
+    }
+
+    @Test
+    void omittedExplicitAuthFlowsUseAwsDefaults() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false,
+                List.of(), List.of(), null, List.of(), null, null, null, null, List.of(), null,
+                List.of(), null, List.of(), null, List.of(), null, null);
+
+        assertEquals(List.of("ALLOW_REFRESH_TOKEN_AUTH", "ALLOW_USER_SRP_AUTH", "ALLOW_CUSTOM_AUTH"),
+                client.getExplicitAuthFlows());
+    }
+
+    @Test
+    void omittedExplicitAuthFlowsRejectPasswordAuthentication() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false,
+                List.of(), List.of(), null, List.of(), null, null, null, null, List.of(), null,
+                List.of(), null, List.of(), null, List.of(), null, null);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
+                        Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!")));
+
+        assertEquals("UnsupportedOperationException", ex.getErrorCode());
+    }
+
+    @Test
+    void emptyExplicitAuthFlowsRejectPasswordAuthentication() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false,
+                List.of(), List.of(), null, List.of(), null, List.of(), null, null, List.of(), null,
+                List.of(), null, List.of(), null, List.of(), null, null);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
+                        Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!")));
+
+        assertEquals("UnsupportedOperationException", ex.getErrorCode());
+    }
+
+    @Test
+    void adminNoSrpAuthAcceptsModernReplacementFlow() {
+        UserPool pool = createPoolAndUser();
+        service.adminSetUserPassword(pool.getId(), "alice", "Perm1234!", true);
+        UserPoolClient client = createClientWithAuthFlows(pool, List.of("ALLOW_ADMIN_USER_PASSWORD_AUTH"));
+
+        Map<String, Object> result = service.adminInitiateAuth(pool.getId(), client.getClientId(),
+                "ADMIN_NO_SRP_AUTH", Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"), Map.of());
+
+        assertNotNull(result.get("AuthenticationResult"));
+    }
+
+    @Test
+    void initiateAuthRejectsPasswordFlowDisabledOnClient() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false,
+                List.of(), List.of(), null, List.of(), null, List.of("ALLOW_REFRESH_TOKEN_AUTH"),
+                null, null, List.of(), null, List.of(), null, List.of(), null, List.of(), null, null);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
+                        Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!")));
+
+        assertEquals("UnsupportedOperationException", ex.getErrorCode());
+    }
+
+    @Test
     @SuppressWarnings("unchecked")
     void initiateAuthWorksAfterPasswordIsSet() {
         UserPool pool = service.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
@@ -2448,7 +2557,7 @@ class CognitoServiceTest {
                 null,
                 List.of(),
                 null,
-                List.of(),
+                List.of("ALLOW_REFRESH_TOKEN_AUTH"),
                 null,
                 null,
                 List.of(),

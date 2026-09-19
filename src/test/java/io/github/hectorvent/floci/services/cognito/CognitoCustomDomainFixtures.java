@@ -85,7 +85,8 @@ final class CognitoCustomDomainFixtures {
     /** A public client, a confirmed user and the access token USER_PASSWORD_AUTH issues for it. */
     static String signInNewUser(String poolId) throws Exception {
         String publicClient = cognitoJson("CreateUserPoolClient", """
-                {"UserPoolId": "%s", "ClientName": "routing-user-client"}
+                {"UserPoolId": "%s", "ClientName": "routing-user-client",
+                 "ExplicitAuthFlows": ["ALLOW_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"]}
                 """.formatted(poolId)).path("UserPoolClient").path("ClientId").asText();
         String username = "user-" + System.nanoTime() + "@example.com";
         cognitoAction("AdminCreateUser", """

@@ -249,7 +249,7 @@ public class CognitoJsonHandler {
                         : null,
                 readStringList(request.path("CallbackURLs")),
                 request.path("DefaultRedirectURI").asText(null),
-                readStringList(request.path("ExplicitAuthFlows")),
+                request.has("ExplicitAuthFlows") ? readStringList(request.path("ExplicitAuthFlows")) : null,
                 request.has("AccessTokenValidity") ? request.path("AccessTokenValidity").asInt()
                         : null,
                 request.has("IdTokenValidity") ? request.path("IdTokenValidity").asInt() : null,

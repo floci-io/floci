@@ -83,6 +83,8 @@ import static io.github.hectorvent.floci.core.common.ReservedTags.rejectUnknownR
 
 @ApplicationScoped
 public class CognitoService implements ResourceProvider {
+    private static final List<String> DEFAULT_EXPLICIT_AUTH_FLOWS = List.of(
+            "ALLOW_REFRESH_TOKEN_AUTH", "ALLOW_USER_SRP_AUTH", "ALLOW_CUSTOM_AUTH");
     private static final int DEFAULT_REFRESH_TOKEN_VALIDITY_DAYS = 30;
     private static final String COGNITO_PASSWORD_SYMBOLS =
             "^$*.[]{}()?\"!@#%&/\\,><':;|_~`=+-";
@@ -638,7 +640,9 @@ public class CognitoService implements ResourceProvider {
                                                List<String> allowedOAuthScopes) {
         return createUserPoolClient(userPoolId, clientName, generateSecret,
                 allowedOAuthFlowsUserPoolClient, allowedOAuthFlows, allowedOAuthScopes, null,
-                List.of(), null, List.of(), null, null, List.of(), null, List.of(), null, null,
+                List.of(), null, List.of("ALLOW_USER_PASSWORD_AUTH", "ALLOW_ADMIN_USER_PASSWORD_AUTH",
+                        "ALLOW_REFRESH_TOKEN_AUTH", "ALLOW_USER_SRP_AUTH", "ALLOW_CUSTOM_AUTH"),
+                null, null, List.of(), null, List.of(), null, null,
                 null, List.of(), null, null);
     }
 
@@ -659,7 +663,9 @@ public class CognitoService implements ResourceProvider {
         List<String> normalizedAllowedOAuthScopes = normalizeStringList(allowedOAuthScopes);
         List<String> normalizedCallbackUrls = normalizeStringList(callbackURLs);
         String normalizedDefaultRedirectUri = normalizeOptionalString(defaultRedirectURI);
-        List<String> normalizedExplicitAuthFlows = normalizeStringList(explicitAuthFlows);
+        List<String> normalizedExplicitAuthFlows = explicitAuthFlows == null
+                ? DEFAULT_EXPLICIT_AUTH_FLOWS
+                : normalizeStringList(explicitAuthFlows);
         List<String> normalizedLogoutUrls = normalizeStringList(logoutURLs);
         List<String> normalizedReadAttributes = normalizeStringList(readAttributes);
         List<String> normalizedSupportedIdentityProviders = normalizeStringList(supportedIdentityProviders);
