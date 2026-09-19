@@ -6,6 +6,20 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.glue.GlueClient;
 import software.amazon.awssdk.services.glue.model.BatchCreatePartitionRequest;
+import software.amazon.awssdk.services.glue.model.BatchDeleteConnectionRequest;
+import software.amazon.awssdk.services.glue.model.BatchDeleteConnectionResponse;
+import software.amazon.awssdk.services.glue.model.Connection;
+import software.amazon.awssdk.services.glue.model.ConnectionInput;
+import software.amazon.awssdk.services.glue.model.ConnectionPropertyKey;
+import software.amazon.awssdk.services.glue.model.ConnectionType;
+import software.amazon.awssdk.services.glue.model.CreateConnectionRequest;
+import software.amazon.awssdk.services.glue.model.CreateConnectionResponse;
+import software.amazon.awssdk.services.glue.model.DeleteConnectionRequest;
+import software.amazon.awssdk.services.glue.model.GetConnectionRequest;
+import software.amazon.awssdk.services.glue.model.GetConnectionsFilter;
+import software.amazon.awssdk.services.glue.model.GetConnectionsRequest;
+import software.amazon.awssdk.services.glue.model.PhysicalConnectionRequirements;
+import software.amazon.awssdk.services.glue.model.UpdateConnectionRequest;
 import software.amazon.awssdk.services.glue.model.BatchDeleteTableRequest;
 import software.amazon.awssdk.services.glue.model.BatchGetPartitionRequest;
 import software.amazon.awssdk.services.glue.model.BatchUpdatePartitionRequest;
@@ -54,6 +68,7 @@ import software.amazon.awssdk.services.glue.model.UserDefinedFunctionInput;
 import software.amazon.awssdk.services.resourcegroupstaggingapi.ResourceGroupsTaggingApiClient;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
@@ -69,6 +84,8 @@ class GlueCatalogTest {
     private static final String SECOND_TABLE_NAME = "catalog_table_second";
     private static final String FUNCTION_NAME = "catalog_function";
     private static final String DATABASE_TAGGED_NAME = TestFixtures.uniqueName("catalog_tagged_db");
+    private static final String CONNECTION_NAME = TestFixtures.uniqueName("catalog_connection");
+    private static final String KAFKA_CONNECTION_NAME = TestFixtures.uniqueName("catalog_kafka_connection");
 
     private static GlueClient glue;
     private static ResourceGroupsTaggingApiClient tagging;
@@ -84,6 +101,12 @@ class GlueCatalogTest {
         if (glue == null) {
             return;
         }
+        try {
+            glue.batchDeleteConnection(BatchDeleteConnectionRequest.builder()
+                    .connectionNameList(CONNECTION_NAME, KAFKA_CONNECTION_NAME)
+                    .build());
+        }
+        catch (Exception ignored) {}
         try {
             glue.deleteUserDefinedFunction(DeleteUserDefinedFunctionRequest.builder()
                     .databaseName(DATABASE_NAME)
@@ -529,6 +552,92 @@ class GlueCatalogTest {
                     .containsEntry("Environment", "dev")
                     .containsEntry("Project", "project1");
         });
+    }
+
+    @Test
+    @DisplayName("Connections are created, read with and without the password, redefined and deleted")
+    void connectionLifecycle() {
+        CreateConnectionResponse created = glue.createConnection(CreateConnectionRequest.builder()
+                .connectionInput(ConnectionInput.builder()
+                        .name(CONNECTION_NAME)
+                        .description("orders database")
+                        .connectionType(ConnectionType.JDBC)
+                        .matchCriteria("orders")
+                        .connectionProperties(Map.of(
+                                ConnectionPropertyKey.JDBC_CONNECTION_URL, "jdbc:postgresql://db.internal:5432/orders",
+                                ConnectionPropertyKey.USERNAME, "app",
+                                ConnectionPropertyKey.PASSWORD, "s3cret"))
+                        .physicalConnectionRequirements(PhysicalConnectionRequirements.builder()
+                                .subnetId("subnet-0123456789abcdef0")
+                                .securityGroupIdList("sg-0123456789abcdef0")
+                                .availabilityZone("us-east-1a")
+                                .build())
+                        .build())
+                .tags(Map.of("env", "dev"))
+                .build());
+        assertThat(created.createConnectionStatusAsString()).isEqualTo("READY");
+
+        Connection connection = glue.getConnection(GetConnectionRequest.builder()
+                .name(CONNECTION_NAME)
+                .build()).connection();
+        assertThat(connection.name()).isEqualTo(CONNECTION_NAME);
+        assertThat(connection.connectionType()).isEqualTo(ConnectionType.JDBC);
+        assertThat(connection.description()).isEqualTo("orders database");
+        assertThat(connection.connectionProperties()).containsEntry(ConnectionPropertyKey.PASSWORD, "s3cret");
+        assertThat(connection.physicalConnectionRequirements().subnetId()).isEqualTo("subnet-0123456789abcdef0");
+        assertThat(connection.statusAsString()).isEqualTo("READY");
+        assertThat(connection.connectionSchemaVersion()).isEqualTo(1);
+        assertThat(connection.creationTime()).isNotNull();
+        assertThat(connection.lastUpdatedTime()).isNotNull();
+
+        Connection hidden = glue.getConnection(GetConnectionRequest.builder()
+                .name(CONNECTION_NAME)
+                .hidePassword(true)
+                .build()).connection();
+        assertThat(hidden.connectionProperties()).doesNotContainKey(ConnectionPropertyKey.PASSWORD);
+        assertThat(hidden.connectionProperties()).containsEntry(ConnectionPropertyKey.USERNAME, "app");
+
+        glue.createConnection(CreateConnectionRequest.builder()
+                .connectionInput(ConnectionInput.builder()
+                        .name(KAFKA_CONNECTION_NAME)
+                        .connectionType(ConnectionType.KAFKA)
+                        .connectionProperties(Map.of(ConnectionPropertyKey.KAFKA_BOOTSTRAP_SERVERS, "broker:9092"))
+                        .build())
+                .build());
+        List<Connection> kafkaOnly = glue.getConnections(GetConnectionsRequest.builder()
+                .filter(GetConnectionsFilter.builder().connectionType(ConnectionType.KAFKA).build())
+                .build()).connectionList();
+        assertThat(kafkaOnly).extracting(Connection::name).contains(KAFKA_CONNECTION_NAME);
+        assertThat(kafkaOnly).extracting(Connection::connectionType).containsOnly(ConnectionType.KAFKA);
+
+        // UpdateConnection redefines the connection: the description is gone afterwards.
+        glue.updateConnection(UpdateConnectionRequest.builder()
+                .name(CONNECTION_NAME)
+                .connectionInput(ConnectionInput.builder()
+                        .name(CONNECTION_NAME)
+                        .connectionType(ConnectionType.JDBC)
+                        .connectionProperties(Map.of(
+                                ConnectionPropertyKey.JDBC_CONNECTION_URL, "jdbc:postgresql://db2.internal:5432/orders",
+                                ConnectionPropertyKey.SECRET_ID, "prod/orders"))
+                        .build())
+                .build());
+        Connection redefined = glue.getConnection(GetConnectionRequest.builder()
+                .name(CONNECTION_NAME)
+                .build()).connection();
+        assertThat(redefined.description()).isNull();
+        assertThat(redefined.connectionProperties()).doesNotContainKey(ConnectionPropertyKey.PASSWORD);
+        assertThat(redefined.connectionProperties()).containsEntry(ConnectionPropertyKey.SECRET_ID, "prod/orders");
+        assertThat(redefined.creationTime()).isEqualTo(connection.creationTime());
+
+        glue.deleteConnection(DeleteConnectionRequest.builder().connectionName(CONNECTION_NAME).build());
+        assertThatThrownBy(() -> glue.getConnection(GetConnectionRequest.builder().name(CONNECTION_NAME).build()))
+                .isInstanceOf(EntityNotFoundException.class);
+
+        BatchDeleteConnectionResponse batch = glue.batchDeleteConnection(BatchDeleteConnectionRequest.builder()
+                .connectionNameList(KAFKA_CONNECTION_NAME, CONNECTION_NAME)
+                .build());
+        assertThat(batch.succeeded()).containsExactly(KAFKA_CONNECTION_NAME);
+        assertThat(batch.errors()).containsOnlyKeys(CONNECTION_NAME);
     }
 
     private static TableInput tableInput(String description) {

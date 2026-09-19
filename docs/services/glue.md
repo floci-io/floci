@@ -3,7 +3,7 @@
 **Protocol:** JSON 1.1
 **Endpoint:** `http://localhost:4566/`
 
-Floci emulates the AWS Glue Data Catalog and Glue Schema Registry, allowing you to manage local data lake metadata and schema-version workflows.
+Floci emulates the AWS Glue Data Catalog (databases, tables, partitions, functions, connections) and Glue Schema Registry, allowing you to manage local data lake metadata and schema-version workflows.
 
 ## Supported Actions
 
@@ -63,6 +63,28 @@ only arises from a backfill failure.
 | GetUserDefinedFunctions | Lists user-defined functions for a database. |
 | UpdateUserDefinedFunction | Updates a stored user-defined function. |
 | DeleteUserDefinedFunction | Deletes a user-defined function from a database. |
+
+#### Connections
+
+| Action | Description |
+|--------|-------------|
+| CreateConnection | Creates a connection definition from a `ConnectionInput`, with optional `Tags`, and answers `CreateConnectionStatus: READY`. |
+| GetConnection | Returns a stored connection. `HidePassword` omits `PASSWORD` and `ENCRYPTED_PASSWORD` from `ConnectionProperties`. |
+| GetConnections | Lists connections, narrowed by `Filter.MatchCriteria`, `Filter.ConnectionType` and `Filter.ConnectionSchemaVersion`, paged by `MaxResults` and `NextToken`. |
+| UpdateConnection | Redefines a connection from a full `ConnectionInput`, as on AWS: members left out of the input are dropped; the name and `CreationTime` are kept. |
+| DeleteConnection | Deletes a connection and its tags. |
+| BatchDeleteConnection | Deletes several connections, reporting the ones not found in `Errors`. |
+| TestConnection | Accepts a connection name or an inline `TestConnectionInput` and answers with an empty body. |
+
+`ConnectionInput` is validated against the API reference: `Name` (1 to 255 characters), `ConnectionType`
+(the documented enumeration) and `ConnectionProperties` (the documented key list, at most 100 entries, and
+empty for a `NETWORK` connection) are required; `MatchCriteria` holds at most 10 entries. Credentials given
+under `AuthenticationConfiguration` are accepted and never returned by a read. A connection that uses
+`AuthenticationConfiguration` or the `SparkProperties`, `AthenaProperties` or `PythonProperties` maps reports
+`ConnectionSchemaVersion` 2; the classic JDBC, Kafka and network shape reports 1.
+
+`TestConnection` is asynchronous on AWS and returns nothing; Floci checks the request's shape and accepts it
+without opening a socket to the data store, since no job or crawler runs against a connection yet.
 
 #### Jobs
 

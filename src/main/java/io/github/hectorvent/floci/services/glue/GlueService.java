@@ -7,6 +7,8 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.glue.model.Column;
+import io.github.hectorvent.floci.services.glue.model.Connection;
+import io.github.hectorvent.floci.services.glue.model.ConnectionInput;
 import io.github.hectorvent.floci.services.glue.model.Crawler;
 import io.github.hectorvent.floci.services.glue.model.CrawlerTargets;
 import io.github.hectorvent.floci.services.glue.model.Database;
@@ -41,6 +43,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
@@ -65,6 +68,44 @@ public class GlueService {
     /** Measured against real Glue (us-west-2): a fourth index reports the limit. */
     private static final int MAX_PARTITION_INDEXES_PER_TABLE = 3;
 
+    // Connection limits and enumerations from the Glue API reference (ConnectionInput and the
+    // Connection structure). AWS rejects a value outside them with InvalidInputException.
+    private static final int MAX_CONNECTION_NAME_LENGTH = 255;
+    private static final int MAX_CONNECTION_DESCRIPTION_LENGTH = 2048;
+    private static final int MAX_CONNECTION_MATCH_CRITERIA = 10;
+    private static final int MAX_CONNECTION_PROPERTIES = 100;
+    private static final Set<String> CONNECTION_TYPES = Set.of(
+            "JDBC", "SFTP", "MONGODB", "KAFKA", "NETWORK", "MARKETPLACE", "CUSTOM", "SALESFORCE",
+            "VIEW_VALIDATION_REDSHIFT", "VIEW_VALIDATION_ATHENA", "GOOGLEADS", "GOOGLESHEETS",
+            "GOOGLEANALYTICS4", "SERVICENOW", "MARKETO", "SAPODATA", "ZENDESK", "JIRACLOUD", "NETSUITEERP",
+            "HUBSPOT", "FACEBOOKADS", "INSTAGRAMADS", "ZOHOCRM", "SALESFORCEPARDOT",
+            "SALESFORCEMARKETINGCLOUD", "ADOBEANALYTICS", "SLACK", "LINKEDIN", "MIXPANEL", "ASANA", "STRIPE",
+            "SMARTSHEET", "DATADOG", "WOOCOMMERCE", "INTERCOM", "SNAPCHATADS", "PAYPAL", "QUICKBOOKS",
+            "FACEBOOKPAGEINSIGHTS", "FRESHDESK", "TWILIO", "DOCUSIGNMONITOR", "FRESHSALES", "ZOOM",
+            "GOOGLESEARCHCONSOLE", "SALESFORCECOMMERCECLOUD", "SAPCONCUR", "DYNATRACE",
+            "MICROSOFTDYNAMIC365FINANCEANDOPS", "MICROSOFTTEAMS", "BLACKBAUDRAISEREDGENXT", "MAILCHIMP",
+            "GITLAB", "PENDO", "PRODUCTBOARD", "CIRCLECI", "PIPEDIVE", "SENDGRID", "AZURECOSMOS", "AZURESQL",
+            "BIGQUERY", "BLACKBAUD", "CLOUDERAHIVE", "CLOUDERAIMPALA", "CLOUDWATCH", "CLOUDWATCHMETRICS",
+            "CMDB", "DATALAKEGEN2", "DB2", "DB2AS400", "DOCUMENTDB", "DOMO", "DYNAMODB",
+            "GOOGLECLOUDSTORAGE", "HBASE", "KUSTOMER", "MICROSOFTDYNAMICS365CRM", "MONDAY", "MYSQL", "OKTA",
+            "OPENSEARCH", "ORACLE", "PIPEDRIVE", "POSTGRESQL", "SAPHANA", "SQLSERVER", "SYNAPSE", "TERADATA",
+            "TERADATANOS", "TIMESTREAM", "TPCDS", "VERTICA");
+    private static final Set<String> CONNECTION_PROPERTY_KEYS = Set.of(
+            "HOST", "PORT", "USERNAME", "PASSWORD", "ENCRYPTED_PASSWORD", "JDBC_DRIVER_JAR_URI",
+            "JDBC_DRIVER_CLASS_NAME", "JDBC_ENGINE", "JDBC_ENGINE_VERSION", "CONFIG_FILES", "INSTANCE_ID",
+            "JDBC_CONNECTION_URL", "JDBC_ENFORCE_SSL", "CUSTOM_JDBC_CERT", "SKIP_CUSTOM_JDBC_CERT_VALIDATION",
+            "CUSTOM_JDBC_CERT_STRING", "CONNECTION_URL", "KAFKA_BOOTSTRAP_SERVERS", "KAFKA_SSL_ENABLED",
+            "KAFKA_CUSTOM_CERT", "KAFKA_SKIP_CUSTOM_CERT_VALIDATION", "KAFKA_CLIENT_KEYSTORE",
+            "KAFKA_CLIENT_KEYSTORE_PASSWORD", "KAFKA_CLIENT_KEY_PASSWORD",
+            "ENCRYPTED_KAFKA_CLIENT_KEYSTORE_PASSWORD", "ENCRYPTED_KAFKA_CLIENT_KEY_PASSWORD",
+            "KAFKA_SASL_MECHANISM", "KAFKA_SASL_PLAIN_USERNAME", "KAFKA_SASL_PLAIN_PASSWORD",
+            "ENCRYPTED_KAFKA_SASL_PLAIN_PASSWORD", "KAFKA_SASL_SCRAM_USERNAME", "KAFKA_SASL_SCRAM_PASSWORD",
+            "KAFKA_SASL_SCRAM_SECRETS_ARN", "ENCRYPTED_KAFKA_SASL_SCRAM_PASSWORD", "KAFKA_SASL_GSSAPI_KEYTAB",
+            "KAFKA_SASL_GSSAPI_KRB5_CONF", "KAFKA_SASL_GSSAPI_SERVICE", "KAFKA_SASL_GSSAPI_PRINCIPAL",
+            "SECRET_ID", "CONNECTOR_URL", "CONNECTOR_TYPE", "CONNECTOR_CLASS_NAME", "ENDPOINT",
+            "ENDPOINT_TYPE", "ROLE_ARN", "REGION", "WORKGROUP_NAME", "CLUSTER_IDENTIFIER", "DATABASE");
+    private static final String CONNECTION_STATUS_READY = "READY";
+
     // Glue's partition index states. FAILED also exists but is only reachable through a backfill
     // failure, which is not emulated.
     private static final String INDEX_STATUS_CREATING = "CREATING";
@@ -81,6 +122,7 @@ public class GlueService {
     private final StorageBackend<String, UserDefinedFunction> functionStore;
     private final StorageBackend<String, Job> jobStore;
     private final StorageBackend<String, Crawler> crawlerStore;
+    private final StorageBackend<String, Connection> connectionStore;
     private final GlueSchemaRegistryService schemaRegistryService;
     private final RegionResolver regionResolver;
     private final ResourceGroupsTaggingService resourceGroupsTaggingService;
@@ -102,6 +144,7 @@ public class GlueService {
         this.functionStore = storageFactory.create("glue", "functions.json", new TypeReference<>() {});
         this.jobStore = storageFactory.create("glue", "jobs.json", new TypeReference<>() {});
         this.crawlerStore = storageFactory.create("glue", "crawlers.json", new TypeReference<>() {});
+        this.connectionStore = storageFactory.create("glue", "connections.json", new TypeReference<>() {});
         this.schemaRegistryService = schemaRegistryService;
         this.regionResolver = regionResolver;
         this.resourceGroupsTaggingService = resourceGroupsTaggingService;
@@ -117,6 +160,7 @@ public class GlueService {
                 StorageBackend<String, UserDefinedFunction> functionStore,
                 StorageBackend<String, Job> jobStore,
                 StorageBackend<String, Crawler> crawlerStore,
+                StorageBackend<String, Connection> connectionStore,
                 GlueSchemaRegistryService schemaRegistryService,
                 RegionResolver regionResolver,
                 ResourceGroupsTaggingService resourceGroupsTaggingService) {
@@ -130,6 +174,7 @@ public class GlueService {
         this.functionStore = functionStore;
         this.jobStore = jobStore;
         this.crawlerStore = crawlerStore;
+        this.connectionStore = connectionStore;
         this.schemaRegistryService = schemaRegistryService;
         this.regionResolver = regionResolver;
         this.resourceGroupsTaggingService = resourceGroupsTaggingService;
@@ -1326,6 +1371,10 @@ public class GlueService {
         return regionResolver.buildArn("glue", region, "job/" + jobName);
     }
 
+    private String connectionArn(String region, String connectionName) {
+        return regionResolver.buildArn("glue", region, "connection/" + connectionName);
+    }
+
     private String crawlerArn(String region, String crawlerName) {
         return regionResolver.buildArn("glue", region, "crawler/" + crawlerName);
     }
@@ -1720,6 +1769,198 @@ public class GlueService {
         LOG.infov("Deleted Glue Crawler: {0}", name);
     }
 
+    // ---- Connections -----------------------------------------------------------------------
+
+    public String createConnection(ConnectionInput input, Map<String, String> tags, String region) {
+        validateConnectionInput(input);
+        // Connections keep their case, as jobs and crawlers do: AWS matches the name exactly.
+        String name = input.getName();
+        if (connectionStore.get(name).isPresent()) {
+            throw new AwsException("AlreadyExistsException", "Connection " + name + " already exists.", 400);
+        }
+        Instant now = Instant.now();
+        Connection connection = toConnection(input);
+        connection.setCreationTime(now);
+        connection.setLastUpdatedTime(now);
+        connectionStore.put(name, connection);
+        if (tags != null && !tags.isEmpty()) {
+            resourceGroupsTaggingService.tagResources(List.of(connectionArn(region, name)), tags, region);
+        }
+        LOG.infov("Created Glue Connection: {0}", name);
+        // Nothing is validated against the data store, so there is no IN_PROGRESS phase to report.
+        return CONNECTION_STATUS_READY;
+    }
+
+    public Connection getConnection(String name, boolean hidePassword) {
+        validateRequired(name, "Name");
+        Connection connection = connectionStore.get(name)
+                .orElseThrow(() -> new AwsException("EntityNotFoundException", "Connection " + name + " not found.", 400));
+        return hidePassword ? connection.withoutPassword() : connection;
+    }
+
+    /**
+     * Lists connections, narrowed by the GetConnections filter: every {@code MatchCriteria}
+     * entry must appear on the connection, and {@code ConnectionType} and
+     * {@code ConnectionSchemaVersion} must match exactly when given.
+     */
+    public Page<Connection> getConnections(List<String> matchCriteria, String connectionType,
+                                           Integer connectionSchemaVersion, boolean hidePassword,
+                                           Integer maxResults, String nextToken) {
+        List<Connection> matching = new ArrayList<>();
+        for (Connection connection : connectionStore.scan(k -> true)) {
+            if (matchCriteria != null && !matchCriteria.isEmpty()
+                    && (connection.getMatchCriteria() == null
+                        || !connection.getMatchCriteria().containsAll(matchCriteria))) {
+                continue;
+            }
+            if (connectionType != null && !connectionType.equals(connection.getConnectionType())) {
+                continue;
+            }
+            if (connectionSchemaVersion != null
+                    && !connectionSchemaVersion.equals(connection.getConnectionSchemaVersion())) {
+                continue;
+            }
+            matching.add(hidePassword ? connection.withoutPassword() : connection);
+        }
+        matching.sort(Comparator.comparing(Connection::getName));
+        return paginate(matching, maxResults, nextToken);
+    }
+
+    /**
+     * UpdateConnection takes a ConnectionInput that "redefines the connection in question"
+     * (API reference), so the stored definition is replaced rather than merged: a member left
+     * out of the input is gone afterwards. The connection keeps its name and creation time.
+     */
+    public void updateConnection(String name, ConnectionInput input) {
+        validateRequired(name, "Name");
+        validateRequired(input, "ConnectionInput");
+        Connection existing = connectionStore.get(name)
+                .orElseThrow(() -> new AwsException("EntityNotFoundException", "Connection " + name + " not found.", 400));
+        validateConnectionInput(input);
+        Connection updated = toConnection(input);
+        updated.setName(existing.getName());
+        updated.setCreationTime(existing.getCreationTime());
+        updated.setLastUpdatedTime(Instant.now());
+        connectionStore.put(name, updated);
+        LOG.infov("Updated Glue Connection: {0}", name);
+    }
+
+    public void deleteConnection(String name, String region) {
+        validateRequired(name, "ConnectionName");
+        if (connectionStore.get(name).isEmpty()) {
+            throw new AwsException("EntityNotFoundException", "Connection " + name + " not found.", 400);
+        }
+        connectionStore.delete(name);
+        resourceGroupsTaggingService.deleteResources(List.of(connectionArn(region, name)), region);
+        LOG.infov("Deleted Glue Connection: {0}", name);
+    }
+
+    /** Deletes what it can; the names that could not be deleted come back keyed in the errors map. */
+    public BatchDeleteConnectionResult batchDeleteConnections(List<String> names, String region) {
+        validateRequired(names, "ConnectionNameList");
+        List<String> succeeded = new ArrayList<>();
+        Map<String, ErrorDetail> errors = new LinkedHashMap<>();
+        for (String name : names) {
+            try {
+                deleteConnection(name, region);
+                succeeded.add(name);
+            } catch (AwsException e) {
+                errors.put(name, new ErrorDetail(e.getErrorCode(), e.getMessage()));
+            }
+        }
+        return new BatchDeleteConnectionResult(succeeded, errors);
+    }
+
+    /**
+     * TestConnection on AWS is asynchronous and answers with an empty body: the outcome is only
+     * visible later, on the connection's status. Floci never reaches the data store (no job can
+     * run against it yet), so the request is checked for shape and accepted. Either an existing
+     * connection is named, or an inline definition with a type and properties is given.
+     */
+    public void testConnection(String connectionName, String connectionType,
+                               Map<String, String> connectionProperties) {
+        if (connectionName != null && !connectionName.isBlank()) {
+            getConnection(connectionName, false);
+            return;
+        }
+        validateRequired(connectionType, "TestConnectionInput.ConnectionType");
+        validateConnectionType(connectionType);
+        validateRequired(connectionProperties, "TestConnectionInput.ConnectionProperties");
+        validateConnectionProperties(connectionProperties);
+    }
+
+    private Connection toConnection(ConnectionInput input) {
+        Connection connection = new Connection();
+        connection.setName(input.getName());
+        connection.setDescription(input.getDescription());
+        connection.setConnectionType(input.getConnectionType());
+        connection.setMatchCriteria(input.getMatchCriteria());
+        connection.setConnectionProperties(new LinkedHashMap<>(input.getConnectionProperties()));
+        connection.setSparkProperties(input.getSparkProperties());
+        connection.setAthenaProperties(input.getAthenaProperties());
+        connection.setPythonProperties(input.getPythonProperties());
+        connection.setPhysicalConnectionRequirements(input.getPhysicalConnectionRequirements());
+        if (input.getAuthenticationConfiguration() != null) {
+            connection.setAuthenticationConfiguration(input.getAuthenticationConfiguration().toOutput());
+        }
+        connection.setStatus(CONNECTION_STATUS_READY);
+        // Schema version 2 "supports properties for specific compute environments" (Connection
+        // structure). A definition that uses any of those members is a version 2 connection;
+        // the classic JDBC/Kafka/Network shape is version 1.
+        boolean usesComputeEnvironmentMembers = input.getAuthenticationConfiguration() != null
+                || input.getSparkProperties() != null
+                || input.getAthenaProperties() != null
+                || input.getPythonProperties() != null;
+        connection.setConnectionSchemaVersion(usesComputeEnvironmentMembers ? 2 : 1);
+        return connection;
+    }
+
+    private void validateConnectionInput(ConnectionInput input) {
+        validateRequired(input, "ConnectionInput");
+        validateRequired(input.getName(), "ConnectionInput.Name");
+        if (input.getName().length() > MAX_CONNECTION_NAME_LENGTH) {
+            throw new AwsException("InvalidInputException",
+                    "ConnectionInput.Name must be between 1 and " + MAX_CONNECTION_NAME_LENGTH + " characters.", 400);
+        }
+        validateRequired(input.getConnectionType(), "ConnectionInput.ConnectionType");
+        validateConnectionType(input.getConnectionType());
+        validateRequired(input.getConnectionProperties(), "ConnectionInput.ConnectionProperties");
+        validateConnectionProperties(input.getConnectionProperties());
+        if (input.getDescription() != null && input.getDescription().length() > MAX_CONNECTION_DESCRIPTION_LENGTH) {
+            throw new AwsException("InvalidInputException",
+                    "ConnectionInput.Description must be at most " + MAX_CONNECTION_DESCRIPTION_LENGTH + " characters.", 400);
+        }
+        if (input.getMatchCriteria() != null && input.getMatchCriteria().size() > MAX_CONNECTION_MATCH_CRITERIA) {
+            throw new AwsException("InvalidInputException",
+                    "ConnectionInput.MatchCriteria must have at most " + MAX_CONNECTION_MATCH_CRITERIA + " items.", 400);
+        }
+    }
+
+    private void validateConnectionType(String connectionType) {
+        if (!CONNECTION_TYPES.contains(connectionType)) {
+            throw new AwsException("InvalidInputException",
+                    "Unsupported connection type: " + connectionType, 400);
+        }
+    }
+
+    private void validateConnectionProperties(Map<String, String> properties) {
+        if (properties.size() > MAX_CONNECTION_PROPERTIES) {
+            throw new AwsException("InvalidInputException",
+                    "ConnectionProperties must have at most " + MAX_CONNECTION_PROPERTIES + " entries.", 400);
+        }
+        for (String key : properties.keySet()) {
+            if (!CONNECTION_PROPERTY_KEYS.contains(key)) {
+                throw new AwsException("InvalidInputException",
+                        "Unsupported connection property key: " + key, 400);
+            }
+        }
+    }
+
+    @RegisterForReflection
+    public record BatchDeleteConnectionResult(
+            @JsonProperty("Succeeded") List<String> succeeded,
+            @JsonProperty("Errors") Map<String, ErrorDetail> errors) {}
+
     public void tagResource(String arn, Map<String, String> tags, String region) {
         validateArn(arn);
         if (arn.contains(":registry/") || arn.contains(":schema/")) {
@@ -1765,6 +2006,9 @@ public class GlueService {
                 return;
             } else if (resource.startsWith("crawler/")) {
                 getCrawler(resource.substring(8));
+                return;
+            } else if (resource.startsWith("connection/")) {
+                getConnection(resource.substring(11), false);
                 return;
             } else if (resource.startsWith("database/")) {
                 getDatabase(resource.substring(9));

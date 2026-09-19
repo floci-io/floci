@@ -26,6 +26,7 @@ import java.util.Objects;
 public class GlueJsonHandler {
 
     private static final TypeReference<List<String>> STRING_LIST = new TypeReference<>() {};
+    private static final TypeReference<Map<String, String>> STRING_MAP = new TypeReference<>() {};
     private static final TypeReference<List<Map<String, Object>>> MAP_LIST = new TypeReference<>() {};
     private static final TypeReference<List<Partition>> PARTITION_LIST = new TypeReference<>() {};
 
@@ -264,6 +265,21 @@ public class GlueJsonHandler {
                 glueService.deleteCrawler(req.getName(), region);
                 yield Response.ok().build();
             }
+            case "CreateConnection" -> handleCreateConnection(request, region);
+            case "GetConnection" -> handleGetConnection(request);
+            case "GetConnections" -> handleGetConnections(request);
+            case "UpdateConnection" -> handleUpdateConnection(request);
+            case "DeleteConnection" -> {
+                glueService.deleteConnection(request.path("ConnectionName").asText(null), region);
+                yield Response.ok(Map.of()).build();
+            }
+            case "BatchDeleteConnection" -> {
+                List<String> names = request.hasNonNull("ConnectionNameList")
+                        ? mapper.convertValue(request.get("ConnectionNameList"), STRING_LIST)
+                        : null;
+                yield Response.ok(glueService.batchDeleteConnections(names, region)).build();
+            }
+            case "TestConnection" -> handleTestConnection(request);
             // Read-only Glue actions for resources the emulator does not model. The AWS SDK
             // expects each to return a 200 with its result key present (empty), so we emit the
             // documented empty shape rather than an InvalidAction 400 that callers can't read.
@@ -835,6 +851,59 @@ public class GlueJsonHandler {
                 : null;
         glueService.untagResource(arn, tagsToRemove, region);
         return Response.ok().build();
+    }
+
+    private Response handleCreateConnection(JsonNode request, String region) throws Exception {
+        ConnectionInput input = request.hasNonNull("ConnectionInput")
+                ? mapper.treeToValue(request.get("ConnectionInput"), ConnectionInput.class)
+                : null;
+        Map<String, String> tags = request.hasNonNull("Tags")
+                ? mapper.convertValue(request.get("Tags"), STRING_MAP)
+                : null;
+        String status = glueService.createConnection(input, tags, region);
+        return Response.ok(Map.of("CreateConnectionStatus", status)).build();
+    }
+
+    private Response handleGetConnection(JsonNode request) {
+        Connection connection = glueService.getConnection(
+                request.path("Name").asText(null), request.path("HidePassword").asBoolean(false));
+        return Response.ok(Map.of("Connection", connection)).build();
+    }
+
+    private Response handleGetConnections(JsonNode request) {
+        JsonNode filter = request.path("Filter");
+        List<String> matchCriteria = filter.hasNonNull("MatchCriteria")
+                ? mapper.convertValue(filter.get("MatchCriteria"), STRING_LIST)
+                : null;
+        String connectionType = filter.path("ConnectionType").asText(null);
+        Integer schemaVersion = filter.hasNonNull("ConnectionSchemaVersion")
+                ? filter.get("ConnectionSchemaVersion").asInt()
+                : null;
+        GlueService.Page<Connection> page = glueService.getConnections(
+                matchCriteria, connectionType, schemaVersion,
+                request.path("HidePassword").asBoolean(false),
+                readMaxResults(request), readNextToken(request));
+        return Response.ok(pageResponse("ConnectionList", page.items(), page.nextToken())).build();
+    }
+
+    private Response handleUpdateConnection(JsonNode request) throws Exception {
+        ConnectionInput input = request.hasNonNull("ConnectionInput")
+                ? mapper.treeToValue(request.get("ConnectionInput"), ConnectionInput.class)
+                : null;
+        glueService.updateConnection(request.path("Name").asText(null), input);
+        return Response.ok(Map.of()).build();
+    }
+
+    private Response handleTestConnection(JsonNode request) {
+        JsonNode input = request.path("TestConnectionInput");
+        Map<String, String> properties = input.hasNonNull("ConnectionProperties")
+                ? mapper.convertValue(input.get("ConnectionProperties"), STRING_MAP)
+                : null;
+        glueService.testConnection(
+                request.path("ConnectionName").asText(null),
+                input.path("ConnectionType").asText(null),
+                properties);
+        return Response.ok(Map.of()).build();
     }
 
     private Response handleGetTags(JsonNode request, String region) {
