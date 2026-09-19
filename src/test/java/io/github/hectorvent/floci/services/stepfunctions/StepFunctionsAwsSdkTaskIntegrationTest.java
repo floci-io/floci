@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -348,7 +349,7 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
 
         given().when().get("/schedules/payout-nightly")
                 .then().statusCode(200)
-                .body("ScheduleExpression", org.hamcrest.Matchers.equalTo("rate(1 day)"));
+                .body("ScheduleExpression", Matchers.equalTo("rate(1 day)"));
     }
 
     @Test
@@ -362,7 +363,7 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
 
         given().when().get("/schedules/payout-nightly")
                 .then().statusCode(200)
-                .body("ScheduleExpression", org.hamcrest.Matchers.equalTo("rate(2 days)"));
+                .body("ScheduleExpression", Matchers.equalTo("rate(2 days)"));
     }
 
     @Test

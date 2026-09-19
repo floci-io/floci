@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.stepfunctions;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -113,7 +114,7 @@ class StepFunctionsAccountContextIntegrationTest {
                         """.formatted(TABLE))
                 .when().post("/")
                 .then().statusCode(200)
-                .body("Item.v.S", org.hamcrest.Matchers.equalTo("hello"));
+                .body("Item.v.S", Matchers.equalTo("hello"));
 
         // 6. Isolation: a different account has no such table at all.
         given()
@@ -225,7 +226,7 @@ class StepFunctionsAccountContextIntegrationTest {
                         """.formatted(PARALLEL_TABLE))
                 .when().post("/")
                 .then().statusCode(200)
-                .body("Item.v.S", org.hamcrest.Matchers.equalTo("A"));
+                .body("Item.v.S", Matchers.equalTo("A"));
         given()
                 .header("Authorization", auth(ACCOUNT, "dynamodb"))
                 .header("X-Amz-Target", "DynamoDB_20120810.GetItem")
@@ -235,7 +236,7 @@ class StepFunctionsAccountContextIntegrationTest {
                         """.formatted(PARALLEL_TABLE))
                 .when().post("/")
                 .then().statusCode(200)
-                .body("Item.v.S", org.hamcrest.Matchers.equalTo("B"));
+                .body("Item.v.S", Matchers.equalTo("B"));
     }
 
     private String waitForTerminal(String execArn) throws InterruptedException {

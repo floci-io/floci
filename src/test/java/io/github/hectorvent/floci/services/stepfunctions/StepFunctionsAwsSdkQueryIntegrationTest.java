@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -64,7 +65,7 @@ class StepFunctionsAwsSdkQueryIntegrationTest {
 
         // Confirm the object is actually retrievable.
         given().when().get("/" + bucket + "/from-sfn.txt")
-                .then().statusCode(200).body(org.hamcrest.Matchers.containsString("hello from step functions"));
+                .then().statusCode(200).body(Matchers.containsString("hello from step functions"));
     }
 
     // ── helpers ─────────────────────────────────────────────────────────────
