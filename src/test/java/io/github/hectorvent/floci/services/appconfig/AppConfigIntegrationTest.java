@@ -10,6 +10,8 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.nio.charset.StandardCharsets;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 
@@ -745,5 +747,88 @@ class AppConfigIntegrationTest {
                 .when().get("/deploymentstrategies/AppConfig.AllAtOnce")
                 .then()
                 .statusCode(200);
+    }
+
+    @Test @Order(43)
+    void getLatestConfigurationReturnsFeatureFlagsRetrievalFormat() {
+        String featureFlagsAppId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"Name\":\"feature-flags-app\"}")
+                .when().post("/applications")
+                .then().statusCode(201)
+                .extract().path("Id");
+
+        String featureFlagsEnvId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"Name\":\"test\"}")
+                .when().post("/applications/" + featureFlagsAppId + "/environments")
+                .then().statusCode(201)
+                .extract().path("Id");
+
+        String featureFlagsProfileId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"Name\":\"flags\",\"LocationUri\":\"hosted\","
+                        + "\"Type\":\"AWS.AppConfig.FeatureFlags\"}")
+                .when().post("/applications/" + featureFlagsAppId + "/configurationprofiles")
+                .then().statusCode(201)
+                .extract().path("Id");
+
+        String content = "{\"flags\":{\"enabled\":{\"name\":\"enabled\"},"
+                + "\"disabled\":{\"name\":\"disabled\"}},\"values\":{"
+                + "\"enabled\":{\"enabled\":true,\"number\":0,\"beta\":false,"
+                + "\"_createdAt\":\"created\",\"_updatedAt\":\"updated\"},"
+                + "\"disabled\":{\"enabled\":false,\"secret\":\"must-not-leak\"}},"
+                + "\"version\":\"1\"}";
+
+        given()
+                .header("Content-Type", "application/json")
+                .body(content.getBytes(StandardCharsets.UTF_8))
+                .when().post("/applications/" + featureFlagsAppId + "/configurationprofiles/"
+                        + featureFlagsProfileId + "/hostedconfigurationversions")
+                .then().statusCode(201).header("Version-Number", equalTo("1"));
+
+        given()
+                .when().get("/applications/" + featureFlagsAppId + "/configurationprofiles/"
+                        + featureFlagsProfileId + "/hostedconfigurationversions/1")
+                .then().statusCode(200)
+                .body("flags.enabled.name", equalTo("enabled"))
+                .body("values.enabled.enabled", equalTo(true))
+                .body("version", equalTo("1"));
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"ConfigurationProfileId\":\"" + featureFlagsProfileId + "\","
+                        + "\"ConfigurationVersion\":\"1\","
+                        + "\"DeploymentStrategyId\":\"AppConfig.AllAtOnce\"}")
+                .when().post("/applications/" + featureFlagsAppId + "/environments/"
+                        + featureFlagsEnvId + "/deployments")
+                .then().statusCode(201);
+
+        String featureFlagsToken = given()
+                .contentType(ContentType.JSON)
+                .body("{\"ApplicationIdentifier\":\"" + featureFlagsAppId + "\","
+                        + "\"EnvironmentIdentifier\":\"" + featureFlagsEnvId + "\","
+                        + "\"ConfigurationProfileIdentifier\":\"" + featureFlagsProfileId + "\"}")
+                .when().post("/configurationsessions")
+                .then().statusCode(201)
+                .extract().path("InitialConfigurationToken");
+
+        given()
+                .queryParam("configuration_token", featureFlagsToken)
+                .when().get("/configuration")
+                .then().statusCode(200)
+                .header("Content-Type", startsWith("application/json"))
+                .header("Version-Label", equalTo("1"))
+                .header("Next-Poll-Configuration-Token", notNullValue())
+                .body("flags", nullValue())
+                .body("values", nullValue())
+                .body("version", nullValue())
+                .body("enabled.enabled", equalTo(true))
+                .body("enabled.number", equalTo(0))
+                .body("enabled.beta", equalTo(false))
+                .body("enabled._createdAt", nullValue())
+                .body("enabled._updatedAt", nullValue())
+                .body("disabled.enabled", equalTo(false))
+                .body("disabled.secret", nullValue());
     }
 }
