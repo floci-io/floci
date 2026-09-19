@@ -8,6 +8,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -100,7 +101,7 @@ class SqsFifoIntegrationTest {
             .extract().xmlPath().getString("SendMessageResponse.SendMessageResult.MessageId");
 
         // Same message ID returned
-        org.junit.jupiter.api.Assertions.assertEquals(msgId1, msgId2);
+        assertEquals(msgId1, msgId2);
     }
 
     @Test

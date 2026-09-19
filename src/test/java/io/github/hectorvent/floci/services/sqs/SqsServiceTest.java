@@ -14,6 +14,9 @@ import jakarta.enterprise.context.ContextNotActiveException;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -980,8 +983,8 @@ class SqsServiceTest {
      * null, the move block was skipped, and messages stayed on the source queue with nothing
      * logged. A silent redrive failure is the worst shape this bug takes.
      */
-    @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.CsvSource({
+    @ParameterizedTest
+    @CsvSource({
             "us-east-1,      arn:aws:sqs:us-east-1:000000000000:",
             "us-gov-west-1,  arn:aws-us-gov:sqs:us-gov-west-1:000000000000:",
             "cn-north-1,     arn:aws-cn:sqs:cn-north-1:000000000000:"})
@@ -1003,8 +1006,8 @@ class SqsServiceTest {
      * The ARN the emulator itself hands back must be the one it accepts. This is the assertion
      * that ties the two halves together rather than trusting a hand-written prefix.
      */
-    @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.ValueSource(strings = {"us-east-1", "us-gov-west-1", "cn-north-1"})
+    @ParameterizedTest
+    @ValueSource(strings = {"us-east-1", "us-gov-west-1", "cn-north-1"})
     void startMessageMoveTask_acceptsTheQueueArnGetQueueAttributesReturned(String region) {
         sqsService.createQueue("rt-dlq", null, region);
         String dlqArn = sqsService.getQueueAttributes(

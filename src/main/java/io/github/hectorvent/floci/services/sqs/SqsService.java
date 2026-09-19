@@ -1,5 +1,10 @@
 package io.github.hectorvent.floci.services.sqs;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -13,13 +18,8 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.model.Message;
-import io.github.hectorvent.floci.services.sqs.model.Queue;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
+import io.github.hectorvent.floci.services.sqs.model.Queue;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -955,7 +955,7 @@ public class SqsService implements Resettable, ResourceProvider {
 
         return redrivePolicyCache.computeIfAbsent(storageKey, k -> {
             try {
-                var rp = new com.fasterxml.jackson.databind.ObjectMapper().readTree(rawPolicy);
+                JsonNode rp = new ObjectMapper().readTree(rawPolicy);
                 return new RedrivePolicy(
                         rp.has("maxReceiveCount") ? rp.get("maxReceiveCount").asInt() : -1,
                         rp.has("deadLetterTargetArn") ? rp.get("deadLetterTargetArn").asText() : null
@@ -1354,7 +1354,7 @@ public class SqsService implements Resettable, ResourceProvider {
             return null;
         }
         try {
-            JsonNode policy = new com.fasterxml.jackson.databind.ObjectMapper().readTree(raw);
+            JsonNode policy = new ObjectMapper().readTree(raw);
             JsonNode dlqArn = policy.get("deadLetterTargetArn");
             return dlqArn != null && !dlqArn.isNull() ? dlqArn.asText() : null;
         } catch (Exception e) {
