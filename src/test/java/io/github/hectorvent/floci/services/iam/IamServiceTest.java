@@ -334,6 +334,59 @@ class IamServiceTest {
     }
 
     @Test
+    void deleteUserWithInlinePolicyIsDeleteConflict() {
+        iamService.createUser("alice", "/");
+        iamService.putUserPolicy("alice", "inline-1", "{\"Version\":\"2012-10-17\"}");
+
+        AwsException ex = assertThrows(AwsException.class, () -> iamService.deleteUser("alice"));
+        assertEquals("DeleteConflict", ex.getErrorCode());
+
+        iamService.deleteUserPolicy("alice", "inline-1");
+        iamService.deleteUser("alice");
+    }
+
+    @Test
+    void deleteUserWithAccessKeyIsDeleteConflict() {
+        iamService.createUser("alice", "/");
+        String keyId = iamService.createAccessKey("alice").getAccessKeyId();
+
+        AwsException ex = assertThrows(AwsException.class, () -> iamService.deleteUser("alice"));
+        assertEquals("DeleteConflict", ex.getErrorCode());
+        assertEquals("alice", iamService.getUser("alice").getUserName());
+
+        iamService.deleteAccessKey("alice", keyId);
+        iamService.deleteUser("alice");
+    }
+
+    @Test
+    void renamingAUserMovesItsAccessKeys() {
+        iamService.createUser("alice", "/");
+        String keyId = iamService.createAccessKey("alice").getAccessKeyId();
+
+        iamService.updateUser("alice", "alicia", null);
+
+        assertEquals(1, iamService.listAccessKeys("alicia").size());
+        assertEquals("alicia", iamService.listAccessKeys("alicia").get(0).getUserName());
+        iamService.createUser("alice", "/");
+        assertTrue(iamService.listAccessKeys("alice").isEmpty());
+        assertEquals("alicia", iamService.findUserNameByAccessKeyId(keyId).orElseThrow());
+    }
+
+    @Test
+    void renamingAUserUpdatesItsGroupMembership() {
+        iamService.createUser("alice", "/");
+        iamService.createGroup("devs", "/");
+        iamService.addUserToGroup("devs", "alice");
+
+        iamService.updateUser("alice", "alicia", null);
+
+        assertEquals(List.of("alicia"), iamService.getGroup("devs").getUserNames());
+        iamService.removeUserFromGroup("devs", "alicia");
+        iamService.deleteGroup("devs");
+        iamService.deleteUser("alicia");
+    }
+
+    @Test
     void renamingAUserMovesItsLoginProfile() {
         iamService.createUser("alice", "/");
         iamService.createLoginProfile("alice", "Sup3r$ecret!", true);

@@ -411,6 +411,14 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             throw new AwsException("DeleteConflict",
                     "Cannot delete entity, must delete login profile first.", 409);
         }
+        if (!user.getInlinePolicies().isEmpty()) {
+            throw new AwsException("DeleteConflict",
+                    "Cannot delete entity, must delete policies first.", 409);
+        }
+        if (!userAccessKeys(userName).isEmpty()) {
+            throw new AwsException("DeleteConflict",
+                    "Cannot delete entity, must delete access keys first.", 409);
+        }
         users.delete(userName);
         LOG.infov("Deleted IAM user: {0}", userName);
     }
@@ -453,6 +461,17 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 profile.setUserName(newUserName);
                 loginProfiles.put(newUserName, profile);
             });
+            for (AccessKey key : userAccessKeys(userName)) {
+                key.setUserName(newUserName);
+                accessKeys.put(key.getAccessKeyId(), key);
+            }
+            for (String groupName : user.getGroupNames()) {
+                groups.get(groupName).ifPresent(group -> {
+                    group.getUserNames().remove(userName);
+                    group.getUserNames().add(newUserName);
+                    groups.put(groupName, group);
+                });
+            }
         } else {
             if (newPath != null) {
                 user.setPath(normalizePath(newPath));
@@ -1363,6 +1382,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     public List<AccessKey> listAccessKeys(String userName) {
         getUser(userName); // validates existence
+        return userAccessKeys(userName);
+    }
+
+    private List<AccessKey> userAccessKeys(String userName) {
         return accessKeys.scan(k -> true).stream()
                 .filter(ak -> userName.equals(ak.getUserName()))
                 .toList();
