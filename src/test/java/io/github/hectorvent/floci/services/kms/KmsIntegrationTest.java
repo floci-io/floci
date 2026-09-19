@@ -1900,6 +1900,19 @@ class KmsIntegrationTest {
     }
 
     @ParameterizedTest
+    @CsvSource({"Encrypt", "Decrypt"})
+    void encryptionAlgorithmValidationListsTheEnumInAwsOrder(String operation) {
+        callKms(operation, "{\"KeyId\":\"%s\",\"Plaintext\":\"aGVsbG8=\",\"CiphertextBlob\":\"AAAA\",\"EncryptionAlgorithm\":\"FOO\"}"
+                .formatted(createKeyArn("SYMMETRIC_DEFAULT", "ENCRYPT_DECRYPT")))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("1 validation error detected: Value 'FOO' at 'encryptionAlgorithm' failed to "
+                        + "satisfy constraint: Member must satisfy enum value set: "
+                        + "[RSAES_OAEP_SHA_1, RSAES_OAEP_SHA_256, SM2PKE, SYMMETRIC_DEFAULT]"));
+    }
+
+    @ParameterizedTest
     @CsvSource({"garbage", "wrong context", "rsa garbage", "rsa short"})
     void decryptRejectsAnInvalidCiphertextWithoutAMessage(String kind) {
         String body = switch (kind) {

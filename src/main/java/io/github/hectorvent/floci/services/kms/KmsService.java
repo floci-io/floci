@@ -1530,7 +1530,7 @@ public class KmsService implements ResourceProvider {
 
     /**
      * Resolves the wire EncryptionAlgorithm value. Real KMS models the enum as
-     * [RSAES_OAEP_SHA_256, RSAES_OAEP_SHA_1, SYMMETRIC_DEFAULT, SM2PKE]. A null or blank
+     * [RSAES_OAEP_SHA_1, RSAES_OAEP_SHA_256, SM2PKE, SYMMETRIC_DEFAULT]. A null or blank
      * value falls back to the SYMMETRIC_DEFAULT default.
      */
     private static KmsKeySpec.Algorithm resolveEncryptionAlgorithm(String encryptionAlgorithm) {
@@ -1545,7 +1545,7 @@ public class KmsService implements ResourceProvider {
             default -> throw new AwsException("ValidationException",
                     "1 validation error detected: Value '" + name + "' at 'encryptionAlgorithm' failed to satisfy "
                             + "constraint: Member must satisfy enum value set: "
-                            + "[RSAES_OAEP_SHA_256, RSAES_OAEP_SHA_1, SYMMETRIC_DEFAULT, SM2PKE]", 400);
+                            + "[RSAES_OAEP_SHA_1, RSAES_OAEP_SHA_256, SM2PKE, SYMMETRIC_DEFAULT]", 400);
         };
     }
 
