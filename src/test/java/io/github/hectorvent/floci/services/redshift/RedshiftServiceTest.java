@@ -35,7 +35,9 @@ import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.*;
@@ -126,6 +128,51 @@ class RedshiftServiceTest {
         assertEquals(streamArn, integration.getSourceStreamArn());
         assertEquals("warehouse", integration.getTargetClusterIdentifier());
         assertNotNull(integration.getLandingTableName());
+        assertEquals("syncing", integration.getStatus());
+        assertFalse(integration.isBackfillCompleted());
+    }
+
+    @Test
+    void updateIntegrationBackfillProgressPersistsCheckpointAndFlipsStatusOnCompletion() {
+        String streamArn = "arn:aws:dynamodb:us-east-1:111111111111:table/orders/stream/2026-09-18T00:00:00.000";
+        String targetArn = "arn:aws:redshift:us-east-1:111111111111:cluster:warehouse";
+        StreamDescription stream = new StreamDescription();
+        stream.setStreamArn(streamArn);
+        stream.setTableName("orders");
+        stream.setStreamStatus("ENABLED");
+        when(streamService.describeStream(streamArn)).thenReturn(stream);
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("warehouse");
+        when(clusterBackend.get("warehouse")).thenReturn(Optional.of(cluster));
+        when(integrationBackend.scan(any())).thenReturn(List.of());
+
+        Integration integration = service.createIntegration("orders-to-warehouse", streamArn, targetArn,
+                null, null, Map.of(), Map.of(), "us-east-1");
+
+        ArgumentCaptor<String> keyCaptor = ArgumentCaptor.forClass(String.class);
+        verify(integrationBackend).put(keyCaptor.capture(), eq(integration));
+        String storageKey = keyCaptor.getValue();
+        when(integrationBackend.keysForAccount("111111111111")).thenReturn(java.util.Set.of(storageKey));
+        when(integrationBackend.getForAccount("111111111111", storageKey)).thenReturn(Optional.of(integration));
+
+        service.updateIntegrationBackfillProgress("111111111111", integration.getIntegrationArn(),
+                "{\"id\":{\"S\":\"1\"}}", false);
+        assertEquals("syncing", integration.getStatus());
+        assertEquals("{\"id\":{\"S\":\"1\"}}", integration.getBackfillLastEvaluatedKey());
+        assertFalse(integration.isBackfillCompleted());
+
+        service.updateIntegrationBackfillProgress("111111111111", integration.getIntegrationArn(), null, true);
+        assertEquals("active", integration.getStatus());
+        assertNull(integration.getBackfillLastEvaluatedKey());
+        assertTrue(integration.isBackfillCompleted());
+    }
+
+    @Test
+    void updateIntegrationBackfillProgressOnUnknownIntegrationThrows() {
+        when(integrationBackend.keysForAccount("111111111111")).thenReturn(java.util.Set.of());
+
+        assertThrows(AwsException.class, () -> service.updateIntegrationBackfillProgress(
+                "111111111111", "arn:aws:redshift:us-east-1:111111111111:integration:missing", null, true));
     }
 
     @Test

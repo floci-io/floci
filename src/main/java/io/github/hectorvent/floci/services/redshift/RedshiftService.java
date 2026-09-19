@@ -371,8 +371,8 @@ public class RedshiftService {
         integration.setRetryCount(0);
         integration.setLastError(null);
         integration.setPollingEnabled(true);
-        // Real integrations pass through creating before settling; nothing here has work to do.
-        integration.setStatus("active");
+        // Real integrations report `syncing` while the backfill scan runs, then `active`.
+        integration.setStatus("syncing");
         integration.setKmsKeyId(kmsKeyId);
         integration.setCreateTime(DateTimeFormatter.ISO_INSTANT.format(Instant.now()));
         integration.setDescription(description);
@@ -481,6 +481,26 @@ public class RedshiftService {
     }
 
     /** One page of integrations plus the marker to continue with, or {@code null} at the end. */
+    public synchronized void updateIntegrationBackfillProgress(String accountId, String integrationArn,
+                                                                String backfillLastEvaluatedKey,
+                                                                boolean backfillCompleted) {
+        for (String key : integrations.keysForAccount(accountId)) {
+            Optional<Integration> stored = integrations.getForAccount(accountId, key);
+            if (stored.isEmpty() || !integrationArn.equals(stored.get().getIntegrationArn())) {
+                continue;
+            }
+            Integration integration = stored.get();
+            integration.setBackfillLastEvaluatedKey(backfillLastEvaluatedKey);
+            integration.setBackfillCompleted(backfillCompleted);
+            integration.setRetryCount(0);
+            integration.setLastError(null);
+            integration.setStatus(backfillCompleted ? "active" : "syncing");
+            integrations.putForAccount(accountId, key, integration);
+            return;
+        }
+        throw new AwsException("IntegrationNotFoundFault", "The requested integration doesn't exist.", 404);
+    }
+
     public record IntegrationPage(List<Integration> integrations, String marker) {}
 
     /** One {@code Filters.DescribeIntegrationsFilter.N} entry. */

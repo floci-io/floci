@@ -24,6 +24,8 @@ public class Integration {
     private String targetClusterIdentifier;
     private String landingTableName;
     private String checkpointSequenceNumber;
+    private String backfillLastEvaluatedKey;
+    private boolean backfillCompleted;
     private int retryCount;
     private String lastError;
     private boolean pollingEnabled;
@@ -55,6 +57,10 @@ public class Integration {
     public void setLandingTableName(String landingTableName) { this.landingTableName = landingTableName; }
     public String getCheckpointSequenceNumber() { return checkpointSequenceNumber; }
     public void setCheckpointSequenceNumber(String checkpointSequenceNumber) { this.checkpointSequenceNumber = checkpointSequenceNumber; }
+    public String getBackfillLastEvaluatedKey() { return backfillLastEvaluatedKey; }
+    public void setBackfillLastEvaluatedKey(String backfillLastEvaluatedKey) { this.backfillLastEvaluatedKey = backfillLastEvaluatedKey; }
+    public boolean isBackfillCompleted() { return backfillCompleted; }
+    public void setBackfillCompleted(boolean backfillCompleted) { this.backfillCompleted = backfillCompleted; }
     public int getRetryCount() { return retryCount; }
     public void setRetryCount(int retryCount) { this.retryCount = retryCount; }
     public String getLastError() { return lastError; }
