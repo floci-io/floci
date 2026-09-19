@@ -1348,6 +1348,36 @@ class Ec2IntegrationTest {
     }
 
     @Test
+    void createSecurityGroupMissingGroupName() {
+        given()
+            .formParam("Action", "CreateSecurityGroup")
+            .formParam("GroupDescription", "Test security group")
+            .formParam("VpcId", vpcId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("MissingParameter"))
+            .body(containsString("GroupName"));
+    }
+
+    @Test
+    void createSecurityGroupMissingDescription() {
+        given()
+            .formParam("Action", "CreateSecurityGroup")
+            .formParam("GroupName", "test-security-group")
+            .formParam("VpcId", vpcId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("MissingParameter"))
+            .body(containsString("GroupDescription"));
+    }
+
+    @Test
     @Order(31)
     void authorizeSecurityGroupIngress() {
         given()
