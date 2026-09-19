@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.cloudformation.model.StackEvent;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.OpenApiDocuments;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ReplacementCleanup;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnRollback;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudFormationResourceRegistry;
@@ -24,7 +25,6 @@ import io.github.hectorvent.floci.services.lambda.model.LambdaLayerVersion;
 import io.github.hectorvent.floci.services.pipes.model.DesiredState;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.ssm.model.Parameter;
-import io.github.hectorvent.floci.services.apigateway.ApiGatewayService;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import io.github.hectorvent.floci.services.apigatewayv2.model.*;
 import io.github.hectorvent.floci.config.EmulatorConfig;
@@ -105,12 +105,6 @@ public class CloudFormationResourceProvisioner {
      * {@code CfnResourceInventoryTest}.
      */
     static final Set<String> LEGACY_SWITCH_TYPES = Set.of(
-            "AWS::ApiGateway::Authorizer",
-            "AWS::ApiGateway::Deployment",
-            "AWS::ApiGateway::Method",
-            "AWS::ApiGateway::Resource",
-            "AWS::ApiGateway::RestApi",
-            "AWS::ApiGateway::Stage",
             "AWS::ApiGatewayV2::Api",
             "AWS::ApiGatewayV2::Authorizer",
             "AWS::ApiGatewayV2::Deployment",
@@ -140,7 +134,6 @@ public class CloudFormationResourceProvisioner {
     private final S3Service s3Service;
     private final LambdaService lambdaService;
     private final IamService iamService;
-    private final ApiGatewayService apiGatewayService;
     private final ApiGatewayV2Service apiGatewayV2Service;
     private final LambdaLayerService lambdaLayerService;
     private final ObjectMapper objectMapper;
@@ -158,7 +151,6 @@ public class CloudFormationResourceProvisioner {
     public CloudFormationResourceProvisioner(S3Service s3Service,
                                              LambdaService lambdaService,
                                              IamService iamService,
-                                             ApiGatewayService apiGatewayService,
                                              ApiGatewayV2Service apiGatewayV2Service,
                                              LambdaLayerService lambdaLayerService,
                                              ObjectMapper objectMapper,
@@ -172,7 +164,6 @@ public class CloudFormationResourceProvisioner {
         this.s3Service = s3Service;
         this.lambdaService = lambdaService;
         this.iamService = iamService;
-        this.apiGatewayService = apiGatewayService;
         this.apiGatewayV2Service = apiGatewayV2Service;
         this.lambdaLayerService = lambdaLayerService;
         this.objectMapper = objectMapper;
@@ -240,12 +231,6 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::IAM::ManagedPolicy" ->
                         provisionIamManagedPolicy(resource, properties, engine, accountId, stackName);
                 case "AWS::IAM::InstanceProfile" -> provisionInstanceProfile(resource, properties, engine, accountId, stackName);
-                case "AWS::ApiGateway::RestApi" -> provisionApiGatewayRestApi(resource, properties, engine, region, accountId, stackName);
-                case "AWS::ApiGateway::Resource" -> provisionApiGatewayResource(resource, properties, engine, region);
-                case "AWS::ApiGateway::Authorizer" -> provisionApiGatewayAuthorizer(resource, properties, engine, region);
-                case "AWS::ApiGateway::Method" -> provisionApiGatewayMethod(resource, properties, engine, region);
-                case "AWS::ApiGateway::Deployment" -> provisionApiGatewayDeployment(resource, properties, engine, region);
-                case "AWS::ApiGateway::Stage" -> provisionApiGatewayStage(resource, properties, engine, region);
                 case "AWS::ApiGatewayV2::Api" -> provisionApiGatewayV2Api(resource, properties, engine, region, accountId, stackName);
                 case "AWS::ApiGatewayV2::Authorizer" -> provisionApiGatewayV2Authorizer(resource, properties, engine, region);
                 case "AWS::ApiGatewayV2::Route" -> provisionApiGatewayV2Route(resource, properties, engine, region);
@@ -466,7 +451,6 @@ public class CloudFormationResourceProvisioner {
             case "AWS::IAM::ManagedPolicy" -> deletePolicySafe(physicalId);
             case "AWS::IAM::InstanceProfile" -> iamService.deleteInstanceProfile(physicalId);
             // No bus context on the type/physicalId path (e.g. CREATE-rollback); targets the default bus.
-            case "AWS::ApiGateway::RestApi" -> apiGatewayService.deleteRestApi(region, physicalId);
             case "AWS::ApiGatewayV2::Api" -> apiGatewayV2Service.deleteApi(region, physicalId);
             case "AWS::Lambda::LayerVersion" -> deleteLambdaLayerVersion(physicalId, region);
             case "AWS::EKS::Cluster" -> eksService.deleteCluster(physicalId);
@@ -1713,156 +1697,6 @@ public class CloudFormationResourceProvisioner {
 
     // ── ApiGateway (V1) ──────────────────────────────────────────────────────
 
-    private void provisionApiGatewayRestApi(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                            String region, String accountId, String stackName) {
-        String name = resolveOptional(props, "Name", engine);
-        if (name == null || name.isBlank()) {
-            name = generatePhysicalName(stackName, r.getLogicalId(), 255, false);
-        }
-        String description = resolveOptional(props, "Description", engine);
-        Map<String, Object> req = new HashMap<>();
-        req.put("name", name);
-        req.put("description", description);
-
-        if (props.has("EndpointConfiguration")) {
-            JsonNode epNode = props.get("EndpointConfiguration");
-            Map<String, Object> epReq = new HashMap<>();
-            epReq.put("types", resolveStringListOrEmpty(epNode, "Types", engine));
-            epReq.put("vpcEndpointIds", resolveStringListOrEmpty(epNode, "VpcEndpointIds", engine));
-            req.put("endpointConfiguration", epReq);
-        }
-
-        var api = apiGatewayService.createRestApi(region, req);
-        r.setPhysicalId(api.getId());
-        r.getAttributes().put("RootResourceId", apiGatewayService.getResources(region, api.getId()).get(0).getId());
-
-        // A declared Body or BodyS3Location is the whole OpenAPI document: measured against real
-        // AWS, us-east-1, create-change-set, it becomes the RestApi's Body with no synthesized
-        // AWS::ApiGateway::Resource or AWS::ApiGateway::Method, so the working OpenAPI
-        // materializer (putRestApi + applyOpenApiSpec) is the only place that turns it into
-        // resources and methods. The same probe's processed template keeps a declared Name and
-        // Description in their own properties even when Body.info carries a different title or
-        // description, but putRestApi overwrites both from the document's info, so the resolved
-        // Name and Description (null when Description is undeclared, clearing what putRestApi
-        // just set) are re-applied immediately after.
-        JsonNode openApiDocument = resolveOpenApiDocument(props, engine);
-        if (openApiDocument != null) {
-            apiGatewayService.putRestApi(region, api.getId(), "overwrite", openApiDocument.toString());
-            apiGatewayService.updateRestApi(region, api.getId(),
-                    List.of(replacePatchOp("/name", name), replacePatchOp("/description", description)));
-        }
-    }
-
-    /**
-     * A {@code replace} patch operation for {@link ApiGatewayService#updateRestApi}, allowing a
-     * {@code null} value ({@code Map.of} rejects one) so an undeclared property can still be
-     * cleared rather than left at whatever {@code putRestApi} last wrote to it.
-     */
-    private Map<String, String> replacePatchOp(String path, String value) {
-        Map<String, String> op = new HashMap<>();
-        op.put("op", "replace");
-        op.put("path", path);
-        op.put("value", value);
-        return op;
-    }
-
-    private void provisionApiGatewayResource(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                             String region) {
-        String apiId = resolveOptional(props, "RestApiId", engine);
-        String parentId = resolveOptional(props, "ParentId", engine);
-        String pathPart = resolveOptional(props, "PathPart", engine);
-
-        Map<String, Object> req = new HashMap<>();
-        req.put("pathPart", pathPart);
-
-        var res = apiGatewayService.createResource(region, apiId, parentId, req);
-        r.setPhysicalId(res.getId());
-    }
-
-    private void provisionApiGatewayAuthorizer(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                               String region) {
-        String apiId = resolveOptional(props, "RestApiId", engine);
-        Map<String, Object> req = new HashMap<>();
-        req.put("name", resolveOptional(props, "Name", engine));
-        req.put("type", resolveOptional(props, "Type", engine));
-        req.put("authorizerUri", resolveOptional(props, "AuthorizerUri", engine));
-        req.put("identitySource", resolveOptional(props, "IdentitySource", engine));
-        String ttl = resolveOptional(props, "AuthorizerResultTtlInSeconds", engine);
-        if (ttl != null) {
-            req.put("authorizerResultTtlInSeconds", ttl);
-        }
-        var authorizer = apiGatewayService.createAuthorizer(region, apiId, req);
-        r.setPhysicalId(authorizer.getId());
-    }
-
-    private void provisionApiGatewayMethod(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                           String region) {
-        String apiId = resolveOptional(props, "RestApiId", engine);
-        String resourceId = resolveOptional(props, "ResourceId", engine);
-        String httpMethod = resolveOptional(props, "HttpMethod", engine);
-
-        Map<String, Object> req = new HashMap<>();
-        req.put("authorizationType", resolveOrDefault(props, "AuthorizationType", engine, "NONE"));
-        String authorizerId = resolveOptional(props, "AuthorizerId", engine);
-        if (authorizerId != null) {
-            req.put("authorizerId", authorizerId);
-        }
-        req.put("apiKeyRequired", Boolean.parseBoolean(resolveOrDefault(props, "ApiKeyRequired", engine, "false")));
-
-        apiGatewayService.putMethod(region, apiId, resourceId, httpMethod, req);
-        r.setPhysicalId(apiId + "-" + resourceId + "-" + httpMethod);
-
-        // Provision integration if present
-        if (props != null && props.has("Integration")) {
-            JsonNode integNode = engine.resolveNode(props.get("Integration"));
-            Map<String, Object> integReq = new HashMap<>();
-            integReq.put("type", resolveOptional(integNode, "Type", engine));
-            integReq.put("httpMethod", resolveOptional(integNode, "IntegrationHttpMethod", engine));
-            integReq.put("uri", resolveOptional(integNode, "Uri", engine));
-
-            apiGatewayService.putIntegration(region, apiId, resourceId, httpMethod, integReq);
-        }
-    }
-
-    private void provisionApiGatewayDeployment(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                               String region) {
-        String apiId = resolveOptional(props, "RestApiId", engine);
-        Map<String, Object> req = new HashMap<>();
-        req.put("description", resolveOptional(props, "Description", engine));
-
-        var deployment = apiGatewayService.createDeployment(region, apiId, req);
-        r.setPhysicalId(deployment.id());
-
-        // AWS::ApiGateway::Deployment accepts an inline StageName: when present, AWS creates that
-        // stage pointing at this deployment, with no separate AWS::ApiGateway::Stage resource.
-        String stageName = resolveOptional(props, "StageName", engine);
-        if (stageName != null && !stageName.isBlank()) {
-            Map<String, Object> stageReq = new HashMap<>();
-            stageReq.put("stageName", stageName);
-            stageReq.put("deploymentId", deployment.id());
-            JsonNode stageDescription = props != null ? props.get("StageDescription") : null;
-            if (stageDescription != null && stageDescription.has("Description")) {
-                stageReq.put("description", resolveOptional(stageDescription, "Description", engine));
-            }
-            apiGatewayService.createStage(region, apiId, stageReq);
-        }
-    }
-
-    private void provisionApiGatewayStage(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                          String region) {
-        String apiId = resolveOptional(props, "RestApiId", engine);
-        String stageName = resolveOptional(props, "StageName", engine);
-        String deploymentId = resolveOptional(props, "DeploymentId", engine);
-
-        Map<String, Object> req = new HashMap<>();
-        req.put("stageName", stageName);
-        req.put("deploymentId", deploymentId);
-        req.put("description", resolveOptional(props, "Description", engine));
-
-        var stage = apiGatewayService.createStage(region, apiId, req);
-        r.setPhysicalId(stageName);
-    }
-
     // ── ApiGatewayV2 (HTTP/WebSocket) ────────────────────────────────────────
 
     private void provisionApiGatewayV2Api(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
@@ -1906,7 +1740,7 @@ public class CloudFormationResourceProvisioner {
      */
     private void reconcileApiGatewayV2BodyRoutes(StackResource r, String region, String apiId, JsonNode props,
                                                  CloudFormationTemplateEngine engine) {
-        JsonNode body = resolveOpenApiDocument(props, engine);
+        JsonNode body = OpenApiDocuments.resolve(props, engine, s3Service, objectMapper);
         ApiGatewayV2BodyResourceState previous = null;
         try {
             previous = snapshotApiGatewayV2BodyResources(r, region, apiId);
@@ -1940,59 +1774,6 @@ public class CloudFormationResourceProvisioner {
                 replacement.integrationIds());
         storeApiGatewayV2BodyResourceIds(r, APIGATEWAY_V2_BODY_AUTHORIZER_IDS_ATTR,
                 replacement.authorizerIds());
-    }
-
-    private JsonNode resolveOpenApiDocument(JsonNode props, CloudFormationTemplateEngine engine) {
-        if (props == null) {
-            return null;
-        }
-        if (props.hasNonNull("Body")) {
-            return engine.resolveNode(props.get("Body"));
-        }
-        if (!props.hasNonNull("BodyS3Location")) {
-            return null;
-        }
-
-        JsonNode location = engine.resolveNode(props.get("BodyS3Location"));
-        OpenApiBodyS3Location bodyS3Location = parseOpenApiBodyS3Location(location);
-
-        try {
-            byte[] document = s3Service.getObject(bodyS3Location.bucket(), bodyS3Location.key(),
-                    bodyS3Location.version()).getData();
-            String content = new String(document, StandardCharsets.UTF_8).trim();
-            if (content.startsWith("{") || content.startsWith("[")) {
-                return objectMapper.readTree(content);
-            }
-            return new CloudFormationYamlParser(objectMapper).parse(content);
-        } catch (AwsException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new AwsException("ValidationException",
-                    "Unable to parse OpenAPI document from s3://" + bodyS3Location.bucket() + "/"
-                            + bodyS3Location.key(), 400);
-        }
-    }
-
-    private OpenApiBodyS3Location parseOpenApiBodyS3Location(JsonNode location) {
-        if (location != null && location.isTextual()) {
-            String uri = location.asText();
-            if (uri.startsWith("s3://")) {
-                String withoutScheme = uri.substring("s3://".length());
-                int slash = withoutScheme.indexOf('/');
-                if (slash > 0 && slash < withoutScheme.length() - 1) {
-                    return new OpenApiBodyS3Location(withoutScheme.substring(0, slash),
-                            withoutScheme.substring(slash + 1), null);
-                }
-            }
-        } else if (location != null && location.isObject()) {
-            String bucket = textOrNull(location, "Bucket");
-            String key = textOrNull(location, "Key");
-            if (bucket != null && !bucket.isBlank() && key != null && !key.isBlank()) {
-                return new OpenApiBodyS3Location(bucket, key, textOrNull(location, "Version"));
-            }
-        }
-        throw new AwsException("ValidationException",
-                "BodyS3Location must resolve to a non-empty S3 location", 400);
     }
 
     /**
@@ -2467,8 +2248,6 @@ public class CloudFormationResourceProvisioner {
                                                  List<Authorizer> authorizers) {}
 
     private record OpenApiAuthorizerBinding(String authorizationType, String authorizerId) {}
-
-    private record OpenApiBodyS3Location(String bucket, String key, String version) {}
 
     private static final class ApiGatewayV2BodyMaterializationException extends RuntimeException {
         private final ApiGatewayV2BodyResources resources;
