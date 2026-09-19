@@ -2043,6 +2043,20 @@ class KmsIntegrationTest {
                 .body("message", nullValue());
     }
 
+    @ParameterizedTest
+    @CsvSource({
+            "HMAC_256, GENERATE_VERIFY_MAC",
+            "RSA_2048, ENCRYPT_DECRYPT",
+            "RSA_2048, SIGN_VERIFY",
+            "ECC_NIST_P256, SIGN_VERIFY",
+            "ML_DSA_44, SIGN_VERIFY",
+    })
+    void disableKeyRotationAcceptsAKeySpecThatDoesNotRotate(String keySpec, String keyUsage) {
+        String keyArn = createKeyArn(keySpec, keyUsage);
+
+        callKms("DisableKeyRotation", "{\"KeyId\":\"%s\"}".formatted(keyArn)).then().statusCode(200);
+    }
+
     @Test
     void rotateKeyOnDemandRejectsAKeyPendingImport() {
         String keyArn = callKms("CreateKey", "{\"Origin\":\"EXTERNAL\"}")

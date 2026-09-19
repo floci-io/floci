@@ -686,7 +686,6 @@ public class KmsService implements ResourceProvider {
         KmsKey key = resolveKey(keyId, region);
         validateRotationOrigin(key);
         validateKeyIsUsableForCryptoOperations(key);
-        validateRotationKeySpec(key);
         key.setKeyRotationEnabled(false);
         keyStore.put(region + "::" + key.getKeyId(), key);
         LOG.infov("Disabled key rotation for KMS key: {0} in {1}", key.getKeyId(), region);
