@@ -147,6 +147,47 @@ class CognitoServiceTest {
         assertEquals(List.of("email"), pool.getUsernameAttributes());
     }
 
+    @Test
+    void initiateAuthRejectsUnrecognizedAuthFlowWithoutIssuingTokens() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(), "client", false, false, List.of(), List.of());
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.initiateAuth(client.getClientId(), "UNKNOWN_FLOW", Map.of("USERNAME", "alice")));
+
+        assertEquals("InvalidParameterException", exception.getErrorCode());
+    }
+
+    @Test
+    void adminInitiateAuthRejectsUnrecognizedAuthFlowWithoutIssuingTokens() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(), "client", false, false, List.of(), List.of());
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.adminInitiateAuth(pool.getId(), client.getClientId(), "UNKNOWN_FLOW",
+                        Map.of("USERNAME", "alice")));
+
+        assertEquals("InvalidParameterException", exception.getErrorCode());
+    }
+
+    @Test
+    void adminInitiateAuthNoSrpFlowRequiresTheCorrectPassword() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(), "client", false, false, List.of(), List.of());
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.adminInitiateAuth(pool.getId(), client.getClientId(), "ADMIN_NO_SRP_AUTH",
+                        Map.of("USERNAME", "alice", "PASSWORD", "wrong")));
+        assertEquals("NotAuthorizedException", exception.getErrorCode());
+
+        Map<String, Object> result = service.adminInitiateAuth(pool.getId(), client.getClientId(),
+                "ADMIN_NO_SRP_AUTH", Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"));
+        assertTrue(result.containsKey("AuthenticationResult"));
+    }
+
     @ParameterizedTest
     @CsvSource({
             "Short1!a",

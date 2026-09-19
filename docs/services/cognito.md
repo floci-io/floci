@@ -195,6 +195,15 @@ further divergences, both deliberate:
 |--------|-------------|
 | ListUsers | Lists users stored in a user pool. |
 
+## Supported AuthFlow Values
+
+`InitiateAuth` accepts `USER_PASSWORD_AUTH`, `USER_SRP_AUTH`, `CUSTOM_AUTH`, `REFRESH_TOKEN_AUTH` and
+`REFRESH_TOKEN`. `AdminInitiateAuth` accepts `ADMIN_USER_PASSWORD_AUTH`, `ADMIN_NO_SRP_AUTH`,
+`ADMIN_USER_SRP_AUTH`, `USER_PASSWORD_AUTH`, `CUSTOM_AUTH`, `REFRESH_TOKEN_AUTH` and `REFRESH_TOKEN`.
+
+Any other `AuthFlow` value, including the choice-based `USER_AUTH` flow, is rejected with
+`InvalidParameterException` and no tokens are issued. `USER_AUTH` is not implemented yet.
+
 ## User Attribute Update Verification
 
 `CreateUserPool`, `UpdateUserPool`, and `DescribeUserPool` support
