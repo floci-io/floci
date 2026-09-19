@@ -286,6 +286,8 @@ class SesImportJobServiceTest {
         AwsException e = assertThrows(AwsException.class,
                 () -> service.createContactListImportJob(REGION, ACCOUNT, url("a.csv"), "CSV", "missing", "PUT"));
         assertEquals("NotFoundException", e.getErrorCode());
+        // Probed against real AWS: this path words it differently from the contact-list APIs.
+        assertEquals("ContactList <missing> doesn't exist", e.getMessage());
         assertTrue(service.listImportJobs(REGION, null, null, null).isEmpty());
     }
 
@@ -586,7 +588,7 @@ class SesImportJobServiceTest {
 
         ImportJob stored = racing.getImportJob(REGION, job.getJobId());
         assertEquals(ImportJob.STATUS_FAILED, stored.getJobStatus());
-        assertTrue(stored.getErrorMessage().contains("not found"));
+        assertEquals("ContactList <" + LIST + "> doesn't exist", stored.getErrorMessage());
         assertEquals(1, stored.getProcessedRecordsCount());
     }
 
@@ -605,8 +607,10 @@ class SesImportJobServiceTest {
         ImportJob stored = service.getImportJob(REGION, job.getJobId());
         assertEquals(ImportJob.STATUS_COMPLETED, stored.getJobStatus());
         assertEquals(4, stored.getProcessedRecordsCount());
-        assertEquals(3, stored.getFailedRecordsCount());
-        assertEquals(1, contactService.listContacts(LIST, REGION).contacts().size());
+        // The wrong-width row and the one with data after a closing quote fail; carol's bare quote
+        // is data, as the developer guide's own unquoted attributesData shows.
+        assertEquals(2, stored.getFailedRecordsCount());
+        assertEquals(2, contactService.listContacts(LIST, REGION).contacts().size());
     }
 
     @Test

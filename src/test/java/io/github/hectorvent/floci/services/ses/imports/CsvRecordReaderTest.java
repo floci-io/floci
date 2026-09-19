@@ -122,14 +122,34 @@ class CsvRecordReaderTest {
     }
 
     @Test
-    void badQuotingFailsOneRecordAndTheReaderCarriesOn() throws IOException {
+    void theDeveloperGuidesOwnContactRowIsAccepted() throws IOException {
+        // Straight out of the SES list-management guide: attributesData is written unquoted, so the
+        // quotes inside it are data. Rejecting them would refuse the documented format.
+        List<ImportRecord> records = readAll(contacts(),
+                "emailAddress,unsubscribeAll,attributesData,topicPreferences.Sports,topicPreferences.Cycling\n"
+                        + "example1@amazon.com,false,{\"Name\": \"John\"},OPT_IN,OPT_OUT\n"
+                        + "example2@amazon.com,true,,OPT_OUT,OPT_OUT\n");
+
+        assertEquals(2, records.size());
+        assertNull(records.get(0).error());
+        assertEquals("{\"Name\": \"John\"}", records.get(0).attributesData());
+        assertEquals(Map.of("Sports", "OPT_IN", "Cycling", "OPT_OUT"), preferences(records.get(0)));
+        assertEquals(Boolean.TRUE, records.get(1).unsubscribeAll());
+    }
+
+    @Test
+    void garbageAfterAClosingQuoteFailsOneRecordAndTheReaderCarriesOn() throws IOException {
         List<ImportRecord> records = readAll(contacts(), "emailAddress,attributesData\n"
                 + "alice@example.com,\"x\"junk\n"
                 + "bob@example.com,ab\"c\n"
                 + "carol@example.com,fine\n");
 
+        // A field that opened a quoted run has to end at the delimiter; anything else cannot be
+        // read back unambiguously.
         assertTrue(records.get(0).error().contains("closing quote"));
-        assertTrue(records.get(1).error().contains("unquoted field"));
+        // A quote that never opened a run is data, so this row is fine.
+        assertNull(records.get(1).error());
+        assertEquals("ab\"c", records.get(1).attributesData());
         assertEquals("carol@example.com", records.get(2).emailAddress());
         assertNull(records.get(2).error());
     }

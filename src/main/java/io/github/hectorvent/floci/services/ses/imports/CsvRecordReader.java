@@ -211,9 +211,11 @@ final class CsvRecordReader implements RecordReader {
         return index == null ? null : fields.get(index);
     }
 
-    // RFC 4180 field splitting: a quoted field may contain commas and line breaks, a doubled quote
-    // inside a quoted field is a literal quote, and anything but a delimiter after the closing
-    // quote (or a bare quote inside an unquoted field) is malformed rather than data.
+    // RFC 4180 field splitting: a quoted field may contain commas and line breaks, and a doubled
+    // quote inside a quoted field is a literal quote. A quote that does not open a field is data,
+    // not an error: the developer guide's own contact row writes attributesData unquoted as
+    // {"Name": "John"}, and core/common/CsvParser keeps such a quote literal as well. Anything but
+    // a delimiter after a closing quote is still malformed, since that row cannot be read back.
     static List<String> splitCsvLine(String line) {
         List<String> fields = new ArrayList<>();
         StringBuilder current = new StringBuilder();
@@ -240,10 +242,7 @@ final class CsvRecordReader implements RecordReader {
                 fields.add(current.toString());
                 current.setLength(0);
                 afterClosingQuote = false;
-            } else if (c == '"') {
-                if (!current.isEmpty()) {
-                    throw new InvalidRecordException("Malformed CSV: quote inside an unquoted field.");
-                }
+            } else if (c == '"' && current.isEmpty()) {
                 quoted = true;
             } else if (c == ',') {
                 fields.add(current.toString());
@@ -259,7 +258,4 @@ final class CsvRecordReader implements RecordReader {
         return fields;
     }
 
-    private static String stripBom(String text) {
-        return text.startsWith("﻿") ? text.substring(1) : text;
-    }
 }

@@ -13,6 +13,8 @@ import java.util.List;
 
 /** Reads newline-delimited JSON: one complete object per line. */
 final class JsonLineReader implements RecordReader {
+
+    private static final String BOM = "\uFEFF";
     private final BufferedReader source;
     private final ImportJob job;
     private final ObjectReader lineReader;
@@ -95,6 +97,6 @@ final class JsonLineReader implements RecordReader {
     }
 
     private static String stripBom(String text) {
-        return text.startsWith("﻿") ? text.substring(1) : text;
+        return text.startsWith(BOM) ? text.substring(BOM.length()) : text;
     }
 }

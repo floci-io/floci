@@ -23,15 +23,10 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
-import java.io.Reader;
-import java.io.StringReader;
-import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -142,8 +137,27 @@ public class SesImportJobService implements Resettable {
         ImportJob job = newJob(region, s3Url, dataFormat, importAction);
         job.setDestinationType(ImportJob.DESTINATION_CONTACT_LIST);
         job.setContactListName(contactListName);
-        contactService.getContactList(contactListName, region);
+        requireContactList(job);
         return start(job, accountId);
+    }
+
+    /**
+     * Probed against real AWS: an import job checks the contact list when it is created, answering
+     * NotFoundException even though the model lists only BadRequest / LimitExceeded /
+     * TooManyRequests for CreateImportJob. This path also words it differently from the contact-list
+     * APIs ("ContactList <name> doesn't exist" rather than "List with name: <name> doesn't exist."),
+     * so the message is rewritten here and the contact service keeps its own.
+     */
+    private void requireContactList(ImportJob job) {
+        try {
+            contactService.getContactList(job.getContactListName(), job.getRegion());
+        } catch (AwsException e) {
+            if (!"NotFoundException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            throw new AwsException("NotFoundException",
+                    "ContactList <" + job.getContactListName() + "> doesn't exist", 404);
+        }
     }
 
     private ImportJob newJob(String region, String s3Url, String dataFormat, String importAction) {
@@ -243,7 +257,7 @@ public class SesImportJobService implements Resettable {
                 throw new AwsException("BadRequestException", "Invalid S3 URL: " + job.getS3Url(), 400);
             }
             if (ImportJob.DESTINATION_CONTACT_LIST.equals(job.getDestinationType())) {
-                contactService.getContactList(job.getContactListName(), job.getRegion());
+                requireContactList(job);
             }
             // Streamed and applied one record at a time, so an import never holds more than the
             // current record in memory whatever the object's size.
@@ -305,7 +319,7 @@ public class SesImportJobService implements Resettable {
             // list itself has gone, which fails the whole job like the pre-run check.
             if (ImportJob.DESTINATION_CONTACT_LIST.equals(job.getDestinationType())
                     && "NotFoundException".equals(e.getErrorCode())) {
-                contactService.getContactList(job.getContactListName(), job.getRegion());
+                requireContactList(job);
             }
             failRecord(job, record.line(), e.getMessage());
         }
