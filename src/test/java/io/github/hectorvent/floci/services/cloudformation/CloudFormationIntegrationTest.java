@@ -18,11 +18,15 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.zip.ZipEntry;
@@ -200,7 +204,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("cf-test-queue"));
-        
+
         // 4. Describe Stacks
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -6708,6 +6712,140 @@ class CloudFormationIntegrationTest {
             .body(containsString("nested-stack-child-queue"));
     }
 
+    @Test
+    void executeChangeSet_siblingNestedStackOutputs_resolveUnderConcurrentDeploys() throws Exception {
+        int deployCount = 20;
+        int concurrency = 8;
+        ExecutorService pool = Executors.newFixedThreadPool(concurrency);
+        List<Callable<String>> deploys = new ArrayList<>();
+        for (int i = 0; i < deployCount; i++) {
+            int index = i;
+            deploys.add(() -> deployParentWithTwoNestedStacksAndCheckOutputs("issue3854-" + index));
+        }
+        try {
+            List<Future<String>> results = new ArrayList<>();
+            for (Callable<String> deploy : deploys) {
+                results.add(pool.submit(deploy));
+            }
+            List<String> failures = new ArrayList<>();
+            for (Future<String> result : results) {
+                String failure = result.get(30, TimeUnit.SECONDS);
+                if (failure != null) {
+                    failures.add(failure);
+                }
+            }
+            assertTrue(failures.isEmpty(),
+                    "nested stack outputs failed to resolve for: " + failures);
+        } finally {
+            pool.shutdown();
+            assertTrue(pool.awaitTermination(30, TimeUnit.SECONDS));
+        }
+    }
+
+    /**
+     * Deploys a parent stack with two sibling nested stacks (each contributing an
+     * {@code AWS::CloudFormation::Stack} resource with its own {@code Outputs}), through the same
+     * {@code CreateChangeSet}/{@code ExecuteChangeSet} path the AWS CDK CLI uses, then polls
+     * {@code DescribeStacks} the way a real client does. Returns {@code null} on success, or a
+     * description of the mismatch: the parent's own outputs, each an {@code Fn::GetAtt} on a
+     * nested stack's {@code Outputs.<Key>}, must resolve to the nested stack's actual value rather
+     * than the unresolved {@code LogicalId.Outputs.Key} literal (issue #3854).
+     */
+    private String deployParentWithTwoNestedStacksAndCheckOutputs(String suffix) {
+        String memberChildTemplate = cognitoPoolNestedStackTemplate(suffix + "-member");
+        String adminChildTemplate = cognitoPoolNestedStackTemplate(suffix + "-admin");
+
+        given().when().put("/issue-3854-templates").then();
+        given().contentType("application/json").body(memberChildTemplate)
+                .when().put("/issue-3854-templates/" + suffix + "-member.json")
+                .then().statusCode(200);
+        given().contentType("application/json").body(adminChildTemplate)
+                .when().put("/issue-3854-templates/" + suffix + "-admin.json")
+                .then().statusCode(200);
+
+        String parentTemplate = """
+            {
+              "Resources": {
+                "MemberNestedStack": {
+                  "Type": "AWS::CloudFormation::Stack",
+                  "Properties": {
+                    "TemplateURL": "http://localhost/issue-3854-templates/%1$s-member.json"
+                  }
+                },
+                "AdminNestedStack": {
+                  "Type": "AWS::CloudFormation::Stack",
+                  "Properties": {
+                    "TemplateURL": "http://localhost/issue-3854-templates/%1$s-admin.json"
+                  }
+                }
+              },
+              "Outputs": {
+                "memberPoolId": {
+                  "Value": { "Fn::GetAtt": ["MemberNestedStack", "Outputs.PoolId"] }
+                },
+                "adminPoolId": {
+                  "Value": { "Fn::GetAtt": ["AdminNestedStack", "Outputs.PoolId"] }
+                }
+              }
+            }
+            """.formatted(suffix);
+
+        String stackName = "issue-3854-parent-" + suffix;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateChangeSet")
+            .formParam("StackName", stackName)
+            .formParam("ChangeSetName", "deploy")
+            .formParam("ChangeSetType", "CREATE")
+            .formParam("TemplateBody", parentTemplate)
+        .when().post("/").then().statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ExecuteChangeSet")
+            .formParam("StackName", stackName)
+            .formParam("ChangeSetName", "deploy")
+        .when().post("/").then().statusCode(200);
+
+        String xml = null;
+        long deadline = System.currentTimeMillis() + 20_000;
+        while (System.currentTimeMillis() < deadline) {
+            xml = given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStacks")
+                .formParam("StackName", stackName)
+            .when().post("/")
+            .then().statusCode(200)
+            .extract().asString();
+            if (xml.contains("<StackStatus>CREATE_COMPLETE</StackStatus>") || xml.contains("FAILED")) {
+                break;
+            }
+        }
+
+        if (xml == null || !xml.contains("<StackStatus>CREATE_COMPLETE</StackStatus>")
+                || xml.contains("NestedStack.Outputs")) {
+            return suffix + ": " + xml;
+        }
+        return null;
+    }
+
+    private static String cognitoPoolNestedStackTemplate(String suffix) {
+        return """
+            {
+              "Resources": {
+                "Pool": {
+                  "Type": "AWS::Cognito::UserPool",
+                  "Properties": { "UserPoolName": "issue-3854-pool-%1$s" }
+                }
+              },
+              "Outputs": {
+                "PoolId": { "Value": {"Ref": "Pool"} }
+              }
+            }
+            """.formatted(suffix);
+    }
+
     // ── Issue #1072: AWS::ApiGatewayV2::Api WEBSOCKET drops RouteSelectionExpression ───
 
     @Test
@@ -7100,7 +7238,7 @@ class CloudFormationIntegrationTest {
             .body("services[0].taskDefinition",
                     equalTo("arn:aws:ecs:us-east-1:000000000000:task-definition/cfn-ecs-update-taskdef:2"));
     }
-    
+
     @Test
     void deleteStack_ec2SecurityGroup_leavesNoOrphans() {
         String stackName = "sg-delete-cleanup-stack";
