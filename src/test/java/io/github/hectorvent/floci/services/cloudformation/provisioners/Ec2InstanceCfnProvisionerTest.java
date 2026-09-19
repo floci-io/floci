@@ -2,32 +2,39 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
+import io.github.hectorvent.floci.services.ec2.model.InstanceState;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 import io.github.hectorvent.floci.services.ec2.model.Placement;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
+import io.github.hectorvent.floci.services.ec2.model.Tag;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
-import io.github.hectorvent.floci.core.common.AwsException;
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.mockito.Mockito.doThrow;
 
 /**
  * {@code AWS::EC2::Instance} in isolation: the attributes Ref and Fn::GetAtt read once the launch
@@ -124,6 +131,152 @@ class Ec2InstanceCfnProvisionerTest {
         assertEquals("DependencyViolation", failure.getErrorCode());
     }
 
+    @Test
+    void updateWithoutACreateOnlyChangeReusesTheInstance() throws Exception {
+        Instance i1 = new Instance();
+        i1.setInstanceId("i-1");
+        i1.setImageId("ami-1");
+        stubLaunch(i1);
+        StackResource r = resource("Server");
+        provisioner.provision(r, props("{\"ImageId\": \"ami-1\"}"), ctx(null));
+        assertEquals("i-1", r.getPhysicalId());
+
+        when(ec2.describeInstances("us-east-1", List.of("i-1"), null))
+                .thenReturn(List.of(reservationOf(i1)));
+        provisioner.provision(r, props("{\"ImageId\": \"ami-1\", \"InstanceType\": \"t3.small\"}"),
+                ctx("i-1"));
+
+        assertEquals("i-1", r.getPhysicalId());
+        verify(ec2, times(1)).runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(),
+                anyList(), any(), any(), anyList(), any(), any(), any());
+    }
+
+    @Test
+    void changingImageIdReplacesTheInstanceAndRecordsTheCleanup() throws Exception {
+        Instance i1 = new Instance();
+        i1.setInstanceId("i-1");
+        i1.setImageId("ami-1");
+        Instance i2 = new Instance();
+        i2.setInstanceId("i-2");
+        i2.setImageId("ami-2");
+        when(ec2.runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(), anyList(),
+                any(), any(), anyList(), any(), any(), any()))
+                .thenReturn(reservationOf(i1), reservationOf(i2));
+        StackResource r = resource("Server");
+        provisioner.provision(r, props("{\"ImageId\": \"ami-1\"}"), ctx(null));
+        assertEquals("i-1", r.getPhysicalId());
+
+        when(ec2.describeInstances("us-east-1", List.of("i-1"), null))
+                .thenReturn(List.of(reservationOf(i1)));
+        provisioner.provision(r, props("{\"ImageId\": \"ami-2\"}"), ctx("i-1"));
+
+        assertEquals("i-2", r.getPhysicalId());
+        assertTrue(provisioner.hasReplacementUpdate(r));
+        assertEquals("i-1", provisioner.updateCleanupPhysicalId(r));
+    }
+
+    @Test
+    void reusedInstanceReconcilesTagsInPlace() throws Exception {
+        Instance i1 = new Instance();
+        i1.setInstanceId("i-1");
+        i1.setImageId("ami-1");
+        stubLaunch(i1);
+        StackResource r = resource("Server");
+        provisioner.provision(r, props("""
+                {"ImageId": "ami-1", "Tags": [{"Key": "env", "Value": "prod"}]}
+                """), ctx(null));
+
+        when(ec2.describeInstances("us-east-1", List.of("i-1"), null))
+                .thenReturn(List.of(reservationOf(i1)));
+        when(ec2.describeTags(eq("us-east-1"), any())).thenReturn(List.of(
+                tagEntry("i-1", "env", "prod"), tagEntry("i-1", "old", "stale")));
+        provisioner.provision(r, props("""
+                {"ImageId": "ami-1", "Tags": [{"Key": "env", "Value": "prod"}]}
+                """), ctx("i-1"));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<Tag>> removed = ArgumentCaptor.forClass(List.class);
+        verify(ec2).deleteTags(eq("us-east-1"), eq(List.of("i-1")), removed.capture());
+        assertEquals(1, removed.getValue().size());
+        assertEquals("old", removed.getValue().get(0).getKey());
+    }
+
+    @Test
+    void updateCreatesAFreshInstanceWhenThePriorOneWasTerminatedOutOfBand() throws Exception {
+        Instance created = new Instance();
+        created.setInstanceId("i-9");
+        created.setImageId("ami-1");
+        stubLaunch(created);
+        when(ec2.describeInstances("us-east-1", List.of("i-1"), null))
+                .thenThrow(new AwsException("InvalidInstanceID.NotFound", "gone", 400));
+        StackResource r = resource("Server");
+
+        assertDoesNotThrow(() -> provisioner.provision(r, props("{\"ImageId\": \"ami-1\"}"), ctx("i-1")));
+
+        assertEquals("i-9", r.getPhysicalId());
+        verify(ec2).runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(),
+                anyList(), any(), any(), anyList(), any(), any(), any());
+    }
+
+    @Test
+    void updateDoesNotReuseATerminatedPriorInstance() throws Exception {
+        Instance terminated = new Instance();
+        terminated.setInstanceId("i-1");
+        terminated.setImageId("ami-1");
+        terminated.setState(InstanceState.terminated());
+        Instance created = new Instance();
+        created.setInstanceId("i-9");
+        created.setImageId("ami-1");
+        stubLaunch(created);
+        when(ec2.describeInstances("us-east-1", List.of("i-1"), null))
+                .thenReturn(List.of(reservationOf(terminated)));
+        StackResource r = resource("Server");
+
+        provisioner.provision(r, props("{\"ImageId\": \"ami-1\"}"), ctx("i-1"));
+
+        assertEquals("i-9", r.getPhysicalId());
+        verify(ec2).runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(),
+                anyList(), any(), any(), anyList(), any(), any(), any());
+    }
+
+    @Test
+    void replacementDoesNotInheritStaleAttributesFromThePriorInstance() throws Exception {
+        Instance withPublicIp = new Instance();
+        withPublicIp.setInstanceId("i-1");
+        withPublicIp.setImageId("ami-1");
+        withPublicIp.setPublicIpAddress("54.0.0.5");
+        Instance withoutPublicIp = new Instance();
+        withoutPublicIp.setInstanceId("i-2");
+        withoutPublicIp.setImageId("ami-2");
+        when(ec2.runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(), anyList(),
+                any(), any(), anyList(), any(), any(), any()))
+                .thenReturn(reservationOf(withPublicIp), reservationOf(withoutPublicIp));
+        StackResource r = resource("Server");
+        provisioner.provision(r, props("{\"ImageId\": \"ami-1\"}"), ctx(null));
+        assertEquals("54.0.0.5", r.getAttributes().get("PublicIp"));
+
+        when(ec2.describeInstances("us-east-1", List.of("i-1"), null))
+                .thenReturn(List.of(reservationOf(withPublicIp)));
+        provisioner.provision(r, props("{\"ImageId\": \"ami-2\"}"), ctx("i-1"));
+
+        assertEquals("i-2", r.getPhysicalId());
+        assertFalse(r.getAttributes().containsKey("PublicIp"));
+    }
+
+    private static Reservation reservationOf(Instance instance) {
+        Reservation reservation = new Reservation();
+        reservation.getInstances().add(instance);
+        return reservation;
+    }
+
+    private static Map<String, String> tagEntry(String resourceId, String key, String value) {
+        Map<String, String> entry = new HashMap<>();
+        entry.put("resourceId", resourceId);
+        entry.put("key", key);
+        entry.put("value", value);
+        return entry;
+    }
+
     private void stubLaunch(Instance instance) {
         Reservation reservation = new Reservation();
         reservation.getInstances().add(instance);
@@ -132,13 +285,17 @@ class Ec2InstanceCfnProvisionerTest {
     }
 
     private ProvisionContext ctx() {
+        return ctx(null);
+    }
+
+    private ProvisionContext ctx(String priorPhysicalId) {
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
         when(engine.resolve(any())).thenAnswer(inv -> {
             JsonNode node = inv.getArgument(0);
             return node == null ? null : node.asText();
         });
         when(engine.resolveNode(any())).thenAnswer(inv -> inv.getArgument(0));
-        return new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack");
+        return new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack", priorPhysicalId);
     }
 
     private JsonNode props(String json) throws Exception {
