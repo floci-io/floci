@@ -1990,6 +1990,18 @@ class KmsIntegrationTest {
     }
 
     @ParameterizedTest
+    @CsvSource({"Sign", "Verify"})
+    void messageTypeValidationListsTheEnumBeforeLookingUpTheKey(String operation) {
+        callKms(operation, ("{\"KeyId\":\"00000000-0000-0000-0000-000000000000\",\"Message\":\"bWVzc2FnZQ==\","
+                + "\"Signature\":\"AAAA\",\"SigningAlgorithm\":\"ECDSA_SHA_256\",\"MessageType\":\"FOO\"}"))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("1 validation error detected: Value 'FOO' at 'messageType' failed to satisfy "
+                        + "constraint: Member must satisfy enum value set: [RAW, DIGEST, EXTERNAL_MU]"));
+    }
+
+    @ParameterizedTest
     @CsvSource({"Encrypt", "Decrypt"})
     void encryptionAlgorithmValidationListsTheEnumInAwsOrder(String operation) {
         callKms(operation, "{\"KeyId\":\"%s\",\"Plaintext\":\"aGVsbG8=\",\"CiphertextBlob\":\"AAAA\",\"EncryptionAlgorithm\":\"FOO\"}"
