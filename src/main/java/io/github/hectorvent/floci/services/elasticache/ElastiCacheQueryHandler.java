@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.elasticache;
 
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.BackupWindows;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsQueryResponse;
@@ -66,7 +67,7 @@ public class ElastiCacheQueryHandler {
             case "DescribeUsers"              -> handleDescribeUsers(params);
             case "ModifyUser"                 -> handleModifyUser(params);
             case "DeleteUser"                 -> handleDeleteUser(params);
-            case "CreateCacheCluster"         -> handleCreateCacheCluster(params);
+            case "CreateCacheCluster"         -> handleCreateCacheCluster(params, region);
             case "DescribeCacheClusters"      -> handleDescribeCacheClusters(params);
             case "DeleteCacheCluster"         -> handleDeleteCacheCluster(params);
             case "CreateCacheSubnetGroup"     -> handleCreateCacheSubnetGroup(params);
@@ -312,9 +313,9 @@ public class ElastiCacheQueryHandler {
         }
     }
 
-    // ── Cache Clusters (Memcached) ────────────────────────────────────────────
+    // ── Cache Clusters (Memcached, and single-node Redis/Valkey) ──────────────
 
-    private Response handleCreateCacheCluster(MultivaluedMap<String, String> params) {
+    private Response handleCreateCacheCluster(MultivaluedMap<String, String> params, String region) {
         String clusterId = params.getFirst("CacheClusterId");
         String engine = params.getFirst("Engine");
 
@@ -322,33 +323,70 @@ public class ElastiCacheQueryHandler {
             return AwsQueryResponse.error("InvalidParameterValue",
                     "CacheClusterId is required.", AwsNamespaces.EC, 400);
         }
-        if (!"memcached".equalsIgnoreCase(engine)) {
+        if (!"memcached".equalsIgnoreCase(engine) && !"redis".equalsIgnoreCase(engine)
+                && !"valkey".equalsIgnoreCase(engine)) {
             return AwsQueryResponse.error("InvalidParameterValue",
-                    "Engine must be 'memcached'. For Redis/Valkey use CreateReplicationGroup.", AwsNamespaces.EC, 400);
+                    "Engine must be 'memcached', 'redis' or 'valkey'.", AwsNamespaces.EC, 400);
         }
 
         try {
-            CacheCluster cluster = memcachedService.createCacheCluster(clusterId);
-            return Response.ok(AwsQueryResponse.envelope("CreateCacheCluster", AwsNamespaces.EC, cacheClusterXml(cluster))).build();
+            CacheCluster cluster = "memcached".equalsIgnoreCase(engine)
+                    ? memcachedService.createCacheCluster(clusterId)
+                    : service.createCacheCluster(new ElastiCacheService.CreateCacheClusterRequest(
+                            clusterId,
+                            engine,
+                            params.getFirst("EngineVersion"),
+                            params.getFirst("CacheNodeType"),
+                            intParam(params, "NumCacheNodes"),
+                            intParam(params, "Port"),
+                            cacheClusterAuthMode(params),
+                            params.getFirst("AuthToken"),
+                            params.getFirst("CacheParameterGroupName"),
+                            params.getFirst("CacheSubnetGroupName"),
+                            optionalInt(params.getFirst("SnapshotRetentionLimit")),
+                            params.getFirst("SnapshotWindow"),
+                            params.getFirst("PreferredMaintenanceWindow"),
+                            params.getFirst("PreferredAvailabilityZone"),
+                            parseSecurityGroupIds(params),
+                            params.getFirst("NetworkType"),
+                            params.getFirst("IpDiscovery"),
+                            boolParam(params, "AtRestEncryptionEnabled"),
+                            region,
+                            parseTags(params)));
+            return Response.ok(AwsQueryResponse.envelope("CreateCacheCluster", AwsNamespaces.EC,
+                    cacheClusterXml(cluster, false))).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
         }
     }
 
+    /** Read exactly as CreateReplicationGroup reads it, so both actions agree about one request. */
+    private static AuthMode cacheClusterAuthMode(MultivaluedMap<String, String> params) {
+        String authToken = params.getFirst("AuthToken");
+        if (authToken != null && !authToken.isBlank()) {
+            return AuthMode.PASSWORD;
+        }
+        if ("true".equalsIgnoreCase(params.getFirst("TransitEncryptionEnabled"))) {
+            return AuthMode.IAM;
+        }
+        return AuthMode.NO_AUTH;
+    }
+
     private Response handleDescribeCacheClusters(MultivaluedMap<String, String> params) {
         String filterId = params.getFirst("CacheClusterId");
         boolean showNodeInfo = "true".equalsIgnoreCase(params.getFirst("ShowCacheNodeInfo"));
+        boolean filtered = filterId != null && !filterId.isBlank();
         try {
             List<ElastiCacheService.MemberCacheCluster> members = service.listMemberCacheClusters(filterId);
-            Collection<CacheCluster> clusterList;
-            if (filterId != null && !filterId.isBlank() && !members.isEmpty()) {
-                clusterList = List.of();
-            } else {
-                clusterList = memcachedService.listCacheClusters(filterId);
+            List<CacheCluster> clusterList = new ArrayList<>(service.findCacheClusters(filterId));
+            // The Memcached lookup is the one that raises CacheClusterNotFound for an unknown id,
+            // which is the right answer only once no other source has answered.
+            if (!filtered || (members.isEmpty() && clusterList.isEmpty())) {
+                clusterList.addAll(memcachedService.listCacheClusters(filterId));
             }
             var xml = new XmlBuilder().start("CacheClusters");
             for (CacheCluster c : clusterList) {
-                xml.raw(cacheClusterXml(c));
+                xml.raw(cacheClusterXml(c, showNodeInfo));
             }
             for (ElastiCacheService.MemberCacheCluster member : members) {
                 xml.raw(memberCacheClusterXml(member, showNodeInfo));
@@ -424,8 +462,13 @@ public class ElastiCacheQueryHandler {
                     "CacheClusterId is required.", AwsNamespaces.EC, 400);
         }
         try {
-            CacheCluster cluster = memcachedService.deleteCacheCluster(clusterId);
-            return Response.ok(AwsQueryResponse.envelope("DeleteCacheCluster", AwsNamespaces.EC, cacheClusterXml(cluster))).build();
+            // Standalone redis/valkey clusters are stored apart from Memcached ones, so the id is
+            // looked for there first and the Memcached delete keeps raising the not-found fault.
+            CacheCluster cluster = service.findCacheClusters(clusterId).isEmpty()
+                    ? memcachedService.deleteCacheCluster(clusterId)
+                    : service.deleteCacheCluster(clusterId);
+            return Response.ok(AwsQueryResponse.envelope("DeleteCacheCluster", AwsNamespaces.EC,
+                    cacheClusterXml(cluster, false))).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
         }
@@ -516,6 +559,21 @@ public class ElastiCacheQueryHandler {
             }
         }
         return subnetIds;
+    }
+
+    /** Reads the SecurityGroupIds list under every spelling the Query protocol sends it in. */
+    private static List<String> parseSecurityGroupIds(MultivaluedMap<String, String> params) {
+        List<String> securityGroupIds = new ArrayList<>();
+        for (String prefix : List.of("SecurityGroupIds.SecurityGroupId", "SecurityGroupIds.member")) {
+            for (int i = 1; ; i++) {
+                String securityGroupId = params.getFirst(prefix + "." + i);
+                if (securityGroupId == null) {
+                    break;
+                }
+                securityGroupIds.add(securityGroupId);
+            }
+        }
+        return securityGroupIds;
     }
 
 private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> params) {
@@ -623,6 +681,22 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
                 }
                 tags = group.getTags();
             }
+            if ("cluster".equals(arn[5])) {
+                CacheCluster cluster = service.findCacheClusters(arn[6]).stream().findFirst().orElse(null);
+                if (cluster != null) {
+                    // Same shape as the replicationgroup arm: the store keys clusters by id
+                    // alone, so the record found must also be the one this ARN names.
+                    if (cluster.getArn() != null && !cluster.getArn().equalsIgnoreCase(resourceName)) {
+                        throw new AwsException("CacheClusterNotFound",
+                                "Cache cluster " + arn[6] + " not found.", 404);
+                    }
+                    tags = cluster.getTags();
+                } else if (service.listMemberCacheClusters(arn[6]).isEmpty()) {
+                    // Memcached clusters and replication group members carry no tags, but they do
+                    // exist. Only an id no source knows is a not-found.
+                    memcachedService.getCacheCluster(arn[6]);
+                }
+            }
             if ("subnetgroup".equals(arn[5])) {
                 tags = service.describeCacheSubnetGroups(arn[6]).getFirst().getTags();
             }
@@ -729,7 +803,15 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
 
     // ── XML helpers ───────────────────────────────────────────────────────────
 
-    private String cacheClusterXml(CacheCluster c) {
+    /**
+     * A cache cluster as its engine has AWS report it. Memcached carries a ConfigurationEndpoint,
+     * the address of its node-discovery endpoint; a single-node redis or valkey cluster has none,
+     * and its endpoint is the node's, reported under CacheNodes when the request asks for node
+     * info. terraform-provider-aws reads {@code port} from whichever of the two is present, so a
+     * redis cluster answering with a ConfigurationEndpoint instead would report itself as the
+     * wrong thing.
+     */
+    private String cacheClusterXml(CacheCluster c, boolean showNodeInfo) {
         Endpoint ep = c.getConfigurationEndpoint();
         var xml = new XmlBuilder()
                 .start("CacheCluster")
@@ -737,11 +819,87 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
                   .elem("CacheClusterStatus", c.getCacheClusterStatus().name().toLowerCase())
                   .elem("Engine", c.getEngine())
                   .elem("EngineVersion", c.getEngineVersion());
-        if (ep != null) {
-            xml.start("ConfigurationEndpoint")
-               .elem("Address", ep.address())
-               .elem("Port", (long) ep.port())
-               .end("ConfigurationEndpoint");
+        if ("memcached".equals(c.getEngine())) {
+            if (ep != null) {
+                xml.start("ConfigurationEndpoint")
+                   .elem("Address", ep.address())
+                   .elem("Port", (long) ep.port())
+                   .end("ConfigurationEndpoint");
+            }
+            return xml.end("CacheCluster").build();
+        }
+
+        xml.elem("NumCacheNodes", (long) c.getNumCacheNodes())
+           .elem("AutoMinorVersionUpgrade", true)
+           .elem("AuthTokenEnabled", c.getAuthMode() == AuthMode.PASSWORD)
+           .elem("TransitEncryptionEnabled", c.getAuthMode() != null && c.getAuthMode() != AuthMode.NO_AUTH)
+           .elem("AtRestEncryptionEnabled", c.isAtRestEncryptionEnabled())
+           .elem("SnapshotRetentionLimit", (long) c.getSnapshotRetentionLimit())
+           .elem("SnapshotWindow", c.getSnapshotWindow() != null
+                   ? c.getSnapshotWindow() : ReplicationGroupSettings.DEFAULT_SNAPSHOT_WINDOW)
+           .elem("PreferredMaintenanceWindow", c.getPreferredMaintenanceWindow() != null
+                   ? c.getPreferredMaintenanceWindow() : BackupWindows.DEFAULT_MAINTENANCE_WINDOW);
+        if (c.getCacheClusterCreateTime() != null) {
+            xml.elem("CacheClusterCreateTime", c.getCacheClusterCreateTime().toString());
+        }
+        if (c.getPreferredAvailabilityZone() != null) {
+            xml.elem("PreferredAvailabilityZone", c.getPreferredAvailabilityZone());
+        }
+        if (c.getNetworkType() != null) {
+            xml.elem("NetworkType", c.getNetworkType());
+        }
+        if (c.getIpDiscovery() != null) {
+            xml.elem("IpDiscovery", c.getIpDiscovery());
+        }
+        if (!c.getSecurityGroupIds().isEmpty()) {
+            xml.start("SecurityGroups");
+            for (String securityGroupId : c.getSecurityGroupIds()) {
+                xml.start("member")
+                   .elem("SecurityGroupId", securityGroupId)
+                   .elem("Status", "active")
+                   .end("member");
+            }
+            xml.end("SecurityGroups");
+        }
+        if (c.getCacheNodeType() != null) {
+            xml.elem("CacheNodeType", c.getCacheNodeType());
+        }
+        if (c.getCacheParameterGroupName() != null) {
+            xml.start("CacheParameterGroup")
+               .elem("CacheParameterGroupName", c.getCacheParameterGroupName())
+               .elem("ParameterApplyStatus", "in-sync")
+               .end("CacheParameterGroup");
+        }
+        if (c.getCacheSubnetGroupName() != null) {
+            xml.elem("CacheSubnetGroupName", c.getCacheSubnetGroupName());
+        }
+        if (c.getArn() != null) {
+            xml.elem("ARN", c.getArn());
+        }
+        if (showNodeInfo && ep != null) {
+            // terraform-provider-aws dereferences CacheNodeCreateTime and ParameterGroupStatus
+            // without a nil check while adopting the resource, so a node carrying only an
+            // endpoint fails the refresh right after a successful create. Both are stable
+            // metadata AWS returns on every available node, and both are already known here:
+            // a single-node cluster's node was created with the cluster, and its parameter
+            // group has the same in-sync status reported for the cluster above.
+            xml.start("CacheNodes")
+               .start("CacheNode")
+                 .elem("CacheNodeId", "0001")
+                 .elem("CacheNodeStatus", "available");
+            if (c.getCacheClusterCreateTime() != null) {
+                xml.elem("CacheNodeCreateTime", c.getCacheClusterCreateTime().toString());
+            }
+            xml.start("Endpoint")
+                 .elem("Address", ep.address())
+                 .elem("Port", (long) ep.port())
+               .end("Endpoint")
+               .elem("ParameterGroupStatus", "in-sync");
+            if (c.getPreferredAvailabilityZone() != null) {
+                xml.elem("CustomerAvailabilityZone", c.getPreferredAvailabilityZone());
+            }
+            xml.end("CacheNode")
+               .end("CacheNodes");
         }
         return xml.end("CacheCluster").build();
     }
