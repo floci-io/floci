@@ -1915,6 +1915,20 @@ class KmsIntegrationTest {
                 .body("message", equalTo("1 validation error detected: " + error));
     }
 
+    @ParameterizedTest
+    @CsvSource({
+            "\"KeySpec\":\"AES_128\", 16",
+            "\"KeySpec\":\"AES_256\", 32",
+            "\"NumberOfBytes\":7, 7",
+    })
+    void generateDataKeyReturnsAPlaintextOfTheRequestedLength(String member, int length) {
+        String plaintext = callKms("GenerateDataKey", "{\"KeyId\":\"%s\",%s}"
+                .formatted(createKeyArn("SYMMETRIC_DEFAULT", "ENCRYPT_DECRYPT"), member))
+                .then().statusCode(200).extract().path("Plaintext");
+
+        assertEquals(length, Base64.getDecoder().decode(plaintext).length);
+    }
+
     /** The key usage and the key state are checked after this. */
     @ParameterizedTest
     @CsvSource(delimiter = '|', value = {

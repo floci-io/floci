@@ -1751,7 +1751,7 @@ public class KmsService implements ResourceProvider {
         if ((keySpec == null) == (numberOfBytes == null)) {
             throw new AwsException("ValidationException", "Please specify either number of bytes or key spec.", 400);
         }
-        int len = (keySpec != null && keySpec.contains("256")) ? 32 : (numberOfBytes != null ? numberOfBytes : 32);
+        int len = keySpec == null ? numberOfBytes : "AES_128".equals(keySpec) ? 16 : 32;
 
         byte[] plaintext = new byte[len];
         ThreadLocalRandom.current().nextBytes(plaintext);
