@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.elasticache;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -29,7 +30,7 @@ class ElastiCacheParameterGroupIntegrationTest {
     private static final String AUTH_HEADER =
             "AWS4-HMAC-SHA256 Credential=test/20260412/us-east-1/elasticache/aws4_request";
 
-    private static io.restassured.specification.RequestSpecification query(String action) {
+    private static RequestSpecification query(String action) {
         return given()
                 .header("Authorization", AUTH_HEADER)
                 .formParam("Action", action)

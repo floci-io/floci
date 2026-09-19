@@ -12,6 +12,7 @@ import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Predicate;
 
 /**
  * Forms a Valkey cluster out of freshly started cluster-enabled nodes, the way
@@ -158,7 +159,7 @@ public class ValkeyClusterFormation {
     }
 
     private static boolean allMatch(List<RespClient> clients,
-                                    java.util.function.Predicate<String> infoPredicate) throws IOException {
+                                    Predicate<String> infoPredicate) throws IOException {
         for (RespClient client : clients) {
             if (!infoPredicate.test(client.callString("CLUSTER", "INFO"))) {
                 return false;

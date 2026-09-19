@@ -3,35 +3,35 @@ package io.github.hectorvent.floci.services.elasticache;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
-import io.github.hectorvent.floci.core.storage.StorageFactory;
-import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
-import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
-import io.github.hectorvent.floci.services.kms.KmsService;
-import io.github.hectorvent.floci.services.kms.model.KmsKey;
-import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroupSettings;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerHandle;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerManager;
 import io.github.hectorvent.floci.services.elasticache.container.ValkeyClusterFormation;
 import io.github.hectorvent.floci.services.elasticache.model.AuthMode;
 import io.github.hectorvent.floci.services.elasticache.model.ClusterNode;
 import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroup;
+import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroupSettings;
 import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroupStatus;
 import io.github.hectorvent.floci.services.elasticache.proxy.ElastiCacheProxyManager;
+import io.github.hectorvent.floci.services.kms.KmsService;
+import io.github.hectorvent.floci.services.kms.model.KmsKey;
+import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
-
-import jakarta.enterprise.inject.Instance;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -41,8 +41,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -73,14 +75,14 @@ class ElastiCacheServiceTest {
         when(ecConfig.proxyBasePort()).thenReturn(16379);
         when(ecConfig.proxyMaxPort()).thenReturn(16399);
         when(ecConfig.defaultImage()).thenReturn("valkey/valkey:8");
-        when(config.hostname()).thenReturn(java.util.Optional.of("localhost"));
+        when(config.hostname()).thenReturn(Optional.of("localhost"));
 
         when(storageFactory.create(anyString(), anyString(), any())).thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
         when(containerManager.tryStart(anyString(), anyString()))
                 .thenReturn(new ElastiCacheContainerHandle("cid", "grp", "localhost", 6379));
         doNothing().when(proxyManager).startProxy(anyString(), any(), anyInt(), anyString(), anyInt(), any());
-        Ec2Service ec2Service = org.mockito.Mockito.mock(Ec2Service.class);
-        kmsService = org.mockito.Mockito.mock(KmsService.class);
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        kmsService = mock(KmsService.class);
         when(kmsService.describeKey(any(), any())).thenThrow(
                 new AwsException("NotFoundException", "Key not found", 404));
         clusterFormation = mock(ValkeyClusterFormation.class);
@@ -106,15 +108,15 @@ class ElastiCacheServiceTest {
         when(ec.proxyBasePort()).thenReturn(17000);
         when(ec.proxyMaxPort()).thenReturn(17000);
         when(ec.defaultImage()).thenReturn("valkey/valkey:8");
-        when(cfg.hostname()).thenReturn(java.util.Optional.of("localhost"));
+        when(cfg.hostname()).thenReturn(Optional.of("localhost"));
         when(sf.create(anyString(), anyString(), any())).thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
         when(cm.start(anyString(), anyString()))
                 .thenReturn(new ElastiCacheContainerHandle("cid", "grp", "localhost", 6379));
         doNothing().when(pm).startProxy(anyString(), any(), anyInt(), anyString(), anyInt(), any());
         ElastiCacheService svc = new ElastiCacheService(cm, pm, mock(ValkeyClusterFormation.class),
-                sf, cfg, org.mockito.Mockito.mock(Ec2Service.class),
+                sf, cfg, mock(Ec2Service.class),
                 new RegionResolver("us-east-1", "000000000000"),
-                org.mockito.Mockito.mock(KmsService.class));
+                mock(KmsService.class));
 
         svc.createReplicationGroup("g1", "d", AuthMode.PASSWORD, null, "us-east-1");
 
@@ -430,7 +432,7 @@ class ElastiCacheServiceTest {
     @Test
     void clusterAnnounceHostnameOverrideIsAnnouncedAndReported() {
         when(config.services().elasticache().clusterAnnounceHostname())
-                .thenReturn(java.util.Optional.of("localhost.floci.io"));
+                .thenReturn(Optional.of("localhost.floci.io"));
         stubPerNodeContainers();
 
         ReplicationGroup group = service.createReplicationGroup(clusterRequest("grp", 1, 0));
@@ -469,7 +471,7 @@ class ElastiCacheServiceTest {
         when(ecConfig.proxyBasePort()).thenReturn(16379);
         when(ecConfig.proxyMaxPort()).thenReturn(16399);
         when(ecConfig.defaultImage()).thenReturn("valkey/valkey:8");
-        when(config.hostname()).thenReturn(java.util.Optional.of("localhost"));
+        when(config.hostname()).thenReturn(Optional.of("localhost"));
         return new ElastiCacheService(containerManager, proxyManager, clusterFormation,
                 storageFactory, config, mock(Ec2Service.class),
                 new RegionResolver("us-east-1", "000000000000"), mock(KmsService.class));
@@ -615,7 +617,7 @@ class ElastiCacheServiceTest {
         key.setEnabled(true);
         key.setKeyState("Enabled");
         for (String form : forms) {
-            org.mockito.Mockito.doReturn(key).when(kmsService).describeKey(form, "us-east-1");
+            doReturn(key).when(kmsService).describeKey(form, "us-east-1");
         }
         return key;
     }
@@ -655,7 +657,7 @@ class ElastiCacheServiceTest {
         assertEquals("InvalidParameterValue", missing.getErrorCode());
         assertEquals("KMS key does not exist with key id: alias/does-not-exist", missing.getMessage());
         assertThrows(AwsException.class, () -> service.getReplicationGroup("g1"));
-        org.mockito.Mockito.verify(containerManager, org.mockito.Mockito.never()).start(anyString(), anyString());
+        verify(containerManager, never()).start(anyString(), anyString());
 
         AwsException combination = assertThrows(AwsException.class, () -> service.createReplicationGroup(
                 "g1", "d", AuthMode.NO_AUTH, null, "us-east-1",
@@ -723,18 +725,18 @@ class ElastiCacheServiceTest {
         // modify has read the group, delete removes it, modify writes its copy back — the store is
         // held inside modify's put so the delete can be run in exactly that window
         PausingStorageBackend<ReplicationGroup> pausing = new PausingStorageBackend<>(new InMemoryStorage<>());
-        StorageFactory factory = org.mockito.Mockito.mock(StorageFactory.class);
+        StorageFactory factory = mock(StorageFactory.class);
         when(factory.create(anyString(), eq("elasticache-groups.json"), any()))
                 .thenAnswer(inv -> new AccountAwareStorageBackend<>(pausing, null, "000000000000"));
-        when(factory.create(anyString(), org.mockito.ArgumentMatchers.argThat(f -> !"elasticache-groups.json".equals(f)), any()))
+        when(factory.create(anyString(), argThat(f -> !"elasticache-groups.json".equals(f)), any()))
                 .thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
         ElastiCacheService svc = new ElastiCacheService(containerManager, proxyManager, clusterFormation,
-                factory, config, org.mockito.Mockito.mock(Ec2Service.class),
+                factory, config, mock(Ec2Service.class),
                 new RegionResolver("us-east-1", "000000000000"), kmsService);
         svc.createReplicationGroup("g1", "d", AuthMode.NO_AUTH, null, "us-east-1");
 
         pausing.pauseOn(PausingStorageBackend.Call.PUT, "g1");
-        java.util.concurrent.atomic.AtomicReference<Throwable> modifyOutcome = new java.util.concurrent.atomic.AtomicReference<>();
+        AtomicReference<Throwable> modifyOutcome = new AtomicReference<>();
         Thread modify = new Thread(() -> {
             try {
                 svc.modifyReplicationGroup("g1", null, null, new ReplicationGroupSettings(null, null, 3, null));
