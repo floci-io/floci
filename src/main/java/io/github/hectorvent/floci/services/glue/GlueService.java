@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.glue;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -17,6 +18,7 @@ import io.github.hectorvent.floci.services.glue.model.Partition;
 import io.github.hectorvent.floci.services.glue.model.PartitionIndex;
 import io.github.hectorvent.floci.services.glue.model.PartitionIndexDescriptor;
 import io.github.hectorvent.floci.services.glue.model.SchemaReference;
+import io.github.hectorvent.floci.services.glue.model.SecurityConfiguration;
 import io.github.hectorvent.floci.services.glue.model.StorageDescriptor;
 import io.github.hectorvent.floci.services.glue.model.Table;
 import io.github.hectorvent.floci.services.glue.model.UserDefinedFunction;
@@ -81,6 +83,7 @@ public class GlueService {
     private final StorageBackend<String, UserDefinedFunction> functionStore;
     private final StorageBackend<String, Job> jobStore;
     private final StorageBackend<String, Crawler> crawlerStore;
+    private final StorageBackend<String, SecurityConfiguration> securityConfigurationStore;
     private final GlueSchemaRegistryService schemaRegistryService;
     private final RegionResolver regionResolver;
     private final ResourceGroupsTaggingService resourceGroupsTaggingService;
@@ -102,6 +105,8 @@ public class GlueService {
         this.functionStore = storageFactory.create("glue", "functions.json", new TypeReference<>() {});
         this.jobStore = storageFactory.create("glue", "jobs.json", new TypeReference<>() {});
         this.crawlerStore = storageFactory.create("glue", "crawlers.json", new TypeReference<>() {});
+        this.securityConfigurationStore = storageFactory.create(
+            "glue", "security_configurations.json", new TypeReference<>() {});
         this.schemaRegistryService = schemaRegistryService;
         this.regionResolver = regionResolver;
         this.resourceGroupsTaggingService = resourceGroupsTaggingService;
@@ -117,6 +122,7 @@ public class GlueService {
                 StorageBackend<String, UserDefinedFunction> functionStore,
                 StorageBackend<String, Job> jobStore,
                 StorageBackend<String, Crawler> crawlerStore,
+                StorageBackend<String, SecurityConfiguration> securityConfigurationStore,
                 GlueSchemaRegistryService schemaRegistryService,
                 RegionResolver regionResolver,
                 ResourceGroupsTaggingService resourceGroupsTaggingService) {
@@ -130,9 +136,61 @@ public class GlueService {
         this.functionStore = functionStore;
         this.jobStore = jobStore;
         this.crawlerStore = crawlerStore;
+        this.securityConfigurationStore = securityConfigurationStore;
         this.schemaRegistryService = schemaRegistryService;
         this.regionResolver = regionResolver;
         this.resourceGroupsTaggingService = resourceGroupsTaggingService;
+    }
+
+    public SecurityConfiguration createSecurityConfiguration(String name, JsonNode encryptionConfiguration,
+                                                              String region) {
+        validateSecurityConfigurationName(name);
+        if (encryptionConfiguration == null || encryptionConfiguration.isNull()) {
+            throw new AwsException("InvalidInputException", "EncryptionConfiguration is required.", 400);
+        }
+        String key = securityConfigurationKey(region, name);
+        if (securityConfigurationStore.get(key).isPresent()) {
+            throw new AwsException("AlreadyExistsException",
+                    "Security configuration already exists: " + name, 400);
+        }
+        SecurityConfiguration configuration = new SecurityConfiguration();
+        configuration.setName(name);
+        configuration.setCreatedTimeStamp(Instant.now());
+        configuration.setEncryptionConfiguration(encryptionConfiguration.deepCopy());
+        securityConfigurationStore.put(key, configuration);
+        return configuration;
+    }
+
+    public SecurityConfiguration getSecurityConfiguration(String name, String region) {
+        validateSecurityConfigurationName(name);
+        return securityConfigurationStore.get(securityConfigurationKey(region, name))
+                .orElseThrow(() -> new AwsException("EntityNotFoundException",
+                        "Security configuration not found: " + name, 400));
+    }
+
+    public void deleteSecurityConfiguration(String name, String region) {
+        validateSecurityConfigurationName(name);
+        String key = securityConfigurationKey(region, name);
+        if (securityConfigurationStore.get(key).isEmpty()) {
+            throw new AwsException("EntityNotFoundException",
+                    "Security configuration not found: " + name, 400);
+        }
+        securityConfigurationStore.delete(key);
+    }
+
+    public List<SecurityConfiguration> getSecurityConfigurations(String region) {
+        String prefix = region + ":";
+        return securityConfigurationStore.scan(key -> key.startsWith(prefix));
+    }
+
+    private static String securityConfigurationKey(String region, String name) {
+        return region + ":" + name;
+    }
+
+    private static void validateSecurityConfigurationName(String name) {
+        if (name == null || name.isBlank()) {
+            throw new AwsException("InvalidInputException", "Name is required.", 400);
+        }
     }
 
     public void createDatabase(Database database) {

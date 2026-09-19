@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.glue;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
@@ -19,6 +21,7 @@ import io.github.hectorvent.floci.services.glue.model.PartitionIndex;
 import io.github.hectorvent.floci.services.glue.model.PartitionIndexDescriptor;
 import io.github.hectorvent.floci.services.glue.model.S3Target;
 import io.github.hectorvent.floci.services.glue.model.SchemaReference;
+import io.github.hectorvent.floci.services.glue.model.SecurityConfiguration;
 import io.github.hectorvent.floci.services.glue.model.StorageDescriptor;
 import io.github.hectorvent.floci.services.glue.model.Table;
 import io.github.hectorvent.floci.services.glue.model.UserDefinedFunction;
@@ -86,6 +89,7 @@ class GlueServiceTest {
                 new InMemoryStorage<String, UserDefinedFunction>(),
                 new InMemoryStorage<String, Job>(),
                 new InMemoryStorage<String, Crawler>(),
+                new InMemoryStorage<String, SecurityConfiguration>(),
                 schemaRegistryService, regionResolver, new ResourceGroupsTaggingService(null));
         glueService.createDatabase(new Database("db1"));
     }
@@ -94,6 +98,32 @@ class GlueServiceTest {
     void createDatabasePersistsCatalogIdSoReadsDoNotWriteIt() {
         assertEquals(ACCOUNT_ID, databaseStore.get("db1").orElseThrow().getCatalogId());
         assertEquals(ACCOUNT_ID, glueService.getDatabase("db1").getCatalogId());
+    }
+
+    @Test
+    void securityConfigurationCrudPreservesEncryptionAndIsRegionScoped() throws Exception {
+        JsonNode encryption = new ObjectMapper().readTree("""
+                {"S3Encryption":[{"S3EncryptionMode":"SSE-KMS","KmsKeyArn":"arn:aws:kms:us-east-1:000000000000:key/a"}],
+                 "CloudWatchEncryption":{"CloudWatchEncryptionMode":"SSE-KMS"}}
+                """);
+
+        SecurityConfiguration created = glueService.createSecurityConfiguration("secure", encryption, REGION);
+
+        assertEquals(encryption, created.getEncryptionConfiguration());
+        assertEquals(encryption, glueService.getSecurityConfiguration("secure", REGION).getEncryptionConfiguration());
+        assertEquals(1, glueService.getSecurityConfigurations(REGION).size());
+        assertTrue(glueService.getSecurityConfigurations("us-west-2").isEmpty());
+
+        AwsException duplicate = assertThrows(AwsException.class,
+                () -> glueService.createSecurityConfiguration("secure", encryption, REGION));
+        assertEquals("AlreadyExistsException", duplicate.getErrorCode());
+        glueService.deleteSecurityConfiguration("secure", REGION);
+        AwsException missingGet = assertThrows(AwsException.class,
+                () -> glueService.getSecurityConfiguration("secure", REGION));
+        assertEquals("EntityNotFoundException", missingGet.getErrorCode());
+        AwsException missingDelete = assertThrows(AwsException.class,
+                () -> glueService.deleteSecurityConfiguration("secure", REGION));
+        assertEquals("EntityNotFoundException", missingDelete.getErrorCode());
     }
 
     @Test
