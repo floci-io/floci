@@ -19,16 +19,20 @@ import io.github.hectorvent.floci.services.eks.model.Cluster;
 import io.github.hectorvent.floci.services.eks.model.AccessConfig;
 import io.github.hectorvent.floci.services.eks.model.ClusterIdentity;
 import io.github.hectorvent.floci.services.eks.model.ClusterStatus;
-import io.github.hectorvent.floci.services.eks.model.OidcIdentity;
 import io.github.hectorvent.floci.services.eks.model.CreateClusterRequest;
 import io.github.hectorvent.floci.services.eks.model.CreateFargateProfileRequest;
 import io.github.hectorvent.floci.services.eks.model.CreateNodeGroupRequest;
+import io.github.hectorvent.floci.services.eks.model.EncryptionConfig;
 import io.github.hectorvent.floci.services.eks.model.FargateProfile;
 import io.github.hectorvent.floci.services.eks.model.FargateProfileStatus;
 import io.github.hectorvent.floci.services.eks.model.KubernetesNetworkConfig;
+import io.github.hectorvent.floci.services.eks.model.LogSetup;
+import io.github.hectorvent.floci.services.eks.model.Logging;
 import io.github.hectorvent.floci.services.eks.model.Nodegroup;
 import io.github.hectorvent.floci.services.eks.model.NodegroupScalingConfig;
 import io.github.hectorvent.floci.services.eks.model.NodegroupStatus;
+import io.github.hectorvent.floci.services.eks.model.OidcIdentity;
+import io.github.hectorvent.floci.services.eks.model.Provider;
 import io.github.hectorvent.floci.services.eks.model.ResourcesVpcConfig;
 import com.fasterxml.jackson.core.type.TypeReference;
 import jakarta.annotation.PostConstruct;
@@ -40,8 +44,10 @@ import org.jboss.logging.Logger;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -60,6 +66,10 @@ import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 public class EksService implements TagHandler, ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(EksService.class);
+
+    private static final List<String> ALL_LOG_TYPES = List.of(
+            "api", "audit", "authenticator", "controllerManager", "scheduler"
+    );
 
     /** The AWS charset for EKS cluster names. It admits no dot, which the Docker-name account
      *  qualifier relies on — see EksClusterManager#accountQualifiedName. */
@@ -104,6 +114,7 @@ public class EksService implements TagHandler, ResourceProvider {
     public void init() {
         backfillOidcIdentities();
         backfillClusterSecurityGroups();
+        backfillLogging();
         if (!config.services().eks().mock()) {
             restorePersistedClusters();
             startReadinessPoller();
@@ -323,6 +334,23 @@ public class EksService implements TagHandler, ResourceProvider {
         }
     }
 
+    void backfillLogging() {
+        for (AccountAwareStorageBackend.AccountEntry<Cluster> entry : allClusterEntries()) {
+            Cluster cluster = entry.value();
+            if (cluster.getLogging() != null) {
+                continue;
+            }
+            String accountId = entry.accountId();
+            if (cluster.getAccountId() == null) {
+                cluster.setAccountId(accountId);
+            }
+            cluster.setLogging(defaultLogging());
+            putClusterForAccount(accountId, cluster);
+            LOG.infov("Backfilled default logging for existing EKS cluster {0} in account {1}",
+                    cluster.getName(), accountId);
+        }
+    }
+
     private String resolveClusterRegion(Cluster cluster) {
         if (cluster.getArn() != null && !cluster.getArn().isBlank()) {
             try {
@@ -408,6 +436,8 @@ public class EksService implements TagHandler, ResourceProvider {
         }
         cluster.setResourcesVpcConfig(vpcConfig);
         cluster.setKubernetesNetworkConfig(buildNetworkConfig(request.getKubernetesNetworkConfig()));
+        cluster.setLogging(buildLogging(request.getLogging()));
+        cluster.setEncryptionConfig(buildEncryptionConfig(request.getEncryptionConfig()));
         cluster.setStatus(ClusterStatus.CREATING);
         cluster.setTags(request.getTags() != null ? new HashMap<>(request.getTags()) : new HashMap<>());
         cluster.setPlatformVersion("eks.1");
@@ -467,9 +497,13 @@ public class EksService implements TagHandler, ResourceProvider {
     }
 
     public Cluster describeCluster(String name) {
-        return storage.get(name)
+        Cluster cluster = storage.get(name)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "No cluster found for name: " + name, 404));
+        if (cluster.getLogging() == null) {
+            cluster.setLogging(defaultLogging());
+        }
+        return cluster;
     }
 
     public List<String> listClusters() {
@@ -781,6 +815,81 @@ public class EksService implements TagHandler, ResourceProvider {
             config.setIpFamily("ipv4");
         }
         return config;
+    }
+
+    static Logging defaultLogging() {
+        return new Logging(List.of(new LogSetup(new ArrayList<>(ALL_LOG_TYPES), false)));
+    }
+
+    private Logging buildLogging(Logging requestedLogging) {
+        if (requestedLogging == null || requestedLogging.getClusterLogging() == null
+                || requestedLogging.getClusterLogging().isEmpty()) {
+            return defaultLogging();
+        }
+
+        Set<String> enabledTypes = new LinkedHashSet<>();
+        Set<String> specifiedTypes = new HashSet<>();
+
+        for (LogSetup setup : requestedLogging.getClusterLogging()) {
+            if (setup == null || setup.getTypes() == null) {
+                continue;
+            }
+            for (String type : setup.getTypes()) {
+                if (!ALL_LOG_TYPES.contains(type)) {
+                    throw new AwsException("InvalidParameterException",
+                            "'" + type + "' is not a valid log type", 400);
+                }
+                specifiedTypes.add(type);
+                if (Boolean.TRUE.equals(setup.getEnabled())) {
+                    enabledTypes.add(type);
+                } else {
+                    enabledTypes.remove(type);
+                }
+            }
+        }
+
+        if (specifiedTypes.isEmpty()) {
+            return defaultLogging();
+        }
+
+        List<String> enabledList = ALL_LOG_TYPES.stream()
+                .filter(enabledTypes::contains)
+                .collect(Collectors.toList());
+        List<String> disabledList = ALL_LOG_TYPES.stream()
+                .filter(t -> !enabledTypes.contains(t))
+                .collect(Collectors.toList());
+
+        List<LogSetup> entries = new ArrayList<>();
+        if (!enabledList.isEmpty()) {
+            entries.add(new LogSetup(enabledList, true));
+        }
+        if (!disabledList.isEmpty()) {
+            entries.add(new LogSetup(disabledList, false));
+        }
+
+        return new Logging(entries);
+    }
+
+    private List<EncryptionConfig> buildEncryptionConfig(List<EncryptionConfig> requestedConfigs) {
+        if (requestedConfigs == null || requestedConfigs.isEmpty()) {
+            return null;
+        }
+        if (requestedConfigs.size() > 1) {
+            throw new AwsException("InvalidParameterException",
+                    "Only one encryption configuration is allowed", 400);
+        }
+        EncryptionConfig config = requestedConfigs.getFirst();
+        if (config == null || config.getResources() == null || config.getResources().isEmpty()
+                || !List.of("secrets").equals(config.getResources())) {
+            throw new AwsException("InvalidParameterException",
+                    "Invalid k8s resource and provider for encryption", 400);
+        }
+        if (config.getProvider() == null || config.getProvider().getKeyArn() == null
+                || config.getProvider().getKeyArn().isBlank()) {
+            throw new AwsException("InvalidParameterException",
+                    "Invalid k8s resource and provider for encryption", 400);
+        }
+        return List.of(new EncryptionConfig(List.of("secrets"), new Provider(config.getProvider().getKeyArn())));
     }
 
     private String nodeGroupKey(String clusterName, String nodegroupName) {

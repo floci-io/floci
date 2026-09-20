@@ -23,12 +23,16 @@ import io.github.hectorvent.floci.services.eks.model.OidcIdentity;
 import io.github.hectorvent.floci.services.eks.model.CreateClusterRequest;
 import io.github.hectorvent.floci.services.eks.model.CreateFargateProfileRequest;
 import io.github.hectorvent.floci.services.eks.model.CreateNodeGroupRequest;
+import io.github.hectorvent.floci.services.eks.model.EncryptionConfig;
 import io.github.hectorvent.floci.services.eks.model.FargateProfile;
 import io.github.hectorvent.floci.services.eks.model.FargateProfileStatus;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
+import io.github.hectorvent.floci.services.eks.model.LogSetup;
+import io.github.hectorvent.floci.services.eks.model.Logging;
 import io.github.hectorvent.floci.services.eks.model.Nodegroup;
 import io.github.hectorvent.floci.services.eks.model.NodegroupScalingConfig;
 import io.github.hectorvent.floci.services.eks.model.NodegroupStatus;
+import io.github.hectorvent.floci.services.eks.model.Provider;
 import io.github.hectorvent.floci.services.eks.model.ResourcesVpcConfig;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -1517,5 +1521,230 @@ class EksServiceTest {
         List<SecurityGroup> allSgs = spyEc2.describeSecurityGroups("us-east-1", List.of(), List.of(), Map.of());
         boolean leaked = allSgs.stream().anyMatch(sg -> sg.getGroupName().startsWith("eks-cluster-sg-cluster-tag-fail-"));
         assertFalse(leaked, "Cluster security group should have been deleted when tagging failed");
+    }
+
+    private CreateClusterRequest createTestClusterRequest(String name) {
+        CreateClusterRequest req = new CreateClusterRequest();
+        req.setName(name);
+        req.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        req.setVersion("1.29");
+        return req;
+    }
+
+    @Test
+    void createClusterWithEncryptionConfigAndLogging() {
+        CreateClusterRequest req = createTestClusterRequest("enc-log-cluster");
+        req.setEncryptionConfig(List.of(
+                new EncryptionConfig(List.of("secrets"), new Provider("arn:aws:kms:us-east-1:000000000000:key/12345678-1234-1234-1234-123456789012"))
+        ));
+        req.setLogging(new Logging(List.of(
+                new LogSetup(List.of("api", "audit"), true),
+                new LogSetup(List.of("authenticator", "controllerManager", "scheduler"), false)
+        )));
+
+        Cluster created = eksService.createCluster(req);
+        assertNotNull(created.getEncryptionConfig());
+        assertEquals(1, created.getEncryptionConfig().size());
+        assertEquals(List.of("secrets"), created.getEncryptionConfig().getFirst().getResources());
+        assertEquals("arn:aws:kms:us-east-1:000000000000:key/12345678-1234-1234-1234-123456789012",
+                created.getEncryptionConfig().getFirst().getProvider().getKeyArn());
+
+        assertNotNull(created.getLogging());
+        List<LogSetup> logSetups = created.getLogging().getClusterLogging();
+        assertEquals(2, logSetups.size());
+        assertEquals(List.of("api", "audit"), logSetups.get(0).getTypes());
+        assertTrue(logSetups.get(0).getEnabled());
+        assertEquals(List.of("authenticator", "controllerManager", "scheduler"), logSetups.get(1).getTypes());
+        assertFalse(logSetups.get(1).getEnabled());
+
+        Cluster described = eksService.describeCluster("enc-log-cluster");
+        assertEquals(created.getEncryptionConfig(), described.getEncryptionConfig());
+        assertEquals(created.getLogging(), described.getLogging());
+    }
+
+    @Test
+    void createClusterWithoutEncryptionConfigOrLoggingUsesDefaults() {
+        CreateClusterRequest req = createTestClusterRequest("default-cluster");
+
+        Cluster created = eksService.createCluster(req);
+        assertNull(created.getEncryptionConfig());
+
+        assertNotNull(created.getLogging());
+        List<LogSetup> logSetups = created.getLogging().getClusterLogging();
+        assertEquals(1, logSetups.size());
+        assertEquals(List.of("api", "audit", "authenticator", "controllerManager", "scheduler"),
+                logSetups.getFirst().getTypes());
+        assertFalse(logSetups.getFirst().getEnabled());
+
+        Cluster described = eksService.describeCluster("default-cluster");
+        assertNull(described.getEncryptionConfig());
+        assertNotNull(described.getLogging());
+        assertEquals(logSetups, described.getLogging().getClusterLogging());
+    }
+
+    @Test
+    void createClusterWithPartiallyEnabledLoggingSplitsEntries() {
+        CreateClusterRequest req = createTestClusterRequest("partial-log-cluster");
+        req.setLogging(new Logging(List.of(
+                new LogSetup(List.of("authenticator", "api"), true)
+        )));
+
+        Cluster created = eksService.createCluster(req);
+        assertNotNull(created.getLogging());
+        List<LogSetup> logSetups = created.getLogging().getClusterLogging();
+        assertEquals(2, logSetups.size());
+        assertEquals(List.of("api", "authenticator"), logSetups.get(0).getTypes());
+        assertTrue(logSetups.get(0).getEnabled());
+        assertEquals(List.of("audit", "controllerManager", "scheduler"), logSetups.get(1).getTypes());
+        assertFalse(logSetups.get(1).getEnabled());
+    }
+
+    @Test
+    void createClusterWithInvalidLogTypeThrowsInvalidParameterException() {
+        CreateClusterRequest req = createTestClusterRequest("invalid-log-cluster");
+        req.setLogging(new Logging(List.of(
+                new LogSetup(List.of("nonexistentLogType"), true)
+        )));
+
+        AwsException ex = assertThrows(AwsException.class, () -> eksService.createCluster(req));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void createClusterWithInvalidEncryptionResourcesThrowsInvalidParameterException() {
+        CreateClusterRequest req1 = createTestClusterRequest("invalid-enc-res-1");
+        req1.setEncryptionConfig(List.of(
+                new EncryptionConfig(List.of("configmaps"), new Provider("arn:aws:kms:us-east-1:000000000000:key/12345678"))
+        ));
+        AwsException ex1 = assertThrows(AwsException.class, () -> eksService.createCluster(req1));
+        assertEquals("InvalidParameterException", ex1.getErrorCode());
+        assertEquals(400, ex1.getHttpStatus());
+
+        CreateClusterRequest req2 = createTestClusterRequest("invalid-enc-res-2");
+        req2.setEncryptionConfig(List.of(
+                new EncryptionConfig(List.of("Secrets"), new Provider("arn:aws:kms:us-east-1:000000000000:key/12345678"))
+        ));
+        AwsException ex2 = assertThrows(AwsException.class, () -> eksService.createCluster(req2));
+        assertEquals("InvalidParameterException", ex2.getErrorCode());
+        assertEquals(400, ex2.getHttpStatus());
+    }
+
+    @Test
+    void createClusterWithMultipleEncryptionConfigsThrowsInvalidParameterException() {
+        CreateClusterRequest req = createTestClusterRequest("multiple-enc-cluster");
+        req.setEncryptionConfig(List.of(
+                new EncryptionConfig(List.of("secrets"), new Provider("arn:aws:kms:us-east-1:000000000000:key/1")),
+                new EncryptionConfig(List.of("secrets"), new Provider("arn:aws:kms:us-east-1:000000000000:key/2"))
+        ));
+        AwsException ex = assertThrows(AwsException.class, () -> eksService.createCluster(req));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void createClusterWithMissingEncryptionKeyArnThrowsInvalidParameterException() {
+        CreateClusterRequest req1 = createTestClusterRequest("missing-keyarn-1");
+        req1.setEncryptionConfig(List.of(
+                new EncryptionConfig(List.of("secrets"), null)
+        ));
+        AwsException ex1 = assertThrows(AwsException.class, () -> eksService.createCluster(req1));
+        assertEquals("InvalidParameterException", ex1.getErrorCode());
+        assertEquals(400, ex1.getHttpStatus());
+
+        CreateClusterRequest req2 = createTestClusterRequest("missing-keyarn-2");
+        req2.setEncryptionConfig(List.of(
+                new EncryptionConfig(List.of("secrets"), new Provider(""))
+        ));
+        AwsException ex2 = assertThrows(AwsException.class, () -> eksService.createCluster(req2));
+        assertEquals("InvalidParameterException", ex2.getErrorCode());
+        assertEquals(400, ex2.getHttpStatus());
+    }
+
+    @Test
+    void backfillLoggingPopulatesDefaultLoggingForPreExistingClusters() {
+        StorageBackend<String, Cluster> rawClusters = new InMemoryStorage<>();
+        AccountAwareStorageBackend<Cluster> clusterStore =
+                new AccountAwareStorageBackend<>(rawClusters, null, "000000000000");
+
+        Cluster legacyCluster = new Cluster();
+        legacyCluster.setName("legacy-eks");
+        legacyCluster.setArn("arn:aws:eks:us-east-1:000000000000:cluster/legacy-eks");
+        legacyCluster.setAccountId("000000000000");
+        legacyCluster.setStatus(ClusterStatus.ACTIVE);
+        legacyCluster.setLogging(null);
+        legacyCluster.setEncryptionConfig(null);
+        clusterStore.putForAccount("000000000000", "legacy-eks", legacyCluster);
+
+        StorageFactory storageFactory = fixedStorageFactory(clusterStore);
+        RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
+        EksService service = new EksService(storageFactory, testConfig(true), regionResolver, null,
+                realEc2Service(), new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()), new ObjectMapper()), mock(EksAccessEntryService.class));
+
+        assertDoesNotThrow(service::init);
+
+        Cluster described = service.describeCluster("legacy-eks");
+        assertNotNull(described.getLogging());
+        assertEquals(1, described.getLogging().getClusterLogging().size());
+        assertEquals(List.of("api", "audit", "authenticator", "controllerManager", "scheduler"),
+                described.getLogging().getClusterLogging().getFirst().getTypes());
+        assertFalse(described.getLogging().getClusterLogging().getFirst().getEnabled());
+        assertNull(described.getEncryptionConfig());
+    }
+
+    @Test
+    void backfillLoggingPreservesExistingLogging() {
+        StorageBackend<String, Cluster> rawClusters = new InMemoryStorage<>();
+        AccountAwareStorageBackend<Cluster> clusterStore =
+                new AccountAwareStorageBackend<>(rawClusters, null, "000000000000");
+
+        Cluster existingCluster = new Cluster();
+        existingCluster.setName("custom-logging-eks");
+        existingCluster.setArn("arn:aws:eks:us-east-1:000000000000:cluster/custom-logging-eks");
+        existingCluster.setAccountId("000000000000");
+        existingCluster.setStatus(ClusterStatus.ACTIVE);
+        Logging customLogging = new Logging(List.of(new LogSetup(List.of("api"), true)));
+        existingCluster.setLogging(customLogging);
+        clusterStore.putForAccount("000000000000", "custom-logging-eks", existingCluster);
+
+        StorageFactory storageFactory = fixedStorageFactory(clusterStore);
+        RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
+        EksService service = new EksService(storageFactory, testConfig(true), regionResolver, null,
+                realEc2Service(), new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()), new ObjectMapper()), mock(EksAccessEntryService.class));
+
+        assertDoesNotThrow(service::init);
+
+        Cluster described = service.describeCluster("custom-logging-eks");
+        assertEquals(customLogging, described.getLogging());
+    }
+
+    @Test
+    void restartRoundTripPreservesEncryptionConfigAndLogging() {
+        StorageBackend<String, Cluster> rawClusters = new InMemoryStorage<>();
+        AccountAwareStorageBackend<Cluster> clusterStore =
+                new AccountAwareStorageBackend<>(rawClusters, null, "000000000000");
+        StorageFactory storageFactory = fixedStorageFactory(clusterStore);
+        RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
+
+        EksService service1 = new EksService(storageFactory, testConfig(true), regionResolver, null,
+                realEc2Service(), new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()), new ObjectMapper()), mock(EksAccessEntryService.class));
+        service1.init();
+
+        CreateClusterRequest req = createTestClusterRequest("restart-cluster");
+        req.setEncryptionConfig(List.of(
+                new EncryptionConfig(List.of("secrets"), new Provider("arn:aws:kms:us-east-1:000000000000:key/persist-key"))
+        ));
+        req.setLogging(new Logging(List.of(
+                new LogSetup(List.of("api", "audit"), true)
+        )));
+        Cluster created = service1.createCluster(req);
+
+        EksService service2 = new EksService(storageFactory, testConfig(true), regionResolver, null,
+                realEc2Service(), new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()), new ObjectMapper()), mock(EksAccessEntryService.class));
+        service2.init();
+
+        Cluster described = service2.describeCluster("restart-cluster");
+        assertEquals(created.getEncryptionConfig(), described.getEncryptionConfig());
+        assertEquals(created.getLogging(), described.getLogging());
     }
 }

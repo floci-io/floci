@@ -3,10 +3,12 @@ package io.github.hectorvent.floci.services.eks.model;
 import com.fasterxml.jackson.annotation.JsonFormat;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 
 @RegisterForReflection
@@ -37,6 +39,13 @@ public class Cluster {
 
     @JsonProperty("kubernetesNetworkConfig")
     private KubernetesNetworkConfig kubernetesNetworkConfig;
+
+    @JsonProperty("logging")
+    private Logging logging;
+
+    @JsonProperty("encryptionConfig")
+    @JsonInclude(JsonInclude.Include.NON_EMPTY)
+    private List<EncryptionConfig> encryptionConfig;
 
     @JsonProperty("status")
     private ClusterStatus status;
@@ -130,6 +139,12 @@ public class Cluster {
 
     public int getHostPort() { return hostPort; }
     public void setHostPort(int hostPort) { this.hostPort = hostPort; }
+
+    public Logging getLogging() { return logging; }
+    public void setLogging(Logging logging) { this.logging = logging; }
+
+    public List<EncryptionConfig> getEncryptionConfig() { return encryptionConfig; }
+    public void setEncryptionConfig(List<EncryptionConfig> encryptionConfig) { this.encryptionConfig = encryptionConfig; }
 
     public String getDockerName() { return dockerName; }
     public void setDockerName(String dockerName) { this.dockerName = dockerName; }

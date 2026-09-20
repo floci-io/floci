@@ -100,6 +100,56 @@ Floci tags the cluster security group with the standard AWS system tags:
 - **Backfill**: Existing persisted clusters that were created before this feature receive an auto-generated cluster security group during startup backfill if their VPC is present.
 - **Rules**: In accordance with AWS EKS behavior, the cluster security group includes a self-referencing inbound rule allowing all traffic from members of the same security group to enable control plane and node communication, a self-referencing outbound rule for Elastic Fabric Adapter (EFA) traffic, and the standard EC2 outbound rule.
 
+## Encryption and logging configuration
+
+EKS clusters support configuring KMS envelope encryption for secrets and control plane logging export.
+
+### Encryption configuration
+
+`CreateCluster` accepts an `encryptionConfig` array specifying the encryption provider for Kubernetes resources:
+
+```json
+{
+  "encryptionConfig": [
+    {
+      "resources": ["secrets"],
+      "provider": {
+        "keyArn": "arn:aws:kms:us-east-1:000000000000:key/12345678-1234-1234-1234-123456789012"
+      }
+    }
+  ]
+}
+```
+
+- **Supported resources**: Only `["secrets"]` is supported by AWS EKS. Specifying any other resource or leaving resources empty causes `InvalidParameterException` (HTTP 400).
+- **Provider**: `provider.keyArn` must be non-empty.
+- **Cardinality**: AWS allows at most one encryption configuration entry. Specifying more than one causes `InvalidParameterException` (HTTP 400).
+- **Omission**: When omitted at creation time, `encryptionConfig` is not populated and is omitted from `DescribeCluster` responses (null or omitted, no synthetic default).
+- **Scope**: Floci stores and returns the encryption configuration faithfully. Envelope encryption of Secrets at the Kubernetes storage layer and KMS cryptographic operations are out of scope.
+
+### Logging configuration
+
+`CreateCluster` accepts control plane logging configuration in `logging.clusterLogging`:
+
+```json
+{
+  "logging": {
+    "clusterLogging": [
+      {
+        "types": ["api", "audit"],
+        "enabled": true
+      }
+    ]
+  }
+}
+```
+
+- **Supported log types**: The valid EKS log types are `api`, `audit`, `authenticator`, `controllerManager`, and `scheduler`. Specifying an unrecognized type causes `InvalidParameterException` (HTTP 400).
+- **Response normalization**: AWS EKS always returns the status of all five log types. Enabled types are returned first (`enabled: true`), followed by disabled types (`enabled: false`).
+- **Default logging**: When omitted or empty at creation time, Floci returns all five log types disabled in a single entry (`enabled: false`).
+- **Backfill**: Existing persisted clusters created before this feature was introduced are automatically backfilled on startup with default disabled logging.
+- **Scope**: Floci stores and returns control plane logging configuration. Shipping log streams to Amazon CloudWatch Logs log groups is out of scope.
+
 ## Modes
 
 ### Mock mode (`mock: true`)
@@ -565,5 +615,3 @@ The following EKS features are not yet supported:
 - `UpdateClusterConfig` / `UpdateClusterVersion`
 - Add-ons (`CreateAddon`, `DescribeAddon`, `ListAddons`)
 - Identity provider configs
-- Access entries and policies
-- Encryption config
