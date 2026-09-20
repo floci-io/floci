@@ -302,13 +302,13 @@ public class CloudFrontController {
     public Response getCachePolicyConfig(@PathParam("Id") String id) {
         try {
             CachePolicy policy = service.getCachePolicy(id);
-            String xml = new XmlBuilder()
+            XmlBuilder xml = new XmlBuilder()
                     .start("CachePolicyConfig", NS)
                     .elem("Name", policy.getName())
-                    .elem("Comment", policy.getComment() != null ? policy.getComment() : "")
-                    .end("CachePolicyConfig")
-                    .build();
-            return Response.ok(xml, XML).header("ETag", policy.getEtag()).build();
+                    .elem("Comment", policy.getComment() != null ? policy.getComment() : "");
+            CloudFrontPolicyConfigCodec.serializeCachePolicy(xml, policy.getConfig());
+            return Response.ok(xml.end("CachePolicyConfig").build(), XML)
+                    .header("ETag", policy.getEtag()).build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
         }
@@ -414,13 +414,13 @@ public class CloudFrontController {
     public Response getOriginRequestPolicyConfig(@PathParam("Id") String id) {
         try {
             OriginRequestPolicy policy = service.getOriginRequestPolicy(id);
-            String xml = new XmlBuilder()
+            XmlBuilder xml = new XmlBuilder()
                     .start("OriginRequestPolicyConfig", NS)
                     .elem("Name", policy.getName())
-                    .elem("Comment", policy.getComment() != null ? policy.getComment() : "")
-                    .end("OriginRequestPolicyConfig")
-                    .build();
-            return Response.ok(xml, XML).header("ETag", policy.getEtag()).build();
+                    .elem("Comment", policy.getComment() != null ? policy.getComment() : "");
+            CloudFrontPolicyConfigCodec.serializeOriginRequestPolicy(xml, policy.getConfig());
+            return Response.ok(xml.end("OriginRequestPolicyConfig").build(), XML)
+                    .header("ETag", policy.getEtag()).build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
         }
@@ -2311,29 +2311,31 @@ public class CloudFrontController {
     }
 
     private String xmlCachePolicyResponse(CachePolicy policy) {
-        return new XmlBuilder()
+        XmlBuilder xml = new XmlBuilder()
                 .start("CachePolicy")
                 .elem("Id", policy.getId())
                 .elem("LastModifiedTime",
                         policy.getLastModifiedTime() != null ? policy.getLastModifiedTime().toString() : "")
                 .start("CachePolicyConfig")
                 .elem("Name", policy.getName())
-                .elem("Comment", policy.getComment() != null ? policy.getComment() : "")
-                .end("CachePolicyConfig")
+                .elem("Comment", policy.getComment() != null ? policy.getComment() : "");
+        CloudFrontPolicyConfigCodec.serializeCachePolicy(xml, policy.getConfig());
+        return xml.end("CachePolicyConfig")
                 .end("CachePolicy")
                 .build();
     }
 
     private String xmlOriginRequestPolicyResponse(OriginRequestPolicy policy) {
-        return new XmlBuilder()
+        XmlBuilder xml = new XmlBuilder()
                 .start("OriginRequestPolicy")
                 .elem("Id", policy.getId())
                 .elem("LastModifiedTime",
                         policy.getLastModifiedTime() != null ? policy.getLastModifiedTime().toString() : "")
                 .start("OriginRequestPolicyConfig")
                 .elem("Name", policy.getName())
-                .elem("Comment", policy.getComment() != null ? policy.getComment() : "")
-                .end("OriginRequestPolicyConfig")
+                .elem("Comment", policy.getComment() != null ? policy.getComment() : "");
+        CloudFrontPolicyConfigCodec.serializeOriginRequestPolicy(xml, policy.getConfig());
+        return xml.end("OriginRequestPolicyConfig")
                 .end("OriginRequestPolicy")
                 .build();
     }
@@ -3538,6 +3540,7 @@ public class CloudFrontController {
         CachePolicy policy = new CachePolicy();
         policy.setName(XmlParser.extractFirst(body, "Name", null));
         policy.setComment(XmlParser.extractFirst(body, "Comment", null));
+        policy.setConfig(CloudFrontPolicyConfigCodec.parseCachePolicy(body));
         return policy;
     }
 
@@ -3545,6 +3548,7 @@ public class CloudFrontController {
         OriginRequestPolicy policy = new OriginRequestPolicy();
         policy.setName(XmlParser.extractFirst(body, "Name", null));
         policy.setComment(XmlParser.extractFirst(body, "Comment", null));
+        policy.setConfig(CloudFrontPolicyConfigCodec.parseOriginRequestPolicy(body));
         return policy;
     }
 
