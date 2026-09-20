@@ -74,6 +74,7 @@ class SageMakerTrainingRunnerTest {
     private static SageMakerTrainingRunner runner() {
         return new SageMakerTrainingRunner(mock(ContainerBuilder.class), mock(ContainerLifecycleManager.class),
                 mock(ContainerLogStreamer.class), mock(EmulatorConfig.class, RETURNS_DEEP_STUBS),
-                mock(ContainerDetector.class), mock(S3Service.class), new ObjectMapper());
+                mock(ContainerDetector.class), mock(S3Service.class), new ObjectMapper(),
+                mock(SageMakerGpuResolver.class));
     }
 }

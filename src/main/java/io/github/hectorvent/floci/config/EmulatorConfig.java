@@ -1138,6 +1138,57 @@ public interface EmulatorConfig {
         boolean enabled();
 
         Optional<String> dockerNetwork();
+
+        GpuConfig gpu();
+
+        /**
+         * Whether, and how, this host lends its accelerators to training containers.
+         *
+         * <p>How many GPUs an instance type has is an AWS fact and lives in the shipped
+         * catalog; this covers only the local decision of which devices Floci may use.
+         */
+        interface GpuConfig {
+            /**
+             * Off by default, so an existing deployment keeps launching CPU-only
+             * containers exactly as before.
+             */
+            @WithDefault("false")
+            boolean enabled();
+
+            /**
+             * How the device request is expressed on the wire, because daemons disagree.
+             *
+             * <p>Defaults to {@code cdi}: Podman resolves only that form, and accepts the
+             * {@code count} form while attaching no device
+             * (containers/podman#22645). Preferring CDI means a misconfiguration fails
+             * the container start instead of silently training on CPU. Use {@code count}
+             * or {@code device-ids} against Docker.
+             */
+            @WithDefault("cdi")
+            GpuRequestMode mode();
+
+            /**
+             * The devices Floci may hand out: CDI names such as
+             * {@code nvidia.com/gpu=GPU-<uuid>} for {@code cdi} mode, or daemon device ids
+             * for {@code device-ids} mode.
+             *
+             * <p>Unset allows no device, so a training job in those modes fails rather than
+             * starting. Defaulting to "every device the daemon exposes" would be the wrong
+             * behaviour on a machine sharing GPUs with other workloads.
+             *
+             * <p>Ignored in {@code count} mode, where the daemon does the choosing.
+             *
+             * <p>Optional rather than a defaulted list because SmallRye rejects an empty
+             * string as a collection default: unset simply means no device is allowed.
+             */
+            Optional<List<String>> devices();
+        }
+
+        enum GpuRequestMode {
+            CDI,
+            DEVICE_IDS,
+            COUNT
+        }
     }
 
     interface CodeDeployServiceConfig {

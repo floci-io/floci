@@ -332,6 +332,18 @@ floci:
     sagemaker:
       enabled: true
       # docker-network: floci-network
+      gpu:
+        # Off by default: an existing deployment keeps launching CPU-only
+        # containers. How many GPUs an ml.* type has is shipped in
+        # sagemaker/instance-type-catalog.yaml; this is only about which of
+        # this machine's devices Floci may hand out.
+        enabled: false
+        # cdi | device-ids | count. Podman resolves only cdi, and accepts
+        # count while attaching no device, so cdi fails loudly instead.
+        mode: cdi
+        # Required for cdi and device-ids modes; unset allows no device.
+        # devices:
+        #   - nvidia.com/gpu=GPU-<uuid>
     batch:
       enabled: true
       runner-mode: immediate

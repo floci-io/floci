@@ -1,0 +1,83 @@
+# Accelerator facts for SageMaker ml.* instance types.
+#
+# Kept separate from ec2/instance-type-catalog.yaml because ml.* is its own
+# namespace: these types are not EC2 instance types and must never surface in
+# DescribeInstanceTypes.
+#
+# gpuCount is a property of the AWS instance type, not of the machine Floci
+# runs on, which is why it is shipped data rather than configuration. What the
+# local host is willing to hand over is a separate operator decision under
+# floci.services.sagemaker.gpu.
+#
+# Like the EC2 catalog, this ships the sizes worth supporting rather than the
+# full AWS inventory. A GPU-family type that is missing here is refused rather
+# than guessed at, so adding a family means adding its rows.
+#
+# The counts below happen to be 1, 4 and 8 because that is what the g4dn, g5,
+# p3 and p4d families offer. That is not a rule to extrapolate from: other AWS
+# accelerated families carry exactly two (g3.8xlarge, g5g.16xlarge,
+# g7.12xlarge), and a size is not a multiplier either, since g4dn.16xlarge has
+# one GPU while the smaller g4dn.12xlarge has four. Hence a table.
+instanceTypes:
+  # CPU families. Listed so the resolver can tell "this type has no
+  # accelerator" apart from "this type is unknown to Floci".
+  - instanceType: ml.m5.large
+    gpuCount: 0
+  - instanceType: ml.m5.xlarge
+    gpuCount: 0
+  - instanceType: ml.m5.2xlarge
+    gpuCount: 0
+  - instanceType: ml.c5.large
+    gpuCount: 0
+  - instanceType: ml.c5.xlarge
+    gpuCount: 0
+  - instanceType: ml.c5.2xlarge
+    gpuCount: 0
+  - instanceType: ml.t3.medium
+    gpuCount: 0
+  - instanceType: ml.t3.large
+    gpuCount: 0
+
+  # G4dn: 1x NVIDIA T4, except the 12xlarge (4) and metal (8).
+  - instanceType: ml.g4dn.xlarge
+    gpuCount: 1
+  - instanceType: ml.g4dn.2xlarge
+    gpuCount: 1
+  - instanceType: ml.g4dn.4xlarge
+    gpuCount: 1
+  - instanceType: ml.g4dn.8xlarge
+    gpuCount: 1
+  - instanceType: ml.g4dn.12xlarge
+    gpuCount: 4
+  - instanceType: ml.g4dn.16xlarge
+    gpuCount: 1
+
+  # G5: 1x NVIDIA A10G, except the 12xlarge (4) and 48xlarge (8).
+  - instanceType: ml.g5.xlarge
+    gpuCount: 1
+  - instanceType: ml.g5.2xlarge
+    gpuCount: 1
+  - instanceType: ml.g5.4xlarge
+    gpuCount: 1
+  - instanceType: ml.g5.8xlarge
+    gpuCount: 1
+  - instanceType: ml.g5.12xlarge
+    gpuCount: 4
+  - instanceType: ml.g5.16xlarge
+    gpuCount: 1
+  - instanceType: ml.g5.24xlarge
+    gpuCount: 4
+  - instanceType: ml.g5.48xlarge
+    gpuCount: 8
+
+  # P3: NVIDIA V100.
+  - instanceType: ml.p3.2xlarge
+    gpuCount: 1
+  - instanceType: ml.p3.8xlarge
+    gpuCount: 4
+  - instanceType: ml.p3.16xlarge
+    gpuCount: 8
+
+  # P4d: 8x NVIDIA A100.
+  - instanceType: ml.p4d.24xlarge
+    gpuCount: 8
