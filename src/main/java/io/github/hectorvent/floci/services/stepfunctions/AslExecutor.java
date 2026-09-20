@@ -1373,20 +1373,24 @@ public class AslExecutor {
     }
 
     /**
-     * AWS SDK integrations for {@code scheduler:createSchedule} and {@code scheduler:updateSchedule}.
-     * The Task {@code Arguments} are the CreateSchedule body with {@code Name} folded in, so they go
-     * through the controller's parse, and both actions answer with the schedule ARN alone. The parse
-     * rejects a malformed {@code Target} with the same {@code AwsException} the service raises, so it
-     * belongs inside the translation that makes those failures reachable for {@code Retry} and
-     * {@code Catch}.
+     * AWS SDK integrations for Scheduler. Create and update parse the full schedule request and
+     * return its ARN. Delete accepts only the schedule identity and returns the empty SDK response.
+     * Service and parsing failures stay inside the translation that makes them reachable for
+     * {@code Retry} and {@code Catch}.
      */
     private JsonNode invokeAwsSdkScheduler(String action, JsonNode input, String region) {
+        boolean deleting = "deleteSchedule".equals(action);
         boolean creating = "createSchedule".equals(action);
-        if (!creating && !"updateSchedule".equals(action)) {
+        if (!creating && !deleting && !"updateSchedule".equals(action)) {
             throw new FailStateException("States.TaskFailed",
                     "Unsupported resource: " + AWS_SDK_SCHEDULER_PREFIX + action);
         }
         try {
+            if (deleting) {
+                schedulerService.deleteSchedule(input.path("Name").asText(null),
+                        input.path("GroupName").asText(null), region);
+                return objectMapper.createObjectNode();
+            }
             ScheduleRequest request = schedulerController.parseScheduleRequest(input);
             request.setName(input.path("Name").asText(null));
             Schedule schedule = creating

@@ -21,7 +21,8 @@ import static org.junit.jupiter.api.Assertions.fail;
 /**
  * Integration tests for the {@code arn:aws:states:::aws-sdk:} task integrations of Step Functions
  * itself and of EventBridge Scheduler: {@code sfn:startExecution}, {@code sfn:sendTaskSuccess},
- * {@code sfn:sendTaskFailure}, {@code scheduler:createSchedule} and {@code scheduler:updateSchedule}.
+ * {@code sfn:sendTaskFailure}, {@code scheduler:createSchedule}, {@code scheduler:updateSchedule}
+ * and {@code scheduler:deleteSchedule}.
  */
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -481,6 +482,113 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
             assertEquals("Scheduler.SerializationException", result.path("caughtError").asText(),
                     shape[0] + " must reach Catch as an SDK exception, not States.Runtime");
         }
+    }
+
+    @Test
+    @Order(16)
+    void deleteScheduleReturnsAnEmptyObjectAndRemovesTheSchedule() throws Exception {
+        var result = mapper.readTree(succeedingOutputOf(
+                createStateMachine("aws-sdk-delete-schedule", deleteScheduleTask(
+                        "payout-nightly", null)), "{}"));
+
+        assertTrue(result.isObject());
+        assertEquals(0, result.size(), "DeleteSchedule returns an empty object");
+        given().when().get("/schedules/payout-nightly").then().statusCode(404);
+    }
+
+    @Test
+    @Order(17)
+    void deleteScheduleUsesTheNamedGroup() throws Exception {
+        given()
+                .contentType("application/json")
+                .body("{}")
+                .when().post("/schedule-groups/payments")
+                .then().statusCode(200);
+        given()
+                .contentType("application/json")
+                .body("""
+                        {
+                          "GroupName": "payments",
+                          "ScheduleExpression": "rate(1 day)",
+                          "FlexibleTimeWindow": {"Mode": "OFF"},
+                          "Target": {"Arn": "TARGET_ARN", "RoleArn": "ROLE"}
+                        }
+                        """.replace("TARGET_ARN", quickChildArn).replace("ROLE", ROLE_ARN))
+                .when().post("/schedules/grouped-payout")
+                .then().statusCode(200);
+
+        succeedingOutputOf(createStateMachine("aws-sdk-delete-grouped-schedule",
+                deleteScheduleTask("grouped-payout", "payments")), "{}");
+
+        given().queryParam("groupName", "payments")
+                .when().get("/schedules/grouped-payout")
+                .then().statusCode(404);
+    }
+
+    @Test
+    @Order(18)
+    void deleteMissingScheduleIsCatchableAsResourceNotFound() throws Exception {
+        var result = mapper.readTree(succeedingOutputOf(
+                createStateMachine("aws-sdk-delete-missing-schedule", catchingDeleteScheduleTask(
+                        "no-such-schedule", "Scheduler.ResourceNotFoundException")), "{}"));
+
+        assertEquals("Scheduler.ResourceNotFoundException", result.path("caughtError").asText());
+    }
+
+    @Test
+    @Order(19)
+    void deleteScheduleWithoutANameIsCatchableAsValidationException() throws Exception {
+        var result = mapper.readTree(succeedingOutputOf(
+                createStateMachine("aws-sdk-delete-schedule-without-name", catchingDeleteScheduleTask(
+                        null, "Scheduler.ValidationException")), "{}"));
+
+        assertEquals("Scheduler.ValidationException", result.path("caughtError").asText());
+    }
+
+    private static String deleteScheduleTask(String scheduleName, String groupName) {
+        String groupArgument = groupName == null ? "" : ", \"GroupName\": \"" + groupName + "\"";
+        return """
+                {
+                  "QueryLanguage": "JSONata",
+                  "StartAt": "Delete",
+                  "States": {
+                    "Delete": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::aws-sdk:scheduler:deleteSchedule",
+                      "Arguments": {"Name": "SCHEDULE_NAME"GROUP_ARGUMENT},
+                      "End": true
+                    }
+                  }
+                }
+                """
+                .replace("SCHEDULE_NAME", scheduleName)
+                .replace("GROUP_ARGUMENT", groupArgument);
+    }
+
+    private static String catchingDeleteScheduleTask(String scheduleName, String errorName) {
+        String nameArgument = scheduleName == null ? "" : "\"Name\": \"" + scheduleName + "\"";
+        return """
+                {
+                  "QueryLanguage": "JSONata",
+                  "StartAt": "Delete",
+                  "States": {
+                    "Delete": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::aws-sdk:scheduler:deleteSchedule",
+                      "Arguments": {NAME_ARGUMENT},
+                      "Catch": [{
+                        "ErrorEquals": ["ERROR_NAME"],
+                        "Next": "Recovered",
+                        "Output": {"caughtError": "{% $states.errorOutput.Error %}"}
+                      }],
+                      "End": true
+                    },
+                    "Recovered": {"Type": "Pass", "End": true}
+                  }
+                }
+                """
+                .replace("NAME_ARGUMENT", nameArgument)
+                .replace("ERROR_NAME", errorName);
     }
 
     private static String scheduleTask(String action, String scheduleName, String expression) {

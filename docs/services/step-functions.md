@@ -426,6 +426,7 @@ the wire and the task fails with `Sfn.StateMachineDoesNotExistException`.
 | `arn:aws:states:::aws-sdk:sfn:sendTaskFailure` | `{}` | `Sfn.InvalidTokenException` |
 | `arn:aws:states:::aws-sdk:scheduler:createSchedule` | `{ScheduleArn}` | `Scheduler.ConflictException` when the name is taken |
 | `arn:aws:states:::aws-sdk:scheduler:updateSchedule` | `{ScheduleArn}` | `Scheduler.ResourceNotFoundException` |
+| `arn:aws:states:::aws-sdk:scheduler:deleteSchedule` | `{}` | `Scheduler.ResourceNotFoundException` |
 | `arn:aws:states:::aws-sdk:sns:publish` | `{MessageId}` | `Sns.NotFoundException` when the topic does not exist |
 
 `sendTaskSuccess` and `sendTaskFailure` resolve a token a `.waitForTaskToken` task is parked on. A

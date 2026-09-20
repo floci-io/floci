@@ -129,9 +129,47 @@ class SchedulerStepFunctionsIntegrationTest {
         assertEquals(0, listExecutions(stateMachineArn).size());
     }
 
+    @Test
+    void stepFunctionsDeleteScheduleStopsFutureOccurrence() {
+        String targetStateMachineArn = createPassStateMachine();
+        String scheduleName = uniqueName("sfn-delete");
+        createSchedule(scheduleName, "rate(1 minute)", "ENABLED",
+                targetStateMachineArn, "{\"deleted\":false}");
+        Schedule schedule = schedulerService.getSchedule(scheduleName, null, REGION);
+        Instant fireAt = schedule.getCreationDate().plus(61, ChronoUnit.SECONDS);
+        String deleterStateMachineArn = createStateMachine(uniqueName("schedule-deleter"), """
+                {
+                  "QueryLanguage": "JSONata",
+                  "StartAt": "Delete",
+                  "States": {
+                    "Delete": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::aws-sdk:scheduler:deleteSchedule",
+                      "Arguments": {"Name": "SCHEDULE_NAME"},
+                      "End": true
+                    }
+                  }
+                }
+                """.replace("SCHEDULE_NAME", scheduleName));
+
+        Response deletion = waitForTerminalExecution(startExecution(deleterStateMachineArn));
+        assertEquals("SUCCEEDED", deletion.jsonPath().getString("status"));
+
+        ScheduleDispatcher dispatcher = new ScheduleDispatcher(
+                schedulerService, scheduleInvoker, sqsService, config);
+        testDispatchers.add(dispatcher);
+        dispatcher.tick(fireAt);
+
+        assertEquals(0, listExecutions(targetStateMachineArn).size());
+    }
+
     private String createPassStateMachine() {
         String name = uniqueName("scheduled-workflow");
         String definition = "{\"StartAt\":\"Pass\",\"States\":{\"Pass\":{\"Type\":\"Pass\",\"End\":true}}}";
+        return createStateMachine(name, definition);
+    }
+
+    private String createStateMachine(String name, String definition) {
         ObjectNode request = MAPPER.createObjectNode();
         request.put("name", name);
         request.put("definition", definition);
@@ -147,6 +185,20 @@ class SchedulerStepFunctionsIntegrationTest {
         String stateMachineArn = response.jsonPath().getString("stateMachineArn");
         stateMachineArns.add(stateMachineArn);
         return stateMachineArn;
+    }
+
+    private String startExecution(String stateMachineArn) {
+        ObjectNode request = MAPPER.createObjectNode();
+        request.put("stateMachineArn", stateMachineArn);
+        request.put("input", "{}");
+        Response response = given()
+                .header("X-Amz-Target", "AWSStepFunctions.StartExecution")
+                .contentType(SFN_CONTENT_TYPE)
+                .body(request.toString())
+                .when()
+                .post("/");
+        response.then().statusCode(200);
+        return response.jsonPath().getString("executionArn");
     }
 
     private void createSchedule(String name, String expression, String state,
