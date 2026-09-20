@@ -487,7 +487,7 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
     @Test
     @Order(16)
     void deleteScheduleReturnsAnEmptyObjectAndRemovesTheSchedule() throws Exception {
-        var result = mapper.readTree(succeedingOutputOf(
+        JsonNode result = mapper.readTree(succeedingOutputOf(
                 createStateMachine("aws-sdk-delete-schedule", deleteScheduleTask(
                         "payout-nightly", null)), "{}"));
 
@@ -528,7 +528,7 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
     @Test
     @Order(18)
     void deleteMissingScheduleIsCatchableAsResourceNotFound() throws Exception {
-        var result = mapper.readTree(succeedingOutputOf(
+        JsonNode result = mapper.readTree(succeedingOutputOf(
                 createStateMachine("aws-sdk-delete-missing-schedule", catchingDeleteScheduleTask(
                         "no-such-schedule", "Scheduler.ResourceNotFoundException")), "{}"));
 
@@ -538,7 +538,7 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
     @Test
     @Order(19)
     void deleteScheduleWithoutANameIsCatchableAsValidationException() throws Exception {
-        var result = mapper.readTree(succeedingOutputOf(
+        JsonNode result = mapper.readTree(succeedingOutputOf(
                 createStateMachine("aws-sdk-delete-schedule-without-name", catchingDeleteScheduleTask(
                         null, "Scheduler.ValidationException")), "{}"));
 
