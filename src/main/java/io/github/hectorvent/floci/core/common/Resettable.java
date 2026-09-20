@@ -12,6 +12,9 @@ public interface Resettable {
 
     void clear();
 
-    /** Resume after reset, including when a storage/clear operation failed. */
+    /**
+     * Resume after reset, including when a storage/clear operation failed or an earlier service's
+     * beforeReset() threw, so this may run without a preceding {@link #beforeReset()} call.
+     */
     default void afterReset() {}
 }

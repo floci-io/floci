@@ -167,11 +167,9 @@ public class EmulatorInfoController {
         for (Resettable service : resettables) {
             services.add(service);
         }
-        List<Resettable> prepared = new ArrayList<>();
         RuntimeException failure = null;
         try {
             for (Resettable service : services) {
-                prepared.add(service);
                 service.beforeReset();
             }
             // Storage still precedes clear(): services recreate their bootstrap state there.
@@ -182,7 +180,10 @@ public class EmulatorInfoController {
         } catch (RuntimeException e) {
             failure = e;
         } finally {
-            for (Resettable service : prepared.reversed()) {
+            // Every service, not only those whose beforeReset() ran: the teardowns above already
+            // shut down the pools that afterReset() restores, and a beforeReset() that throws
+            // would otherwise leave every later service with its pool terminated for good.
+            for (Resettable service : services.reversed()) {
                 try {
                     service.afterReset();
                 } catch (RuntimeException e) {
