@@ -381,6 +381,133 @@ class GlueJsonHandlerTest {
     }
 
     @Test
+    void classifierCrudPreservesPartialUpdatesAndMetadata() throws Exception {
+        ObjectNode create = mapper.createObjectNode();
+        create.putObject("GrokClassifier")
+                .put("Name", "access-logs")
+                .put("Classification", "apache")
+                .put("GrokPattern", "%{COMMONAPACHELOG}")
+                .put("CustomPatterns", "ORIGINAL value");
+        assertEquals(200, handler.handle("CreateClassifier", create, REGION).getStatus());
+
+        JsonNode created = mapper.valueToTree(body(handler.handle(
+                "GetClassifier", mapper.createObjectNode().put("Name", "access-logs"), REGION)))
+                .get("Classifier").get("GrokClassifier");
+        assertEquals(1, created.get("Version").asLong());
+        assertTrue(created.has("CreationTime"));
+        assertTrue(created.has("LastUpdated"));
+
+        ObjectNode update = mapper.createObjectNode();
+        update.putObject("GrokClassifier")
+                .put("Name", "access-logs")
+                .put("Classification", "apache-updated");
+        assertEquals(200, handler.handle("UpdateClassifier", update, REGION).getStatus());
+
+        JsonNode updated = mapper.valueToTree(body(handler.handle(
+                "GetClassifier", mapper.createObjectNode().put("Name", "access-logs"), REGION)))
+                .get("Classifier").get("GrokClassifier");
+        assertEquals("apache-updated", updated.get("Classification").asText());
+        assertEquals("%{COMMONAPACHELOG}", updated.get("GrokPattern").asText());
+        assertEquals("ORIGINAL value", updated.get("CustomPatterns").asText());
+        assertEquals(created.get("CreationTime"), updated.get("CreationTime"));
+        assertEquals(2, updated.get("Version").asLong());
+
+        assertEquals(200, handler.handle(
+                "DeleteClassifier", mapper.createObjectNode().put("Name", "access-logs"), REGION).getStatus());
+        AwsException missing = assertThrows(AwsException.class, () -> handler.handle(
+                "GetClassifier", mapper.createObjectNode().put("Name", "access-logs"), REGION));
+        assertEquals("EntityNotFoundException", missing.getErrorCode());
+    }
+
+    @Test
+    void allClassifierKindsRoundTripAndListsArePaginatedByName() throws Exception {
+        ObjectNode grok = mapper.createObjectNode();
+        grok.putObject("GrokClassifier")
+                .put("Name", "d-grok")
+                .put("Classification", "logs")
+                .put("GrokPattern", "%{GREEDYDATA:message}");
+        ObjectNode json = mapper.createObjectNode();
+        json.putObject("JsonClassifier").put("Name", "b-json").put("JsonPath", "$.records[*]");
+        ObjectNode xml = mapper.createObjectNode();
+        xml.putObject("XMLClassifier")
+                .put("Name", "a-xml")
+                .put("Classification", "xml")
+                .put("RowTag", "record");
+        ObjectNode csv = mapper.createObjectNode();
+        csv.putObject("CsvClassifier")
+                .put("Name", "c-csv")
+                .put("Delimiter", ",")
+                .put("QuoteSymbol", "\"")
+                .put("ContainsHeader", "PRESENT")
+                .put("Serde", "OpenCSVSerDe")
+                .putArray("CustomDatatypes").add("STRING").add("TIMESTAMP");
+        assertEquals(200, handler.handle("CreateClassifier", grok, REGION).getStatus());
+        assertEquals(200, handler.handle("CreateClassifier", json, REGION).getStatus());
+        assertEquals(200, handler.handle("CreateClassifier", xml, REGION).getStatus());
+        assertEquals(200, handler.handle("CreateClassifier", csv, REGION).getStatus());
+
+        ObjectNode firstRequest = mapper.createObjectNode().put("MaxResults", 2);
+        JsonNode first = mapper.valueToTree(body(handler.handle("GetClassifiers", firstRequest, REGION)));
+        assertEquals(2, first.get("Classifiers").size());
+        assertEquals("a-xml", first.get("Classifiers").get(0).get("XMLClassifier").get("Name").asText());
+        assertEquals("b-json", first.get("Classifiers").get(1).get("JsonClassifier").get("Name").asText());
+        assertEquals("2", first.get("NextToken").asText());
+
+        ObjectNode secondRequest = mapper.createObjectNode().put("MaxResults", 2).put("NextToken", "2");
+        JsonNode second = mapper.valueToTree(body(handler.handle("GetClassifiers", secondRequest, REGION)));
+        assertEquals(2, second.get("Classifiers").size());
+        assertEquals("c-csv", second.get("Classifiers").get(0).get("CsvClassifier").get("Name").asText());
+        assertEquals("d-grok", second.get("Classifiers").get(1).get("GrokClassifier").get("Name").asText());
+        assertTrue(!second.has("NextToken"));
+    }
+
+    @Test
+    void classifierValidationRejectsAmbiguousAndInvalidRequests() throws Exception {
+        ObjectNode ambiguous = mapper.createObjectNode();
+        ambiguous.putObject("JsonClassifier").put("Name", "ambiguous").put("JsonPath", "$");
+        ambiguous.putObject("XMLClassifier").put("Name", "ambiguous").put("Classification", "xml");
+        assertClassifierError("InvalidInputException", "CreateClassifier", ambiguous);
+
+        ObjectNode invalidCsv = mapper.createObjectNode();
+        invalidCsv.putObject("CsvClassifier")
+                .put("Name", "invalid-csv")
+                .put("Delimiter", ",")
+                .put("QuoteSymbol", ",")
+                .put("ContainsHeader", "MAYBE");
+        assertClassifierError("InvalidInputException", "CreateClassifier", invalidCsv);
+
+        ObjectNode invalidGrok = mapper.createObjectNode();
+        invalidGrok.putObject("GrokClassifier")
+                .put("Name", "invalid-grok")
+                .put("Classification", "logs");
+        assertClassifierError("InvalidInputException", "CreateClassifier", invalidGrok);
+    }
+
+    @Test
+    void classifierCreateUpdateAndDeleteUseAwsErrors() throws Exception {
+        ObjectNode create = mapper.createObjectNode();
+        create.putObject("JsonClassifier").put("Name", "events").put("JsonPath", "$.events[*]");
+        assertEquals(200, handler.handle("CreateClassifier", create, REGION).getStatus());
+        assertClassifierError("AlreadyExistsException", "CreateClassifier", create);
+
+        ObjectNode wrongKind = mapper.createObjectNode();
+        wrongKind.putObject("XMLClassifier").put("Name", "events").put("Classification", "xml");
+        assertClassifierError("InvalidInputException", "UpdateClassifier", wrongKind);
+
+        ObjectNode missing = mapper.createObjectNode();
+        missing.putObject("JsonClassifier").put("Name", "missing").put("JsonPath", "$");
+        assertClassifierError("EntityNotFoundException", "UpdateClassifier", missing);
+        assertClassifierError("EntityNotFoundException", "DeleteClassifier",
+                mapper.createObjectNode().put("Name", "missing"));
+    }
+
+    private void assertClassifierError(String errorCode, String action, JsonNode request) {
+        AwsException exception = assertThrows(AwsException.class,
+                () -> handler.handle(action, request, REGION));
+        assertEquals(errorCode, exception.getErrorCode());
+    }
+
+    @Test
     void createJobSucceeds() throws Exception {
         ObjectNode request = mapper.createObjectNode();
         request.put("Name", "test-job");

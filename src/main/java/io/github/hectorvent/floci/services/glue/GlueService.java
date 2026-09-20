@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.glue.model.Classifier;
 import io.github.hectorvent.floci.services.glue.model.Column;
 import io.github.hectorvent.floci.services.glue.model.Crawler;
 import io.github.hectorvent.floci.services.glue.model.CrawlerTargets;
@@ -41,6 +42,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
@@ -51,6 +53,11 @@ public class GlueService {
     private static final Logger LOG = Logger.getLogger(GlueService.class);
     private static final int MAX_FUNCTION_PATTERN_LENGTH = 255;
     private static final int MAX_FUNCTION_RESULTS = 100;
+    private static final Set<String> CSV_HEADER_VALUES = Set.of("UNKNOWN", "PRESENT", "ABSENT");
+    private static final Set<String> CSV_SERDE_VALUES = Set.of("OpenCSVSerDe", "LazySimpleSerDe", "None");
+    private static final Set<String> CSV_CUSTOM_DATATYPES = Set.of(
+            "BINARY", "BOOLEAN", "DATE", "DECIMAL", "DOUBLE", "FLOAT",
+            "INT", "LONG", "SHORT", "STRING", "TIMESTAMP");
     static final String COLUMN_NAME = "ColumnName";
     static final String COLUMN_TYPE = "ColumnType";
     static final String ANALYZED_TIME = "AnalyzedTime";
@@ -81,6 +88,7 @@ public class GlueService {
     private final StorageBackend<String, UserDefinedFunction> functionStore;
     private final StorageBackend<String, Job> jobStore;
     private final StorageBackend<String, Crawler> crawlerStore;
+    private final StorageBackend<String, Classifier> classifierStore;
     private final GlueSchemaRegistryService schemaRegistryService;
     private final RegionResolver regionResolver;
     private final ResourceGroupsTaggingService resourceGroupsTaggingService;
@@ -102,6 +110,7 @@ public class GlueService {
         this.functionStore = storageFactory.create("glue", "functions.json", new TypeReference<>() {});
         this.jobStore = storageFactory.create("glue", "jobs.json", new TypeReference<>() {});
         this.crawlerStore = storageFactory.create("glue", "crawlers.json", new TypeReference<>() {});
+        this.classifierStore = storageFactory.create("glue", "classifiers.json", new TypeReference<>() {});
         this.schemaRegistryService = schemaRegistryService;
         this.regionResolver = regionResolver;
         this.resourceGroupsTaggingService = resourceGroupsTaggingService;
@@ -117,6 +126,7 @@ public class GlueService {
                 StorageBackend<String, UserDefinedFunction> functionStore,
                 StorageBackend<String, Job> jobStore,
                 StorageBackend<String, Crawler> crawlerStore,
+                StorageBackend<String, Classifier> classifierStore,
                 GlueSchemaRegistryService schemaRegistryService,
                 RegionResolver regionResolver,
                 ResourceGroupsTaggingService resourceGroupsTaggingService) {
@@ -130,6 +140,7 @@ public class GlueService {
         this.functionStore = functionStore;
         this.jobStore = jobStore;
         this.crawlerStore = crawlerStore;
+        this.classifierStore = classifierStore;
         this.schemaRegistryService = schemaRegistryService;
         this.regionResolver = regionResolver;
         this.resourceGroupsTaggingService = resourceGroupsTaggingService;
@@ -1619,6 +1630,166 @@ public class GlueService {
         jobStore.delete(normalizedName);
         resourceGroupsTaggingService.deleteResources(List.of(jobArn(region, normalizedName)), region);
         LOG.infov("Deleted Glue Job: {0}", name);
+    }
+
+    public void createClassifier(Classifier classifier) {
+        validateClassifierShape(classifier);
+        String name = classifier.name();
+        validateClassifierName(name);
+        if (classifierStore.get(name).isPresent()) {
+            throw new AwsException("AlreadyExistsException", "Classifier " + name + " already exists.", 400);
+        }
+
+        Map<String, Object> details = new LinkedHashMap<>(classifier.selectedDetails());
+        validateClassifierDetails(classifier.selectedKind(), details);
+        double now = Instant.now().toEpochMilli() / 1000.0d;
+        details.put("CreationTime", now);
+        details.put("LastUpdated", now);
+        details.put("Version", 1L);
+        classifierStore.put(name, classifier.copyWithDetails(details));
+        LOG.infov("Created Glue Classifier: {0}", name);
+    }
+
+    public Classifier getClassifier(String name) {
+        validateClassifierName(name);
+        return classifierStore.get(name)
+                .orElseThrow(() -> new AwsException(
+                        "EntityNotFoundException", "Classifier " + name + " not found.", 400));
+    }
+
+    public Page<Classifier> getClassifiers(Integer maxResults, String nextToken) {
+        List<Classifier> classifiers = classifierStore.scan(key -> true);
+        classifiers.sort(Comparator.comparing(Classifier::name));
+        return paginate(classifiers, maxResults, nextToken);
+    }
+
+    public void updateClassifier(Classifier update) {
+        validateClassifierShape(update);
+        String name = update.name();
+        validateClassifierName(name);
+        Classifier existing = getClassifier(name);
+        if (!existing.selectedKind().equals(update.selectedKind())) {
+            throw new AwsException("InvalidInputException", "Classifier type cannot be changed.", 400);
+        }
+
+        Map<String, Object> details = new LinkedHashMap<>(existing.selectedDetails());
+        update.selectedDetails().forEach((key, value) -> {
+            if (!"CreationTime".equals(key) && !"LastUpdated".equals(key) && !"Version".equals(key)) {
+                details.put(key, value);
+            }
+        });
+        validateClassifierDetails(existing.selectedKind(), details);
+        Number version = (Number) existing.selectedDetails().get("Version");
+        details.put("CreationTime", existing.selectedDetails().get("CreationTime"));
+        details.put("LastUpdated", Instant.now().toEpochMilli() / 1000.0d);
+        details.put("Version", (version == null ? 1L : version.longValue()) + 1L);
+        classifierStore.put(name, existing.copyWithDetails(details));
+        LOG.infov("Updated Glue Classifier: {0}", name);
+    }
+
+    public void deleteClassifier(String name) {
+        validateClassifierName(name);
+        if (classifierStore.get(name).isEmpty()) {
+            throw new AwsException("EntityNotFoundException", "Classifier " + name + " not found.", 400);
+        }
+        classifierStore.delete(name);
+        LOG.infov("Deleted Glue Classifier: {0}", name);
+    }
+
+    private void validateClassifierShape(Classifier classifier) {
+        if (classifier == null || classifier.selectedKindCount() != 1) {
+            throw new AwsException(
+                    "InvalidInputException", "Exactly one classifier type must be specified.", 400);
+        }
+    }
+
+    private void validateClassifierName(String name) {
+        validateRequired(name, "Name");
+        if (name.length() > 255 || name.indexOf('\r') >= 0 || name.indexOf('\n') >= 0) {
+            throw new AwsException("InvalidInputException", "Name must be between 1 and 255 characters.", 400);
+        }
+    }
+
+    private void validateClassifierDetails(String kind, Map<String, Object> details) {
+        validateClassifierName(stringValue(details, "Name", true));
+        switch (kind) {
+            case "GrokClassifier" -> validateGrokClassifier(details);
+            case "XMLClassifier" -> stringValue(details, "Classification", true);
+            case "JsonClassifier" -> stringValue(details, "JsonPath", true);
+            case "CsvClassifier" -> validateCsvClassifier(details);
+            default -> throw new AwsException("InvalidInputException", "Unsupported classifier type.", 400);
+        }
+    }
+
+    private void validateGrokClassifier(Map<String, Object> details) {
+        stringValue(details, "Classification", true);
+        String grokPattern = stringValue(details, "GrokPattern", true);
+        if (grokPattern.length() > 2048) {
+            throw new AwsException("InvalidInputException", "GrokPattern must not exceed 2048 characters.", 400);
+        }
+        String customPatterns = stringValue(details, "CustomPatterns", false);
+        if (customPatterns != null && customPatterns.length() > 16000) {
+            throw new AwsException("InvalidInputException", "CustomPatterns must not exceed 16000 characters.", 400);
+        }
+    }
+
+    private void validateCsvClassifier(Map<String, Object> details) {
+        String delimiter = validateSingleCharacter(details, "Delimiter");
+        String quoteSymbol = validateSingleCharacter(details, "QuoteSymbol");
+        if (delimiter != null && delimiter.equals(quoteSymbol)) {
+            throw new AwsException(
+                    "InvalidInputException", "QuoteSymbol must be different from Delimiter.", 400);
+        }
+        validateEnum(details, "ContainsHeader", CSV_HEADER_VALUES);
+        validateEnum(details, "Serde", CSV_SERDE_VALUES);
+        validateStringList(details, "Header", null);
+        validateStringList(details, "CustomDatatypes", CSV_CUSTOM_DATATYPES);
+    }
+
+    private String validateSingleCharacter(Map<String, Object> details, String field) {
+        String value = stringValue(details, field, false);
+        if (value != null && (value.codePointCount(0, value.length()) != 1
+                || value.indexOf('\r') >= 0 || value.indexOf('\n') >= 0)) {
+            throw new AwsException("InvalidInputException", field + " must be exactly one character.", 400);
+        }
+        return value;
+    }
+
+    private void validateEnum(Map<String, Object> details, String field, Set<String> allowed) {
+        String value = stringValue(details, field, false);
+        if (value != null && !allowed.contains(value)) {
+            throw new AwsException("InvalidInputException", "Invalid " + field + ": " + value, 400);
+        }
+    }
+
+    private void validateStringList(Map<String, Object> details, String field, Set<String> allowed) {
+        Object value = details.get(field);
+        if (value == null) {
+            return;
+        }
+        if (!(value instanceof List<?> values)) {
+            throw new AwsException("InvalidInputException", field + " must be a list.", 400);
+        }
+        for (Object item : values) {
+            if (!(item instanceof String text) || text.isEmpty() || text.length() > 255
+                    || (allowed != null && !allowed.contains(text))) {
+                throw new AwsException("InvalidInputException", "Invalid value in " + field + ".", 400);
+            }
+        }
+    }
+
+    private String stringValue(Map<String, Object> details, String field, boolean required) {
+        Object value = details.get(field);
+        if (value == null) {
+            if (required) {
+                throw new AwsException("InvalidInputException", field + " is required.", 400);
+            }
+            return null;
+        }
+        if (!(value instanceof String text) || (required && text.isBlank())) {
+            throw new AwsException("InvalidInputException", field + " must be a string.", 400);
+        }
+        return text;
     }
 
     public void createCrawler(Crawler crawler) {

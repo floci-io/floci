@@ -84,6 +84,16 @@ only arises from a backfill failure.
 | UpdateCrawler | Updates a crawler. |
 | DeleteCrawler | Removes a specified crawler from the AWS Glue Data Catalog. |
 
+#### Classifiers
+
+| Action | Description |
+|--------|-------------|
+| CreateClassifier | Creates a Grok, XML, JSON, or CSV classifier. |
+| GetClassifier | Retrieves a classifier by name. |
+| GetClassifiers | Lists classifiers, paged by `MaxResults` and `NextToken`. |
+| UpdateClassifier | Partially updates a classifier without changing its type. |
+| DeleteClassifier | Deletes a classifier by name. |
+
 ### Schema Registry
 
 #### Registries
