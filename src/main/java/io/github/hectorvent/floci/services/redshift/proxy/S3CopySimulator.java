@@ -288,16 +288,16 @@ public final class S3CopySimulator {
         return fabricateCopy(spec, null);
     }
 
-    static String copyBackendSql(CopyStatementParser.S3CopyFrom spec, List<String> effectiveColumns) {
-        return fabricateCopy(spec, effectiveColumns);
+    static String copyBackendSql(CopyStatementParser.S3CopyFrom spec, List<String> discoveredColumns) {
+        return fabricateCopy(spec, discoveredColumns);
     }
 
     static void streamCopyInput(CopyInput input, OutputStream backendOut) throws IOException {
         streamCopyInput(input, null, backendOut);
     }
 
-    static void streamCopyInput(CopyInput input, List<String> effectiveColumns, OutputStream backendOut) throws IOException {
-        streamObjects(input.spec(), effectiveColumns, input.s3(), input.iamService(), input.roleSession(), input.keys(), backendOut);
+    static void streamCopyInput(CopyInput input, List<String> discoveredColumns, OutputStream backendOut) throws IOException {
+        streamObjects(input.spec(), discoveredColumns, input.s3(), input.iamService(), input.roleSession(), input.keys(), backendOut);
     }
 
     static void releaseCopySession(CopyInput input) {
@@ -416,16 +416,16 @@ public final class S3CopySimulator {
         }
 
         try {
-            List<String> effectiveColumns = spec.columns();
-            if (spec.jsonAuto() && (effectiveColumns == null || effectiveColumns.isEmpty())) {
-                effectiveColumns = discoverTableColumns(client, backend, spec, txStatus, onStatusChange);
-                if (effectiveColumns == null) {
+            List<String> discoveredColumns = null;
+            if (spec.jsonAuto() && (spec.columns() == null || spec.columns().isEmpty())) {
+                discoveredColumns = discoverTableColumns(client, backend, spec, txStatus, onStatusChange);
+                if (discoveredColumns == null) {
                     return true;
                 }
             }
 
             OutputStream backendOut = backend.getOutputStream();
-            backendOut.write(PostgresWireDecoder.encodeQuery(copyBackendSql(spec, effectiveColumns)));
+            backendOut.write(PostgresWireDecoder.encodeQuery(copyBackendSql(spec, discoveredColumns)));
             backendOut.flush();
 
             PostgresWireDecoder backendDecoder = new PostgresWireDecoder(backend.getInputStream());
@@ -458,7 +458,7 @@ public final class S3CopySimulator {
             // a CopyFail to the backend, whose ErrorResponse/ReadyForQuery is relayed to the client;
             // or, if the backend is unreachable, one synthesized ErrorResponse/ReadyForQuery.
             try {
-                streamCopyInput(input, effectiveColumns, backendOut);
+                streamCopyInput(input, discoveredColumns, backendOut);
                 writeCopyDone(backendOut);
                 drainToReadyForQuery(backendDecoder, client, onStatusChange);
             } catch (RuntimeException | IOException e) {
@@ -511,11 +511,11 @@ public final class S3CopySimulator {
         return keys;
     }
 
-    private static String fabricateCopy(CopyStatementParser.S3CopyFrom spec, List<String> effectiveColumns) {
+    private static String fabricateCopy(CopyStatementParser.S3CopyFrom spec, List<String> discoveredColumns) {
         StringBuilder sql = new StringBuilder("COPY ").append(spec.targetTable());
-        if (effectiveColumns != null && !effectiveColumns.isEmpty()) {
+        if (discoveredColumns != null && !discoveredColumns.isEmpty()) {
             sql.append(" (")
-                    .append(effectiveColumns.stream()
+                    .append(discoveredColumns.stream()
                             .map(c -> "\"" + c.replace("\"", "\"\"") + "\"")
                             .collect(Collectors.joining(", ")))
                     .append(")");
@@ -552,7 +552,7 @@ public final class S3CopySimulator {
         return value.replace("'", "''");
     }
 
-    private static void streamObjects(CopyStatementParser.S3CopyFrom spec, List<String> effectiveColumns,
+    private static void streamObjects(CopyStatementParser.S3CopyFrom spec, List<String> discoveredColumns,
                                       S3Service s3, IamService iamService, RoleSession roleSession,
                                       List<String> keys, OutputStream backendOut) throws IOException {
         byte[] buffer = new byte[CHUNK];
@@ -568,8 +568,8 @@ public final class S3CopySimulator {
             InputStream rawIn = new ByteArrayInputStream(data);
             try (InputStream in = spec.gzip() ? new GZIPInputStream(rawIn) : rawIn) {
                 if (spec.jsonAuto()) {
-                    List<String> targetCols = (effectiveColumns != null && !effectiveColumns.isEmpty())
-                            ? effectiveColumns
+                    List<String> targetCols = (discoveredColumns != null && !discoveredColumns.isEmpty())
+                            ? discoveredColumns
                             : (spec.columns() != null
                                     ? spec.columns().stream().map(S3CopySimulator::unquoteIdentifier).toList()
                                     : List.of());

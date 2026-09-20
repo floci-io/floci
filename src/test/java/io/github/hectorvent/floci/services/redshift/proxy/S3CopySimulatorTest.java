@@ -969,7 +969,7 @@ class S3CopySimulatorTest {
         joinBackend(backend);
 
         String sql = fabricated.get();
-        assertTrue(sql.contains("COPY t (\"a\", \"b\") FROM STDIN"), sql);
+        assertTrue(sql.contains("COPY t (a, b) FROM STDIN"), sql);
         assertTrue(sql.toUpperCase().contains("FORMAT TEXT"), sql);
         assertTrue(sql.contains("DELIMITER '|'"), sql);
         assertFalse(sql.toUpperCase().contains("HEADER"), sql);
@@ -990,7 +990,7 @@ class S3CopySimulatorTest {
         joinBackend(backend);
 
         String sql = fabricated.get();
-        assertTrue(sql.contains("COPY t (\"a\", \"b\") FROM STDIN"), sql);
+        assertTrue(sql.contains("COPY t (a, b) FROM STDIN"), sql);
         assertTrue(sql.toUpperCase().contains("FORMAT CSV"), sql);
         assertTrue(sql.contains("DELIMITER ','"), sql);
     }
@@ -1481,6 +1481,53 @@ class S3CopySimulatorTest {
         assertEquals('C', msg1.type());
         PostgresWireDecoder.FrontendMessage msg2 = clientIn.nextMessage();
         assertEquals('Z', msg2.type());
+    }
+
+    @Test
+    void runCopyFrom_withQuotedAndMixedCaseColumns_passesThroughToBackendAndMatchesJsonKeys() throws Exception {
+        String ndjson = "{\"col one\": \"Alice\", \"MixedCase\": 10}\n";
+        S3Object dataObj = new S3Object("wh", "users.json", ndjson.getBytes(StandardCharsets.UTF_8), "application/json");
+        when(s3.objectExists("wh", "users.json")).thenReturn(true);
+        when(s3.getObject("wh", "users.json")).thenReturn(dataObj);
+
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "public.users", List.of("\"col one\"", "MixedCase"), "wh", "users.json", null, 0, false, false, null, null, true, false);
+
+        ByteArrayOutputStream streamedData = new ByteArrayOutputStream();
+        Thread backend = backendThread(() -> {
+            PostgresWireDecoder in = new PostgresWireDecoder(testBackend.getInputStream());
+            OutputStream out = testBackend.getOutputStream();
+
+            PostgresWireDecoder.FrontendMessage q = in.nextMessage();
+            assertEquals('Q', q.type());
+            assertEquals("COPY public.users (\"col one\", MixedCase) FROM STDIN WITH (FORMAT csv, DELIMITER ',')", q.getSql());
+
+            out.write(new byte[]{'G', 0, 0, 0, 4});
+            out.flush();
+
+            while (true) {
+                PostgresWireDecoder.FrontendMessage m = in.nextMessage();
+                if (m == null || m.type() == 'c') {
+                    break;
+                }
+                if (m.type() == 'd') {
+                    streamedData.write(m.body());
+                }
+            }
+
+            writeCommandComplete(out, "COPY 1");
+            writeReadyForQuery(out, 'I');
+        });
+
+        boolean handled = S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, null, 'I');
+        joinBackend(backend);
+        assertTrue(handled);
+
+        assertEquals("Alice,10\n", streamedData.toString(StandardCharsets.UTF_8));
+
+        PostgresWireDecoder clientIn = new PostgresWireDecoder(testClient.getInputStream());
+        assertEquals('C', clientIn.nextMessage().type());
+        assertEquals('Z', clientIn.nextMessage().type());
     }
 
     @Test
