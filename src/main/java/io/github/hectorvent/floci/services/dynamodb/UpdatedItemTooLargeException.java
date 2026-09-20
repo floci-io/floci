@@ -2,7 +2,7 @@ package io.github.hectorvent.floci.services.dynamodb;
 
 import io.github.hectorvent.floci.core.common.AwsException;
 
-/** An update over 400KB, which AWS can only find once the transaction is running, so it cancels. */
+/** An update over 400KB. A transact member carrying one cancels instead of failing up front. */
 public class UpdatedItemTooLargeException extends AwsException {
 
     public UpdatedItemTooLargeException() {
