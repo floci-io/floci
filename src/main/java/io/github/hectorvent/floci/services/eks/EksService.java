@@ -77,12 +77,14 @@ public class EksService implements TagHandler, ResourceProvider {
     private final Ec2Service ec2Service;
     private final EksOidcService oidcService;
     private final EksAccessEntryService accessEntries;
+    private final EksPodIdentityAssociationService podIdentityAssociations;
     private final ScheduledExecutorService poller = Executors.newSingleThreadScheduledExecutor();
 
     @Inject
     public EksService(StorageFactory storageFactory, EmulatorConfig config,
             RegionResolver regionResolver, EksClusterManager clusterManager, Ec2Service ec2Service,
-            EksOidcService oidcService, EksAccessEntryService accessEntries) {
+            EksOidcService oidcService, EksAccessEntryService accessEntries,
+            EksPodIdentityAssociationService podIdentityAssociations) {
         this.storage = storageFactory.create("eks", "eks-clusters.json",
                 new TypeReference<Map<String, Cluster>>() {
                 });
@@ -98,6 +100,14 @@ public class EksService implements TagHandler, ResourceProvider {
         this.ec2Service = ec2Service;
         this.oidcService = oidcService;
         this.accessEntries = accessEntries;
+        this.podIdentityAssociations = podIdentityAssociations;
+    }
+
+    public EksService(StorageFactory storageFactory, EmulatorConfig config,
+            RegionResolver regionResolver, EksClusterManager clusterManager, Ec2Service ec2Service,
+            EksOidcService oidcService, EksAccessEntryService accessEntries) {
+        this(storageFactory, config, regionResolver, clusterManager, ec2Service,
+                oidcService, accessEntries, null);
     }
 
     @PostConstruct
@@ -489,6 +499,9 @@ public class EksService implements TagHandler, ResourceProvider {
         }
         deleteClusterSecurityGroup(cluster);
         accessEntries.deleteClusterEntries(cluster);
+        if (podIdentityAssociations != null) {
+            podIdentityAssociations.deleteClusterAssociations(cluster);
+        }
         storage.delete(name);
         oidcService.deleteKey(name);
         return cluster;

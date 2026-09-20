@@ -71,7 +71,8 @@ class EksServiceTest {
         Ec2Service ec2Service = null;
         RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
         eksService = new EksService(storageFactory, config, regionResolver, clusterManager, ec2Service,
-                new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class));
+                new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class),
+                mock(EksPodIdentityAssociationService.class));
     }
 
     private EmulatorConfig testConfig() {
@@ -231,7 +232,8 @@ class EksServiceTest {
         EksOidcService oidcService = new EksOidcService(
                 fixedStorageFactory(keyStore), new ObjectMapper());
         EksService restarted = new EksService(fixedStorageFactory(clusterStore), testConfig(),
-                new RegionResolver("us-east-1", "000000000000"), null, null, oidcService, mock(EksAccessEntryService.class));
+                new RegionResolver("us-east-1", "000000000000"), null, null, oidcService,
+                mock(EksAccessEntryService.class), mock(EksPodIdentityAssociationService.class));
         restarted.init();
 
         Cluster migrated = restarted.describeCluster("legacy-cluster");

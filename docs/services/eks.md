@@ -3,7 +3,7 @@
 **Protocol:** REST-JSON  
 **Endpoint:** `http://localhost:4566/` (path-routed via JAX-RS)
 
-EKS uses a standard REST API with JSON bodies — not the JSON 1.1 (`X-Amz-Target`) or Query protocol.
+EKS uses a standard REST API with JSON bodies: not the JSON 1.1 (`X-Amz-Target`) or Query protocol.
 
 ## Supported Operations
 
@@ -17,6 +17,11 @@ EKS uses a standard REST API with JSON bodies — not the JSON 1.1 (`X-Amz-Targe
 | `DescribeAccessEntry` | Describe an access entry by IAM principal ARN |
 | `ListAccessEntries` | List principal ARNs with pagination |
 | `DeleteAccessEntry` | Delete access-entry metadata |
+| `CreatePodIdentityAssociation` | Create a pod identity association between a service account and IAM role |
+| `DescribePodIdentityAssociation` | Describe a pod identity association by association ID |
+| `ListPodIdentityAssociations` | List pod identity associations in a cluster with optional filtering and pagination |
+| `UpdatePodIdentityAssociation` | Update the IAM role, target role, or session tags for a pod identity association |
+| `DeletePodIdentityAssociation` | Delete a pod identity association |
 | `CreateNodegroup` | Create node group metadata for a cluster |
 | `DescribeNodegroup` | Describe a node group by cluster and name |
 | `ListNodegroups` | List node group names for a cluster |
@@ -67,6 +72,26 @@ aws --endpoint-url http://localhost:4566 eks create-access-entry \
   --type EC2_LINUX
 ```
 
+## Pod Identity Associations
+
+Floci supports the EKS Pod Identity association management plane. You can map a Kubernetes `(namespace, serviceAccount)` pair directly to an IAM role without configuring OpenID Connect (OIDC) identity providers or mutating ServiceAccount annotations.
+
+### Management Plane Operations
+
+- **Creation**: `CreatePodIdentityAssociation` associates a Kubernetes service account in a specific namespace with an IAM role ARN. The referenced IAM role must exist in IAM. A cluster cannot have duplicate associations for the same `(namespace, serviceAccount)` pair (rejected with HTTP 409 `ResourceInUseException`). Requests support idempotency via `clientRequestToken`.
+- **Retrieval**: `DescribePodIdentityAssociation` retrieves full association details by cluster name and association ID (`a-` followed by 17 alphanumeric characters).
+- **Listing**: `ListPodIdentityAssociations` returns summaries of associations for a cluster, with optional filtering by `namespace` and `serviceAccount`, plus pagination using `maxResults` (1-100) and cluster-bound `nextToken`.
+- **Updating**: `UpdatePodIdentityAssociation` modifies the associated `roleArn`, `targetRoleArn`, `disableSessionTags`, or `policy`.
+- **Deletion**: `DeletePodIdentityAssociation` removes an association and returns its final metadata. Deleting an EKS cluster automatically purges all of its pod identity associations.
+
+### Limitations and Scope
+
+Credentials delivery directly into pods is not yet supported:
+- Mutating webhook injection for pod environment variables (`AWS_CONTAINER_CREDENTIALS_FULL_URI`, `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE`) is not implemented.
+- The link-local metadata credential endpoint (`169.254.170.23`) is not implemented.
+
+Applications running inside pods cannot currently exchange tokens for temporary AWS credentials via the link-local endpoint. Use access entries, node credentials, or explicit credential configuration until the pod identity agent endpoint is added.
+
 ## Cluster security group
 
 When an EKS cluster is created with a VPC (either specified directly or resolved from subnets), Floci provisions a dedicated EC2 cluster security group and populates its ID in `cluster.resourcesVpcConfig.clusterSecurityGroupId` on both `CreateCluster` and `DescribeCluster` responses.
@@ -108,9 +133,9 @@ Cluster metadata is stored in-process. No Docker containers are started. The clu
 
 ### Real mode (`mock: false`, default)
 
-Floci starts a **k3s** (`rancher/k3s`) container for each cluster. The k3s API server is exposed on a host port from the configured range (`6500–6599`). Once `/readyz` responds, the cluster transitions to `ACTIVE` and the CA certificate is extracted from the kubeconfig.
+Floci starts a **k3s** (`rancher/k3s`) container for each cluster. The k3s API server is exposed on a host port from the configured range (`6500-6599`). Once `/readyz` responds, the cluster transitions to `ACTIVE` and the CA certificate is extracted from the kubeconfig.
 
-By default `describe-cluster` returns a **host-reachable** endpoint (`https://localhost:<hostPort>`); the k3s server certificate includes a `localhost` SAN, so it verifies against the CA in `cluster.certificateAuthority.data`. Set `endpoint-mode: network` to return the container DNS name (`https://floci-eks-<name>:6443`) instead — reachable from other containers on the Docker network (the pre-#1118 behaviour). In `network` mode the endpoint falls back to the host-reachable form when Floci runs natively, since there is no container DNS name a host client could use.
+By default `describe-cluster` returns a **host-reachable** endpoint (`https://localhost:<hostPort>`); the k3s server certificate includes a `localhost` SAN, so it verifies against the CA in `cluster.certificateAuthority.data`. Set `endpoint-mode: network` to return the container DNS name (`https://floci-eks-<name>:6443`) instead: reachable from other containers on the Docker network (the pre-#1118 behaviour). In `network` mode the endpoint falls back to the host-reachable form when Floci runs natively, since there is no container DNS name a host client could use.
 
 #### Connecting with `kubectl` (native AWS workflow)
 
@@ -130,7 +155,7 @@ Temporary IAM credentials must include their `AWS_SESSION_TOKEN` when signing th
 This webhook is enabled by default (`iam-auth-webhook: true`). Set it to `false` to start k3s without it (in which case `aws eks get-token` tokens are rejected with `401`).
 
 !!! note "Webhook reachability & networking"
-    The k3s API server must be able to reach Floci's webhook URL. When Floci runs natively, k3s containers reach it via `host.docker.internal`; when Floci runs in a container (`floci start`), Floci and the k3s containers share a Docker network. The k3s network is taken from `FLOCI_SERVICES_EKS_DOCKER_NETWORK` if set, otherwise the global `FLOCI_SERVICES_DOCKER_NETWORK`, otherwise the network Floci is itself attached to (auto-detected) — so no EKS-specific network configuration is required in the standard compose setup.
+    The k3s API server must be able to reach Floci's webhook URL. When Floci runs natively, k3s containers reach it via `host.docker.internal`; when Floci runs in a container (`floci start`), Floci and the k3s containers share a Docker network. The k3s network is taken from `FLOCI_SERVICES_EKS_DOCKER_NETWORK` if set, otherwise the global `FLOCI_SERVICES_DOCKER_NETWORK`, otherwise the network Floci is itself attached to (auto-detected), so no EKS-specific network configuration is required in the standard compose setup.
 
     The webhook kubeconfig is copied into the k3s container via the Docker API (not bind-mounted), so the token-webhook works the same in native and Docker-in-Docker modes with **no host-path / `host-persistent-path` configuration**.
 
@@ -150,7 +175,7 @@ services:
 ```
 
 !!! note "No port mapping needed for k3s ports"
-    k3s containers bind their API server port (6500–6599) directly on the host via Docker — no `ports:` entry is required in `docker-compose.yml`. See [Ports Reference](../configuration/ports.md#ports-65006599-eks-real-mode) for the full explanation.
+    k3s containers bind their API server port (6500-6599) directly on the host via Docker: no `ports:` entry is required in `docker-compose.yml`. See [Ports Reference](../configuration/ports.md#ports-65006599-eks-real-mode) for the full explanation.
 
 #### Clusters survive a restart
 
@@ -158,7 +183,7 @@ With a persistent [storage mode](../configuration/storage.md) (the default), clu
 `eks-clusters.json` are **re-latched to their k3s containers when Floci starts**:
 
 - A surviving container (for example after a Docker Desktop / daemon reboot) is adopted and
-  started in place, keeping its published API server port and data volume — deployments come
+  started in place, keeping its published API server port and data volume: deployments come
   back as they were.
 - A missing container is recreated. Its named k3s data volume (`floci-eks-<name>`; for a
   [non-default account](../configuration/multi-account.md), `floci-eks-<account>.<name>`) is
@@ -198,7 +223,7 @@ back (for example Docker is unavailable), the cluster is marked `FAILED` instead
 Images pushed to the [Floci ECR registry](ecr.md) use `localhost`-based repository URIs
 (for example `000000000000.dkr.ecr.us-east-1.localhost:4566/my-repo:tag`). Inside a k3s
 cluster that hostname would resolve to the k3s container itself, and containerd insists
-on HTTPS for anything it doesn't recognize as loopback — so, out of the box, k3s cannot
+on HTTPS for anything it doesn't recognize as loopback: so, out of the box, k3s cannot
 pull from the registry even though `docker push` from the host works.
 
 Floci solves this at cluster creation: each new k3s container gets a generated
@@ -241,7 +266,7 @@ Requirements and limits:
 Use `FLOCI_SERVICES_EKS_MOCK=true` when you only need the API shape:
 
 ```yaml
-# docker-compose.yml — CI / test environment
+# docker-compose.yml: CI / test environment
 services:
   floci:
     image: floci/floci:latest
