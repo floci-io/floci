@@ -139,6 +139,18 @@ services:
       FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ENABLED: "true"
 ```
 
+### CloudFormation and SAM
+
+`AWS::Lambda::Function` accepts the same pair. A template whose `Code` is
+`{"S3Bucket": "hot-reload", "S3Key": "/absolute/path"}` is handed to Lambda unchanged instead of
+being resolved against S3, so the stack creates a hot-reload function and reaches
+`CREATE_COMPLETE`. A SAM `CodeUri` of `s3://hot-reload//absolute/path` expands to the same `Code`:
+the double slash keeps the key absolute, because SAM takes everything after the first slash as the key.
+Redeploying the stack with an unchanged path is a no-op for the code; a changed path updates the
+function's bind mount through `UpdateFunctionCode`. Lambda's own hot-reload checks still apply, so
+a stack whose hot-reload path is relative, outside the allow-list, or used while hot-reload is
+disabled fails with Lambda's error as the resource status reason.
+
 ### Limitations
 
 - The `S3Key` path is interpreted by the **Docker daemon**, not by Floci. When Floci itself runs inside Docker, the path must exist on the Docker host machine, not inside the Floci container.

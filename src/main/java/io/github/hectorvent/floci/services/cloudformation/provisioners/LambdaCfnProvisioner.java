@@ -48,6 +48,7 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
     private static final String LAYER_VERSION = "AWS::Lambda::LayerVersion";
 
     private static final String LAMBDA_CODE_IDENTITY_ATTR = "FlociLambdaCodeIdentity";
+    private static final String HOT_RELOAD_BUCKET = "hot-reload";
     private static final String LAMBDA_NAME_MODE_ATTR = "FlociLambdaFunctionNameMode";
     private static final String LAMBDA_PACKAGE_TYPE_ATTR = "FlociLambdaPackageType";
     private static final String NAME_MODE_EXPLICIT = "explicit";
@@ -265,6 +266,14 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
 
             String s3Bucket = codeNode.path("S3Bucket").asText(null);
             String s3Key = codeNode.path("S3Key").asText(null);
+            if (HOT_RELOAD_BUCKET.equals(s3Bucket) && s3Key != null) {
+                // Lambda's bind-mount hot-reload convention: the bucket is a marker and the key
+                // is a directory on the Docker host, so there is no S3 object to probe. Hand the
+                // pair to LambdaService unchanged; it enforces the hot-reload enablement and
+                // path allow-list and reports its own errors, which fail the resource.
+                return new LambdaCodeSpec(Map.of("S3Bucket", s3Bucket, "S3Key", s3Key),
+                        "hot-reload:" + s3Key);
+            }
             if (s3Bucket != null && s3Key != null) {
                 // A template that names its code explicitly must fail if that code cannot be
                 // read, the way real CloudFormation does. Substituting the stub handler here
@@ -402,6 +411,9 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
         Map<String, Object> request = code.request();
         if (request.containsKey("ImageUri")) {
             return !Objects.equals(fn.getImageUri(), request.get("ImageUri"));
+        }
+        if (HOT_RELOAD_BUCKET.equals(request.get("S3Bucket"))) {
+            return !Objects.equals(fn.getHotReloadHostPath(), request.get("S3Key"));
         }
         if (request.containsKey("S3Bucket") && request.containsKey("S3Key")) {
             return !Objects.equals(fn.getS3Bucket(), request.get("S3Bucket"))

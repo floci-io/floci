@@ -151,7 +151,7 @@ service_labels:
 notes:
   AWS::S3::BucketPolicy: accepted; policy not enforced
   AWS::SQS::QueuePolicy: accepted; policy not enforced
-  AWS::Lambda::Function: Zip via S3/inline `ZipFile`, and Image
+  AWS::Lambda::Function: Zip via S3/inline `ZipFile`, Image, and the `hot-reload` bind-mount bucket
   AWS::Lambda::EventSourceMapping: SQS, Kinesis, DynamoDB Streams
   AWS::Lambda::Alias: also what SAM's `AutoPublishAlias` expands into
   AWS::EC2::SecurityGroup: inline `SecurityGroupIngress`/`SecurityGroupEgress` supported
