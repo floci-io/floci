@@ -781,20 +781,20 @@ public class DynamoDbService implements ResourceProvider {
                                     JsonNode expressionAttrNames, JsonNode expressionAttrValues,
                                     String returnValues, String conditionExpression, String region,
                                     String returnValuesOnConditionCheckFailure) {
-        return updateItemInternal(tableName, key, attributeUpdates, updateExpression,
-                expressionAttrNames, expressionAttrValues, returnValues,
-                conditionExpression, region, returnValuesOnConditionCheckFailure, true);
+        return updateItem(tableName, key, attributeUpdates, updateExpression, expressionAttrNames,
+                expressionAttrValues, returnValues, conditionExpression, region,
+                returnValuesOnConditionCheckFailure, UpdateSizeRule.UPDATE_ITEM);
     }
 
-    private UpdateResult updateItemInternal(String tableName, JsonNode key, JsonNode attributeUpdates,
-                                             String updateExpression,
-                                             JsonNode expressionAttrNames, JsonNode expressionAttrValues,
-                                             String returnValues, String conditionExpression, String region,
-                                             String returnValuesOnConditionCheckFailure,
-                                             boolean shouldPersist) {
+    UpdateResult updateItem(String tableName, JsonNode key, JsonNode attributeUpdates,
+                                    String updateExpression,
+                                    JsonNode expressionAttrNames, JsonNode expressionAttrValues,
+                                    String returnValues, String conditionExpression, String region,
+                                    String returnValuesOnConditionCheckFailure,
+                                    UpdateSizeRule sizeRule) {
         return updateItemInternal(tableName, key, attributeUpdates, updateExpression,
                 expressionAttrNames, expressionAttrValues, returnValues,
-                conditionExpression, region, returnValuesOnConditionCheckFailure, shouldPersist, null);
+                conditionExpression, region, returnValuesOnConditionCheckFailure, true, sizeRule);
     }
 
     private UpdateResult updateItemInternal(String tableName, JsonNode key, JsonNode attributeUpdates,
@@ -803,11 +803,11 @@ public class DynamoDbService implements ResourceProvider {
                                              String returnValues, String conditionExpression, String region,
                                              String returnValuesOnConditionCheckFailure,
                                              boolean shouldPersist,
-                                             Consumer<Runnable> deferredStreamEvents) {
+                                             UpdateSizeRule sizeRule) {
         return updateItemInternal(tableName, key, attributeUpdates, updateExpression,
                 expressionAttrNames, expressionAttrValues, returnValues,
-                conditionExpression, region, returnValuesOnConditionCheckFailure, shouldPersist,
-                deferredStreamEvents, null);
+                conditionExpression, region, returnValuesOnConditionCheckFailure, shouldPersist, null,
+                sizeRule);
     }
 
     private UpdateResult updateItemInternal(String tableName, JsonNode key, JsonNode attributeUpdates,
@@ -817,7 +817,22 @@ public class DynamoDbService implements ResourceProvider {
                                              String returnValuesOnConditionCheckFailure,
                                              boolean shouldPersist,
                                              Consumer<Runnable> deferredStreamEvents,
-                                             Map<String, ConcurrentSkipListMap<String, JsonNode>> stagedItems) {
+                                             UpdateSizeRule sizeRule) {
+        return updateItemInternal(tableName, key, attributeUpdates, updateExpression,
+                expressionAttrNames, expressionAttrValues, returnValues,
+                conditionExpression, region, returnValuesOnConditionCheckFailure, shouldPersist,
+                deferredStreamEvents, null, sizeRule);
+    }
+
+    private UpdateResult updateItemInternal(String tableName, JsonNode key, JsonNode attributeUpdates,
+                                             String updateExpression,
+                                             JsonNode expressionAttrNames, JsonNode expressionAttrValues,
+                                             String returnValues, String conditionExpression, String region,
+                                             String returnValuesOnConditionCheckFailure,
+                                             boolean shouldPersist,
+                                             Consumer<Runnable> deferredStreamEvents,
+                                             Map<String, ConcurrentSkipListMap<String, JsonNode>> stagedItems,
+                                             UpdateSizeRule sizeRule) {
         String canonicalTableName = canonicalTableName(region, tableName);
         String storageKey = regionKey(region, canonicalTableName);
         var table = requireActiveTable(storageKey, canonicalTableName);
@@ -928,6 +943,16 @@ public class DynamoDbService implements ResourceProvider {
             // AWS validates index key values against the item the update produces.
             validateIndexKeyTypes(table, item, true);
 
+            if (sizeRule == UpdateSizeRule.UPDATE_ITEM) {
+                requireUpdateItemWithinSizeLimit(item,
+                        writtenAttributes(touchedPaths, updateExpression, expressionAttrNames),
+                        updateExpression != null
+                                ? DynamoDbItemSize.updateExpressionCost(updateExpression)
+                                : DynamoDbItemSize.attributeUpdatesCost(attributeUpdates));
+            } else {
+                requireUpdatedItemWithinSizeLimit(item);
+            }
+
             items.put(itemKey, item);
             if (shouldPersist) {
                 persistItems(storageKey);
@@ -953,14 +978,30 @@ public class DynamoDbService implements ResourceProvider {
                 streamEvent.run();
             }
 
-            var touched = new ArrayList<TouchedPath>();
-            for (var path : touchedPaths) {
-                var tokens = updateExpression != null ? parsePath(path, expressionAttrNames) : List.<Object>of(path);
+            List<TouchedPath> touched = new ArrayList<>();
+            for (String path : touchedPaths) {
+                List<Object> tokens = pathTokens(path, updateExpression, expressionAttrNames);
                 touched.add(new TouchedPath(tokens,
                         existing == null ? null : valueAtTokens(existing, tokens), valueAtTokens(item, tokens)));
             }
             return new UpdateResult(item, existing, touched);
         });
+    }
+
+    private List<Object> pathTokens(String path, String updateExpression, JsonNode expressionAttrNames) {
+        return updateExpression != null ? parsePath(path, expressionAttrNames) : List.<Object>of(path);
+    }
+
+    private Set<String> writtenAttributes(List<String> touchedPaths, String updateExpression,
+                                           JsonNode expressionAttrNames) {
+        Set<String> names = new LinkedHashSet<>();
+        for (String path : touchedPaths) {
+            List<Object> tokens = pathTokens(path, updateExpression, expressionAttrNames);
+            if (!tokens.isEmpty() && tokens.get(0) instanceof String name) {
+                names.add(name);
+            }
+        }
+        return names;
     }
 
     public QueryResult query(String tableName, JsonNode keyConditions,
@@ -1468,7 +1509,8 @@ public class DynamoDbService implements ResourceProvider {
             for (int i = 0; i < transactItems.size(); i++) {
                 try {
                     validateTransactItem(transactItems.get(i), region, staged);
-                } catch (KeySchemaMismatchException | ItemNestingExceededException e) {
+                } catch (KeySchemaMismatchException | ItemNestingExceededException
+                        | UpdatedItemTooLargeException e) {
                     throw cancelledByMember(transactItems.size(), i, e.getMessage());
                 }
             }
@@ -1495,7 +1537,8 @@ public class DynamoDbService implements ResourceProvider {
                             upd.has("UpdateExpression") ? upd.get("UpdateExpression").asText() : null,
                             upd.has("ExpressionAttributeNames") ? upd.get("ExpressionAttributeNames") : null,
                             upd.has("ExpressionAttributeValues") ? upd.get("ExpressionAttributeValues") : null,
-                            "NONE", null, region, "NONE", false, pendingStreamEvents::add, staged);
+                            "NONE", null, region, "NONE", false, pendingStreamEvents::add, staged,
+                            UpdateSizeRule.FINISHED_ITEM);
                     affectedStorageKeys.add(storageKey);
                 }
             }
@@ -1754,6 +1797,20 @@ public class DynamoDbService implements ResourceProvider {
             validateKeyNotModified(table, key, item);
             requireItemNestingWithinLimit(item);
             validateIndexKeyTypes(table, item, true);
+            requireUpdatedItemWithinSizeLimit(item);
+        }
+    }
+
+    private static void requireUpdatedItemWithinSizeLimit(JsonNode item) {
+        if (!DynamoDbItemSize.updatedItemWithinLimit(item)) {
+            throw new UpdatedItemTooLargeException();
+        }
+    }
+
+    private static void requireUpdateItemWithinSizeLimit(JsonNode item, Set<String> writtenAttributes,
+                                                          int actionCost) {
+        if (!DynamoDbItemSize.updateItemWithinLimit(item, writtenAttributes, actionCost)) {
+            throw new UpdatedItemTooLargeException();
         }
     }
 
@@ -3085,7 +3142,7 @@ public class DynamoDbService implements ResourceProvider {
         }
     }
 
-    private int findNextComma(String s) {
+    static int findNextComma(String s) {
         // Find next comma that is not inside a function call
         int depth = 0;
         for (int i = 0; i < s.length(); i++) {
@@ -3097,7 +3154,7 @@ public class DynamoDbService implements ResourceProvider {
         return -1;
     }
 
-    private int findNextClauseKeyword(String s) {
+    static int findNextClauseKeyword(String s) {
         // Find the start of the next clause keyword (SET, REMOVE, ADD, DELETE)
         String upper = s.toUpperCase();
         int[] positions = {
@@ -3115,7 +3172,7 @@ public class DynamoDbService implements ResourceProvider {
         return min;
     }
 
-    private int indexOfKeyword(String upper, String keyword) {
+    private static int indexOfKeyword(String upper, String keyword) {
         // Find the next occurrence of keyword at a word boundary (start of string
         // or preceded by whitespace). Loop past non-boundary hits so attribute
         // names that contain a keyword as a substring (e.g. "oldSET" before a

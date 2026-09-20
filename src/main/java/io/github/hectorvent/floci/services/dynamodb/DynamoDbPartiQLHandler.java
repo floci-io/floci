@@ -504,7 +504,8 @@ class DynamoDbPartiQLHandler {
 
         DynamoDbService.UpdateResult result = service.updateItem(stmt.table(), key, null, ue,
                 ean.isEmpty() ? null : ean.toNode(mapper),
-                eav.isEmpty() ? null : eav.toNode(mapper), returnValues, ce, region, "NONE");
+                eav.isEmpty() ? null : eav.toNode(mapper), returnValues, ce, region, "NONE",
+                UpdateSizeRule.FINISHED_ITEM);
         return itemsResponse(returnedAttributes(stmt.returning(), result));
     }
 
