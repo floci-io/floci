@@ -44,6 +44,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.Function;
 import java.util.regex.Pattern;
 
 /**
@@ -150,6 +151,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private final RegionResolver regionResolver;
     private final boolean seedDeployerPrincipal;
     private final String seededAccountAlias;
+    /** Guards case-insensitive IAM name uniqueness checks and their corresponding writes. */
+    private final Object resourceNameLock = new Object();
 
     /**
      * AWS-managed policies (arn:aws:iam::aws:policy/...), keyed by ARN. These are global —
@@ -370,17 +373,19 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     // =========================================================================
 
     public IamUser createUser(String userName, String path) {
-        if (users.get(userName).isPresent()) {
-            throw new AwsException("EntityAlreadyExists",
-                    "User with name " + userName + " already exists.", 409);
+        synchronized (resourceNameLock) {
+            if (containsNameIgnoreCase(users, IamUser::getUserName, userName)) {
+                throw new AwsException("EntityAlreadyExists",
+                        "User with name " + userName + " already exists.", 409);
+            }
+            String userId = "AIDA" + randomId(16);
+            String normalizedPath = normalizePath(path);
+            String arn = iamArn("user", normalizedPath, userName);
+            IamUser user = new IamUser(userId, userName, normalizedPath, arn);
+            users.put(userName, user);
+            LOG.infov("Created IAM user: {0}", userName);
+            return user;
         }
-        String userId = "AIDA" + randomId(16);
-        String normalizedPath = normalizePath(path);
-        String arn = iamArn("user", normalizedPath, userName);
-        IamUser user = new IamUser(userId, userName, normalizedPath, arn);
-        users.put(userName, user);
-        LOG.infov("Created IAM user: {0}", userName);
-        return user;
     }
 
     public IamUser getUser(String userName) {
@@ -444,45 +449,50 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * name-based lookup.
      */
     public void updateUser(String userName, String newUserName, String newPath, String expectedUserId) {
-        IamUser user = getUser(userName);
-        if (expectedUserId != null && !expectedUserId.equals(user.getUserId())) {
-            throw new AwsException("EntityAlreadyExists",
-                    "User " + userName + " was replaced by a different user of the same name; "
-                            + "refusing to apply an update meant for the original user.", 409);
-        }
-        if (newUserName != null && !newUserName.equals(userName)) {
-            if (users.get(newUserName).isPresent()) {
+        synchronized (resourceNameLock) {
+            IamUser user = getUser(userName);
+            if (expectedUserId != null && !expectedUserId.equals(user.getUserId())) {
                 throw new AwsException("EntityAlreadyExists",
-                        "User with name " + newUserName + " already exists.", 409);
+                        "User " + userName + " was replaced by a different user of the same name; "
+                                + "refusing to apply an update meant for the original user.", 409);
             }
-            List<AccessKey> keysToMove = userAccessKeys(userName);
-            users.delete(userName);
-            user.setUserName(newUserName);
-            if (newPath != null) user.setPath(normalizePath(newPath));
-            user.setArn(iamArn("user", user.getPath(), newUserName));
-            users.put(newUserName, user);
-            loginProfiles.get(userName).ifPresent(profile -> {
-                loginProfiles.delete(userName);
-                profile.setUserName(newUserName);
-                loginProfiles.put(newUserName, profile);
-            });
-            for (AccessKey key : keysToMove) {
-                key.setUserName(newUserName);
-                accessKeys.put(key.getAccessKeyId(), key);
-            }
-            for (String groupName : user.getGroupNames()) {
-                groups.get(groupName).ifPresent(group -> {
-                    group.getUserNames().remove(userName);
-                    group.getUserNames().add(newUserName);
-                    groups.put(groupName, group);
+            if (newUserName != null && !newUserName.equals(userName)) {
+                boolean nameTaken = users.scan(k -> true).stream()
+                        .filter(existing -> !existing.getUserId().equals(user.getUserId()))
+                        .anyMatch(existing -> existing.getUserName().equalsIgnoreCase(newUserName));
+                if (nameTaken) {
+                    throw new AwsException("EntityAlreadyExists",
+                            "User with name " + newUserName + " already exists.", 409);
+                }
+                List<AccessKey> keysToMove = userAccessKeys(userName);
+                users.delete(userName);
+                user.setUserName(newUserName);
+                if (newPath != null) user.setPath(normalizePath(newPath));
+                user.setArn(iamArn("user", user.getPath(), newUserName));
+                users.put(newUserName, user);
+                loginProfiles.get(userName).ifPresent(profile -> {
+                    loginProfiles.delete(userName);
+                    profile.setUserName(newUserName);
+                    loginProfiles.put(newUserName, profile);
                 });
+                for (AccessKey key : keysToMove) {
+                    key.setUserName(newUserName);
+                    accessKeys.put(key.getAccessKeyId(), key);
+                }
+                for (String groupName : user.getGroupNames()) {
+                    groups.get(groupName).ifPresent(group -> {
+                        group.getUserNames().remove(userName);
+                        group.getUserNames().add(newUserName);
+                        groups.put(groupName, group);
+                    });
+                }
+            } else {
+                if (newPath != null) {
+                    user.setPath(normalizePath(newPath));
+                    user.setArn(iamArn("user", user.getPath(), userName));
+                }
+                users.put(userName, user);
             }
-        } else {
-            if (newPath != null) {
-                user.setPath(normalizePath(newPath));
-                user.setArn(iamArn("user", user.getPath(), userName));
-            }
-            users.put(userName, user);
         }
     }
 
@@ -507,17 +517,19 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     // =========================================================================
 
     public IamGroup createGroup(String groupName, String path) {
-        if (groups.get(groupName).isPresent()) {
-            throw new AwsException("EntityAlreadyExists",
-                    "Group with name " + groupName + " already exists.", 409);
+        synchronized (resourceNameLock) {
+            if (containsNameIgnoreCase(groups, IamGroup::getGroupName, groupName)) {
+                throw new AwsException("EntityAlreadyExists",
+                        "Group with name " + groupName + " already exists.", 409);
+            }
+            String groupId = "AGPA" + randomId(16);
+            String normalizedPath = normalizePath(path);
+            String arn = iamArn("group", normalizedPath, groupName);
+            IamGroup group = new IamGroup(groupId, groupName, normalizedPath, arn);
+            groups.put(groupName, group);
+            LOG.infov("Created IAM group: {0}", groupName);
+            return group;
         }
-        String groupId = "AGPA" + randomId(16);
-        String normalizedPath = normalizePath(path);
-        String arn = iamArn("group", normalizedPath, groupName);
-        IamGroup group = new IamGroup(groupId, groupName, normalizedPath, arn);
-        groups.put(groupName, group);
-        LOG.infov("Created IAM group: {0}", groupName);
-        return group;
     }
 
     public IamGroup getGroup(String groupName) {
@@ -615,20 +627,22 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     public IamRole createRole(String roleName, String path, String assumeRolePolicyDocument,
                               String description, int maxSessionDuration, Map<String, String> tags) {
-        if (roles.get(roleName).isPresent()) {
-            throw new AwsException("EntityAlreadyExists",
-                    "Role with name " + roleName + " already exists.", 409);
+        synchronized (resourceNameLock) {
+            if (containsNameIgnoreCase(roles, IamRole::getRoleName, roleName)) {
+                throw new AwsException("EntityAlreadyExists",
+                        "Role with name " + roleName + " already exists.", 409);
+            }
+            String roleId = "AROA" + randomId(16);
+            String normalizedPath = normalizePath(path);
+            String arn = iamArn("role", normalizedPath, roleName);
+            IamRole role = new IamRole(roleId, roleName, normalizedPath, arn, assumeRolePolicyDocument);
+            role.setDescription(description);
+            if (maxSessionDuration > 0) role.setMaxSessionDuration(maxSessionDuration);
+            if (tags != null) role.getTags().putAll(tags);
+            roles.put(roleName, role);
+            LOG.infov("Created IAM role: {0}", roleName);
+            return role;
         }
-        String roleId = "AROA" + randomId(16);
-        String normalizedPath = normalizePath(path);
-        String arn = iamArn("role", normalizedPath, roleName);
-        IamRole role = new IamRole(roleId, roleName, normalizedPath, arn, assumeRolePolicyDocument);
-        role.setDescription(description);
-        if (maxSessionDuration > 0) role.setMaxSessionDuration(maxSessionDuration);
-        if (tags != null) role.getTags().putAll(tags);
-        roles.put(roleName, role);
-        LOG.infov("Created IAM role: {0}", roleName);
-        return role;
     }
 
     public IamRole getRole(String roleName) {
@@ -714,19 +728,21 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                     "The derived role name " + roleName + " exceeds the "
                             + ROLE_NAME_MAX_LENGTH + "-character role name limit.", 400);
         }
-        // createRole would answer EntityAlreadyExists, which this action does not document; the
-        // duplicate-suffix case is an InvalidInput as far as its published error list is concerned.
-        if (roles.get(roleName).isPresent()) {
-            throw new AwsException("InvalidInput",
-                    "A role named " + roleName + " already exists; supply a different CustomSuffix.", 400);
+        synchronized (resourceNameLock) {
+            // createRole would answer EntityAlreadyExists, which this action does not document; the
+            // duplicate-suffix case is an InvalidInput as far as its published error list is concerned.
+            if (containsNameIgnoreCase(roles, IamRole::getRoleName, roleName)) {
+                throw new AwsException("InvalidInput",
+                        "A role named " + roleName + " already exists; supply a different CustomSuffix.", 400);
+            }
+            String trustPolicy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                    + "\"Principal\":{\"Service\":\"" + awsServiceName + "\"},\"Action\":\"sts:AssumeRole\"}]}";
+            IamRole role = createRole(roleName, SERVICE_LINKED_ROLE_PATH + awsServiceName + "/",
+                    trustPolicy, description, 0, Map.of());
+            role.setServiceLinkedRole(true);
+            roles.put(roleName, role);
+            return role;
         }
-        String trustPolicy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
-                + "\"Principal\":{\"Service\":\"" + awsServiceName + "\"},\"Action\":\"sts:AssumeRole\"}]}";
-        IamRole role = createRole(roleName, SERVICE_LINKED_ROLE_PATH + awsServiceName + "/",
-                trustPolicy, description, 0, Map.of());
-        role.setServiceLinkedRole(true);
-        roles.put(roleName, role);
-        return role;
     }
 
     /**
@@ -854,18 +870,20 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     public IamPolicy createPolicy(String policyName, String path, String description,
                                   String document, Map<String, String> tags) {
-        String normalizedPath = normalizePath(path);
-        String arn = iamArn("policy", normalizedPath, policyName);
-        if (policies.get(arn).isPresent()) {
-            throw new AwsException("EntityAlreadyExists",
-                    "Policy " + arn + " already exists.", 409);
+        synchronized (resourceNameLock) {
+            String normalizedPath = normalizePath(path);
+            String arn = iamArn("policy", normalizedPath, policyName);
+            if (containsNameIgnoreCase(policies, IamPolicy::getPolicyName, policyName)) {
+                throw new AwsException("EntityAlreadyExists",
+                        "Policy " + arn + " already exists.", 409);
+            }
+            String policyId = "ANPA" + randomId(16);
+            IamPolicy policy = new IamPolicy(policyId, policyName, normalizedPath, arn, description, document);
+            if (tags != null) policy.getTags().putAll(tags);
+            policies.put(arn, policy);
+            LOG.infov("Created IAM policy: {0}", arn);
+            return policy;
         }
-        String policyId = "ANPA" + randomId(16);
-        IamPolicy policy = new IamPolicy(policyId, policyName, normalizedPath, arn, description, document);
-        if (tags != null) policy.getTags().putAll(tags);
-        policies.put(arn, policy);
-        LOG.infov("Created IAM policy: {0}", arn);
-        return policy;
     }
 
     public IamPolicy getPolicy(String policyArn) {
@@ -2603,6 +2621,14 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     private String iamArn(String resourceType, String path, String name) {
         return AwsArnUtils.Arn.of("iam", "", regionResolver.getAccountId(), resourceType + path + name).toString();
+    }
+
+    private static <T> boolean containsNameIgnoreCase(StorageBackend<String, T> storage,
+                                                       Function<T, String> nameExtractor,
+                                                       String requestedName) {
+        return storage.scan(key -> true).stream()
+                .map(nameExtractor)
+                .anyMatch(existingName -> existingName != null && existingName.equalsIgnoreCase(requestedName));
     }
 
     private static String normalizePath(String path) {
