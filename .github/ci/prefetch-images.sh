@@ -7,7 +7,7 @@
 set -u
 SHARD_FILE="${1:-}"
 command -v docker >/dev/null 2>&1 || exit 0
-[ -r "$SHARD_FILE" ] || exit 0
+[ -r "$SHARD_FILE" ] || { echo "prefetch-images: ${SHARD_FILE:-<none>} not readable, nothing prefetched" >&2; exit 0; }
 
 pull() { docker pull -q "$1" >/dev/null 2>&1 & }
 
