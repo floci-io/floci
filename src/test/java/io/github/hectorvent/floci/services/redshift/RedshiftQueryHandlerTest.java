@@ -871,8 +871,8 @@ class RedshiftQueryHandlerTest {
 
         handler.handle("GetClusterCredentials", params);
 
-        java.time.Instant expiresAt = credentialBroker.resolve("acc", "c1", "IAM:analyst").orElseThrow().expiresAt();
-        assertTrue(expiresAt.isAfter(java.time.Instant.now().plusSeconds(800)),
+        Instant expiresAt = credentialBroker.resolve("acc", "c1", "IAM:analyst").orElseThrow().expiresAt();
+        assertTrue(expiresAt.isAfter(Instant.now().plusSeconds(800)),
                 "an out-of-range config default must fall back to the AWS minimum, not be used as-is");
     }
 

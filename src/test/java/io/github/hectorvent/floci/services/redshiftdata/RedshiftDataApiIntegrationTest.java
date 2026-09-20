@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.redshiftdata;
 import io.github.hectorvent.floci.services.redshift.RedshiftService;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ExtractableResponse;
+import io.restassured.response.Response;
 import jakarta.inject.Inject;
 import org.awaitility.Awaitility;
 import org.junit.jupiter.api.AfterAll;
@@ -92,7 +94,7 @@ class RedshiftDataApiIntegrationTest {
         assertEquals(2, asInt(insertRows));
 
         String selectId = executeAndWait("SELECT id, name FROM t ORDER BY id");
-        var result = RestAssuredJsonUtils.awsAction("RedshiftData", "GetStatementResult",
+        ExtractableResponse<Response> result = RestAssuredJsonUtils.awsAction("RedshiftData", "GetStatementResult",
                 "{\"Id\":\"" + selectId + "\"}").then().statusCode(200).extract();
         assertEquals(2, asInt(result.path("TotalNumRows")));
         assertEquals("id", result.path("ColumnMetadata[0].name"));

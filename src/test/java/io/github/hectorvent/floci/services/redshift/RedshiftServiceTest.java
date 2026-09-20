@@ -37,6 +37,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -159,7 +160,7 @@ class RedshiftServiceTest {
         ArgumentCaptor<String> keyCaptor = ArgumentCaptor.forClass(String.class);
         verify(integrationBackend).put(keyCaptor.capture(), eq(integration));
         String storageKey = keyCaptor.getValue();
-        when(integrationBackend.keysForAccount("111111111111")).thenReturn(java.util.Set.of(storageKey));
+        when(integrationBackend.keysForAccount("111111111111")).thenReturn(Set.of(storageKey));
         when(integrationBackend.getForAccount("111111111111", storageKey)).thenReturn(Optional.of(integration));
 
         service.updateIntegrationBackfillProgress("111111111111", integration.getIntegrationArn(),
@@ -176,7 +177,7 @@ class RedshiftServiceTest {
 
     @Test
     void updateIntegrationBackfillProgressOnUnknownIntegrationThrows() {
-        when(integrationBackend.keysForAccount("111111111111")).thenReturn(java.util.Set.of());
+        when(integrationBackend.keysForAccount("111111111111")).thenReturn(Set.of());
 
         assertThrows(AwsException.class, () -> service.updateIntegrationBackfillProgress(
                 "111111111111", "arn:aws:redshift:us-east-1:111111111111:integration:missing", null, true));
@@ -314,7 +315,7 @@ class RedshiftServiceTest {
         persisted.setClusterStatus("available");
         persisted.setProxyPort(7108);
 
-        var entry = mock(AccountAwareStorageBackend.AccountEntry.class);
+        AccountAwareStorageBackend.AccountEntry<Cluster> entry = mock(AccountAwareStorageBackend.AccountEntry.class);
         when(entry.value()).thenReturn(persisted);
         when(entry.accountId()).thenReturn("111111111111");
         when(entry.key()).thenReturn("c1");
