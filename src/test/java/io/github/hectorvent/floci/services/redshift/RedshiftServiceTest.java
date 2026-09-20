@@ -238,7 +238,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testOnStartRecreatesContainersAcrossAccounts() {
+    void onStartRecreatesContainersAcrossAccounts() {
         Cluster clusterA = new Cluster();
         clusterA.setClusterIdentifier("cluster-a");
         clusterA.setMasterUsername("admin");
@@ -271,7 +271,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testOnStartSkipsClusterWithRunningContainer() {
+    void onStartSkipsClusterWithRunningContainer() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("cluster-a");
         cluster.setClusterStatus("available");
@@ -287,7 +287,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testOnStartMarksClusterUnavailableOnStartFailure() {
+    void onStartMarksClusterUnavailableOnStartFailure() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("cluster-a");
         cluster.setMasterUsername("admin");
@@ -334,7 +334,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testCreateCluster() {
+    void createCluster() {
         when(clusterBackend.get(anyString())).thenReturn(Optional.empty());
         when(cm.start(any(), any(), any(), any())).thenReturn(new RedshiftContainerHandle("c1", "my-cluster", "localhost", 5432));
 
@@ -347,7 +347,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testCreateClusterWithVpcMetadata() {
+    void createClusterWithVpcMetadata() {
         when(clusterBackend.get(anyString())).thenReturn(Optional.empty());
         when(cm.start(any(), any(), any(), any())).thenReturn(new RedshiftContainerHandle("c1", "my-cluster", "localhost", 5432));
 
@@ -382,7 +382,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testCreateClusterAlreadyExists() {
+    void createClusterAlreadyExists() {
         when(clusterBackend.get("existing-cluster")).thenReturn(Optional.of(new Cluster()));
 
         assertThrows(AwsException.class, () ->
@@ -475,7 +475,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testDescribeClusters() {
+    void describeClusters() {
         Cluster c = new Cluster();
         c.setClusterIdentifier("test-c");
         when(clusterBackend.get("test-c")).thenReturn(Optional.of(c));
@@ -499,7 +499,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testDeleteCluster() {
+    void deleteCluster() {
         Cluster c = new Cluster();
         c.setClusterIdentifier("test-c");
         when(clusterBackend.get("test-c")).thenReturn(Optional.of(c));
@@ -558,7 +558,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testRebootClusterDumpsAndRestoresData() throws Exception {
+    void rebootClusterDumpsAndRestoresData() throws Exception {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
         cluster.setMasterUsername("admin");
@@ -611,7 +611,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testRebootClusterNotFound() {
+    void rebootClusterNotFound() {
         when(clusterBackend.get("missing")).thenReturn(Optional.empty());
 
         assertThrows(AwsException.class, () -> service.rebootCluster("missing"));
@@ -706,7 +706,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testCreateSnapshot() {
+    void createSnapshot() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
         cluster.setMasterUsername("admin");
@@ -738,7 +738,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testCreateSnapshotClusterNotFound() {
+    void createSnapshotClusterNotFound() {
         when(clusterBackend.get("missing-cluster")).thenReturn(Optional.empty());
 
         assertThrows(AwsException.class, () ->
@@ -746,7 +746,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testCreateSnapshotAlreadyExists() {
+    void createSnapshotAlreadyExists() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
         when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
@@ -757,7 +757,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testCreateSnapshotRejectsTraversalOrMalformedIdentifier() {
+    void createSnapshotRejectsTraversalOrMalformedIdentifier() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
         cluster.setMasterUsername("admin");
@@ -779,7 +779,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testModifyClusterUpdatesMetadataAndPassword() {
+    void modifyClusterUpdatesMetadataAndPassword() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
         cluster.setNodeType("dc2.large");
@@ -797,7 +797,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testModifyClusterUpdatesVpcSecurityGroups() {
+    void modifyClusterUpdatesVpcSecurityGroups() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
         cluster.setMasterUsername("admin");
@@ -811,7 +811,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testModifyClusterNotFound() {
+    void modifyClusterNotFound() {
         when(clusterBackend.get("missing")).thenReturn(Optional.empty());
 
         assertThrows(AwsException.class, () ->
@@ -838,7 +838,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testDescribeLoggingStatusDefaultsToDisabled() {
+    void describeLoggingStatusDefaultsToDisabled() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
         when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
@@ -850,14 +850,14 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testDescribeLoggingStatusNotFound() {
+    void describeLoggingStatusNotFound() {
         when(clusterBackend.get("missing")).thenReturn(Optional.empty());
 
         assertThrows(AwsException.class, () -> service.describeLoggingStatus("missing"));
     }
 
     @Test
-    void testEnableLogging() {
+    void enableLogging() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
         when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
@@ -909,7 +909,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testEnableLoggingRequiresBucketName() {
+    void enableLoggingRequiresBucketName() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
         when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
@@ -918,7 +918,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testEnableLoggingCloudWatchDoesNotRequireBucketName() {
+    void enableLoggingCloudWatchDoesNotRequireBucketName() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
         when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
@@ -930,7 +930,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testCreateClusterAssignsDefaultParameterGroup() {
+    void createClusterAssignsDefaultParameterGroup() {
         when(clusterBackend.get(anyString())).thenReturn(Optional.empty());
         when(cm.start(any(), any(), any(), any())).thenReturn(new RedshiftContainerHandle("c1", "my-cluster", "localhost", 5432));
 
@@ -939,7 +939,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testModifyClusterStoresMultiAZ() {
+    void modifyClusterStoresMultiAZ() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
         when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
@@ -948,7 +948,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testDescribeDefaultParameterGroupIsSynthesized() {
+    void describeDefaultParameterGroupIsSynthesized() {
         when(parameterGroupBackend.get("default.redshift-1.0")).thenReturn(Optional.empty());
 
         List<ClusterParameterGroup> groups = service.describeClusterParameterGroups("default.redshift-1.0");
@@ -957,14 +957,14 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testEnableLoggingNotFound() {
+    void enableLoggingNotFound() {
         when(clusterBackend.get("missing")).thenReturn(Optional.empty());
 
         assertThrows(AwsException.class, () -> service.enableLogging("missing", "my-bucket", null, null, null));
     }
 
     @Test
-    void testDisableLoggingClearsConfig() {
+    void disableLoggingClearsConfig() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
         cluster.setLoggingEnabled(true);
@@ -982,14 +982,14 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testDisableLoggingNotFound() {
+    void disableLoggingNotFound() {
         when(clusterBackend.get("missing")).thenReturn(Optional.empty());
 
         assertThrows(AwsException.class, () -> service.disableLogging("missing"));
     }
 
     @Test
-    void testDescribeSnapshots() {
+    void describeSnapshots() {
         Snapshot s = new Snapshot("snap-1", "my-cluster", "available", 5439, "admin");
         when(snapshotBackend.get("snap-1")).thenReturn(Optional.of(s));
 
@@ -999,14 +999,14 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testDescribeSnapshotsNotFound() {
+    void describeSnapshotsNotFound() {
         when(snapshotBackend.get("missing-snap")).thenReturn(Optional.empty());
 
         assertThrows(AwsException.class, () -> service.describeSnapshots("missing-snap"));
     }
 
     @Test
-    void testDeleteSnapshot() {
+    void deleteSnapshot() {
         Snapshot s = new Snapshot("snap-1", "my-cluster", "available", 5439, "admin");
         s.setSqlDump(dumpPath("snap-1"));
         when(snapshotBackend.get("snap-1")).thenReturn(Optional.of(s));
@@ -1019,14 +1019,14 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testDeleteSnapshotNotFound() {
+    void deleteSnapshotNotFound() {
         when(snapshotBackend.get("missing-snap")).thenReturn(Optional.empty());
 
         assertThrows(AwsException.class, () -> service.deleteSnapshot("missing-snap"));
     }
 
     @Test
-    void testRestoreFromClusterSnapshot() {
+    void restoreFromClusterSnapshot() {
         Cluster sourceCluster = new Cluster();
         sourceCluster.setClusterIdentifier("source-cluster");
         sourceCluster.setMasterPassword("password123");
@@ -1057,7 +1057,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testRestoreFromClusterSnapshotUsesStoredPasswordAfterSourceClusterDeleted() {
+    void restoreFromClusterSnapshotUsesStoredPasswordAfterSourceClusterDeleted() {
         Snapshot snapshot = new Snapshot("my-snapshot", "deleted-source", "available", 5439, "admin");
         snapshot.setMasterPassword("original-secret");
         snapshot.setSqlDump(dumpPath("my-snapshot"));
@@ -1075,7 +1075,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testRestoreFromClusterSnapshotFallsBackToAdminWhenSourceClusterGone() {
+    void restoreFromClusterSnapshotFallsBackToAdminWhenSourceClusterGone() {
         Snapshot snapshot = new Snapshot("my-snapshot", "deleted-source", "available", 5439, "admin");
         snapshot.setSqlDump(dumpPath("my-snapshot"));
         when(clusterBackend.get("restored-cluster")).thenReturn(Optional.empty());
@@ -1091,7 +1091,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testRestoreFromClusterSnapshotAlreadyExists() {
+    void restoreFromClusterSnapshotAlreadyExists() {
         when(clusterBackend.get("existing-cluster")).thenReturn(Optional.of(new Cluster()));
 
         assertThrows(AwsException.class, () ->
@@ -1099,7 +1099,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testRestoreFromClusterSnapshotNotFound() {
+    void restoreFromClusterSnapshotNotFound() {
         when(clusterBackend.get("new-cluster")).thenReturn(Optional.empty());
         when(snapshotBackend.get("missing-snapshot")).thenReturn(Optional.empty());
 
@@ -1108,7 +1108,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testRestoreFromClusterSnapshotFailure() {
+    void restoreFromClusterSnapshotFailure() {
         Snapshot snapshot = new Snapshot("my-snapshot", "source-cluster", "available", 5439, "admin", dumpPath("my-snapshot"));
         when(clusterBackend.get("failed-cluster")).thenReturn(Optional.empty());
         when(snapshotBackend.get("my-snapshot")).thenReturn(Optional.of(snapshot));
@@ -1119,7 +1119,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testRestoreFromClusterSnapshotRejectsUntrustedDumpPathBeforeProvisioning() {
+    void restoreFromClusterSnapshotRejectsUntrustedDumpPathBeforeProvisioning() {
         // A dump path persisted outside the account dir (e.g. by pre-validation code) must be
         // rejected up front — no cluster record, no container.
         Snapshot snapshot = new Snapshot("my-snapshot", "source-cluster", "available", 5439, "admin", "/etc/shadow");
@@ -1188,7 +1188,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testCreateClusterParameterGroup() {
+    void createClusterParameterGroup() {
         when(parameterGroupBackend.get("my-pg")).thenReturn(Optional.empty());
 
         ClusterParameterGroup pg = service.createClusterParameterGroup("my-pg", "redshift-1.0", "custom pg");
@@ -1201,7 +1201,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testCreateClusterParameterGroupAlreadyExists() {
+    void createClusterParameterGroupAlreadyExists() {
         when(parameterGroupBackend.get("my-pg")).thenReturn(Optional.of(new ClusterParameterGroup()));
 
         assertThrows(AwsException.class, () ->
@@ -1209,7 +1209,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testDescribeClusterParameterGroups() {
+    void describeClusterParameterGroups() {
         ClusterParameterGroup pg = new ClusterParameterGroup("my-pg", "redshift-1.0", "custom pg");
         when(parameterGroupBackend.get("my-pg")).thenReturn(Optional.of(pg));
 
@@ -1219,7 +1219,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testDescribeClusterParameterGroupsNotFound() {
+    void describeClusterParameterGroupsNotFound() {
         when(parameterGroupBackend.get("missing-pg")).thenReturn(Optional.empty());
 
         assertThrows(AwsException.class, () ->
@@ -1227,7 +1227,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testDeleteClusterParameterGroup() {
+    void deleteClusterParameterGroup() {
         ClusterParameterGroup pg = new ClusterParameterGroup("my-pg", "redshift-1.0", "custom pg");
         when(parameterGroupBackend.get("my-pg")).thenReturn(Optional.of(pg));
 
@@ -1239,7 +1239,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testDeleteClusterParameterGroupNotFound() {
+    void deleteClusterParameterGroupNotFound() {
         when(parameterGroupBackend.get("missing-pg")).thenReturn(Optional.empty());
 
         assertThrows(AwsException.class, () ->
@@ -1247,7 +1247,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testModifyClusterParameterGroup() {
+    void modifyClusterParameterGroup() {
         ClusterParameterGroup group = new ClusterParameterGroup("my-pg", "redshift-1.0", "custom pg");
         when(parameterGroupBackend.get("my-pg")).thenReturn(Optional.of(group));
 
@@ -1262,7 +1262,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testModifyClusterParameterGroupAppendsUnknownParameter() {
+    void modifyClusterParameterGroupAppendsUnknownParameter() {
         ClusterParameterGroup group = new ClusterParameterGroup("my-pg", "redshift-1.0", "custom pg");
         when(parameterGroupBackend.get("my-pg")).thenReturn(Optional.of(group));
 
@@ -1274,7 +1274,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testModifyClusterParameterGroupNotFound() {
+    void modifyClusterParameterGroupNotFound() {
         when(parameterGroupBackend.get("missing")).thenReturn(Optional.empty());
 
         assertThrows(AwsException.class, () ->
@@ -1282,7 +1282,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testDescribeClusterParametersReturnsStoredValues() {
+    void describeClusterParametersReturnsStoredValues() {
         ClusterParameterGroup group = new ClusterParameterGroup("my-pg", "redshift-1.0", "custom pg");
         group.setParameters(new ArrayList<>(List.of(new Parameter("statement_timeout", "5000"))));
         when(parameterGroupBackend.get("my-pg")).thenReturn(Optional.of(group));
@@ -1295,7 +1295,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testModifyClusterParameterGroupPreservesMetadata() {
+    void modifyClusterParameterGroupPreservesMetadata() {
         ClusterParameterGroup group = new ClusterParameterGroup("my-pg", "redshift-1.0", "custom pg");
         when(parameterGroupBackend.get("my-pg")).thenReturn(Optional.of(group));
 
@@ -1312,7 +1312,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testCreateAndListTagsForCluster() {
+    void createAndListTagsForCluster() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
         when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
@@ -1325,7 +1325,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testDeleteTagsForCluster() {
+    void deleteTagsForCluster() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
         cluster.setTags(new LinkedHashMap<>(Map.of("env", "test", "team", "data")));
@@ -1337,19 +1337,19 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testCreateTagsRejectsNonArnResourceName() {
+    void createTagsRejectsNonArnResourceName() {
         assertThrows(AwsException.class, () ->
                 service.createTags("my-cluster", Map.of("env", "test")));
     }
 
     @Test
-    void testCreateTagsRejectsUnknownResourceType() {
+    void createTagsRejectsUnknownResourceType() {
         assertThrows(AwsException.class, () ->
                 service.createTags("arn:aws:redshift:us-east-1:111111111111:reservednode:foo", Map.of("env", "test")));
     }
 
     @Test
-    void testDescribeTagsForSpecificResource() {
+    void describeTagsForSpecificResource() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
         cluster.setTags(new LinkedHashMap<>(Map.of("env", "test")));
@@ -1365,7 +1365,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testDescribeTagsScansAllResourcesOfType() {
+    void describeTagsScansAllResourcesOfType() {
         Cluster a = new Cluster();
         a.setClusterIdentifier("cluster-a");
         a.setTags(new LinkedHashMap<>(Map.of("env", "prod")));
@@ -1384,7 +1384,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testCreateClusterSubnetGroup() {
+    void createClusterSubnetGroup() {
         when(subnetGroupBackend.get("my-subnet-group")).thenReturn(Optional.empty());
 
         ClusterSubnetGroup group = service.createClusterSubnetGroup(
@@ -1397,7 +1397,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testCreateClusterSubnetGroupAlreadyExists() {
+    void createClusterSubnetGroupAlreadyExists() {
         when(subnetGroupBackend.get("existing")).thenReturn(Optional.of(new ClusterSubnetGroup()));
 
         assertThrows(AwsException.class, () ->
@@ -1405,7 +1405,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testDescribeClusterSubnetGroups() {
+    void describeClusterSubnetGroups() {
         ClusterSubnetGroup group = new ClusterSubnetGroup("my-group", "d", "vpc-1", List.of("subnet-1"));
         when(subnetGroupBackend.get("my-group")).thenReturn(Optional.of(group));
 
@@ -1416,7 +1416,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testModifyClusterSubnetGroup() {
+    void modifyClusterSubnetGroup() {
         ClusterSubnetGroup group = new ClusterSubnetGroup("my-group", "old", "vpc-1", List.of("subnet-1"));
         when(subnetGroupBackend.get("my-group")).thenReturn(Optional.of(group));
 
@@ -1427,7 +1427,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testDeleteClusterSubnetGroup() {
+    void deleteClusterSubnetGroup() {
         ClusterSubnetGroup group = new ClusterSubnetGroup("my-group", "d", "vpc-1", List.of("subnet-1"));
         when(subnetGroupBackend.get("my-group")).thenReturn(Optional.of(group));
 
@@ -1439,7 +1439,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testDeleteClusterSubnetGroupNotFound() {
+    void deleteClusterSubnetGroupNotFound() {
         when(subnetGroupBackend.get("missing")).thenReturn(Optional.empty());
 
         assertThrows(AwsException.class, () -> service.deleteClusterSubnetGroup("missing"));
