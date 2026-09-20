@@ -21,6 +21,7 @@ import io.vertx.core.http.HttpClient;
 import io.vertx.core.http.HttpClientOptions;
 import io.vertx.core.http.HttpServer;
 import io.vertx.core.http.HttpServerOptions;
+import io.vertx.core.http.HttpServerRequest;
 import io.vertx.core.http.RequestOptions;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
@@ -29,6 +30,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -596,8 +598,29 @@ public class ElbV2DataPlane {
     private void proxyRequest(io.vertx.core.http.HttpServerRequest req, String host, int port,
                               boolean preserveHostHeader) {
         req.pause();
+        if (ElbV2TargetResolver.isIpLiteral(host)) {
+            try {
+                proxyRequestTo(req, ElbV2TargetResolver.resolveCheckedAddress(host), host, port, preserveHostHeader);
+            } catch (IOException e) {
+                rejectTarget(req, host, e);
+            }
+            return;
+        }
+        vertx.<String>executeBlocking(() -> ElbV2TargetResolver.resolveCheckedAddress(host))
+                .onSuccess(address -> proxyRequestTo(req, address, host, port, preserveHostHeader))
+                .onFailure(err -> rejectTarget(req, host, err));
+    }
+
+    private void rejectTarget(HttpServerRequest req, String host, Throwable err) {
+        LOG.warnv("Refusing to proxy to target {0}: {1}", host, err.getMessage());
+        req.resume();
+        req.response().setStatusCode(503).end("Service unavailable");
+    }
+
+    private void proxyRequestTo(HttpServerRequest req, String address, String host, int port,
+                                boolean preserveHostHeader) {
         RequestOptions opts = new RequestOptions()
-                .setHost(host)
+                .setHost(address)
                 .setPort(port)
                 .setURI(req.uri())
                 .setMethod(req.method());

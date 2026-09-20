@@ -195,7 +195,7 @@ public class ElbV2HealthChecker implements Resettable {
     }
 
     private int probe(String host, int port, String path, int timeoutSeconds) throws IOException {
-        URL url = new URL("http", host, port, path);
+        URL url = new URL("http", ElbV2TargetResolver.resolveCheckedAddress(host), port, path);
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
         conn.setConnectTimeout(timeoutSeconds * 1000);
         conn.setReadTimeout(timeoutSeconds * 1000);

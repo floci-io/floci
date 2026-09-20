@@ -665,6 +665,33 @@ class ElbV2IntegrationTest {
     }
 
     @Test
+    @Order(26)
+    void registerTargetsRejectsMetadataAddress() {
+        given()
+                .formParam("Action", "RegisterTargets")
+                .formParam("TargetGroupArn", tgArn)
+                .formParam("Targets.member.1.Id", "169.254.169.254")
+                .formParam("Targets.member.1.Port", "80")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("InvalidTarget"));
+
+        given()
+                .formParam("Action", "DescribeTargetHealth")
+                .formParam("TargetGroupArn", tgArn)
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("DescribeTargetHealthResponse.DescribeTargetHealthResult.TargetHealthDescriptions.member.Target.Id",
+                        not(hasItem("169.254.169.254")));
+    }
+
+    @Test
     @Order(27)
     void describeTargetHealthReturnsInitial() {
         given()

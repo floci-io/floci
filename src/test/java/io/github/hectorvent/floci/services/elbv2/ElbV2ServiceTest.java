@@ -265,6 +265,33 @@ class ElbV2ServiceTest {
         assertEquals("Target is not registered to the target group", health.getDescription());
     }
 
+    @Test
+    void registerTargetsRejectsLinkLocalAndMetadataAddresses() {
+        String tgArn = createTargetGroup("metadata-tg");
+
+        for (String address : List.of("169.254.169.254", "169.254.170.2", "fe80::1", "fd00:ec2::254")) {
+            TargetDescription target = new TargetDescription();
+            target.setId(address);
+            AwsException ex = assertThrows(AwsException.class,
+                    () -> service.registerTargets(REGION, tgArn, List.of(target)), address);
+            assertEquals("InvalidTarget", ex.getErrorCode());
+        }
+        assertTrue(service.describeTargetGroups(REGION, null, List.of(tgArn), null).getFirst().getTargets().isEmpty());
+        verify(healthChecker, never()).addTargets(eq(tgArn), anyList(), any(TargetGroup.class));
+    }
+
+    @Test
+    void registerTargetsStillAcceptsLoopbackAndPrivateAddresses() {
+        String tgArn = createTargetGroup("local-tg");
+
+        for (String address : List.of("127.0.0.1", "10.0.0.5", "172.17.0.2", "192.168.1.10")) {
+            TargetDescription target = new TargetDescription();
+            target.setId(address);
+            service.registerTargets(REGION, tgArn, List.of(target));
+        }
+        assertEquals(4, service.describeTargetGroups(REGION, null, List.of(tgArn), null).getFirst().getTargets().size());
+    }
+
     private String createTargetGroup(String name) {
         return service.createTargetGroup(
                 REGION, name, "HTTP", "HTTP1", 9999, "vpc-a", "instance",

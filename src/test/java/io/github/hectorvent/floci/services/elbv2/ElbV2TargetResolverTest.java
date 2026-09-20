@@ -6,7 +6,12 @@ import io.github.hectorvent.floci.services.elbv2.model.TargetDescription;
 import io.github.hectorvent.floci.services.elbv2.model.TargetGroup;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -37,5 +42,19 @@ class ElbV2TargetResolverTest {
         target.setId("10.0.0.12");
 
         assertEquals("10.0.0.12", ElbV2TargetResolver.resolveHost(ec2Service, targetGroup, target));
+    }
+
+    @Test
+    void checkedAddressReturnsAnIpLiteralForLoopbackAndPrivateTargets() throws IOException {
+        assertEquals("127.0.0.1", ElbV2TargetResolver.resolveCheckedAddress("127.0.0.1"));
+        assertEquals("10.0.0.12", ElbV2TargetResolver.resolveCheckedAddress("10.0.0.12"));
+    }
+
+    @Test
+    void checkedAddressRejectsLinkLocalAndMetadataTargets() {
+        for (String host : List.of("169.254.169.254", "169.254.170.2", "fe80::1", "fd00:ec2::254")) {
+            IOException ex = assertThrows(IOException.class, () -> ElbV2TargetResolver.resolveCheckedAddress(host), host);
+            assertTrue(ex.getMessage().contains("link-local or metadata address"), ex.getMessage());
+        }
     }
 }

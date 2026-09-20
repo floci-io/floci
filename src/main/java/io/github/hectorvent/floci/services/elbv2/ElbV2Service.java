@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.SsrfProtection;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -15,6 +16,8 @@ import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.io.IOException;
+import java.net.InetAddress;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -758,6 +761,11 @@ public class ElbV2Service implements ResourceProvider {
 
     public void registerTargets(String region, String tgArn, List<TargetDescription> targets) {
         TargetGroup tg = requireTargetGroup(region, tgArn);
+        if (!"lambda".equals(tg.getTargetType())) {
+            for (TargetDescription t : targets) {
+                requireNotMetadataAddress(t.getId());
+            }
+        }
         List<TargetDescription> existing = tg.getTargets();
         for (TargetDescription t : targets) {
             // replace if same id+port already registered
@@ -766,6 +774,18 @@ public class ElbV2Service implements ResourceProvider {
         }
         persistRegion(targetGroups, region);
         healthChecker.addTargets(tgArn, targets, tg);
+    }
+
+    private static void requireNotMetadataAddress(String targetId) {
+        if (!ElbV2TargetResolver.isIpLiteral(targetId)) {
+            return;
+        }
+        try {
+            SsrfProtection.rejectMetadataAddresses(InetAddress.getAllByName(targetId), targetId);
+        } catch (IOException e) {
+            throw new AwsException("InvalidTarget",
+                    "The IP address '" + targetId + "' is not a valid target", 400);
+        }
     }
 
     public void deregisterTargets(String region, String tgArn, List<TargetDescription> targets) {
