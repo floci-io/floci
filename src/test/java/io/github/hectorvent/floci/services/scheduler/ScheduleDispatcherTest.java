@@ -75,8 +75,8 @@ class ScheduleDispatcherTest {
         s.getTarget().setDeadLetterConfig(new DeadLetterConfig(DLQ_TARGET_ARN));
         when(schedulerService.listAllSchedules()).thenReturn(List.of(s));
         doThrow(new RuntimeException("target unavailable")).when(invoker)
-                .invoke(eq(s.getTarget()), anyString());
-        when(invoker.materializeRequest(eq(s.getTarget()), anyString())).thenReturn(TARGET_REQUEST);
+                .invoke(eq(s), any());
+        when(invoker.materializeRequest(eq(s), any())).thenReturn(TARGET_REQUEST);
         return s;
     }
 
@@ -108,7 +108,7 @@ class ScheduleDispatcherTest {
 
         dispatcher.tick(Instant.parse("2026-04-21T09:18:00Z"));
 
-        verify(invoker, times(1)).invoke(s.getTarget(), "eu-central-1");
+        verify(invoker, times(1)).invoke(eq(s), eq(Instant.parse("2026-04-21T09:17:54Z")));
     }
 
     @Test
@@ -118,7 +118,7 @@ class ScheduleDispatcherTest {
 
         dispatcher.tick(Instant.parse("2026-04-21T09:17:00Z"));
 
-        verify(invoker, never()).invoke(any(), anyString());
+        verify(invoker, never()).invoke(any(), any());
     }
 
     @Test
@@ -130,7 +130,7 @@ class ScheduleDispatcherTest {
         dispatcher.tick(Instant.parse("2026-04-21T09:19:00Z"));
         dispatcher.tick(Instant.parse("2026-04-21T09:20:00Z"));
 
-        verify(invoker, times(1)).invoke(eq(s.getTarget()), anyString());
+        verify(invoker, times(1)).invoke(eq(s), any());
     }
 
     @Test
@@ -163,7 +163,7 @@ class ScheduleDispatcherTest {
 
         dispatcher.tick(Instant.parse("2026-04-21T09:18:00Z"));
 
-        verify(invoker, never()).invoke(any(), anyString());
+        verify(invoker, never()).invoke(any(), any());
     }
 
     @Test
@@ -174,7 +174,7 @@ class ScheduleDispatcherTest {
 
         dispatcher.tick(Instant.parse("2026-04-21T09:18:00Z"));
 
-        verify(invoker, never()).invoke(any(), anyString());
+        verify(invoker, never()).invoke(any(), any());
     }
 
     @Test
@@ -185,7 +185,7 @@ class ScheduleDispatcherTest {
 
         dispatcher.tick(Instant.parse("2026-04-21T09:18:00Z"));
 
-        verify(invoker, never()).invoke(any(), anyString());
+        verify(invoker, never()).invoke(any(), any());
     }
 
     @Test
@@ -195,13 +195,13 @@ class ScheduleDispatcherTest {
         when(schedulerService.listAllSchedules()).thenReturn(List.of(s));
 
         dispatcher.tick(Instant.parse("2026-04-21T09:04:00Z"));
-        verify(invoker, never()).invoke(any(), anyString());
+        verify(invoker, never()).invoke(any(), any());
 
         dispatcher.tick(Instant.parse("2026-04-21T09:06:00Z"));
-        verify(invoker, times(1)).invoke(eq(s.getTarget()), anyString());
+        verify(invoker, times(1)).invoke(eq(s), any());
 
         dispatcher.tick(Instant.parse("2026-04-21T09:11:01Z"));
-        verify(invoker, times(2)).invoke(eq(s.getTarget()), anyString());
+        verify(invoker, times(2)).invoke(eq(s), any());
     }
 
     @Test
@@ -210,7 +210,7 @@ class ScheduleDispatcherTest {
         when(schedulerService.listAllSchedules()).thenReturn(List.of(s));
 
         assertDoesNotThrow(() -> dispatcher.tick(Instant.parse("2026-04-21T09:18:00Z")));
-        verify(invoker, never()).invoke(any(), anyString());
+        verify(invoker, never()).invoke(any(), any());
     }
 
     @Test
@@ -221,7 +221,7 @@ class ScheduleDispatcherTest {
 
         dispatcher.tick(Instant.parse("2026-04-21T09:18:00Z"));
 
-        verify(invoker, never()).invoke(any(), anyString());
+        verify(invoker, never()).invoke(any(), any());
     }
 
     @Test
@@ -232,7 +232,7 @@ class ScheduleDispatcherTest {
 
         tickEveryTenSeconds("2026-04-21T09:18:00Z", 3);
 
-        verify(invoker, times(1)).invoke(s.getTarget(), "eu-central-1");
+        verify(invoker, times(1)).invoke(eq(s), eq(Instant.parse("2026-04-21T09:17:54Z")));
         verifyNoInteractions(sqsService);
     }
 
@@ -243,7 +243,7 @@ class ScheduleDispatcherTest {
 
         tickEveryTenSeconds("2026-04-21T09:18:00Z", 3);
 
-        verify(invoker, never()).invoke(any(), anyString());
+        verify(invoker, never()).invoke(any(), any());
         verifyNoInteractions(sqsService);
     }
 
@@ -253,13 +253,13 @@ class ScheduleDispatcherTest {
         s.getTarget().setRetryPolicy(new RetryPolicy(3600, 1));
         when(schedulerService.listAllSchedules()).thenReturn(List.of(s));
         doThrow(new RuntimeException("target unavailable")).when(invoker)
-                .invoke(eq(s.getTarget()), anyString());
+                .invoke(eq(s), any());
 
         dispatcher.tick(Instant.parse("2026-04-21T09:18:00Z"));
         dispatcher.tick(Instant.parse("2026-04-21T09:19:00Z"));
         dispatcher.tick(Instant.parse("2026-04-21T09:21:00Z"));
 
-        verify(invoker, times(2)).invoke(eq(s.getTarget()), anyString());
+        verify(invoker, times(2)).invoke(eq(s), any());
     }
 
     @Test
@@ -268,15 +268,15 @@ class ScheduleDispatcherTest {
 
         dispatcher.tick(Instant.parse("2026-04-21T09:18:00Z"));
         dispatcher.tick(Instant.parse("2026-04-21T09:18:59Z"));
-        verify(invoker, times(1)).invoke(eq(s.getTarget()), anyString());
+        verify(invoker, times(1)).invoke(eq(s), any());
 
         dispatcher.tick(Instant.parse("2026-04-21T09:19:00Z"));
-        verify(invoker, times(2)).invoke(eq(s.getTarget()), anyString());
+        verify(invoker, times(2)).invoke(eq(s), any());
 
         dispatcher.tick(Instant.parse("2026-04-21T09:20:59Z"));
-        verify(invoker, times(2)).invoke(eq(s.getTarget()), anyString());
+        verify(invoker, times(2)).invoke(eq(s), any());
         dispatcher.tick(Instant.parse("2026-04-21T09:21:00Z"));
-        verify(invoker, times(3)).invoke(eq(s.getTarget()), anyString());
+        verify(invoker, times(3)).invoke(eq(s), any());
     }
 
     @Test
@@ -286,7 +286,7 @@ class ScheduleDispatcherTest {
         dispatcher.tick(Instant.parse("2026-04-21T09:18:00Z"));
         dispatcher.tick(Instant.parse("2026-04-21T09:19:00Z"));
 
-        verify(invoker, times(2)).invoke(eq(s.getTarget()), anyString());
+        verify(invoker, times(2)).invoke(eq(s), any());
         verifyNoInteractions(sqsService);
     }
 
@@ -297,7 +297,7 @@ class ScheduleDispatcherTest {
         dispatcher.tick(Instant.parse("2026-04-21T09:18:00Z"));
         dispatcher.tick(Instant.parse("2026-04-21T11:18:00Z"));
 
-        verify(invoker, times(2)).invoke(eq(s.getTarget()), anyString());
+        verify(invoker, times(2)).invoke(eq(s), any());
         Map<String, MessageAttributeValue> attributes = deadLetters(1).get(0);
         assertEquals("MaximumRetryAttempts", attribute(attributes, "EXHAUSTED_RETRY_CONDITION"));
         assertEquals("1", attribute(attributes, "RETRY_ATTEMPTS"));
@@ -311,7 +311,7 @@ class ScheduleDispatcherTest {
         dispatcher.tick(Instant.parse("2026-04-21T09:19:00Z"));
         dispatcher.tick(Instant.parse("2026-04-21T09:21:00Z"));
 
-        verify(invoker, times(1)).invoke(eq(s.getTarget()), anyString());
+        verify(invoker, times(1)).invoke(eq(s), any());
         Map<String, MessageAttributeValue> attributes = deadLetters(1).get(0);
         assertEquals("MaximumEventAgeInSeconds", attribute(attributes, "EXHAUSTED_RETRY_CONDITION"));
         assertEquals("0", attribute(attributes, "RETRY_ATTEMPTS"));
@@ -321,13 +321,13 @@ class ScheduleDispatcherTest {
     void sendsExhaustedOccurrenceToDeadLetterQueueWithSchedulerAttributes() {
         Schedule s = failingSchedule("dead-letter", "at(2026-04-21T09:17:54)", new RetryPolicy(3600, 2));
         doThrow(new AwsException("AWS.SimpleQueueService.NonExistentQueue",
-                "The specified queue does not exist.", 400)).when(invoker).invoke(eq(s.getTarget()), anyString());
+                "The specified queue does not exist.", 400)).when(invoker).invoke(eq(s), any());
 
         dispatcher.tick(Instant.parse("2026-04-21T09:18:00Z"));
         dispatcher.tick(Instant.parse("2026-04-21T09:19:00Z"));
         dispatcher.tick(Instant.parse("2026-04-21T09:21:00Z"));
 
-        verify(invoker, times(3)).invoke(eq(s.getTarget()), anyString());
+        verify(invoker, times(3)).invoke(eq(s), any());
         Map<String, MessageAttributeValue> attributes = deadLetters(1).get(0);
         assertEquals(9, attributes.size());
         assertEquals("AWS.SimpleQueueService.NonExistentQueue", attribute(attributes, "ERROR_CODE"));
@@ -339,7 +339,7 @@ class ScheduleDispatcherTest {
         assertEquals("2026-04-21T09:17:54Z", attribute(attributes, "SCHEDULED_TIME"));
         assertEquals(s.getArn(), attribute(attributes, "SCHEDULE_ARN"));
         assertEquals(SQS_TARGET_ARN, attribute(attributes, "TARGET_ARN"));
-        verify(invoker, never()).invoke(argThat(target -> DLQ_TARGET_ARN.equals(target.getArn())), anyString());
+        verify(invoker, never()).invoke(argThat(schedule -> DLQ_TARGET_ARN.equals(schedule.getTarget().getArn())), any());
     }
 
     @Test
@@ -351,11 +351,11 @@ class ScheduleDispatcherTest {
         topic.getTarget().setRetryPolicy(new RetryPolicy(3600, 0));
         topic.getTarget().setDeadLetterConfig(new DeadLetterConfig("arn:aws:sns:eu-central-1:000000000000:dead-letter"));
         when(schedulerService.listAllSchedules()).thenReturn(List.of(fifo, topic));
-        doThrow(new RuntimeException("target unavailable")).when(invoker).invoke(any(), anyString());
+        doThrow(new RuntimeException("target unavailable")).when(invoker).invoke(any(), any());
 
         tickEveryTenSeconds("2026-04-21T09:18:00Z", 2);
 
-        verify(invoker, times(2)).invoke(any(), anyString());
+        verify(invoker, times(2)).invoke(any(), any());
         verifyNoInteractions(sqsService);
     }
 
@@ -367,7 +367,7 @@ class ScheduleDispatcherTest {
         dispatcher.tick(Instant.parse("2026-04-21T09:10:00Z"));
         dispatcher.tick(Instant.parse("2026-04-21T09:12:00Z"));
 
-        verify(invoker, times(4)).invoke(eq(s.getTarget()), anyString());
+        verify(invoker, times(4)).invoke(eq(s), any());
         List<Map<String, MessageAttributeValue>> deadLetters = deadLetters(2);
         assertEquals("2026-04-21T09:05:00Z", attribute(deadLetters.get(0), "SCHEDULED_TIME"));
         assertEquals("2026-04-21T09:10:00Z", attribute(deadLetters.get(1), "SCHEDULED_TIME"));
@@ -379,7 +379,7 @@ class ScheduleDispatcherTest {
         Schedule s = failingSchedule("at-delete", "at(2026-04-21T09:17:54)", new RetryPolicy(3600, 1));
         s.setActionAfterCompletion("DELETE");
         s.setAccountId("000000000000");
-        when(invoker.invoke(eq(s.getTarget()), anyString()))
+        when(invoker.invoke(eq(s), any()))
                 .thenThrow(new RuntimeException("target unavailable"))
                 .thenReturn(TARGET_REQUEST);
 
@@ -415,7 +415,7 @@ class ScheduleDispatcherTest {
         s.setState("ENABLED");
         dispatcher.tick(Instant.parse("2026-04-21T09:18:20Z"));
 
-        verify(invoker, times(1)).invoke(eq(s.getTarget()), anyString());
+        verify(invoker, times(1)).invoke(eq(s), any());
         verifyNoInteractions(sqsService);
     }
 
@@ -426,7 +426,7 @@ class ScheduleDispatcherTest {
 
         tickEveryTenSeconds("2026-04-21T09:18:00Z", 3);
 
-        verify(invoker, times(1)).invoke(eq(s.getTarget()), anyString());
+        verify(invoker, times(1)).invoke(eq(s), any());
         verifyNoInteractions(sqsService);
     }
 
@@ -439,7 +439,7 @@ class ScheduleDispatcherTest {
         s.setLastModificationDate(Instant.parse("2026-04-21T09:18:05Z"));
         dispatcher.tick(Instant.parse("2026-04-21T09:18:10Z"));
 
-        verify(invoker, times(1)).invoke(eq(s.getTarget()), anyString());
+        verify(invoker, times(1)).invoke(eq(s), any());
         verifyNoInteractions(sqsService);
     }
 }

@@ -331,6 +331,74 @@ class SchedulerServiceTest {
         assertEquals("ValidationException", e.getErrorCode());
     }
 
+    // Target.Input in the Scheduler API reference: templated Lambda, Step Functions and EventBridge
+    // targets require well-formed JSON; other target types accept any text, and universal
+    // (aws-sdk) target input is only checked when the schedule is invoked.
+
+    @Test
+    void createScheduleRejectsNonJsonInputForLambdaTarget() {
+        AwsException e = assertThrows(AwsException.class, () ->
+                service.createSchedule(
+                        newRequest("s", null, "rate(1 hour)",
+                                new FlexibleTimeWindow("OFF", null),
+                                new Target("arn:aws:lambda:us-east-1:000000000000:function:my-func",
+                                        "arn:aws:iam::000000000000:role/my-role", "not json", null)),
+                        REGION));
+        assertEquals("ValidationException", e.getErrorCode());
+        assertEquals(400, e.getHttpStatus());
+    }
+
+    @Test
+    void createScheduleRejectsNonJsonInputForEventBridgeTarget() {
+        AwsException e = assertThrows(AwsException.class, () ->
+                service.createSchedule(
+                        newRequest("s", null, "rate(1 hour)",
+                                new FlexibleTimeWindow("OFF", null),
+                                new Target("arn:aws:events:us-east-1:000000000000:event-bus/my-bus",
+                                        "arn:aws:iam::000000000000:role/my-role", "{\"unterminated\":", null)),
+                        REGION));
+        assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    @Test
+    void updateScheduleRejectsNonJsonInputForStepFunctionsTarget() {
+        String stateMachineArn = "arn:aws:states:us-east-1:000000000000:stateMachine:my-workflow";
+        service.createSchedule(
+                newRequest("sfn-upd", null, "rate(1 hour)",
+                        new FlexibleTimeWindow("OFF", null),
+                        new Target(stateMachineArn, "arn:aws:iam::000000000000:role/my-role", "{}", null)),
+                REGION);
+        AwsException e = assertThrows(AwsException.class, () ->
+                service.updateSchedule(
+                        newRequest("sfn-upd", null, "rate(1 hour)",
+                                new FlexibleTimeWindow("OFF", null),
+                                new Target(stateMachineArn, "arn:aws:iam::000000000000:role/my-role", "not json", null)),
+                        REGION));
+        assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    @Test
+    void createScheduleAcceptsTextInputForSqsTarget() {
+        Schedule s = service.createSchedule(
+                newRequest("sqs-text", null, "rate(1 hour)",
+                        new FlexibleTimeWindow("OFF", null),
+                        new Target("arn:aws:sqs:us-east-1:000000000000:my-queue",
+                                "arn:aws:iam::000000000000:role/my-role", "plain text", null)),
+                REGION);
+        assertEquals("plain text", s.getTarget().getInput());
+    }
+
+    @Test
+    void createScheduleAcceptsAnyInputForUniversalTarget() {
+        Schedule s = service.createSchedule(
+                newRequest("universal", null, "rate(1 hour)",
+                        new FlexibleTimeWindow("OFF", null),
+                        new Target("arn:aws:scheduler:::aws-sdk:lambda:invoke",
+                                "arn:aws:iam::000000000000:role/my-role", "not json", null)),
+                REGION);
+        assertEquals("not json", s.getTarget().getInput());
+    }
+
     @Test
     void updateScheduleMissingRequiredFieldsThrows() {
         service.createSchedule(
