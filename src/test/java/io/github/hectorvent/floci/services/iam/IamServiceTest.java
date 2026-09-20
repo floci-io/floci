@@ -187,6 +187,17 @@ class IamServiceTest {
     }
 
     @Test
+    void createUserRejectsNameThatDiffersOnlyByCase() {
+        iamService.createUser("CaseUser", "/");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> iamService.createUser("caseuser", "/"));
+
+        assertEquals("EntityAlreadyExists", error.getErrorCode());
+        assertEquals(409, error.getHttpStatus());
+    }
+
+    @Test
     void getUserNotFoundThrows() {
         assertThrows(AwsException.class, () -> iamService.getUser("nonexistent"));
     }
@@ -229,6 +240,29 @@ class IamServiceTest {
         assertThrows(AwsException.class, () -> iamService.getUser("alice"));
         IamUser renamed = iamService.getUser("alice-renamed");
         assertEquals("/new/", renamed.getPath());
+    }
+
+    @Test
+    void updateUserRejectsAnotherUserNameThatDiffersOnlyByCase() {
+        iamService.createUser("CaseUser", "/");
+        iamService.createUser("Other", "/");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> iamService.updateUser("Other", "CASEUSER", null));
+
+        assertEquals("EntityAlreadyExists", error.getErrorCode());
+        assertEquals(409, error.getHttpStatus());
+        assertEquals("Other", iamService.getUser("Other").getUserName());
+    }
+
+    @Test
+    void updateUserAllowsChangingOnlyItsOwnNameCase() {
+        iamService.createUser("CaseUser", "/");
+
+        iamService.updateUser("CaseUser", "caseuser", null);
+
+        assertEquals("caseuser", iamService.getUser("caseuser").getUserName());
+        assertThrows(AwsException.class, () -> iamService.getUser("CaseUser"));
     }
 
     @Test
@@ -464,6 +498,17 @@ class IamServiceTest {
     }
 
     @Test
+    void createGroupRejectsNameThatDiffersOnlyByCase() {
+        iamService.createGroup("CaseGroup", "/");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> iamService.createGroup("casegroup", "/"));
+
+        assertEquals("EntityAlreadyExists", error.getErrorCode());
+        assertEquals(409, error.getHttpStatus());
+    }
+
+    @Test
     void addAndRemoveUserFromGroup() {
         iamService.createUser("alice", "/");
         iamService.createGroup("developers", "/");
@@ -542,6 +587,17 @@ class IamServiceTest {
     }
 
     @Test
+    void createRoleRejectsNameThatDiffersOnlyByCase() {
+        iamService.createRole("CaseRole", "/", "{}", null, 3600, null);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> iamService.createRole("caserole", "/", "{}", null, 3600, null));
+
+        assertEquals("EntityAlreadyExists", error.getErrorCode());
+        assertEquals(409, error.getHttpStatus());
+    }
+
+    @Test
     void updateAssumeRolePolicyWithMatchingExpectedIdApplies() {
         IamRole role = iamService.createRole("LambdaExec", "/", "{}", null, 3600, null);
         String newDoc = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\"}]}";
@@ -601,6 +657,17 @@ class IamServiceTest {
     }
 
     @Test
+    void createServiceLinkedRoleRejectsCaseInsensitiveRoleNameCollisionAsInvalidInput() {
+        iamService.createRole("awsserviceroleforaccessanalyzer", "/", "{}", null, 0, null);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> iamService.createServiceLinkedRole("access-analyzer.amazonaws.com", null, null));
+
+        assertEquals("InvalidInput", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
     void deleteRoleWithAttachedPolicyFails() {
         iamService.createRole("LambdaExec", "/", "{}", null, 0, null);
         String policyArn = iamService.createPolicy("P", "/", null, "{}", null).getArn();
@@ -635,6 +702,17 @@ class IamServiceTest {
         assertEquals("arn:aws:iam::000000000000:policy/ReadOnly", policy.getArn());
         assertEquals("v1", policy.getDefaultVersionId());
         assertEquals(doc, policy.getDefaultDocument());
+    }
+
+    @Test
+    void createPolicyRejectsCaseInsensitiveNameAcrossPaths() {
+        iamService.createPolicy("CasePolicy", "/first/", null, "{}", null);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> iamService.createPolicy("casepolicy", "/second/", null, "{}", null));
+
+        assertEquals("EntityAlreadyExists", error.getErrorCode());
+        assertEquals(409, error.getHttpStatus());
     }
 
     @Test
