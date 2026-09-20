@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.redshift.container;
 
 import com.github.dockerjava.api.async.ResultCallback;
+import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.StreamType;
 import io.github.hectorvent.floci.config.EmulatorConfig;
@@ -98,14 +99,14 @@ public class RedshiftContainerManager {
      * persistent volume, so a blind recreate would silently discard the cluster's data;
      * adopting preserves it whenever the physical container survived. If no such container
      * exists (first start, or the container itself was removed), this falls back to
-     * {@link #start} — in that case the previous data is unrecoverable, matching this
+     * {@link #start}, and in that case the previous data is unrecoverable, matching this
      * project's decision not to back Redshift containers with a Docker volume.
      */
     public RedshiftContainerHandle adoptOrStart(String accountId, String clusterIdentifier, String masterUsername, String masterPassword) {
         String containerName = containerName(accountId, clusterIdentifier);
-        var existing = lifecycleManager.findByName(containerName);
+        Optional<Container> existing = lifecycleManager.findByName(containerName);
         if (existing.isEmpty()) {
-            LOG.warnv("No surviving container for cluster {0}; starting a fresh empty one — the previous"
+            LOG.warnv("No surviving container for cluster {0}; starting a fresh empty one: the previous"
                     + " contents are not recoverable (no Docker volume backs Redshift containers)", clusterIdentifier);
             return start(accountId, clusterIdentifier, masterUsername, masterPassword);
         }
@@ -212,10 +213,10 @@ public class RedshiftContainerManager {
             throw new AwsException("InvalidParameterValue", "Username must be a valid SQL identifier", 400);
         }
         // AWS ModifyCluster rejects ', ", \, / and @ in MasterUserPassword and enforces an
-        // 8-64 length plus at least one uppercase, one lowercase and one digit — we enforce
+        // 8-64 length plus at least one uppercase, one lowercase and one digit, and we enforce
         // the same set for parity. The single-quote rejection is doubly load-bearing: the
         // password is spliced into a psql -c SQL literal here, so ' would also break that
-        // literal — but it is AWS-correct regardless, so do not "fix" it away by escaping.
+        // literal, but it is AWS-correct regardless, so do not "fix" it away by escaping.
         if (newPassword != null) {
             for (char forbidden : new char[]{'\'', '"', '\\', '/', '@'}) {
                 if (newPassword.indexOf(forbidden) >= 0) {
@@ -334,7 +335,8 @@ public class RedshiftContainerManager {
                     } else {
                         out.write(payload);
                     }
-                } catch (IOException ignored) {
+                } catch (IOException e) {
+                    LOG.warnv(e, "Failed to capture output of container exec {0}", execId);
                 }
             }
 
@@ -364,6 +366,7 @@ public class RedshiftContainerManager {
             try {
                 callback.close();
             } catch (IOException ignored) {
+                // The exec result is already collected, so a failure to release the callback stream cannot change it.
             }
         }
     }

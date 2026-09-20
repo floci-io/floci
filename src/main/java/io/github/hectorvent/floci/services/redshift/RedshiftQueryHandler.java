@@ -26,6 +26,7 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
@@ -1090,7 +1091,7 @@ public class RedshiftQueryHandler {
     private static List<RedshiftService.IntegrationFilter> integrationFilters(MultivaluedMap<String, String> params) {
         Map<String, RedshiftService.IntegrationFilter> byIndex = new LinkedHashMap<>();
         for (String key : params.keySet()) {
-            java.util.regex.Matcher matcher = FILTER_NAME.matcher(key);
+            Matcher matcher = FILTER_NAME.matcher(key);
             if (!matcher.matches()) {
                 continue;
             }
