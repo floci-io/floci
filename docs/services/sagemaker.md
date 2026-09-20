@@ -69,6 +69,8 @@ floci:
 
 `mode` defaults to `cdi` because daemons differ: Podman resolves only CDI and will accept a count request while attaching no device ([containers/podman#22645](https://github.com/containers/podman/issues/22645)). Choosing CDI means a misconfiguration fails the container start rather than quietly training on CPU. Use `count` or `device-ids` against Docker.
 
+Floci does not reserve configured devices across concurrent training jobs. In `cdi` and `device-ids` modes, each job takes the first devices it needs from the allowlist, so two simultaneous one-GPU jobs can target the same local card and contend for memory.
+
 A training job fails with an explanatory `FailureReason`, rather than running on CPU, when:
 
 - the instance type belongs to a GPU family (`ml.g*`, `ml.p*`, `ml.inf*`, `ml.trn*`) that the catalog does not list, so its accelerator count is unknown

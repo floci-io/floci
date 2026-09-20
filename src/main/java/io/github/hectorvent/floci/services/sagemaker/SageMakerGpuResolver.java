@@ -13,8 +13,8 @@ import java.util.Optional;
  * Turns a SageMaker {@code InstanceType} into a device request on a container, or into a
  * clear refusal.
  *
- * <p>Shared by training and endpoint hosting, which face the same question from different
- * request shapes.
+ * <p>Currently used by training jobs. It is kept separate from the training runner so the
+ * same rules can be reused if GPU-backed endpoint hosting is added later.
  *
  * <p>The design rule throughout: never answer a GPU request with a CPU container. A job
  * that asks for {@code ml.g5.xlarge}, trains on CPU and reports {@code Completed} leaves
