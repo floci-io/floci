@@ -10,8 +10,11 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-/** Parses and serializes the nested configuration of CloudFront cache forwarding policies. */
+/** Parses and serializes nested configuration for CloudFront cache and origin request policies. */
 final class CloudFrontPolicyConfigCodec {
+
+    private static final long DEFAULT_TTL = 86_400L;
+    private static final long DEFAULT_MAX_TTL = 31_536_000L;
 
     private CloudFrontPolicyConfigCodec() {
     }
@@ -22,6 +25,7 @@ final class CloudFrontPolicyConfigCodec {
         copyScalar(root, config, "MinTTL");
         copyScalar(root, config, "DefaultTTL");
         copyScalar(root, config, "MaxTTL");
+        applyCachePolicyTtlDefaults(config);
 
         XmlElement parameters = root.child("ParametersInCacheKeyAndForwardedToOrigin");
         if (parameters != null) {
@@ -104,7 +108,9 @@ final class CloudFrontPolicyConfigCodec {
             XmlElement itemContainer = names.child("Items");
             if (itemContainer != null) {
                 for (XmlElement item : itemContainer.children()) {
-                    items.add(item.text());
+                    if ("Name".equals(item.name())) {
+                        items.add(item.text());
+                    }
                 }
             }
             values.put(listName, items);
@@ -139,6 +145,30 @@ final class CloudFrontPolicyConfigCodec {
         Object value = values.get(name);
         if (value != null) {
             xml.elem(name, value.toString());
+        }
+    }
+
+    private static void applyCachePolicyTtlDefaults(Map<String, Object> config) {
+        long minTtl = longValue(config.get("MinTTL"), 0L);
+        if (!config.containsKey("DefaultTTL")) {
+            config.put("DefaultTTL", Long.toString(Math.max(DEFAULT_TTL, minTtl)));
+        }
+        if (!config.containsKey("MaxTTL")) {
+            long defaultTtl = longValue(config.get("DefaultTTL"), DEFAULT_TTL);
+            long maxTtl = minTtl > DEFAULT_MAX_TTL || defaultTtl > DEFAULT_MAX_TTL
+                    ? defaultTtl : DEFAULT_MAX_TTL;
+            config.put("MaxTTL", Long.toString(maxTtl));
+        }
+    }
+
+    private static long longValue(Object value, long fallback) {
+        if (value == null) {
+            return fallback;
+        }
+        try {
+            return Long.parseLong(value.toString());
+        } catch (NumberFormatException ignored) {
+            return fallback;
         }
     }
 

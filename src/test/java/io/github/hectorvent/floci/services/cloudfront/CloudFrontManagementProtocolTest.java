@@ -212,6 +212,75 @@ class CloudFrontManagementProtocolTest {
     }
 
     @Test
+    void policyCreationRejectsMissingConfigurationRoot() {
+        given()
+            .contentType("application/xml")
+            .body("<UnexpectedConfig><Name>missing-cache-root</Name></UnexpectedConfig>")
+        .when()
+            .post(API + "cache-policy")
+        .then()
+            .statusCode(400)
+            .body(hasXPath("//*[local-name()='Code']/text()", equalTo("InvalidArgument")));
+
+        given()
+            .contentType("application/xml")
+            .body("<UnexpectedConfig><Name>missing-origin-root</Name></UnexpectedConfig>")
+        .when()
+            .post(API + "origin-request-policy")
+        .then()
+            .statusCode(400)
+            .body(hasXPath("//*[local-name()='Code']/text()", equalTo("InvalidArgument")));
+    }
+
+    @Test
+    void cachePolicyReadFillsAwsTtlDefaults() {
+        String name = "default-ttl-cache-policy-" + UUID.randomUUID();
+        String id = null;
+        String etag = null;
+        try {
+            Response created = given()
+                    .contentType("application/xml")
+                    .body("""
+                            <CachePolicyConfig xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">
+                              <Name>%s</Name>
+                              <MinTTL>10</MinTTL>
+                              <ParametersInCacheKeyAndForwardedToOrigin>
+                                <EnableAcceptEncodingGzip>false</EnableAcceptEncodingGzip>
+                                <EnableAcceptEncodingBrotli>false</EnableAcceptEncodingBrotli>
+                                <HeadersConfig><HeaderBehavior>none</HeaderBehavior></HeadersConfig>
+                                <CookiesConfig><CookieBehavior>none</CookieBehavior></CookiesConfig>
+                                <QueryStringsConfig>
+                                  <QueryStringBehavior>none</QueryStringBehavior>
+                                </QueryStringsConfig>
+                              </ParametersInCacheKeyAndForwardedToOrigin>
+                            </CachePolicyConfig>
+                            """.formatted(name))
+                    .when()
+                    .post(API + "cache-policy");
+            created.then()
+                    .statusCode(201)
+                    .body(hasXPath("//*[local-name()='DefaultTTL']/text()", equalTo("86400")))
+                    .body(hasXPath("//*[local-name()='MaxTTL']/text()", equalTo("31536000")));
+            id = XmlParser.extractFirst(created.asString(), "Id", null);
+            etag = created.header("ETag");
+
+            given()
+                    .when()
+                    .get(API + "cache-policy/" + id + "/config")
+                    .then()
+                    .statusCode(200)
+                    .body(hasXPath("//*[local-name()='DefaultTTL']/text()", equalTo("86400")))
+                    .body(hasXPath("//*[local-name()='MaxTTL']/text()", equalTo("31536000")));
+        } finally {
+            if (id != null && etag != null) {
+                given().header("If-Match", etag)
+                        .when().delete(API + "cache-policy/" + id)
+                        .then().statusCode(204);
+            }
+        }
+    }
+
+    @Test
     void cachePolicyPreservesItsCompleteConfigAcrossManagementOperations() {
         String name = "complete-cache-policy-" + UUID.randomUUID();
         String id = null;

@@ -7,6 +7,8 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CloudFrontPolicyConfigCodecTest {
 
@@ -105,5 +107,57 @@ class CloudFrontPolicyConfigCodecTest {
         Map<String, Object> reparsed = CloudFrontPolicyConfigCodec.parseOriginRequestPolicy(
                 xml.end("OriginRequestPolicyConfig").build());
         assertEquals(config, reparsed);
+    }
+
+    @Test
+    void cachePolicyConfigAppliesAwsTtlDefaults() {
+        Map<String, Object> standard = CloudFrontPolicyConfigCodec.parseCachePolicy("""
+                <CachePolicyConfig><MinTTL>10</MinTTL></CachePolicyConfig>
+                """);
+        assertEquals("86400", standard.get("DefaultTTL"));
+        assertEquals("31536000", standard.get("MaxTTL"));
+
+        Map<String, Object> raisedMinimum = CloudFrontPolicyConfigCodec.parseCachePolicy("""
+                <CachePolicyConfig><MinTTL>40000000</MinTTL></CachePolicyConfig>
+                """);
+        assertEquals("40000000", raisedMinimum.get("DefaultTTL"));
+        assertEquals("40000000", raisedMinimum.get("MaxTTL"));
+
+        Map<String, Object> raisedDefault = CloudFrontPolicyConfigCodec.parseCachePolicy("""
+                <CachePolicyConfig><MinTTL>0</MinTTL><DefaultTTL>40000000</DefaultTTL></CachePolicyConfig>
+                """);
+        assertEquals("40000000", raisedDefault.get("MaxTTL"));
+    }
+
+    @Test
+    void selectionParsingAcceptsOnlyNamesAndPreservesEmptyShapes() {
+        String body = """
+                <OriginRequestPolicyConfig>
+                  <HeadersConfig><HeaderBehavior>none</HeaderBehavior></HeadersConfig>
+                  <CookiesConfig><CookieBehavior>whitelist</CookieBehavior>
+                    <Cookies><Quantity>0</Quantity></Cookies>
+                  </CookiesConfig>
+                  <QueryStringsConfig><QueryStringBehavior>whitelist</QueryStringBehavior>
+                    <QueryStrings><Quantity>1</Quantity><Items>
+                      <Ignored>not-a-name</Ignored><Name>page</Name>
+                    </Items></QueryStrings>
+                  </QueryStringsConfig>
+                </OriginRequestPolicyConfig>
+                """;
+
+        Map<String, Object> config = CloudFrontPolicyConfigCodec.parseOriginRequestPolicy(body);
+        assertEquals(Map.of("HeaderBehavior", "none"), config.get("HeadersConfig"));
+        assertEquals(Map.of("CookieBehavior", "whitelist", "Cookies", List.of()),
+                config.get("CookiesConfig"));
+        assertEquals(Map.of("QueryStringBehavior", "whitelist", "QueryStrings", List.of("page")),
+                config.get("QueryStringsConfig"));
+
+        XmlBuilder xml = new XmlBuilder().start("OriginRequestPolicyConfig");
+        CloudFrontPolicyConfigCodec.serializeOriginRequestPolicy(xml, config);
+        String serialized = xml.end("OriginRequestPolicyConfig").build();
+        assertTrue(serialized.contains("<HeaderBehavior>none</HeaderBehavior>"));
+        assertFalse(serialized.contains("<Headers>"));
+        assertTrue(serialized.contains("<Cookies><Quantity>0</Quantity></Cookies>"));
+        assertFalse(serialized.contains("<Cookies><Quantity>0</Quantity><Items>"));
     }
 }
