@@ -836,6 +836,7 @@ class BatchServiceTest {
                     {"jobs":["%s"]}
                     """.formatted(jobId))).path("jobs").get(0);
             assertEquals("RUNNING", running.path("status").asText());
+            verify(runner, never()).requestStop(jobId);
             verify(runner, never()).stopJob(jobId);
         } finally {
             releaseRun.countDown();
@@ -856,7 +857,7 @@ class BatchServiceTest {
         doAnswer(invocation -> {
             stopRequested.countDown();
             return null;
-        }).when(runner).stopJob(any(String.class));
+        }).when(runner).requestStop(any(String.class));
         BatchService service = dockerService(runner);
         String queueArn = arrayReadyQueue(service);
         String definitionArn = service.registerJobDefinition(json("""
@@ -882,6 +883,131 @@ class BatchServiceTest {
         assertNotNull(failedWithAttempt);
         assertEquals(137, failedWithAttempt.path("attempts").get(0).path("container").path("exitCode").asInt());
         assertEquals("Operator requested shutdown", failedWithAttempt.path("statusReason").asText());
+        verify(runner).requestStop(jobId);
+        verify(runner).stopJob(jobId);
+    }
+
+    @Test
+    void jobControlValidatesRequiredFieldsReasonLimitAndUnknownJobs() throws Exception {
+        InMemoryStorage<String, BatchJob> jobStore = new InMemoryStorage<>();
+        BatchService service = immediateService(jobStore);
+
+        AwsException missingJobId = assertThrows(AwsException.class, () -> service.cancelJob(json("""
+                {"reason":"No longer needed"}
+                """)));
+        assertEquals("ClientException", missingJobId.getErrorCode());
+        assertEquals("jobId is required", missingJobId.getMessage());
+
+        AwsException missingReason = assertThrows(AwsException.class, () -> service.terminateJob(json("""
+                {"jobId":"job-1"}
+                """)));
+        assertEquals("ClientException", missingReason.getErrorCode());
+        assertEquals("reason is required", missingReason.getMessage());
+
+        BatchJob boundaryJob = storedJob("boundary-job", BatchStatus.RUNNABLE);
+        jobStore.put(boundaryJob.getJobId(), boundaryJob);
+        String boundaryReason = "x".repeat(1024);
+        service.cancelJob(json("""
+                {"jobId":"boundary-job","reason":"%s"}
+                """.formatted(boundaryReason)));
+        JsonNode boundaryDetail = service.describeJobs(json("""
+                {"jobs":["boundary-job"]}
+                """)).path("jobs").get(0);
+        assertEquals(boundaryReason, boundaryDetail.path("statusReason").asText());
+
+        BatchJob overLimitJob = storedJob("over-limit-job", BatchStatus.RUNNABLE);
+        jobStore.put(overLimitJob.getJobId(), overLimitJob);
+        AwsException overLimit = assertThrows(AwsException.class, () -> service.cancelJob(json("""
+                {"jobId":"over-limit-job","reason":"%s"}
+                """.formatted("x".repeat(1025)))));
+        assertEquals("ClientException", overLimit.getErrorCode());
+
+        AwsException unknownJob = assertThrows(AwsException.class, () -> service.terminateJob(json("""
+                {"jobId":"unknown-job","reason":"Stop requested"}
+                """)));
+        assertEquals("ClientException", unknownJob.getErrorCode());
+        assertEquals("Job not found: unknown-job", unknownJob.getMessage());
+    }
+
+    @Test
+    void jobControlIsIdempotentForTerminalJobs() throws Exception {
+        InMemoryStorage<String, BatchJob> jobStore = new InMemoryStorage<>();
+        BatchDockerRunner runner = mock(BatchDockerRunner.class);
+        BatchService service = service("docker", jobStore, runner);
+        BatchJob succeeded = storedJob("succeeded-job", BatchStatus.SUCCEEDED);
+        succeeded.setStatusReason("Job completed successfully");
+        BatchJob failed = storedJob("failed-job", BatchStatus.FAILED);
+        failed.setStatusReason("Original failure");
+        jobStore.put(succeeded.getJobId(), succeeded);
+        jobStore.put(failed.getJobId(), failed);
+
+        service.cancelJob(json("""
+                {"jobId":"succeeded-job","reason":"Cancel again"}
+                """));
+        service.terminateJob(json("""
+                {"jobId":"failed-job","reason":"Terminate again"}
+                """));
+
+        JsonNode jobs = service.describeJobs(json("""
+                {"jobs":["succeeded-job","failed-job"]}
+                """)).path("jobs");
+        assertEquals("SUCCEEDED", jobs.get(0).path("status").asText());
+        assertEquals("Job completed successfully", jobs.get(0).path("statusReason").asText());
+        assertEquals("FAILED", jobs.get(1).path("status").asText());
+        assertEquals("Original failure", jobs.get(1).path("statusReason").asText());
+        verify(runner, never()).requestStop(any(String.class));
+        verify(runner, never()).stopJob(any(String.class));
+    }
+
+    @Test
+    void terminateMultiNodeJobStopsNodesAndPreservesRequestedReason() throws Exception {
+        BatchDockerRunner runner = mock(BatchDockerRunner.class);
+        CountDownLatch nodesStarted = new CountDownLatch(2);
+        CountDownLatch stopRequested = new CountDownLatch(1);
+        when(runner.run(any(BatchJob.class), anyInt(), any(BatchNodeExecution.class)))
+                .thenAnswer(invocation -> {
+                    BatchNodeExecution node = invocation.getArgument(2);
+                    nodesStarted.countDown();
+                    assertTrue(stopRequested.await(2, TimeUnit.SECONDS));
+                    return new BatchRunResult(137, "Job terminated", "log-" + node.getNodeIndex(),
+                            1L, 2L, false);
+                });
+        doAnswer(invocation -> {
+            stopRequested.countDown();
+            return null;
+        }).when(runner).requestStop(any(String.class));
+        BatchService service = dockerService(runner);
+        String queueArn = arrayReadyQueue(service);
+        String definitionArn = service.registerJobDefinition(json("""
+                {
+                  "jobDefinitionName":"terminate-mnp-job",
+                  "type":"multinode",
+                  "nodeProperties":{
+                    "numNodes":2,
+                    "mainNode":0,
+                    "nodeRangeProperties":[{"targetNodes":"0:1","container":{"image":"worker:latest"}}]
+                  }
+                }
+                """), REGION).path("jobDefinitionArn").asText();
+        String jobId = service.submitJob(json("""
+                {"jobName":"terminate-mnp","jobQueue":"%s","jobDefinition":"%s"}
+                """.formatted(queueArn, definitionArn)), REGION).path("jobId").asText();
+
+        assertTrue(nodesStarted.await(2, TimeUnit.SECONDS));
+        service.terminateJob(json("""
+                {"jobId":"%s","reason":"Stop every node"}
+                """.formatted(jobId)));
+
+        JsonNode failedWithAttempt = waitForJobAttemptCount(service, jobId, 1);
+        assertNotNull(failedWithAttempt);
+        assertEquals("FAILED", failedWithAttempt.path("status").asText());
+        assertEquals("Stop every node", failedWithAttempt.path("statusReason").asText());
+        JsonNode nodes = service.listJobs(json("""
+                {"multiNodeJobId":"%s"}
+                """.formatted(jobId))).path("jobSummaryList");
+        assertEquals(137, nodes.get(0).path("container").path("exitCode").asInt());
+        assertEquals(137, nodes.get(1).path("container").path("exitCode").asInt());
+        verify(runner).requestStop(jobId);
         verify(runner).stopJob(jobId);
     }
 
@@ -913,6 +1039,7 @@ class BatchServiceTest {
         assertEquals("Stop the array", detail.get(0).path("statusReason").asText());
         assertEquals("FAILED", detail.get(1).path("status").asText());
         assertEquals("FAILED", detail.get(2).path("status").asText());
+        verify(runner).requestStop("array-parent:1");
         verify(runner, never()).stopJob("array-parent:0");
         verify(runner).stopJob("array-parent:1");
     }

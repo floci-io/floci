@@ -487,6 +487,7 @@ public class BatchService {
                     if (controlSingleJob(child, reason, terminate)) {
                         changed = true;
                         if (terminate && wasRunning) {
+                            dockerRunner.requestStop(child.getJobId());
                             jobsToStop.add(child.getJobId());
                         }
                     }
@@ -498,6 +499,7 @@ public class BatchService {
             } else {
                 boolean wasRunning = BatchStatus.RUNNING.name().equals(job.getStatus());
                 if (controlSingleJob(job, reason, terminate) && terminate && wasRunning) {
+                    dockerRunner.requestStop(job.getJobId());
                     jobsToStop.add(job.getJobId());
                 }
             }

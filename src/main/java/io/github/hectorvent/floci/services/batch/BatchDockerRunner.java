@@ -142,8 +142,11 @@ public class BatchDockerRunner implements ContainerTeardown {
         }
     }
 
-    public void stopJob(String jobId) {
+    public void requestStop(String jobId) {
         stopRequestedJobs.add(jobId);
+    }
+
+    public void stopJob(String jobId) {
         for (Map.Entry<String, String> entry : new ConcurrentHashMap<>(inFlightContainers).entrySet()) {
             if (!entry.getKey().equals(jobId) && !entry.getKey().startsWith(jobId + "#node")) {
                 continue;
