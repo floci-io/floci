@@ -615,3 +615,4 @@ The following EKS features are not yet supported:
 - `UpdateClusterConfig` / `UpdateClusterVersion`
 - Add-ons (`CreateAddon`, `DescribeAddon`, `ListAddons`)
 - Identity provider configs
+- Access policies
