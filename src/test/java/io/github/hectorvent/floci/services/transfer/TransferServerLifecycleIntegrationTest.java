@@ -5,9 +5,12 @@ import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.anEmptyMap;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
 
 /**
@@ -101,7 +104,10 @@ class TransferServerLifecycleIntegrationTest {
             .body("""
                 {
                     "EndpointType": "VPC",
-                    "EndpointDetails": {"VpcId": "vpc-123"},
+                    "EndpointDetails": {
+                        "VpcId": "vpc-123",
+                        "SubnetIds": ["subnet-a", "subnet-b"]
+                    },
                     "IdentityProviderType": "API_GATEWAY",
                     "IdentityProviderDetails": {
                         "Url": "https://idp.example.com",
@@ -124,6 +130,7 @@ class TransferServerLifecycleIntegrationTest {
         .then()
             .statusCode(200)
             .body("Server.EndpointDetails.VpcId", equalTo("vpc-123"))
+            .body("Server.EndpointDetails.SubnetIds", equalTo(List.of("subnet-a", "subnet-b")))
             .body("Server.IdentityProviderDetails.Url", equalTo("https://idp.example.com"))
             .body("Server.IdentityProviderDetails.InvocationRole",
                     equalTo("arn:aws:iam::000000000000:role/transfer-idp"));
@@ -134,6 +141,10 @@ class TransferServerLifecycleIntegrationTest {
             .body("""
                 {
                     "ServerId": "%s",
+                    "EndpointDetails": {
+                        "VpcId": "vpc-456",
+                        "SecurityGroupIds": ["sg-a", "sg-b"]
+                    },
                     "IdentityProviderDetails": {"Url": "https://other.example.com"}
                 }
                 """.formatted(serverId))
@@ -151,7 +162,8 @@ class TransferServerLifecycleIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("Server.EndpointDetails.VpcId", equalTo("vpc-123"))
+            .body("Server.EndpointDetails.VpcId", equalTo("vpc-456"))
+            .body("Server.EndpointDetails.SecurityGroupIds", nullValue())
             .body("Server.IdentityProviderDetails.Url", equalTo("https://other.example.com"));
 
         given()
@@ -173,7 +185,8 @@ class TransferServerLifecycleIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("Server.EndpointDetails.VpcId", equalTo("vpc-123"))
+            .body("Server.EndpointDetails.VpcId", equalTo("vpc-456"))
+            .body("Server.EndpointDetails.SecurityGroupIds", nullValue())
             .body("Server.IdentityProviderDetails", anEmptyMap());
     }
 

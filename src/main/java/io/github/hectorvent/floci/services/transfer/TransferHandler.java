@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.transfer;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -292,7 +293,9 @@ public class TransferHandler {
             s.getProtocols().forEach(protocols::add);
         }
         if (s.getEndpointDetails() != null) {
-            node.set("EndpointDetails", objectMapper.valueToTree(s.getEndpointDetails()));
+            ObjectNode endpointDetails = objectMapper.valueToTree(s.getEndpointDetails());
+            endpointDetails.remove("SecurityGroupIds");
+            node.set("EndpointDetails", endpointDetails);
         }
         if (s.getIdentityProviderDetails() != null) {
             node.set("IdentityProviderDetails", objectMapper.valueToTree(s.getIdentityProviderDetails()));
@@ -405,9 +408,10 @@ public class TransferHandler {
         if (node == null || node.isMissingNode() || node.isNull()) {
             return null;
         }
-        Map<String, Object> map = new HashMap<>();
-        node.fields().forEachRemaining(e -> map.put(e.getKey(), e.getValue().asText()));
-        return map;
+        if (!node.isObject()) {
+            return new HashMap<>();
+        }
+        return objectMapper.convertValue(node, new TypeReference<Map<String, Object>>() {});
     }
 
     private Map<String, String> parseTags(JsonNode node) {
