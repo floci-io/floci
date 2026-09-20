@@ -15,6 +15,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 
+import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -25,6 +26,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.PriorityQueue;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -373,23 +375,25 @@ class KinesisServiceTest {
         reader.start();
 
         // Split an open shard repeatedly; each split is one control-plane resharding with its own
-        // publish window. Always split an open shard so open shards remain available.
+        // publish window. Always split the widest open shard so ranges never narrow to the point
+        // splitting is impossible; this keeps every one of the 3000 iterations a real split with
+        // its own publish window. The open shards are kept in a queue ordered by width, so picking
+        // the widest is not a scan of the whole (growing) shard list on every iteration.
+        PriorityQueue<OpenShard> openShards = new PriorityQueue<>(
+                Comparator.comparing(OpenShard::width).reversed());
+        for (KinesisShard shard : stream.getShards()) {
+            openShards.add(OpenShard.of(shard));
+        }
         for (int i = 0; i < 3000 && violation.get() == null; i++) {
-            // Split the widest open shard so ranges never narrow to the point splitting is impossible;
-            // this keeps every one of the 3000 iterations a real split with its own publish window.
-            KinesisShard open = stream.getShards().stream()
-                    .filter(s -> !s.isClosed())
-                    .max(java.util.Comparator.comparing(s ->
-                            new java.math.BigInteger(s.getHashKeyRange().endingHashKey())
-                                    .subtract(new java.math.BigInteger(s.getHashKeyRange().startingHashKey()))))
-                    .orElseThrow();
-            java.math.BigInteger start = new java.math.BigInteger(open.getHashKeyRange().startingHashKey());
-            java.math.BigInteger end = new java.math.BigInteger(open.getHashKeyRange().endingHashKey());
-            java.math.BigInteger mid = start.add(end).divide(java.math.BigInteger.TWO);
-            if (mid.compareTo(start) <= 0 || mid.compareTo(end) >= 0) {
+            OpenShard open = openShards.poll();
+            BigInteger mid = open.start().add(open.end()).divide(BigInteger.TWO);
+            if (mid.compareTo(open.start()) <= 0 || mid.compareTo(open.end()) >= 0) {
                 break; // range too narrow to split further
             }
-            kinesisService.splitShard("my-stream", open.getShardId(), mid.toString(), REGION);
+            kinesisService.splitShard("my-stream", open.shardId(), mid.toString(), REGION);
+            List<KinesisShard> shards = stream.getShards();
+            openShards.add(OpenShard.of(shards.get(shards.size() - 2)));
+            openShards.add(OpenShard.of(shards.get(shards.size() - 1)));
         }
         done.set(true);
         reader.join(TimeUnit.SECONDS.toMillis(10));
@@ -1068,6 +1072,18 @@ class KinesisServiceTest {
     }
 
     private static final String META_STREAM = "meta";
+
+    private record OpenShard(String shardId, BigInteger start, BigInteger end) {
+        static OpenShard of(KinesisShard shard) {
+            return new OpenShard(shard.getShardId(),
+                    new BigInteger(shard.getHashKeyRange().startingHashKey()),
+                    new BigInteger(shard.getHashKeyRange().endingHashKey()));
+        }
+
+        BigInteger width() {
+            return end.subtract(start);
+        }
+    }
 
     /**
      * A store that parks the first {@code get} after {@link #arm()} until released.
