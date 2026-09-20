@@ -32,11 +32,11 @@ import java.util.UUID;
 @ApplicationScoped
 public class EksPodIdentityAssociationService {
 
-    private static final SecureRandom RANDOM = new SecureRandom();
     private static final String ID_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz";
 
     private final StorageBackend<String, StoredAssociation> associations;
     private final IamService iam;
+    private final SecureRandom random = new SecureRandom();
 
     @Inject
     public EksPodIdentityAssociationService(StorageFactory factory, IamService iam) {
@@ -324,10 +324,10 @@ public class EksPodIdentityAssociationService {
         }
     }
 
-    private static String generateAssociationId() {
+    private String generateAssociationId() {
         StringBuilder sb = new StringBuilder("a-");
         for (int i = 0; i < 17; i++) {
-            sb.append(ID_ALPHABET.charAt(RANDOM.nextInt(ID_ALPHABET.length())));
+            sb.append(ID_ALPHABET.charAt(random.nextInt(ID_ALPHABET.length())));
         }
         return sb.toString();
     }
