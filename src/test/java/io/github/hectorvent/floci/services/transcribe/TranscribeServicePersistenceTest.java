@@ -47,7 +47,7 @@ class TranscribeServicePersistenceTest {
         TranscribeService reloaded = serviceWithStorage(storage);
         assertEquals("en-US", reloaded.getVocabulary("keep").languageCode());
         assertThrows(AwsException.class, () -> reloaded.getVocabulary("drop"));
-        assertTrue(reloaded.listVocabularies(null, null, null).vocabularies().stream()
+        assertTrue(reloaded.listVocabularies(null, null, null, null).vocabularies().stream()
                 .noneMatch(v -> v.vocabularyName().equals("drop")));
     }
 

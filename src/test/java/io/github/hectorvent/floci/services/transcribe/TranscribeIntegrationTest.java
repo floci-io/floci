@@ -237,6 +237,17 @@ class TranscribeIntegrationTest {
 
         given()
             .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "Transcribe.DeleteTranscriptionJob")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"TranscriptionJobName":"paged-job-a"}""")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType(CONTENT_TYPE)
             .header("X-Amz-Target", "Transcribe.ListTranscriptionJobs")
             .header("Authorization", AUTH_HEADER)
             .body("""
@@ -456,6 +467,17 @@ class TranscribeIntegrationTest {
             .body("Vocabularies", hasSize(1))
             .body("Vocabularies[0].VocabularyName", equalTo("paged-vocab-a"))
             .body("NextToken", equalTo("paged-vocab-a"));
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "Transcribe.DeleteVocabulary")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"VocabularyName":"paged-vocab-a"}""")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
 
         given()
             .contentType(CONTENT_TYPE)
