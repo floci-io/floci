@@ -2864,6 +2864,13 @@ public interface EmulatorConfig {
         boolean imds();
 
         /**
+         * When true, routes link-local IMDS traffic from ordinary pod network namespaces to the node's
+         * link-local listener. Requires {@code imds()} to be enabled.
+         */
+        @WithDefault("false")
+        boolean imdsPodNetwork();
+
+        /**
          * When true, configures k3s with the cluster's per-cluster OIDC signing keypair and
          * advertises Floci's OIDC issuer URL, enabling in-cluster IAM Roles for Service Accounts (IRSA).
          */

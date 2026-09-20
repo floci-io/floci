@@ -993,9 +993,33 @@ public class EksClusterManager {
                 return;
             }
 
+            if (config.services().eks().imdsPodNetwork()) {
+                configurePodNetworkRouting(cluster, containerId);
+            }
+
             LOG.infov("Configured link-local IMDS endpoint for EKS cluster {0}", cluster.getName());
         } catch (Exception e) {
             LOG.warnv("Could not configure link-local IMDS endpoint for EKS cluster {0}: {1}",
+                    cluster.getName(), e.getMessage());
+        }
+    }
+
+    void configurePodNetworkRouting(Cluster cluster, String containerId) {
+        configurePodNetworkRouting(cluster, containerId, EksPodNetworkRouting.DEFAULT_ENDPOINTS);
+    }
+
+    void configurePodNetworkRouting(Cluster cluster, String containerId, List<LinkLocalEndpoint> endpoints) {
+        try {
+            String[] routingCmd = EksPodNetworkRouting.buildRoutingCommand(
+                    EksPodNetworkRouting.DEFAULT_POD_CIDR,
+                    endpoints);
+            ContainerExecResult routing = execInContainerForResult(containerId, routingCmd, 15);
+            if (routing.exitCode() != 0) {
+                LOG.warnv("Could not configure link-local pod network routing for EKS cluster {0}: {1}",
+                        cluster.getName(), routing.summary());
+            }
+        } catch (Exception e) {
+            LOG.warnv("Could not configure link-local pod network routing for EKS cluster {0}: {1}",
                     cluster.getName(), e.getMessage());
         }
     }

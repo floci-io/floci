@@ -775,6 +775,7 @@ class EksClusterManagerTest {
             manager.configureLinkLocalMetadataEndpoint(cluster, "container-42");
 
             verify(metadataServer).reconcileContainerAddresses(any(), any());
+            // imds=true, imdsPodNetwork=false (default): 2 commands (install probe, start proxy)
             assertEquals(2, capturedCmds.size());
             // First command: install probe
             assertTrue(capturedCmds.get(0)[2].contains("command -v socat"));
@@ -786,8 +787,33 @@ class EksClusterManagerTest {
         }
 
         @Test
+        void configuresPodNetworkRoutingWhenImdsPodNetworkEnabled() {
+            when(eks.imdsPodNetwork()).thenReturn(true);
+
+            Cluster cluster = new Cluster();
+            cluster.setName("test-cluster");
+
+            manager.configureLinkLocalMetadataEndpoint(cluster, "container-42");
+
+            verify(metadataServer).reconcileContainerAddresses(any(), any());
+            assertEquals(3, capturedCmds.size());
+            // First command: install probe
+            assertTrue(capturedCmds.get(0)[2].contains("command -v socat"));
+            // Second command: start command with 169.254.169.254
+            assertTrue(capturedCmds.get(1)[2].contains("169.254.169.254"));
+            assertTrue(capturedCmds.get(1)[2].contains("TCP:floci-host:9169"));
+            // Third command: pod network routing with iptables
+            assertTrue(capturedCmds.get(2)[2].contains("FLOCI-LINK-LOCAL"));
+            assertTrue(capturedCmds.get(2)[2].contains("10.42.0.0/16"));
+            assertTrue(capturedCmds.get(2)[2].contains("169.254.169.254"));
+
+            assertNotNull(manager.getRegisteredClusterNodeInstance(cluster));
+        }
+
+        @Test
         void skipsWhenImdsIsDisabled() {
             when(eks.imds()).thenReturn(false);
+            when(eks.imdsPodNetwork()).thenReturn(true);
 
             Cluster cluster = new Cluster();
             cluster.setName("test-cluster");
@@ -808,6 +834,27 @@ class EksClusterManagerTest {
 
             // Failure to wire proxy should log warning and continue without throwing
             manager.configureLinkLocalMetadataEndpoint(cluster, "container-42");
+        }
+
+        @Test
+        void podNetworkRoutingFailureLogsWarningAndDoesNotAbort() {
+            when(eks.imdsPodNetwork()).thenReturn(true);
+
+            InspectExecCmd inspectExec = Mockito.mock(InspectExecCmd.class);
+            InspectExecResponse inspectResponse = Mockito.mock(InspectExecResponse.class);
+            // Simulate install and start succeeding (0), but routing failing (1)
+            when(inspectResponse.getExitCodeLong()).thenReturn(0L, 0L, 1L);
+            when(inspectExec.exec()).thenReturn(inspectResponse);
+            when(dockerClient.inspectExecCmd(anyString())).thenReturn(inspectExec);
+
+            Cluster cluster = new Cluster();
+            cluster.setName("test-cluster");
+
+            // Pod network routing failure logs warning and continues without throwing
+            manager.configureLinkLocalMetadataEndpoint(cluster, "container-42");
+
+            assertEquals(3, capturedCmds.size());
+            assertNotNull(manager.getRegisteredClusterNodeInstance(cluster));
         }
 
         @Test

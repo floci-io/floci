@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
+import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
 import io.quarkus.test.junit.QuarkusTest;
@@ -38,7 +39,9 @@ class EksImdsDockerIntegrationTest {
     public static final class Profile implements QuarkusTestProfile {
         @Override
         public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.eks.imds", "true");
+            return Map.of(
+                    "floci.services.eks.imds", "true",
+                    "floci.services.eks.imds-pod-network", "true");
         }
     }
 
@@ -63,6 +66,9 @@ class EksImdsDockerIntegrationTest {
     @Inject
     EksClusterManager eksClusterManager;
 
+    @Inject
+    DockerHostResolver dockerHostResolver;
+
     private String containerId;
     private Cluster cluster;
 
@@ -73,6 +79,8 @@ class EksImdsDockerIntegrationTest {
             LOG.warn("Docker daemon is not available; skipping EksImdsDockerIntegrationTest");
         }
         Assumptions.assumeTrue(dockerAvailable, "Docker daemon must be available for EKS IMDS integration test");
+        Assumptions.assumeTrue(dockerHostResolver.isLinuxHost(),
+                "Link-local IMDS container test requires a Linux host; on macOS/Windows, container-to-host proxy traffic arrives from 127.0.0.1 which collides across clusters");
         metadataServer.start().join();
     }
 
@@ -106,9 +114,9 @@ class EksImdsDockerIntegrationTest {
         containerId = lifecycleManager.createAndStart(spec).containerId();
         assertNotNull(containerId, "Container ID must not be null");
 
-        // Ensure curl dependency is installed in the test fixture if absent
+        // Ensure curl, iptables, and iproute2 dependencies are installed in the test fixture if absent
         execInContainer(containerId, new String[]{"sh", "-c",
-                "command -v curl >/dev/null 2>&1 || apk add --no-cache curl"});
+                "command -v curl >/dev/null 2>&1 && command -v iptables >/dev/null 2>&1 && command -v ip >/dev/null 2>&1 || apk add --no-cache curl iptables iproute2"});
 
         eksClusterManager.configureLinkLocalMetadataEndpoint(cluster, containerId);
 
@@ -124,26 +132,78 @@ class EksImdsDockerIntegrationTest {
         assertNotNull(instanceId, "instance-id response should not be null");
         assertTrue(instanceId.trim().startsWith("i-"), "Instance ID should start with 'i-': " + instanceId);
 
-        // IMDSv1 fallback test using wget (tool guaranteed by alpine:3.21 image)
+        // IMDSv1 fallback test using wget (hostNetwork / node namespace regression test)
         String imdsv1Cmd = "wget -q -O - http://169.254.169.254/latest/meta-data/instance-id";
         String v1InstanceId = execInContainer(containerId, new String[]{"sh", "-c", imdsv1Cmd});
         assertEquals(instanceId.trim(), v1InstanceId.trim(), "IMDSv1 and IMDSv2 instance IDs should match");
 
-        // Pod-isolation test: ordinary pods in their own network namespace cannot reach link-local IMDS
-        // Tested using wget (tool guaranteed by alpine:3.21 image)
-        String podIsolationCmd = """
-                if command -v unshare >/dev/null 2>&1; then
-                  unshare -n wget -q -O - -T 2 http://169.254.169.254/latest/meta-data/instance-id
-                else
-                  ip netns add pod-test 2>/dev/null || true
-                  ip netns exec pod-test wget -q -O - -T 2 http://169.254.169.254/latest/meta-data/instance-id
-                  ret=$?
-                  ip netns del pod-test 2>/dev/null || true
-                  exit $ret
-                fi
+        // Pod network namespace test: ordinary pods in their own network namespace reach link-local IMDS
+        // via the rules programmed for the pod CIDR (10.42.0.0/16).
+        String podNetworkSetupCmd = """
+                set -e
+                ip link add cni0 type bridge 2>/dev/null || true
+                ip addr add 10.42.0.1/24 dev cni0 2>/dev/null || true
+                ip link set cni0 up
+
+                ip netns add pod-test 2>/dev/null || true
+                ip link add veth-host type veth peer name eth0 netns pod-test 2>/dev/null || true
+                ip link set veth-host master cni0 up
+                ip netns exec pod-test ip link set lo up
+                ip netns exec pod-test ip addr add 10.42.0.15/24 dev eth0 2>/dev/null || true
+                ip netns exec pod-test ip link set eth0 up
+                ip netns exec pod-test ip route replace default via 10.42.0.1
+
+                # Stand-in CNI portmap rule: k3s/flannel installs CNI-HOSTPORT-DNAT matching dst-type LOCAL.
+                # Simulate a hostPort/ingress binding or redirect on port 80 that intercepts LOCAL traffic.
+                iptables -t nat -N CNI-HOSTPORT-DNAT 2>/dev/null || true
+                iptables -t nat -F CNI-HOSTPORT-DNAT 2>/dev/null || true
+                iptables -t nat -A CNI-HOSTPORT-DNAT -p tcp --dport 80 -j REDIRECT --to-ports 9999
+                iptables -t nat -D PREROUTING -m addrtype --dst-type LOCAL -j CNI-HOSTPORT-DNAT 2>/dev/null || true
+                iptables -t nat -A PREROUTING -m addrtype --dst-type LOCAL -j CNI-HOSTPORT-DNAT
                 """;
-        ExecResult podResult = execInContainerWithExitCode(containerId, new String[]{"sh", "-c", podIsolationCmd});
-        assertNotEquals(0L, podResult.exitCode(), "IMDS should not be reachable from an isolated pod network namespace");
+        execInContainer(containerId, new String[]{"sh", "-c", podNetworkSetupCmd});
+
+        try {
+            // Ordinary pod querying instance-id with FLOCI-LINK-LOCAL preempting CNI-HOSTPORT-DNAT
+            String podInstanceIdCmd = "ip netns exec pod-test wget -q -O - -T 3 http://169.254.169.254/latest/meta-data/instance-id";
+            String podInstanceId = execInContainer(containerId, new String[]{"sh", "-c", podInstanceIdCmd});
+            assertNotNull(podInstanceId, "Pod instance ID response should not be null");
+            assertEquals(instanceId.trim(), podInstanceId.trim(),
+                    "Pod should receive the same instance ID as the node namespace");
+
+            // Ordinary pod querying IAM info
+            String podIamInfoCmd = "ip netns exec pod-test wget -q -O - -T 3 http://169.254.169.254/latest/meta-data/iam/info";
+            String podIamInfo = execInContainer(containerId, new String[]{"sh", "-c", podIamInfoCmd});
+            assertNotNull(podIamInfo, "Pod IAM info response should not be null");
+            assertTrue(podIamInfo.contains(clusterName + "-node-profile"),
+                    "Pod IAM info should contain instance profile: " + podIamInfo);
+
+            // Prove the FLOCI-LINK-LOCAL rule is strictly required:
+            // Temporarily detach FLOCI-LINK-LOCAL from PREROUTING. The pod request now hits CNI-HOSTPORT-DNAT
+            // and fails because port 80 is redirected to 9999.
+            execInContainer(containerId, new String[]{"sh", "-c",
+                    "iptables -t nat -D PREROUTING -j FLOCI-LINK-LOCAL"});
+            ExecResult intercepted = execInContainerWithExitCode(containerId, new String[]{"sh", "-c",
+                    "ip netns exec pod-test wget -q -O - -T 2 http://169.254.169.254/latest/meta-data/instance-id"});
+            assertNotEquals(0, intercepted.exitCode(),
+                    "Without FLOCI-LINK-LOCAL chain, pod request should be intercepted by CNI-HOSTPORT-DNAT and fail");
+
+            // Re-insert FLOCI-LINK-LOCAL at rule 1: pod request succeeds again
+            execInContainer(containerId, new String[]{"sh", "-c",
+                    "iptables -t nat -I PREROUTING 1 -j FLOCI-LINK-LOCAL"});
+            String restoredInstanceId = execInContainer(containerId, new String[]{"sh", "-c", podInstanceIdCmd});
+            assertEquals(instanceId.trim(), restoredInstanceId.trim(),
+                    "Restoring FLOCI-LINK-LOCAL rule must restore pod reachability");
+        } finally {
+            execInContainerWithExitCode(containerId, new String[]{"sh", "-c", """
+                    ip netns del pod-test 2>/dev/null || true
+                    ip link del cni0 2>/dev/null || true
+                    iptables -t nat -D PREROUTING -j FLOCI-LINK-LOCAL 2>/dev/null || true
+                    iptables -t nat -D PREROUTING -m addrtype --dst-type LOCAL -j CNI-HOSTPORT-DNAT 2>/dev/null || true
+                    iptables -t nat -F CNI-HOSTPORT-DNAT 2>/dev/null || true
+                    iptables -t nat -X CNI-HOSTPORT-DNAT 2>/dev/null || true
+                    """});
+        }
     }
 
     private boolean isDockerAvailable() {
