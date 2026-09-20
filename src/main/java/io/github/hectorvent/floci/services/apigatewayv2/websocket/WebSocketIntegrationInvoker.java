@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.apigatewayv2.websocket;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.SsrfProtection;
 import io.github.hectorvent.floci.services.apigateway.AwsServiceRouter;
 import io.github.hectorvent.floci.services.apigateway.VtlTemplateEngine;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Integration;
@@ -14,6 +15,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.net.InetAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -241,8 +243,10 @@ public class WebSocketIntegrationInvoker {
         LOG.debugv("Forwarding event to HTTP_PROXY endpoint: {0}", uri);
 
         try {
+            URI target = URI.create(uri);
+            SsrfProtection.rejectMetadataAddresses(InetAddress.getAllByName(target.getHost()), target.getHost());
             HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(uri))
+                    .uri(target)
                     .header("Content-Type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofString(eventJson, StandardCharsets.UTF_8))
                     .build();
@@ -289,8 +293,10 @@ public class WebSocketIntegrationInvoker {
         LOG.debugv("Forwarding transformed event to HTTP endpoint: {0}", uri);
 
         try {
+            URI target = URI.create(uri);
+            SsrfProtection.rejectMetadataAddresses(InetAddress.getAllByName(target.getHost()), target.getHost());
             HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(uri))
+                    .uri(target)
                     .header("Content-Type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofString(transformedPayload, StandardCharsets.UTF_8))
                     .build();

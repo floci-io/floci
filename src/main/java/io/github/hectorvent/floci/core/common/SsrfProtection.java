@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.core.common;
 
+import java.io.IOException;
 import java.net.InetAddress;
 import java.util.Arrays;
 
@@ -33,6 +34,21 @@ public final class SsrfProtection {
             return isAwsIpv6Metadata(bytes);
         }
         return false;
+    }
+
+    /**
+     * Returns {@code addresses} unchanged, or throws when any of them is a metadata address per
+     * {@link #isMetadataAddress}. Callers that connect to the returned addresses, instead of
+     * resolving {@code host} again, are not exposed to a hostname that answers differently the
+     * second time.
+     */
+    public static InetAddress[] rejectMetadataAddresses(InetAddress[] addresses, String host) throws IOException {
+        for (InetAddress address : addresses) {
+            if (isMetadataAddress(address)) {
+                throw new IOException("integration URI resolves to a link-local or metadata address: " + host);
+            }
+        }
+        return addresses;
     }
 
     private static boolean isAwsIpv6Metadata(byte[] bytes) {
