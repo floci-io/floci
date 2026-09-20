@@ -2,7 +2,7 @@
 
 **Protocol:** JSON 1.1 (`X-Amz-Target: AmazonEC2ContainerRegistry_V20150921.*`) for the control plane.
 **Data plane:** OCI Distribution Spec v2 (`/v2/...`), proxied by Floci to a real `registry:2` container.
-**Endpoint:** `POST http://localhost:4566/` for the control plane; `<account>.dkr.ecr.<region>.localhost:4566/<repo>` for `docker push` / `docker pull`.
+**Endpoint:** `POST http://localhost:4566/` (or `https://...`) for the control plane; `<account>.dkr.ecr.<region>.localhost:4566/<repo>` (HTTP) or `<account>.dkr.ecr.<region>.localhost.floci.io:4566/<repo>` (TLS) for `docker push` / `docker pull`.
 
 ## Supported Actions
 
@@ -30,6 +30,7 @@
 ## Emulation Behavior
 
 - **Real OCI registry backing.** A single shared `registry:2` container per Floci instance stores all repositories. Floci proxies Docker Distribution traffic to it and starts it lazily on the first ECR API call. The container is reused across Floci restarts (`keep-running-on-shutdown: true` by default), so pushed image bytes survive restarts.
+- **TLS registry data plane.** Real AWS ECR is HTTPS-only. When TLS is enabled (`FLOCI_TLS_ENABLED=true`), Floci serves the registry data plane over TLS at `<account>.dkr.ecr.<region>.localhost.floci.io:<port>/<repo>`. The server certificate automatically includes regional wildcards `*.dkr.ecr.<region>.localhost.floci.io` for every advertised AWS region as Subject Alternative Names (SANs). Container runtimes and tools (Docker, containerd, nerdctl, podman) connect over HTTPS after trusting Floci's root CA certificate (`GET /_floci/ca.pem` or system trust store). The plain HTTP loopback path (`<account>.dkr.ecr.<region>.localhost:<port>`) remains fully supported without changes.
 - **Storage cleanup.** `DeleteRepository --force` removes repository manifests, including untagged manifests. When it deletes the final repository, or when a non-retained runtime stops, Floci removes the named registry volume only in `memory` mode or when `prune-volumes-on-delete: true`.
 - **Loopback URI scheme.** Repository URIs follow `<account>.dkr.ecr.<region>.localhost:<flociPort>/<repoName>`. RFC 6761 reserves `*.localhost` to resolve to the loopback address, and the docker daemon auto-trusts loopback as an insecure registry, so `docker push` and `docker pull` work without daemon configuration. A `path` URI style fallback (`localhost:<flociPort>/<account>/<region>/<repo>`) is available via `floci.services.ecr.uri-style: path` for environments where `*.localhost` resolution misbehaves.
 - **Image tag mutability.** `IMMUTABLE` repositories allow the first manifest write for a tag and reject every replacement, including a replacement with the same manifest. The proxy forwards blob uploads and digest-addressed manifests unchanged.
@@ -127,6 +128,31 @@ aws ecr batch-delete-image --repository-name floci-it/app \
     --image-ids imageTag=v1 --endpoint-url $AWS_ENDPOINT
 aws ecr delete-repository  --repository-name floci-it/app --force \
     --endpoint-url $AWS_ENDPOINT
+```
+
+### Push and Pull over TLS
+
+When TLS is enabled (`FLOCI_TLS_ENABLED=true`), trust Floci's root CA and authenticate against the TLS registry data plane:
+
+```bash
+# 1. Download and trust Floci's root CA
+curl -s http://localhost:4566/_floci/ca.pem -o floci-root-ca.pem
+export AWS_CA_BUNDLE=$PWD/floci-root-ca.pem
+export AWS_ENDPOINT=https://localhost:4566
+
+# 2. Authenticate Docker against the TLS endpoint
+aws ecr get-login-password --endpoint-url $AWS_ENDPOINT \
+  | docker login --username AWS --password-stdin \
+        000000000000.dkr.ecr.us-east-1.localhost.floci.io:4566
+
+# 3. Tag and push an image over TLS
+docker pull alpine:3.19
+docker tag  alpine:3.19 \
+            000000000000.dkr.ecr.us-east-1.localhost.floci.io:4566/floci-it/app:v1
+docker push 000000000000.dkr.ecr.us-east-1.localhost.floci.io:4566/floci-it/app:v1
+
+# 4. Pull over TLS
+docker pull 000000000000.dkr.ecr.us-east-1.localhost.floci.io:4566/floci-it/app:v1
 ```
 
 !!! note "Pulling from other containers (EKS, same-network consumers)"

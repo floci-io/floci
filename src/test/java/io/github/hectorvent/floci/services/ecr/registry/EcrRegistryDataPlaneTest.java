@@ -58,6 +58,48 @@ class EcrRegistryDataPlaneTest {
     }
 
     @Test
+    void hostnameStyleWithTlsDomainMatchesAndCapturesAccountAndRegion() {
+        EcrRegistryDataPlane.RegistryRequest request = EcrRegistryDataPlane.requestFor(
+                "123456789012.dkr.ecr.eu-west-1.localhost.floci.io:4566",
+                "/v2/team/app/manifests/v2", null, "hostname").orElseThrow();
+
+        assertEquals("123456789012", request.accountId());
+        assertEquals("eu-west-1", request.region());
+        assertEquals("team/app", request.repositoryName());
+        assertEquals("123456789012/eu-west-1/team/app", request.storageRepositoryName());
+        assertEquals("v2", request.tag());
+        assertEquals("/v2/123456789012/eu-west-1/team/app/manifests/v2", request.backendUri());
+
+        EcrRegistryDataPlane.RegistryRequest requestNoPort = EcrRegistryDataPlane.requestFor(
+                "123456789012.dkr.ecr.eu-west-1.localhost.floci.io",
+                "/v2/team/app/tags/list", null, "hostname").orElseThrow();
+
+        assertEquals("123456789012", requestNoPort.accountId());
+        assertEquals("eu-west-1", requestNoPort.region());
+        assertEquals("/v2/123456789012/eu-west-1/team/app/tags/list", requestNoPort.backendUri());
+    }
+
+    @Test
+    void malformedAccountOrNonEcrHostIsRejected() {
+        // Less than 12 digits
+        assertFalse(EcrRegistryDataPlane.requestFor(
+                "12345.dkr.ecr.us-east-1.localhost.floci.io:4566",
+                "/v2/repo/manifests/latest", null, "hostname").isPresent());
+        // Non-numeric account
+        assertFalse(EcrRegistryDataPlane.requestFor(
+                "abcdefghijkl.dkr.ecr.us-east-1.localhost.floci.io:4566",
+                "/v2/repo/manifests/latest", null, "hostname").isPresent());
+        // Non-ECR subdomain
+        assertFalse(EcrRegistryDataPlane.requestFor(
+                "s3.localhost.floci.io:4566",
+                "/v2/repo/manifests/latest", null, "hostname").isPresent());
+        // Default host
+        assertFalse(EcrRegistryDataPlane.requestFor(
+                "localhost.floci.io:4566",
+                "/v2/repo/manifests/latest", null, "hostname").isPresent());
+    }
+
+    @Test
     void digestManifestWriteDoesNotAcquireAnImmutableTagLock() {
         var request = EcrRegistryDataPlane.requestFor(
                 "000000000000.dkr.ecr.us-east-1.localhost:4566",
@@ -190,10 +232,72 @@ class EcrRegistryDataPlaneTest {
         }
     }
 
+    @Test
+    void immutableTagRejectsReplacementOverTlsDataPlane() throws Exception {
+        AtomicBoolean tagExists = new AtomicBoolean();
+        HttpServer registry = vertx.createHttpServer()
+                .requestHandler(request -> {
+                    if (request.method() == HttpMethod.HEAD) {
+                        request.response().setStatusCode(tagExists.get() ? 200 : 404)
+                                .putHeader("Docker-Content-Digest", "sha256:existing")
+                                .end();
+                    } else if (request.method() == HttpMethod.PUT) {
+                        tagExists.set(true);
+                        request.response().setStatusCode(201).end();
+                    } else {
+                        request.response().setStatusCode(200).end();
+                    }
+                })
+                .listen(0, "127.0.0.1")
+                .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+
+        HttpServer dataPlane = null;
+        try {
+            EcrRegistryManager registryManager = Mockito.mock(EcrRegistryManager.class);
+            EcrService ecrService = Mockito.mock(EcrService.class);
+            EmulatorConfig config = Mockito.mock(EmulatorConfig.class, Mockito.RETURNS_DEEP_STUBS);
+            when(config.services().ecr().enabled()).thenReturn(true);
+            when(config.services().ecr().uriStyle()).thenReturn("hostname");
+            when(registryManager.httpClient())
+                    .thenReturn(new RegistryHttpClient("http://127.0.0.1:" + registry.actualPort()));
+            when(ecrService.isImageTagImmutable("platform/api", "000000000000", "us-east-1"))
+                    .thenReturn(true);
+            when(ecrService.registryRepositoryName("platform/api", "000000000000", "us-east-1"))
+                    .thenReturn("legacy/platform-api");
+
+            Router router = Router.router(vertx);
+            new EcrRegistryDataPlane(registryManager, ecrService, config, vertx).register(router);
+            dataPlane = vertx.createHttpServer().requestHandler(router)
+                    .listen(0, "127.0.0.1")
+                    .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+
+            String tlsHost = "000000000000.dkr.ecr.us-east-1.localhost.floci.io:4566";
+            assertEquals(201, putManifest(dataPlane.actualPort(), tlsHost).statusCode());
+
+            ManifestResponse rejected = putManifest(dataPlane.actualPort(), tlsHost);
+            assertEquals(400, rejected.statusCode());
+            JsonObject json = new JsonObject(rejected.body());
+            JsonArray errors = json.getJsonArray("errors");
+            assertNotNull(errors);
+            assertEquals(1, errors.size());
+            JsonObject error = errors.getJsonObject(0);
+            assertEquals("TAG_INVALID", error.getString("code"));
+        } finally {
+            if (dataPlane != null) {
+                dataPlane.close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            }
+            registry.close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+        }
+    }
+
     private record ManifestResponse(int statusCode, String body) {
     }
 
     private ManifestResponse putManifest(int port) throws Exception {
+        return putManifest(port, "000000000000.dkr.ecr.us-east-1.localhost:4566");
+    }
+
+    private ManifestResponse putManifest(int port, String host) throws Exception {
         HttpClient client = vertx.createHttpClient();
         return client.request(new RequestOptions()
                         .setHost("127.0.0.1")
@@ -201,7 +305,7 @@ class EcrRegistryDataPlaneTest {
                         .setMethod(HttpMethod.PUT)
                         .setURI("/v2/platform/api/manifests/v1"))
                 .compose(request -> {
-                    request.putHeader("Host", "000000000000.dkr.ecr.us-east-1.localhost:4566");
+                    request.putHeader("Host", host);
                     request.setChunked(true);
                     return request.send(Buffer.buffer("{}"));
                 })

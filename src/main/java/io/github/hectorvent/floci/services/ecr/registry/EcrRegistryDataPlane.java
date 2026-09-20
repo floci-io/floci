@@ -33,7 +33,7 @@ import java.util.regex.Pattern;
 public class EcrRegistryDataPlane {
 
     private static final Pattern ECR_HOST = Pattern.compile(
-            "^([0-9]{12})\\.dkr\\.ecr\\.([a-z0-9-]+)\\.localhost(?::[0-9]+)?$");
+            "^([0-9]{12})\\.dkr\\.ecr\\.([a-z0-9-]+)\\.localhost(?:\\.floci\\.io)?(?::[0-9]+)?$");
     private static final String MANIFESTS_PATH = "/manifests/";
     private static final Set<String> HOP_BY_HOP_HEADERS = Set.of(
             "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",

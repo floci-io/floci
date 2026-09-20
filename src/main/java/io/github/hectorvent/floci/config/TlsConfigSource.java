@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import org.eclipse.microprofile.config.spi.ConfigSource;
@@ -64,13 +65,21 @@ public class TlsConfigSource implements ConfigSource {
     // host.docker.internal: how Lambda containers reach Floci when it runs on the host (not in a container).
     // A wildcard SAN covers one label, so every two-label service form needs its own entry.
     // Package-private so the tests assert against this list instead of copying it.
-    static final List<String> DEFAULT_SAN_HOSTNAMES = List.of(
-            "localhost", "127.0.0.1", "0.0.0.0", "*.localhost",
-            "localhost.floci.io", "*.localhost.floci.io",
-            "*.execute-api.localhost.floci.io",
-            "*.execute-api.localhost.localstack.cloud",
-            "*.cloudfront.localhost.floci.io", "*.cloudfront.localhost",
-            "host.docker.internal");
+    static final List<String> DEFAULT_SAN_HOSTNAMES = defaultSanHostnames();
+
+    private static List<String> defaultSanHostnames() {
+        List<String> sans = new ArrayList<>(List.of(
+                "localhost", "127.0.0.1", "0.0.0.0", "*.localhost",
+                "localhost.floci.io", "*.localhost.floci.io",
+                "*.execute-api.localhost.floci.io",
+                "*.execute-api.localhost.localstack.cloud",
+                "*.cloudfront.localhost.floci.io", "*.cloudfront.localhost",
+                "host.docker.internal"));
+        for (String region : AwsRegions.ALL) {
+            sans.add("*.dkr.ecr." + region + ".localhost.floci.io");
+        }
+        return List.copyOf(sans);
+    }
 
     private static volatile Path resolvedTlsDir;
 

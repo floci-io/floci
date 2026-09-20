@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import org.bouncycastle.asn1.x500.X500Name;
@@ -469,6 +470,27 @@ class TlsCertificateHostnameTest {
         X509Certificate leaf = parseCertificate(tlsDir.resolve("floci-server.crt"));
         assertNotEquals(firstLeaf, Files.readString(tlsDir.resolve("floci-server.crt")));
         leaf.verify(ca.getPublicKey());
+    }
+
+    @Test
+    void defaultSansIncludeEcrRegionalHostnamesForAllAwsRegions() throws Exception {
+        System.setProperty("floci.tls.enabled", "true");
+        System.setProperty("floci.tls.self-signed", "true");
+        System.setProperty("floci.storage.persistent-path", tempDir.toString());
+
+        new TlsConfigSource();
+
+        Path certFile = tempDir.resolve("tls/floci-server.crt");
+        X509Certificate cert = parseCertificate(certFile);
+        List<String> sans = extractSansFromCertificate(cert);
+
+        for (String region : AwsRegions.ALL) {
+            String expectedWildcard = "*.dkr.ecr." + region + ".localhost.floci.io";
+            assertTrue(TlsConfigSource.DEFAULT_SAN_HOSTNAMES.contains(expectedWildcard),
+                    "DEFAULT_SAN_HOSTNAMES missing ECR wildcard for region " + region);
+            assertTrue(sans.contains(expectedWildcard),
+                    "Certificate SANs missing ECR wildcard for region " + region);
+        }
     }
 
     // ==================== Helper Methods ====================
