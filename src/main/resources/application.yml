@@ -41,12 +41,13 @@ quarkus:
     add-all-charsets: true
     resources:
       # The Pricing service reads its bundled snapshot, EC2 reads its image
-      # catalog (ec2/image-catalog.yaml), AppSync's GraphQL parser reads its
-      # message bundles, and API Gateway's Velocity engine reads its default
-      # properties at runtime via ClassLoader#getResourceAsStream. Quarkus's
-      # static resource analysis cannot detect these dynamically-built paths,
-      # so they are registered explicitly to ensure GraalVM includes every
-      # file in the native image.
+      # catalog (ec2/image-catalog.yaml), SageMaker reads its instance type
+      # catalog (sagemaker/instance-type-catalog.yaml), AppSync's GraphQL
+      # parser reads its message bundles, and API Gateway's Velocity engine
+      # reads its default properties at runtime via
+      # ClassLoader#getResourceAsStream. Quarkus's static resource analysis
+      # cannot detect these dynamically-built paths, so they are registered
+      # explicitly to ensure GraalVM includes every file in the native image.
       # The IAM managed-policy catalog (iam/*) is not listed on purpose.
       # AwsManagedPolicies parses it while the image is built and the parsed
       # catalog lives in the image heap, so the 3.5 MB of source files would
@@ -55,6 +56,7 @@ quarkus:
         - pricing-snapshots/**
         - ui/*.html
         - ec2/*.yaml
+        - sagemaker/*.yaml
         - i18n/*.properties
         - org/apache/velocity/runtime/defaults/*.properties
         # DriverManager finds the JDBC drivers through ServiceLoader, and the MySQL
