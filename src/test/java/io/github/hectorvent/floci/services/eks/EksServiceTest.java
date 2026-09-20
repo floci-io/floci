@@ -738,6 +738,31 @@ class EksServiceTest {
     }
 
     @Test
+    void deleteClusterDeletesAddons() {
+        StorageFactory storageFactory = new StorageFactory(null, null) {
+            @Override
+            public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
+                    TypeReference<Map<String, V>> typeReference) {
+                return AccountAwareStorageBackend.inMemory("000000000000");
+            }
+        };
+
+        EksAddonService mockAddons = mock(EksAddonService.class);
+        EksService service = new EksService(storageFactory, testConfig(),
+                new RegionResolver("us-east-1", "000000000000"), null, null,
+                new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class),
+                mock(EksPodIdentityAssociationService.class), mockAddons);
+
+        CreateClusterRequest req = new CreateClusterRequest();
+        req.setName("addons-cluster-to-delete");
+        req.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        service.createCluster(req);
+
+        service.deleteCluster("addons-cluster-to-delete");
+        verify(mockAddons).deleteClusterAddons(any(Cluster.class));
+    }
+
+    @Test
     void taggingOperations() {
         CreateClusterRequest req = new CreateClusterRequest();
         req.setName("tagged-cluster");

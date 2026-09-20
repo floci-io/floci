@@ -88,13 +88,15 @@ public class EksService implements TagHandler, ResourceProvider {
     private final EksOidcService oidcService;
     private final EksAccessEntryService accessEntries;
     private final EksPodIdentityAssociationService podIdentityAssociations;
+    private final EksAddonService addons;
     private final ScheduledExecutorService poller = Executors.newSingleThreadScheduledExecutor();
 
     @Inject
     public EksService(StorageFactory storageFactory, EmulatorConfig config,
             RegionResolver regionResolver, EksClusterManager clusterManager, Ec2Service ec2Service,
             EksOidcService oidcService, EksAccessEntryService accessEntries,
-            EksPodIdentityAssociationService podIdentityAssociations) {
+            EksPodIdentityAssociationService podIdentityAssociations,
+            EksAddonService addons) {
         this.storage = storageFactory.create("eks", "eks-clusters.json",
                 new TypeReference<Map<String, Cluster>>() {
                 });
@@ -111,13 +113,22 @@ public class EksService implements TagHandler, ResourceProvider {
         this.oidcService = oidcService;
         this.accessEntries = accessEntries;
         this.podIdentityAssociations = podIdentityAssociations;
+        this.addons = addons;
+    }
+
+    public EksService(StorageFactory storageFactory, EmulatorConfig config,
+            RegionResolver regionResolver, EksClusterManager clusterManager, Ec2Service ec2Service,
+            EksOidcService oidcService, EksAccessEntryService accessEntries,
+            EksPodIdentityAssociationService podIdentityAssociations) {
+        this(storageFactory, config, regionResolver, clusterManager, ec2Service,
+                oidcService, accessEntries, podIdentityAssociations, null);
     }
 
     public EksService(StorageFactory storageFactory, EmulatorConfig config,
             RegionResolver regionResolver, EksClusterManager clusterManager, Ec2Service ec2Service,
             EksOidcService oidcService, EksAccessEntryService accessEntries) {
         this(storageFactory, config, regionResolver, clusterManager, ec2Service,
-                oidcService, accessEntries, null);
+                oidcService, accessEntries, null, null);
     }
 
     @PostConstruct
@@ -535,6 +546,9 @@ public class EksService implements TagHandler, ResourceProvider {
         accessEntries.deleteClusterEntries(cluster);
         if (podIdentityAssociations != null) {
             podIdentityAssociations.deleteClusterAssociations(cluster);
+        }
+        if (addons != null) {
+            addons.deleteClusterAddons(cluster);
         }
         storage.delete(name);
         oidcService.deleteKey(name);

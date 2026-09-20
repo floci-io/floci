@@ -22,6 +22,12 @@ EKS uses a standard REST API with JSON bodies: not the JSON 1.1 (`X-Amz-Target`)
 | `ListPodIdentityAssociations` | List pod identity associations in a cluster with optional filtering and pagination |
 | `UpdatePodIdentityAssociation` | Update the IAM role, target role, or session tags for a pod identity association |
 | `DeletePodIdentityAssociation` | Delete a pod identity association |
+| `CreateAddon` | Create an addon for an EKS cluster |
+| `DescribeAddon` | Describe an addon by cluster and addon name |
+| `ListAddons` | List addon names installed in a cluster with pagination |
+| `UpdateAddon` | Update addon configuration, version, or service account role |
+| `DeleteAddon` | Delete an addon from a cluster |
+| `DescribeAddonVersions` | Describe supported addon versions by Kubernetes version or addon name |
 | `CreateNodegroup` | Create node group metadata for a cluster |
 | `DescribeNodegroup` | Describe a node group by cluster and name |
 | `ListNodegroups` | List node group names for a cluster |
@@ -91,6 +97,23 @@ Credentials delivery directly into pods is not yet supported:
 - The link-local metadata credential endpoint (`169.254.170.23`) is not implemented.
 
 Applications running inside pods cannot currently exchange tokens for temporary AWS credentials via the link-local endpoint. Use access entries, node credentials, or explicit credential configuration until the pod identity agent endpoint is added.
+
+## Addon management
+
+Floci supports the EKS cluster addon management plane for AWS SDKs and Terraform (`aws_eks_addon` resource).
+
+### Supported operations
+
+- **Creation**: `CreateAddon` creates an addon on an ACTIVE cluster. Supported addons include `vpc-cni`, `coredns`, `kube-proxy`, and `eks-pod-identity-agent`. If `addonVersion` is omitted, the default version compatible with the cluster Kubernetes version is resolved automatically. Referenced `serviceAccountRoleArn` must exist in IAM. Idempotency is supported via `clientRequestToken`.
+- **Retrieval**: `DescribeAddon` returns the complete addon resource shape, including ARN, cluster name, version, status (`ACTIVE`), health issues, tags, service account role ARN, configuration values, pod identity associations, owner, and publisher.
+- **Listing**: `ListAddons` lists installed addon names with pagination (`maxResults` and `nextToken`).
+- **Updating**: `UpdateAddon` updates the addon version, configuration values, service account role ARN, or resolve-conflicts strategy. It returns an `Update` tracking object and updates the addon metadata.
+- **Deletion**: `DeleteAddon` marks the addon as `DELETING` and removes it from the cluster. Deleting a cluster automatically cleans up all associated addons.
+- **Supported versions**: `DescribeAddonVersions` queries the addon version catalog with optional filtering by `addonName` and `kubernetesVersion`, supporting pagination.
+
+### Metadata recording only
+
+Addons in Floci are recorded metadata only. Creating or updating an addon does not install or reconcile Kubernetes DaemonSets, Deployments, or custom resources inside the cluster container.
 
 ## Cluster security group
 

@@ -1,0 +1,232 @@
+{
+  "addons": [
+    {
+      "addonName": "vpc-cni",
+      "type": "networking",
+      "owner": "aws",
+      "publisher": "eks",
+      "addonVersions": [
+        {
+          "addonVersion": "v1.18.5-eksbuild.1",
+          "architecture": ["amd64", "arm64"],
+          "compatibilities": [
+            {
+              "clusterVersion": "1.31",
+              "platformVersions": ["*"],
+              "defaultVersion": true
+            },
+            {
+              "clusterVersion": "1.30",
+              "platformVersions": ["*"],
+              "defaultVersion": false
+            }
+          ],
+          "requiresConfiguration": false,
+          "requiresIamPermissions": true
+        },
+        {
+          "addonVersion": "v1.18.1-eksbuild.1",
+          "architecture": ["amd64", "arm64"],
+          "compatibilities": [
+            {
+              "clusterVersion": "1.30",
+              "platformVersions": ["*"],
+              "defaultVersion": true
+            },
+            {
+              "clusterVersion": "1.29",
+              "platformVersions": ["*"],
+              "defaultVersion": true
+            }
+          ],
+          "requiresConfiguration": false,
+          "requiresIamPermissions": true
+        },
+        {
+          "addonVersion": "v1.16.0-eksbuild.1",
+          "architecture": ["amd64", "arm64"],
+          "compatibilities": [
+            {
+              "clusterVersion": "1.28",
+              "platformVersions": ["*"],
+              "defaultVersion": true
+            }
+          ],
+          "requiresConfiguration": false,
+          "requiresIamPermissions": true
+        }
+      ]
+    },
+    {
+      "addonName": "coredns",
+      "type": "networking",
+      "owner": "aws",
+      "publisher": "eks",
+      "addonVersions": [
+        {
+          "addonVersion": "v1.11.3-eksbuild.1",
+          "architecture": ["amd64", "arm64"],
+          "compatibilities": [
+            {
+              "clusterVersion": "1.31",
+              "platformVersions": ["*"],
+              "defaultVersion": true
+            }
+          ],
+          "requiresConfiguration": false,
+          "requiresIamPermissions": false
+        },
+        {
+          "addonVersion": "v1.11.1-eksbuild.4",
+          "architecture": ["amd64", "arm64"],
+          "compatibilities": [
+            {
+              "clusterVersion": "1.30",
+              "platformVersions": ["*"],
+              "defaultVersion": true
+            },
+            {
+              "clusterVersion": "1.29",
+              "platformVersions": ["*"],
+              "defaultVersion": true
+            }
+          ],
+          "requiresConfiguration": false,
+          "requiresIamPermissions": false
+        },
+        {
+          "addonVersion": "v1.10.1-eksbuild.7",
+          "architecture": ["amd64", "arm64"],
+          "compatibilities": [
+            {
+              "clusterVersion": "1.28",
+              "platformVersions": ["*"],
+              "defaultVersion": true
+            }
+          ],
+          "requiresConfiguration": false,
+          "requiresIamPermissions": false
+        }
+      ]
+    },
+    {
+      "addonName": "kube-proxy",
+      "type": "networking",
+      "owner": "aws",
+      "publisher": "eks",
+      "addonVersions": [
+        {
+          "addonVersion": "v1.31.0-eksbuild.1",
+          "architecture": ["amd64", "arm64"],
+          "compatibilities": [
+            {
+              "clusterVersion": "1.31",
+              "platformVersions": ["*"],
+              "defaultVersion": true
+            }
+          ],
+          "requiresConfiguration": false,
+          "requiresIamPermissions": false
+        },
+        {
+          "addonVersion": "v1.30.0-eksbuild.3",
+          "architecture": ["amd64", "arm64"],
+          "compatibilities": [
+            {
+              "clusterVersion": "1.30",
+              "platformVersions": ["*"],
+              "defaultVersion": true
+            }
+          ],
+          "requiresConfiguration": false,
+          "requiresIamPermissions": false
+        },
+        {
+          "addonVersion": "v1.29.3-eksbuild.2",
+          "architecture": ["amd64", "arm64"],
+          "compatibilities": [
+            {
+              "clusterVersion": "1.29",
+              "platformVersions": ["*"],
+              "defaultVersion": true
+            }
+          ],
+          "requiresConfiguration": false,
+          "requiresIamPermissions": false
+        },
+        {
+          "addonVersion": "v1.28.8-eksbuild.2",
+          "architecture": ["amd64", "arm64"],
+          "compatibilities": [
+            {
+              "clusterVersion": "1.28",
+              "platformVersions": ["*"],
+              "defaultVersion": true
+            }
+          ],
+          "requiresConfiguration": false,
+          "requiresIamPermissions": false
+        }
+      ]
+    },
+    {
+      "addonName": "eks-pod-identity-agent",
+      "type": "security",
+      "owner": "aws",
+      "publisher": "eks",
+      "addonVersions": [
+        {
+          "addonVersion": "v1.3.0-eksbuild.1",
+          "architecture": ["amd64", "arm64"],
+          "compatibilities": [
+            {
+              "clusterVersion": "1.31",
+              "platformVersions": ["*"],
+              "defaultVersion": true
+            },
+            {
+              "clusterVersion": "1.30",
+              "platformVersions": ["*"],
+              "defaultVersion": true
+            },
+            {
+              "clusterVersion": "1.29",
+              "platformVersions": ["*"],
+              "defaultVersion": true
+            },
+            {
+              "clusterVersion": "1.28",
+              "platformVersions": ["*"],
+              "defaultVersion": true
+            }
+          ],
+          "requiresConfiguration": false,
+          "requiresIamPermissions": false
+        },
+        {
+          "addonVersion": "v1.2.0-eksbuild.1",
+          "architecture": ["amd64", "arm64"],
+          "compatibilities": [
+            {
+              "clusterVersion": "1.30",
+              "platformVersions": ["*"],
+              "defaultVersion": false
+            },
+            {
+              "clusterVersion": "1.29",
+              "platformVersions": ["*"],
+              "defaultVersion": false
+            },
+            {
+              "clusterVersion": "1.28",
+              "platformVersions": ["*"],
+              "defaultVersion": false
+            }
+          ],
+          "requiresConfiguration": false,
+          "requiresIamPermissions": false
+        }
+      ]
+    }
+  ]
+}

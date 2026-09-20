@@ -57,6 +57,7 @@ quarkus:
         - ui/*.html
         - ec2/*.yaml
         - sagemaker/*.yaml
+        - eks/*.json
         - i18n/*.properties
         - org/apache/velocity/runtime/defaults/*.properties
         # DriverManager finds the JDBC drivers through ServiceLoader, and the MySQL
