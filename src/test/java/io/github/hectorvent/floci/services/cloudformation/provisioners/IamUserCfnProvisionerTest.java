@@ -148,6 +148,10 @@ class IamUserCfnProvisionerTest {
                 {
                   "UserName": "app-user",
                   "Groups": ["developers", "qa"],
+                  "Tags": [
+                    {"Key": "Environment", "Value": "test"},
+                    {"Key": "Owner", "Value": "platform"}
+                  ],
                   "ManagedPolicyArns": [
                     "arn:aws:iam::aws:policy/ReadOnlyAccess",
                     "arn:aws:iam::aws:policy/PowerUserAccess"
@@ -166,6 +170,7 @@ class IamUserCfnProvisionerTest {
         verify(iam).attachUserPolicy("app-user", "arn:aws:iam::aws:policy/ReadOnlyAccess");
         verify(iam).attachUserPolicy("app-user", "arn:aws:iam::aws:policy/PowerUserAccess");
         verify(iam).putUserPolicy(eq("app-user"), eq("s3-access"), any());
+        verify(iam).tagUser("app-user", Map.of("Environment", "test", "Owner", "platform"));
     }
 
     @Test
@@ -248,6 +253,9 @@ class IamUserCfnProvisionerTest {
         existing.getAttachedPolicyArns().add("arn:aws:iam::aws:policy/Drop");
         existing.getInlinePolicies().put("keep-inline", "{}");
         existing.getInlinePolicies().put("drop-inline", "{}");
+        existing.getTags().put("keep-tag", "same");
+        existing.getTags().put("update-tag", "old");
+        existing.getTags().put("drop-tag", "remove-me");
 
         when(iam.createUser(eq("my-user"), eq("/"))).thenThrow(new AwsException("EntityAlreadyExists", "exists", 409));
         when(iam.getUser("my-user")).thenReturn(existing);
@@ -264,6 +272,11 @@ class IamUserCfnProvisionerTest {
                   "UserName": "my-user",
                   "Groups": ["keep-group"],
                   "ManagedPolicyArns": ["arn:aws:iam::aws:policy/Keep"],
+                  "Tags": [
+                    {"Key": "keep-tag", "Value": "same"},
+                    {"Key": "update-tag", "Value": "new"},
+                    {"Key": "add-tag", "Value": "added"}
+                  ],
                   "Policies": [
                     {
                       "PolicyName": "keep-inline",
@@ -279,6 +292,39 @@ class IamUserCfnProvisionerTest {
         verify(iam, never()).removeUserFromGroup("keep-group", "my-user");
         verify(iam, never()).detachUserPolicy("my-user", "arn:aws:iam::aws:policy/Keep");
         verify(iam, never()).deleteUserPolicy("my-user", "keep-inline");
+        verify(iam).tagUser("my-user", Map.of("update-tag", "new", "add-tag", "added"));
+        verify(iam).untagUser("my-user", List.of("drop-tag"));
+    }
+
+    @Test
+    void failedTagReconciliationRestoresPriorTags() {
+        IamUser existing = new IamUser("AIDAuser", "my-user", "/", "arn:aws:iam::" + ACCOUNT_ID + ":user/my-user");
+        existing.getTags().put("keep-tag", "old");
+        existing.getTags().put("drop-tag", "restore-me");
+        when(iam.createUser(eq("my-user"), eq("/")))
+                .thenThrow(new AwsException("EntityAlreadyExists", "exists", 409));
+        when(iam.getUser("my-user")).thenReturn(existing);
+        doThrow(new AwsException("ServiceFailure", "tag removal failed", 500))
+                .when(iam).untagUser("my-user", List.of("drop-tag"));
+
+        StackResource r = resource();
+        r.setPhysicalId("my-user");
+        r.getAttributes().put("__FlociUserId", "AIDAuser");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {
+                  "UserName": "my-user",
+                  "Tags": [
+                    {"Key": "keep-tag", "Value": "new"},
+                    {"Key": "add-tag", "Value": "added"}
+                  ]
+                }
+                """), updateCtx("my-user")));
+
+        verify(iam).tagUser("my-user", Map.of("keep-tag", "new", "add-tag", "added"));
+        verify(iam).untagUser("my-user", List.of("drop-tag"));
+        verify(iam).untagUser("my-user", List.of("add-tag"));
+        verify(iam).tagUser("my-user", Map.of("keep-tag", "old", "drop-tag", "restore-me"));
     }
 
     @Test
