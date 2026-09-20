@@ -20,6 +20,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -95,7 +96,7 @@ class RedshiftDynamoDbZeroEtlConsumerTest {
         consumer.pollOnce(integration);
 
         assertFalse(integration.isBackfillCompleted());
-        assertTrue(integration.getBackfillLastEvaluatedKey() != null);
+        assertNotNull(integration.getBackfillLastEvaluatedKey());
         verify(redshiftService).updateIntegrationBackfillProgress(eq(integration.getAccountId()),
                 eq(integration.getIntegrationArn()), eq(integration.getBackfillLastEvaluatedKey()), eq(false));
         verify(streamService, never()).getShardIterator(any(), any(), any(), any());
