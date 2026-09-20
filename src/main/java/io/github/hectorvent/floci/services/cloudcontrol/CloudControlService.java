@@ -4,12 +4,14 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationResourceProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
@@ -255,7 +257,7 @@ public class CloudControlService {
         persistRequest(new PersistedRequest(pending, region, desiredStateJson, System.currentTimeMillis()));
         executor.submit(() -> RequestScopes.runAs(accountId, () -> {
             try {
-                var resource = provisioner.provisionStandalone(typeName, props, region, accountId);
+                StackResource resource = provisioner.provisionStandalone(typeName, props, region, accountId);
                 if (resource == null || resource.getPhysicalId() == null) {
                     record(pending.failed("CreateResource is not supported for " + typeName + "."));
                 } else {
@@ -506,7 +508,7 @@ public class CloudControlService {
                     putIfPresent(properties, "State", instance.getState().getName());
                 }
                 if (instance.getSecurityGroups() != null && !instance.getSecurityGroups().isEmpty()) {
-                    var groups = properties.putArray("SecurityGroupIds");
+                    ArrayNode groups = properties.putArray("SecurityGroupIds");
                     for (GroupIdentifier g : instance.getSecurityGroups()) {
                         if (g.getGroupId() != null) groups.add(g.getGroupId());
                     }
@@ -641,7 +643,7 @@ public class CloudControlService {
         if (validTags.isEmpty()) {
             return;
         }
-        var tagArray = properties.putArray("Tags");
+        ArrayNode tagArray = properties.putArray("Tags");
         for (Tag tag : validTags) {
             tagArray.addObject()
                     .put("Key", tag.getKey())
