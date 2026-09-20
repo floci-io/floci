@@ -397,8 +397,9 @@ class ElastiCacheQueryHandlerTest {
         p = params();
         p.add("ResourceName", "arn:aws:elasticache:us-east-1:000000000000:replicationgroup:g2");
         response = handler.handle("ListTagsForResource", p, "us-east-1");
-        assertEquals(404, response.getStatus(), (String) response.getEntity());
-        assertFalse(((String) response.getEntity()).contains("west"));
+        String entity = (String) response.getEntity();
+        assertEquals(404, response.getStatus(), entity);
+        assertFalse(entity.contains("west"));
     }
 
     @Test
