@@ -15,6 +15,7 @@ import java.util.Optional;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.not;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
@@ -160,6 +161,54 @@ public class RedshiftOperationsTest {
             .header("Authorization", AUTH_HEADER)
             .formParam("Action", "ModifyCluster")
             .formParam("ClusterIdentifier", "cluster-src")
+            .formParam("NodeType", "ra3.xlplus")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<NodeType>ra3.xlplus</NodeType>"));
+
+        // 1d. ModifyClusterIamRoles adds a role, then removes it
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "ModifyClusterIamRoles")
+            .formParam("ClusterIdentifier", "cluster-src")
+            .formParam("AddIamRoles.IamRoleArn.1", "arn:aws:iam::000000000000:role/redshift-copy")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<IamRoleArn>arn:aws:iam::000000000000:role/redshift-copy</IamRoleArn>"))
+            .body(containsString("<ApplyStatus>in-sync</ApplyStatus>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "ModifyClusterIamRoles")
+            .formParam("ClusterIdentifier", "cluster-src")
+            .formParam("RemoveIamRoles.IamRoleArn.1", "arn:aws:iam::000000000000:role/redshift-copy")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(not(containsString("redshift-copy")));
+
+        // 1e. Static discovery APIs
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DescribeClusterVersions")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<ClusterParameterGroupFamily>redshift-1.0</ClusterParameterGroupFamily>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DescribeOrderableClusterOptions")
             .formParam("NodeType", "ra3.xlplus")
         .when()
             .post("/")

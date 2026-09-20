@@ -30,7 +30,10 @@ import software.amazon.awssdk.services.redshift.model.DescribeClusterSnapshotsRe
 import software.amazon.awssdk.services.redshift.model.DescribeClusterSubnetGroupsRequest;
 import software.amazon.awssdk.services.redshift.model.DescribeClustersRequest;
 import software.amazon.awssdk.services.redshift.model.DescribeClustersResponse;
+import software.amazon.awssdk.services.redshift.model.DescribeOrderableClusterOptionsRequest;
 import software.amazon.awssdk.services.redshift.model.DescribeTagsRequest;
+import software.amazon.awssdk.services.redshift.model.ModifyClusterIamRolesRequest;
+import software.amazon.awssdk.services.redshift.model.ModifyClusterIamRolesResponse;
 import software.amazon.awssdk.services.redshift.model.ModifyClusterRequest;
 import software.amazon.awssdk.services.redshift.model.RebootClusterRequest;
 import software.amazon.awssdk.services.redshift.model.RestoreFromClusterSnapshotRequest;
@@ -308,6 +311,27 @@ class RedshiftOperationsTest {
                 .nodeType("ra3.xlplus")
                 .build());
         assertThat(modified.cluster().nodeType()).isEqualTo("ra3.xlplus");
+
+        String roleArn = "arn:aws:iam::000000000000:role/rs-copy-role";
+        ModifyClusterIamRolesResponse withRole = client.modifyClusterIamRoles(ModifyClusterIamRolesRequest.builder()
+                .clusterIdentifier(clusterId)
+                .addIamRoles(roleArn)
+                .build());
+        assertThat(withRole.cluster().iamRoles())
+                .anyMatch(r -> roleArn.equals(r.iamRoleArn()) && "in-sync".equals(r.applyStatus()));
+        ModifyClusterIamRolesResponse withoutRole = client.modifyClusterIamRoles(ModifyClusterIamRolesRequest.builder()
+                .clusterIdentifier(clusterId)
+                .removeIamRoles(roleArn)
+                .build());
+        assertThat(withoutRole.cluster().iamRoles()).isEmpty();
+
+        assertThat(client.describeClusterVersions().clusterVersions())
+                .anyMatch(v -> "redshift-1.0".equals(v.clusterParameterGroupFamily()));
+        assertThat(client.describeOrderableClusterOptions(DescribeOrderableClusterOptionsRequest.builder()
+                .nodeType("ra3.xlplus")
+                .build()).orderableClusterOptions())
+                .isNotEmpty()
+                .allMatch(o -> "ra3.xlplus".equals(o.nodeType()));
 
         var rebooted = client.rebootCluster(RebootClusterRequest.builder()
                 .clusterIdentifier(clusterId)

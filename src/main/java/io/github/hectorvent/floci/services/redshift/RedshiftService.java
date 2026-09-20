@@ -42,6 +42,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Collection;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -646,6 +647,38 @@ public class RedshiftService {
         clusters.put(clusterIdentifier, cluster);
         clusters.flush();
         return cluster;
+    }
+
+    public synchronized Cluster modifyClusterIamRoles(String clusterIdentifier, List<String> addIamRoles,
+                                                      List<String> removeIamRoles) {
+        Cluster cluster = clusters.get(clusterIdentifier)
+                .orElseThrow(() -> new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404));
+
+        // Validate every ARN before mutating: the cluster object is a live reference from HybridStorage.
+        addIamRoles.forEach(RedshiftService::requireIamRoleArn);
+        removeIamRoles.forEach(RedshiftService::requireIamRoleArn);
+
+        Set<String> roles = new LinkedHashSet<>(cluster.getIamRoleArns());
+        roles.addAll(addIamRoles);
+        roles.removeAll(removeIamRoles);
+        cluster.setIamRoleArns(List.copyOf(roles));
+
+        proxyManager.updateIamRoles(relayKey(clusters.accountId(), clusterIdentifier), cluster.getIamRoleArns());
+        clusters.put(clusterIdentifier, cluster);
+        clusters.flush();
+        return cluster;
+    }
+
+    private static void requireIamRoleArn(String arn) {
+        AwsArnUtils.Arn parsed;
+        try {
+            parsed = AwsArnUtils.parse(arn);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("InvalidParameterValue", "Invalid IAM role ARN: " + arn, 400);
+        }
+        if (!"iam".equals(parsed.service()) || !parsed.resource().startsWith("role/")) {
+            throw new AwsException("InvalidParameterValue", "Not an IAM role ARN: " + arn, 400);
+        }
     }
 
     private void updateManagedMasterSecret(Cluster cluster, String password) {

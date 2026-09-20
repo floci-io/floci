@@ -40,6 +40,9 @@ For running SQL without a PostgreSQL wire connection (the way Lambda and Step Fu
 | `ModifyClusterSubnetGroup` | Update a subnet group's description or subnet list |
 | `DeleteClusterSubnetGroup` | Remove a subnet group |
 | `ModifyCluster` | Update node type, parameter group, security groups, or the master password |
+| `DescribeClusterVersions` | Return the single emulated engine version and its parameter group family |
+| `DescribeOrderableClusterOptions` | Return the static node types and cluster types, optionally filtered by `NodeType` or `ClusterVersion` |
+| `ModifyClusterIamRoles` | Add or remove the IAM roles associated with a cluster; COPY and UNLOAD see the change on new connections. `DefaultIamRoleArn` is ignored |
 | `RebootCluster` | Restart a cluster's container |
 | `GetClusterCredentials` | Issue a short-lived DbUser / DbPassword pair the auth proxy and Data API accept for a non-master user |
 | `GetClusterCredentialsWithIAM` | Issue short-lived credentials with the DbUser derived from the caller's IAM identity |
@@ -238,7 +241,9 @@ order) through its own S3 service and streams the rows into the backing PostgreS
   bucket as the manifest file itself; cross-bucket manifest entries are rejected as an intentional deviation.
 - `IGNOREHEADER` and `HEADER` skip lines from the first resolved object only.
 - `GZIP` is the only input compression recognized; `BZIP2`, `LZOP` and `ZSTD` are not.
-- `IAM_ROLE '<role-arn>'` is supported. The role must be associated with the cluster, exist in
+- `IAM_ROLE '<role-arn>'` is supported. The role must be associated with the cluster (at
+  `CreateCluster` or through `ModifyClusterIamRoles`; connections opened before a change keep the
+  roles they started with), exist in
   the local IAM service, and trust Redshift to assume it. With
   `FLOCI_SERVICES_S3_ENFORCE_AUTH` off, S3 policy checks are skipped. With it on, the role's
   identity policy must allow the required S3 actions, and any bucket policy must not deny the

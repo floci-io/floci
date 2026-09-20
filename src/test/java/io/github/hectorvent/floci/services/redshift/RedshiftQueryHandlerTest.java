@@ -429,6 +429,74 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
+    void modifyClusterIamRolesAcceptsNamedMemberForm() {
+        // Real Redshift SDK sends "AddIamRoles.IamRoleArn.N" and "RemoveIamRoles.IamRoleArn.N".
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "c1");
+        params.putSingle("AddIamRoles.IamRoleArn.1", "arn:aws:iam::111111111111:role/a");
+        params.putSingle("RemoveIamRoles.IamRoleArn.1", "arn:aws:iam::111111111111:role/b");
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("c1");
+        cluster.setIamRoleArns(List.of("arn:aws:iam::111111111111:role/a"));
+        when(service.modifyClusterIamRoles(eq("c1"), any(), any())).thenReturn(cluster);
+
+        Response response = handler.handle("ModifyClusterIamRoles", params);
+
+        assertEquals(200, response.getStatus());
+        verify(service).modifyClusterIamRoles("c1",
+                List.of("arn:aws:iam::111111111111:role/a"), List.of("arn:aws:iam::111111111111:role/b"));
+        String body = response.getEntity().toString();
+        assertTrue(body.contains("<ModifyClusterIamRolesResult>"));
+        assertTrue(body.contains("<IamRoleArn>arn:aws:iam::111111111111:role/a</IamRoleArn>"));
+        assertTrue(body.contains("<ApplyStatus>in-sync</ApplyStatus>"));
+    }
+
+    @Test
+    void describeClusterVersionsListsTheEmulatedVersion() {
+        Response response = handler.handle("DescribeClusterVersions", new MultivaluedHashMap<>());
+
+        assertEquals(200, response.getStatus());
+        String body = response.getEntity().toString();
+        assertTrue(body.contains("<DescribeClusterVersionsResult>"));
+        assertTrue(body.contains("<ClusterVersion>1.0</ClusterVersion>"));
+        assertTrue(body.contains("<ClusterParameterGroupFamily>redshift-1.0</ClusterParameterGroupFamily>"));
+    }
+
+    @Test
+    void describeClusterVersionsFiltersByVersion() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterVersion", "9.9");
+
+        String body = handler.handle("DescribeClusterVersions", params).getEntity().toString();
+
+        assertFalse(body.contains("<ClusterVersion>1.0</ClusterVersion>"));
+    }
+
+    @Test
+    void describeOrderableClusterOptionsFiltersByNodeType() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("NodeType", "ra3.xlplus");
+        when(regionResolver.resolveRegionFromAuth("auth")).thenReturn("eu-west-1");
+
+        Response response = handler.handle("DescribeOrderableClusterOptions", params, "auth");
+
+        assertEquals(200, response.getStatus());
+        String body = response.getEntity().toString();
+        assertTrue(body.contains("<Name>eu-west-1a</Name>"));
+        assertTrue(body.contains("<DescribeOrderableClusterOptionsResult>"));
+        assertTrue(body.contains("<NodeType>ra3.xlplus</NodeType>"));
+        assertFalse(body.contains("<NodeType>dc2.large</NodeType>"));
+        assertTrue(body.contains("<ClusterType>multi-node</ClusterType>"));
+    }
+
+    @Test
+    void modifyClusterIamRolesRequiresClusterIdentifier() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("ModifyClusterIamRoles", new MultivaluedHashMap<>()));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+    }
+
+    @Test
     void testBuildClusterXmlIncludesParameterGroupAndTags() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("ClusterIdentifier", "test-cluster");

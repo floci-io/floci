@@ -514,6 +514,75 @@ public class RedshiftQueryHandler {
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
         }
+        case "DescribeClusterVersions" -> {
+            String requested = params.getFirst("ClusterVersion");
+            XmlBuilder builder = new XmlBuilder()
+                    .start("DescribeClusterVersionsResponse")
+                      .start("DescribeClusterVersionsResult")
+                        .start("ClusterVersions");
+            if (requested == null || requested.isBlank() || RedshiftClusterCatalog.CLUSTER_VERSION.equals(requested)) {
+                builder.start("ClusterVersion")
+                        .elem("ClusterVersion", RedshiftClusterCatalog.CLUSTER_VERSION)
+                        .elem("ClusterParameterGroupFamily", RedshiftClusterCatalog.PARAMETER_GROUP_FAMILY)
+                        .elem("Description", "Amazon Redshift emulated engine")
+                        .end("ClusterVersion");
+            }
+            String xml = builder
+                        .end("ClusterVersions")
+                      .end("DescribeClusterVersionsResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("DescribeClusterVersionsResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        }
+        case "DescribeOrderableClusterOptions" -> {
+            String zone = regionResolver.resolveRegionFromAuth(authorizationHeader) + "a";
+            XmlBuilder builder = new XmlBuilder()
+                    .start("DescribeOrderableClusterOptionsResponse")
+                      .start("DescribeOrderableClusterOptionsResult")
+                        .start("OrderableClusterOptions");
+            for (RedshiftClusterCatalog.OrderableOption option : RedshiftClusterCatalog.orderableOptions(
+                    params.getFirst("ClusterVersion"), params.getFirst("NodeType"))) {
+                builder.start("OrderableClusterOption")
+                        .elem("ClusterVersion", RedshiftClusterCatalog.CLUSTER_VERSION)
+                        .elem("ClusterType", option.clusterType())
+                        .elem("NodeType", option.nodeType())
+                        .start("AvailabilityZones")
+                          .start("AvailabilityZone").elem("Name", zone).end("AvailabilityZone")
+                        .end("AvailabilityZones")
+                        .end("OrderableClusterOption");
+            }
+            String xml = builder
+                        .end("OrderableClusterOptions")
+                      .end("DescribeOrderableClusterOptionsResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("DescribeOrderableClusterOptionsResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        }
+        case "ModifyClusterIamRoles" -> {
+            String clusterIdentifier = params.getFirst("ClusterIdentifier");
+            if (clusterIdentifier == null || clusterIdentifier.isBlank()) {
+                throw new AwsException("InvalidParameterValue", "ClusterIdentifier is required", 400);
+            }
+            Cluster cluster = service.modifyClusterIamRoles(clusterIdentifier,
+                    memberList(params, "AddIamRoles"), memberList(params, "RemoveIamRoles"));
+            String xml = new XmlBuilder()
+                    .start("ModifyClusterIamRolesResponse")
+                      .start("ModifyClusterIamRolesResult")
+                        .raw(buildClusterXml(cluster))
+                      .end("ModifyClusterIamRolesResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("ModifyClusterIamRolesResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        }
         case "RebootCluster" -> {
             String clusterIdentifier = params.getFirst("ClusterIdentifier");
             if (clusterIdentifier == null || clusterIdentifier.isBlank()) {
@@ -655,7 +724,7 @@ public class RedshiftQueryHandler {
         if (cluster.getIamRoleArns() != null && !cluster.getIamRoleArns().isEmpty()) {
             builder.start("IamRoles");
             for (String iamRoleArn : cluster.getIamRoleArns()) {
-                builder.start("IamRole").elem("IamRoleArn", iamRoleArn).end("IamRole");
+                builder.start("IamRole").elem("IamRoleArn", iamRoleArn).elem("ApplyStatus", "in-sync").end("IamRole");
             }
             builder.end("IamRoles");
         }
@@ -886,7 +955,7 @@ public class RedshiftQueryHandler {
         return switch (baseName) {
             case "SubnetIds" -> quoted + "(\\.member|\\.SubnetIdentifier)?\\.\\d+";
             case "VpcSecurityGroupIds" -> quoted + "(\\.member|\\.VpcSecurityGroupId)?\\.\\d+";
-            case "IamRoles" -> quoted + "(\\.member|\\.IamRoleArn)?\\.\\d+";
+            case "IamRoles", "AddIamRoles", "RemoveIamRoles" -> quoted + "(\\.member|\\.IamRoleArn)?\\.\\d+";
             case "TagKeys" -> quoted + "(\\.member|\\.TagKey)?\\.\\d+";
             case "DbGroups" -> quoted + "(\\.member|\\.DbGroup)?\\.\\d+";
             default -> quoted + "(\\.member)?\\.\\d+";

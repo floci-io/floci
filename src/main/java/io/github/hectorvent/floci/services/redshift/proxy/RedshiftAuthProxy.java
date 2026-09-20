@@ -39,7 +39,7 @@ public class RedshiftAuthProxy {
     private final S3Service s3Service;
     private final IamService iamService;
     private final String clusterAccountId;
-    private final List<String> iamRoleArns;
+    private volatile List<String> iamRoleArns;
     private final int handshakeTimeoutMillis;
     private final int backendConnectTimeoutMillis;
     private final Semaphore connectionPermits;
@@ -139,6 +139,11 @@ public class RedshiftAuthProxy {
     /** Swap the master-password snapshot after a rotation; new connections authenticate against it. */
     public void updateMasterPassword(String newPassword) {
         this.masterPassword = newPassword;
+    }
+
+    /** Swap the associated-role snapshot; new connections authorize COPY and UNLOAD against it. */
+    public void updateIamRoles(List<String> newIamRoleArns) {
+        this.iamRoleArns = newIamRoleArns == null ? List.of() : List.copyOf(newIamRoleArns);
     }
 
     public void stop() {

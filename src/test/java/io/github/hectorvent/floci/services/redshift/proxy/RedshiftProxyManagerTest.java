@@ -12,6 +12,7 @@ import java.io.IOException;
 import java.lang.reflect.Field;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -98,6 +99,26 @@ class RedshiftProxyManagerTest {
         }
     }
 
+
+    @Test
+    void updateIamRolesSwapsTheRunningSnapshotWithoutARestart() throws Exception {
+        RedshiftProxyManager manager = newManager();
+        int port = availablePort();
+        try {
+            start(manager, KEY, port);
+            manager.updateIamRoles(KEY, List.of("arn:aws:iam::111111111111:role/copy"));
+            assertEquals(List.of("arn:aws:iam::111111111111:role/copy"), iamRoleArns(registry(manager).get(KEY)));
+            assertPortUnavailable(port);
+        } finally {
+            manager.stopAll();
+        }
+    }
+
+    @Test
+    void updateIamRolesForUnknownKeyIsANoOp() {
+        RedshiftProxyManager manager = newManager();
+        assertDoesNotThrow(() -> manager.updateIamRoles("missing", List.of()));
+    }
 
     @Test
     void updateMasterPasswordForUnknownKeyIsANoOp() {
@@ -265,6 +286,13 @@ class RedshiftProxyManagerTest {
         Field field = RedshiftAuthProxy.class.getDeclaredField("masterPassword");
         field.setAccessible(true);
         return (String) field.get(proxy);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<String> iamRoleArns(RedshiftAuthProxy proxy) throws Exception {
+        Field field = RedshiftAuthProxy.class.getDeclaredField("iamRoleArns");
+        field.setAccessible(true);
+        return (List<String>) field.get(proxy);
     }
 
     private static int availablePort() throws IOException {

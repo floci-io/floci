@@ -106,6 +106,14 @@ public class RedshiftProxyManager {
         }
     }
 
+    public synchronized void updateIamRoles(String relayKey, List<String> iamRoleArns) {
+        RedshiftAuthProxy proxy = proxies.get(relayKey);
+        if (proxy != null) {
+            proxy.updateIamRoles(iamRoleArns);
+            LOG.infov("Updated Redshift proxy IAM roles for cluster {0}", relayKey);
+        }
+    }
+
     public synchronized void stopProxy(String relayKey) {
         // Retry any listener a previous failed start/replace could not close. If it still
         // cannot be closed this throws, and the entry stays for the next retry.

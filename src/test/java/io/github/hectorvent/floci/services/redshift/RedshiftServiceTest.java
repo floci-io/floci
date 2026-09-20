@@ -808,6 +808,62 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void modifyClusterIamRolesAddsAndRemovesRolesAndUpdatesTheProxy() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("c1");
+        cluster.setIamRoleArns(List.of("arn:aws:iam::111111111111:role/old", "arn:aws:iam::111111111111:role/keep"));
+        when(clusterBackend.get("c1")).thenReturn(Optional.of(cluster));
+        when(clusterBackend.accountId()).thenReturn("111111111111");
+
+        Cluster updated = service.modifyClusterIamRoles("c1",
+                List.of("arn:aws:iam::111111111111:role/new", "arn:aws:iam::111111111111:role/keep"),
+                List.of("arn:aws:iam::111111111111:role/old"));
+
+        assertEquals(List.of("arn:aws:iam::111111111111:role/keep", "arn:aws:iam::111111111111:role/new"),
+                updated.getIamRoleArns());
+        verify(proxyManager).updateIamRoles("111111111111:c1", updated.getIamRoleArns());
+        verify(clusterBackend).put(eq("c1"), any(Cluster.class));
+        verify(clusterBackend).flush();
+    }
+
+    @Test
+    void modifyClusterIamRolesRejectsMalformedRoleArnWithoutChangingTheCluster() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("c1");
+        cluster.setIamRoleArns(List.of("arn:aws:iam::111111111111:role/keep"));
+        when(clusterBackend.get("c1")).thenReturn(Optional.of(cluster));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.modifyClusterIamRoles("c1", List.of("not-an-arn"), List.of()));
+
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals(List.of("arn:aws:iam::111111111111:role/keep"), cluster.getIamRoleArns());
+        verify(proxyManager, never()).updateIamRoles(any(), any());
+    }
+
+    @Test
+    void modifyClusterIamRolesRejectsNonRoleArn() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("c1");
+        when(clusterBackend.get("c1")).thenReturn(Optional.of(cluster));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.modifyClusterIamRoles("c1", List.of("arn:aws:iam::111111111111:user/bob"), List.of()));
+
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+    }
+
+    @Test
+    void modifyClusterIamRolesNotFound() {
+        when(clusterBackend.get("missing")).thenReturn(Optional.empty());
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.modifyClusterIamRoles("missing", List.of(), List.of()));
+
+        assertEquals("ClusterNotFound", ex.getErrorCode());
+    }
+
+    @Test
     void testDescribeSnapshots() {
         Snapshot s = new Snapshot("snap-1", "my-cluster", "available", 5439, "admin");
         when(snapshotBackend.get("snap-1")).thenReturn(Optional.of(s));
