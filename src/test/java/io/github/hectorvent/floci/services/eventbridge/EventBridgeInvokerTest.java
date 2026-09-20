@@ -22,6 +22,7 @@ import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
+import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -45,6 +46,7 @@ class EventBridgeInvokerTest {
     private FirehoseService firehoseService;
     private EventBridgeService eventBridgeService;
     private EcsService ecsService;
+    private StepFunctionsService stepFunctionsService;
     private RegionResolver regionResolver;
 
     @BeforeEach
@@ -56,6 +58,7 @@ class EventBridgeInvokerTest {
         firehoseService = mock(FirehoseService.class);
         eventBridgeService = mock(EventBridgeService.class);
         ecsService = mock(EcsService.class);
+        stepFunctionsService = mock(StepFunctionsService.class);
         regionResolver = mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn("000000000000");
         when(eventBridgeService.putEvents(anyList(), anyString(), any()))
@@ -73,10 +76,56 @@ class EventBridgeInvokerTest {
                 ecsService,
                 new EcsJsonHandler(ecsService, new ObjectMapper(),
                         new HostVolumePolicy(emulatorConfig)),
+                stepFunctionsService,
                 regionResolver,
                 new ObjectMapper(),
                 emulatorConfig
         );
+    }
+
+    @Test
+    void invokeTarget_stateMachineTargetStartsExecutionWithDefaultEvent() {
+        String arn = "arn:aws:states:eu-west-1:111122223333:stateMachine:orders";
+        String event = "{\"detail\":{\"orderId\":\"o-42\"}}";
+        Target target = new Target("id1", arn, null, null);
+
+        invoker.invokeTarget(target, event, "us-east-1");
+
+        verify(stepFunctionsService).startExecution(arn, null, event, "eu-west-1");
+    }
+
+    @Test
+    void invokeTarget_stateMachineTargetUsesExplicitInput() {
+        String arn = "arn:aws:states:us-east-1:000000000000:stateMachine:orders";
+        Target target = new Target("id1", arn, "{\"source\":\"override\"}", null);
+
+        invoker.invokeTarget(target, "{\"ignored\":true}", "us-east-1");
+
+        verify(stepFunctionsService).startExecution(
+                arn, null, "{\"source\":\"override\"}", "us-east-1");
+    }
+
+    @Test
+    void invokeTarget_qualifiedStateMachineTargetRemainsUnsupported() {
+        String versionArn = "arn:aws:states:us-east-1:000000000000:stateMachine:orders:1";
+        String aliasArn = "arn:aws:states:us-east-1:000000000000:stateMachine:orders:PROD";
+
+        invoker.invokeTarget(new Target("version", versionArn, "{}", null), "{}", "us-east-1");
+        invoker.invokeTarget(new Target("alias", aliasArn, "{}", null), "{}", "us-east-1");
+
+        verifyNoInteractions(stepFunctionsService);
+    }
+
+    @Test
+    void invokeTarget_stateMachineStartFailureDoesNotEscapeDelivery() {
+        String arn = "arn:aws:states:us-east-1:000000000000:stateMachine:missing";
+        when(stepFunctionsService.startExecution(arn, null, "{}", "us-east-1"))
+                .thenThrow(new IllegalStateException("missing state machine"));
+
+        assertDoesNotThrow(() -> invoker.invokeTarget(
+                new Target("id1", arn, "{}", null), "{\"ignored\":true}", "us-east-1"));
+
+        verify(stepFunctionsService).startExecution(arn, null, "{}", "us-east-1");
     }
 
     @Test
