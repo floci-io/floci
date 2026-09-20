@@ -10,7 +10,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -71,12 +70,17 @@ public class SageMakerInstanceTypeCatalog {
     /**
      * Whether the type belongs to a family that carries accelerators on AWS, regardless of
      * whether this catalog lists the specific size.
+     *
+     * <p>Case sensitive, like {@link #gpuCount(String)} and like EC2's {@code find} and
+     * {@code familyOf}: AWS instance types are exact tokens, so folding case here would make
+     * this disagree with the catalog lookup and answer "GPU family" for a spelling the lookup
+     * then reports as missing from the catalog.
      */
     public static boolean isAcceleratorFamily(String instanceType) {
         if (instanceType == null || instanceType.isBlank()) {
             return false;
         }
-        String normalized = instanceType.trim().toLowerCase(Locale.ROOT);
+        String normalized = instanceType.trim();
         return ACCELERATOR_FAMILY_PREFIXES.stream().anyMatch(normalized::startsWith);
     }
 

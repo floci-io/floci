@@ -8,7 +8,6 @@ import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import com.github.dockerjava.api.model.DeviceRequest;
-import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -20,7 +19,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-@DisplayName("SageMakerGpuResolver: instance type to device request")
 class SageMakerGpuResolverTest {
 
     private static final String UUID_A = "nvidia.com/gpu=GPU-aaaaaaaa";
