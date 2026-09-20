@@ -118,19 +118,26 @@ public class KinesisEventSourcePoller implements Resettable {
                 LambdaFunction fn = functionStore.getForAccount(esm.getAccountId(), esm.getRegion(), esm.getFunctionName()).orElse(null);
                 if (fn == null) return;
 
+                // This runs on the poller thread, outside any request scope, so the request-context
+                // overloads would resolve the stream in the default account. Read the stream in the
+                // account that owns the mapping, like the function lookup above.
+                String accountId = esm.getAccountId();
                 String streamName = streamNameFromArn(esm.getEventSourceArn());
-                KinesisStream stream = kinesisService.describeStream(streamName, esm.getRegion());
+                KinesisStream stream = kinesisService.describeStreamForAccount(accountId, streamName, esm.getRegion());
 
                 for (KinesisShard shard : stream.getShards()) {
                     String lastSeq = esm.getShardSequenceNumbers().get(shard.getShardId());
                     String iterator;
                     if (lastSeq == null) {
-                        iterator = kinesisService.getShardIterator(streamName, shard.getShardId(), "TRIM_HORIZON", null, esm.getRegion());
+                        iterator = kinesisService.getShardIteratorForAccount(accountId, streamName, shard.getShardId(),
+                                "TRIM_HORIZON", null, esm.getRegion());
                     } else {
-                        iterator = kinesisService.getShardIterator(streamName, shard.getShardId(), "AFTER_SEQUENCE_NUMBER", lastSeq, esm.getRegion());
+                        iterator = kinesisService.getShardIteratorForAccount(accountId, streamName, shard.getShardId(),
+                                "AFTER_SEQUENCE_NUMBER", lastSeq, esm.getRegion());
                     }
 
-                    Map<String, Object> result = kinesisService.getRecords(iterator, esm.getBatchSize(), esm.getRegion());
+                    Map<String, Object> result = kinesisService.getRecordsForAccount(accountId, iterator,
+                            esm.getBatchSize(), esm.getRegion());
                     List<KinesisRecord> records = (List<KinesisRecord>) result.get("Records");
 
                     if (records.isEmpty()) {
