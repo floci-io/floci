@@ -498,7 +498,7 @@ final class CognitoAuthFlowHandler {
             return userAuthChallengeResponse(pool, client, user, "SELECT_CHALLENGE", available,
                     Map.of("USERNAME", user.getUsername()));
         }
-        return startUserAuthChallenge(pool, client, user, preferred, available, params, clientMetadata);
+        return startUserAuthChallenge(pool, client, user, preferred, available, true, params, clientMetadata);
     }
 
     /**
@@ -519,29 +519,37 @@ final class CognitoAuthFlowHandler {
         CognitoUser user = service.adminGetUser(pool.getId(), username);
         requireSignInEligible(user);
         List<String> available = availableUserAuthChallenges(user);
-        return startUserAuthChallenge(pool, client, user, answer, available, responses, clientMetadata);
+        return startUserAuthChallenge(pool, client, user, answer, available, false, responses, clientMetadata);
     }
 
+    /**
+     * Starts {@code challenge} for {@code user}. {@code advertiseAvailable} says whether the
+     * challenge response may carry {@code AvailableChallenges}: only {@code InitiateAuthResponse}
+     * and {@code AdminInitiateAuthResponse} declare that member, so the {@code SELECT_CHALLENGE}
+     * path (a RespondToAuthChallenge response) passes {@code false}.
+     */
     private Map<String, Object> startUserAuthChallenge(UserPool pool, UserPoolClient client, CognitoUser user,
                                                           String challenge, List<String> available,
+                                                          boolean advertiseAvailable,
                                                           Map<String, String> params, Map<String, String> clientMetadata) {
         if (!available.contains(challenge)) {
             throw new AwsException("InvalidParameterException",
                     challenge + " is not an available challenge for this user", 400);
         }
+        List<String> advertised = advertiseAvailable ? available : null;
         return switch (challenge) {
             case "PASSWORD" -> params.containsKey("PASSWORD")
                     ? authenticateWithPassword(pool, client, params, clientMetadata)
-                    : userAuthChallengeResponse(pool, client, user, "PASSWORD", available,
+                    : userAuthChallengeResponse(pool, client, user, "PASSWORD", advertised,
                             Map.of("USERNAME", user.getUsername()));
             case "PASSWORD_SRP" -> params.containsKey("SRP_A")
                     ? handleUserSrpAuth(pool, client, params, clientMetadata)
-                    : userAuthChallengeResponse(pool, client, user, "PASSWORD_SRP", available,
+                    : userAuthChallengeResponse(pool, client, user, "PASSWORD_SRP", advertised,
                             Map.of("USERNAME", user.getUsername()));
             case "EMAIL_OTP" -> issueOtpChallenge(pool, client, user, "EMAIL_OTP", "email", "EMAIL",
-                    available, clientMetadata);
+                    advertised, clientMetadata);
             case "SMS_OTP" -> issueOtpChallenge(pool, client, user, "SMS_OTP", "phone_number", "SMS",
-                    available, clientMetadata);
+                    advertised, clientMetadata);
             default -> throw new AwsException("InvalidParameterException",
                     challenge + " is not a supported challenge", 400);
         };
@@ -585,6 +593,11 @@ final class CognitoAuthFlowHandler {
         return result;
     }
 
+    /**
+     * Builds a USER_AUTH challenge response and tracks its session. {@code available} is the
+     * {@code AvailableChallenges} list to emit, or {@code null} to leave the member out, which
+     * RespondToAuthChallenge responses must do because their shape does not declare it.
+     */
     private Map<String, Object> userAuthChallengeResponse(UserPool pool, UserPoolClient client, CognitoUser user,
                                                             String challengeName, List<String> available,
                                                             Map<String, String> challengeParameters) {
@@ -595,7 +608,9 @@ final class CognitoAuthFlowHandler {
         result.put("ChallengeName", challengeName);
         result.put("Session", session);
         result.put("ChallengeParameters", challengeParameters);
-        result.put("AvailableChallenges", available);
+        if (available != null) {
+            result.put("AvailableChallenges", available);
+        }
         return result;
     }
 

@@ -2751,6 +2751,52 @@ class CognitoIntegrationTest {
 
     @Test
     @Order(107)
+    void respondToSelectChallengeOmitsAvailableChallengesOverTheWire() throws Exception {
+        // Reproduces #4003: AvailableChallenges is declared on InitiateAuthResponse only, yet the
+        // SELECT_CHALLENGE path used to copy it onto the RespondToAuthChallenge response too.
+        String userAuthPoolId = cognitoJson("CreateUserPool", """
+                { "PoolName": "UserAuthWireSelectChallengePool" }
+                """).path("UserPool").path("Id").asText();
+        String userAuthClientId = cognitoJson("CreateUserPoolClient", """
+                { "UserPoolId": "%s", "ClientName": "user-auth-client" }
+                """.formatted(userAuthPoolId)).path("UserPoolClient").path("ClientId").asText();
+        cognitoAction("AdminCreateUser", """
+                { "UserPoolId": "%s", "Username": "gale",
+                  "UserAttributes": [{ "Name": "email", "Value": "gale@example.com" }] }
+                """.formatted(userAuthPoolId))
+                .then().statusCode(200);
+        cognitoAction("AdminSetUserPassword", """
+                { "UserPoolId": "%s", "Username": "gale", "Password": "Gale1234!", "Permanent": true }
+                """.formatted(userAuthPoolId))
+                .then().statusCode(200);
+
+        JsonNode init = cognitoJson("InitiateAuth", """
+                {
+                  "ClientId": "%s",
+                  "AuthFlow": "USER_AUTH",
+                  "AuthParameters": { "USERNAME": "gale" }
+                }
+                """.formatted(userAuthClientId));
+        assertEquals("SELECT_CHALLENGE", init.path("ChallengeName").asText());
+        assertTrue(init.has("AvailableChallenges"), "InitiateAuth should keep advertising AvailableChallenges");
+        String session = init.path("Session").asText();
+
+        JsonNode challenge = cognitoJson("RespondToAuthChallenge", """
+                {
+                  "ClientId": "%s",
+                  "ChallengeName": "SELECT_CHALLENGE",
+                  "Session": "%s",
+                  "ChallengeResponses": { "USERNAME": "gale", "ANSWER": "PASSWORD" }
+                }
+                """.formatted(userAuthClientId, session));
+
+        assertEquals("PASSWORD", challenge.path("ChallengeName").asText());
+        assertFalse(challenge.has("AvailableChallenges"),
+                "RespondToAuthChallengeResponse does not declare AvailableChallenges: " + challenge);
+    }
+
+    @Test
+    @Order(108)
     void initiateAuthWithUserAuthRejectsALiteTierPoolOverTheWire() throws Exception {
         String liteTierPoolId = cognitoJson("CreateUserPool", """
                 { "PoolName": "UserAuthLiteTierPool", "UserPoolTier": "LITE" }
@@ -2781,7 +2827,7 @@ class CognitoIntegrationTest {
     }
 
     @Test
-    @Order(108)
+    @Order(109)
     void respondToAuthChallengeRejectsPasswordWithNoSessionOverTheWire() throws Exception {
         // Reproduces the bypass reported on #3930: without session tracking, RespondToAuthChallenge
         // would accept a bare USERNAME/PASSWORD pair with ChallengeName=PASSWORD and sign the user

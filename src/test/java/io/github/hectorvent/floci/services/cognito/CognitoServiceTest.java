@@ -2257,6 +2257,47 @@ class CognitoServiceTest {
     }
 
     @Test
+    void selectChallengeResponseDoesNotCarryAvailableChallenges() {
+        // Only InitiateAuthResponse and AdminInitiateAuthResponse declare AvailableChallenges;
+        // RespondToAuthChallengeResponse is AuthenticationResult, ChallengeName,
+        // ChallengeParameters and Session only.
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        Map<String, Object> initResult = service.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice"));
+        assertNotNull(initResult.get("AvailableChallenges"),
+                "InitiateAuth should still advertise AvailableChallenges on SELECT_CHALLENGE");
+        String session = (String) initResult.get("Session");
+
+        Map<String, Object> result = service.respondToAuthChallenge(client.getClientId(), "SELECT_CHALLENGE",
+                session, Map.of("USERNAME", "alice", "ANSWER", "PASSWORD"));
+
+        assertEquals("PASSWORD", result.get("ChallengeName"));
+        assertFalse(result.containsKey("AvailableChallenges"),
+                "RespondToAuthChallenge does not declare AvailableChallenges: " + result.keySet());
+    }
+
+    @Test
+    void adminSelectChallengeResponseDoesNotCarryAvailableChallenges() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        Map<String, Object> initResult = service.adminInitiateAuth(pool.getId(), client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice"));
+        assertNotNull(initResult.get("AvailableChallenges"),
+                "AdminInitiateAuth should still advertise AvailableChallenges on SELECT_CHALLENGE");
+        String session = (String) initResult.get("Session");
+
+        Map<String, Object> result = service.adminRespondToAuthChallenge(pool.getId(), client.getClientId(),
+                "SELECT_CHALLENGE", session, Map.of("USERNAME", "alice", "ANSWER", "PASSWORD_SRP"));
+
+        assertEquals("PASSWORD_SRP", result.get("ChallengeName"));
+        assertFalse(result.containsKey("AvailableChallenges"),
+                "AdminRespondToAuthChallenge does not declare AvailableChallenges: " + result.keySet());
+    }
+
+    @Test
     void selectChallengeWithPasswordSrpAnswerAndSrpAReturnsPasswordVerifier() {
         UserPool pool = createPoolAndUser();
         UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
