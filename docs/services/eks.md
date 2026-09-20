@@ -256,7 +256,8 @@ back (for example Docker is unavailable), the cluster is marked `FAILED` instead
 |---|---|---|
 | `FLOCI_SERVICES_EKS_ENABLED` | `true` | Enable the EKS service |
 | `FLOCI_SERVICES_EKS_MOCK` | `false` | Metadata-only mode (no Docker) |
-| `FLOCI_SERVICES_EKS_DEFAULT_IMAGE` | `rancher/k3s:latest` | k3s Docker image |
+| `FLOCI_SERVICES_EKS_DEFAULT_IMAGE` | `rancher/k3s:latest` | k3s Docker image fallback |
+| `FLOCI_SERVICES_EKS_IMAGE_TEMPLATE` | *(unset)* | Format string for custom k3s images (e.g. `myregistry.io/k3s:v%s`), taking cluster version |
 | `FLOCI_SERVICES_EKS_API_SERVER_BASE_PORT` | `6500` | First port in the k3s API server range |
 | `FLOCI_SERVICES_EKS_API_SERVER_MAX_PORT` | `6599` | Last port in the k3s API server range |
 | `FLOCI_SERVICES_EKS_DATA_PATH` | `./data/eks` | Host bind-mount root for cluster data |
@@ -267,6 +268,35 @@ back (for example Docker is unavailable), the cluster is marked `FAILED` instead
 | `FLOCI_SERVICES_EKS_ECR_REGISTRY_MIRROR` | `true` | Inject a containerd `registries.yaml` so pods can pull images pushed to [Floci ECR](ecr.md) |
 | `FLOCI_SERVICES_EKS_IRSA_SIGNING_KEY` | `true` | Pass the cluster OIDC signing key to k3s so in-cluster projected service account tokens can assume IAM roles via Floci STS |
 | `FLOCI_SERVICES_EKS_IMDS` | `false` | Enable link-local IMDS (`169.254.169.254`) proxy in cluster containers |
+
+### Kubernetes versions and network configuration
+
+Floci supports standard AWS EKS Kubernetes versions (`1.xx`, 1.28 and above). Known releases are mapped to stable pinned k3s images, while newer or unpinned versions dynamically resolve to upstream k3s release images (`rancher/k3s:v<version>.0-k3s1`):
+
+- `1.28` (`rancher/k3s:v1.28.15-k3s1`)
+- `1.29` (`rancher/k3s:v1.29.14-k3s1`, default version metadata)
+- `1.30` (`rancher/k3s:v1.30.10-k3s1`)
+- `1.31` (`rancher/k3s:v1.31.5-k3s1`)
+- `1.32` (`rancher/k3s:v1.32.2-k3s1`)
+- `1.33` (`rancher/k3s:v1.33.1-k3s1`)
+- `1.34` (`rancher/k3s:v1.34.1-k3s1`)
+- `1.35` (`rancher/k3s:v1.35.0-k3s1`)
+- `1.36` (`rancher/k3s:v1.36.0-k3s1`)
+- `1.37+` (dynamically resolved to `rancher/k3s:v<version>.0-k3s1`)
+
+When `--version` is omitted, the cluster version defaults to `1.29` and the container image resolution uses `FLOCI_SERVICES_EKS_DEFAULT_IMAGE` (`rancher/k3s:latest` by default). When a version is explicitly requested, it maps to the corresponding pinned image or template.
+
+You can specify standard EKS `version` and `kubernetesNetworkConfig.serviceIpv4Cidr` when creating a cluster:
+
+```bash
+aws --endpoint-url http://localhost:4566 eks create-cluster \
+  --name my-cluster \
+  --role-arn arn:aws:iam::000000000000:role/eks-role \
+  --version 1.31 \
+  --kubernetes-network-config serviceIpv4Cidr=172.20.0.0/16
+```
+
+Floci validates that `serviceIpv4Cidr` falls within RFC 1918 private address ranges (`10.0.0.0/8`, `172.16.0.0/12`, or `192.168.0.0/16`), has a prefix length between `/12` and `/24`, and does not overlap with the VPC CIDR. When omitted, Floci defaults `serviceIpv4Cidr` to `10.100.0.0/16` (or `172.20.0.0/16` if `10.100.0.0/16` overlaps with the VPC). Internal pod CIDR (`--cluster-cidr`) defaults to `10.42.0.0/16` to avoid collisions with Docker bridge networks.
 
 ### Pulling images from Floci ECR
 

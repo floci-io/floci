@@ -74,6 +74,12 @@ public class Cluster {
     @JsonIgnore
     private int hostPort;
 
+    @JsonIgnore
+    private String podCidr;
+
+    @JsonIgnore
+    private boolean explicitVersion;
+
     /**
      * Resolved Docker container/volume name for this cluster's k3s resources. In-memory only
      * (never part of the AWS response shape): assigned when the container is started, or
@@ -148,4 +154,10 @@ public class Cluster {
 
     public String getDockerName() { return dockerName; }
     public void setDockerName(String dockerName) { this.dockerName = dockerName; }
+
+    public String getPodCidr() { return podCidr; }
+    public void setPodCidr(String podCidr) { this.podCidr = podCidr; }
+
+    public boolean isExplicitVersion() { return explicitVersion; }
+    public void setExplicitVersion(boolean explicitVersion) { this.explicitVersion = explicitVersion; }
 }

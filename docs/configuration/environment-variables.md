@@ -455,6 +455,7 @@ These services spawn Docker containers. They require access to the Docker socket
 | `FLOCI_SERVICES_EKS_MOCK` | `false` | When `true`, clusters are created instantly without a real container |
 | `FLOCI_SERVICES_EKS_PROVIDER` | `k3s` | Kubernetes provider (`k3s`) |
 | `FLOCI_SERVICES_EKS_DEFAULT_IMAGE` | `rancher/k3s:latest` | Docker image for EKS clusters |
+| `FLOCI_SERVICES_EKS_IMAGE_TEMPLATE` | _(none)_ | Format string for custom k3s images (e.g. `myrepo/k3s:v%s`), taking cluster version |
 | `FLOCI_SERVICES_EKS_API_SERVER_BASE_PORT` | `6500` | First port in the Kubernetes API server range |
 | `FLOCI_SERVICES_EKS_API_SERVER_MAX_PORT` | `6599` | Last port in the Kubernetes API server range |
 | `FLOCI_SERVICES_EKS_KEEP_RUNNING_ON_SHUTDOWN` | `false` | Keep EKS containers running when Floci stops |

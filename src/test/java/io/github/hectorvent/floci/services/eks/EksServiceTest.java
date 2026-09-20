@@ -26,6 +26,7 @@ import io.github.hectorvent.floci.services.eks.model.CreateNodeGroupRequest;
 import io.github.hectorvent.floci.services.eks.model.EncryptionConfig;
 import io.github.hectorvent.floci.services.eks.model.FargateProfile;
 import io.github.hectorvent.floci.services.eks.model.FargateProfileStatus;
+import io.github.hectorvent.floci.services.eks.model.KubernetesNetworkConfig;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
 import io.github.hectorvent.floci.services.eks.model.LogSetup;
 import io.github.hectorvent.floci.services.eks.model.Logging;
@@ -59,10 +60,12 @@ import static org.mockito.Mockito.when;
 class EksServiceTest {
 
     private EksService eksService;
+    private StorageFactory storageFactory;
+    private RegionResolver regionResolver;
 
     @BeforeEach
     void setUp() {
-        StorageFactory storageFactory = new StorageFactory(null, null) {
+        storageFactory = new StorageFactory(null, null) {
             @Override
             public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
                     TypeReference<Map<String, V>> typeReference) {
@@ -73,7 +76,7 @@ class EksServiceTest {
         EmulatorConfig config = testConfig();
         EksClusterManager clusterManager = null;
         Ec2Service ec2Service = null;
-        RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
+        regionResolver = new RegionResolver("us-east-1", "000000000000");
         eksService = new EksService(storageFactory, config, regionResolver, clusterManager, ec2Service,
                 new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class),
                 mock(EksPodIdentityAssociationService.class));
@@ -1748,5 +1751,221 @@ class EksServiceTest {
         Cluster described = service2.describeCluster("restart-cluster");
         assertEquals(created.getEncryptionConfig(), described.getEncryptionConfig());
         assertEquals(created.getLogging(), described.getLogging());
+    }
+
+    @Test
+    void createClusterWithSupportedVersion() {
+        CreateClusterRequest req = createTestClusterRequest("v30-cluster");
+        req.setVersion("1.30");
+
+        Cluster created = eksService.createCluster(req);
+        assertEquals("1.30", created.getVersion());
+
+        Cluster described = eksService.describeCluster("v30-cluster");
+        assertEquals("1.30", described.getVersion());
+    }
+
+    @Test
+    void createClusterWithFutureVersionSucceeds() {
+        CreateClusterRequest req = createTestClusterRequest("v37-cluster");
+        req.setVersion("1.37");
+
+        Cluster created = eksService.createCluster(req);
+        assertEquals("1.37", created.getVersion());
+
+        Cluster described = eksService.describeCluster("v37-cluster");
+        assertEquals("1.37", described.getVersion());
+    }
+
+    @Test
+    void createClusterWithoutVersionDefaultsTo129() {
+        CreateClusterRequest req = createTestClusterRequest("default-ver-cluster");
+        req.setVersion(null);
+        Cluster created = eksService.createCluster(req);
+        assertEquals("1.29", created.getVersion());
+        assertFalse(created.isExplicitVersion());
+    }
+
+    @Test
+    void createClusterWithInvalidVersionFormatThrowsInvalidParameterException() {
+        CreateClusterRequest req1 = createTestClusterRequest("v-prefix-cluster");
+        req1.setVersion("v1.30");
+        AwsException ex1 = assertThrows(AwsException.class, () -> eksService.createCluster(req1));
+        assertEquals("InvalidParameterException", ex1.getErrorCode());
+        assertTrue(ex1.getMessage().contains("The specified parameter version is not valid: v1.30"));
+
+        CreateClusterRequest req2 = createTestClusterRequest("patch-version-cluster");
+        req2.setVersion("1.30.2");
+        AwsException ex2 = assertThrows(AwsException.class, () -> eksService.createCluster(req2));
+        assertEquals("InvalidParameterException", ex2.getErrorCode());
+        assertTrue(ex2.getMessage().contains("The specified parameter version is not valid: 1.30.2"));
+    }
+
+    @Test
+    void createClusterWithUnsupportedVersionThrowsInvalidParameterException() {
+        CreateClusterRequest req = createTestClusterRequest("bad-version-cluster");
+        req.setVersion("1.15");
+
+        AwsException ex = assertThrows(AwsException.class, () -> eksService.createCluster(req));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertTrue(ex.getMessage().contains("Unsupported Kubernetes version '1.15'"));
+    }
+
+    @Test
+    void createClusterWithCustomServiceIpv4Cidr() {
+        CreateClusterRequest req = createTestClusterRequest("cidr-cluster");
+        KubernetesNetworkConfig netConfig = new KubernetesNetworkConfig();
+        netConfig.setServiceIpv4Cidr("172.20.0.0/16");
+        req.setKubernetesNetworkConfig(netConfig);
+
+        Cluster created = eksService.createCluster(req);
+        assertNotNull(created.getKubernetesNetworkConfig());
+        assertEquals("172.20.0.0/16", created.getKubernetesNetworkConfig().getServiceIpv4Cidr());
+
+        Cluster described = eksService.describeCluster("cidr-cluster");
+        assertEquals("172.20.0.0/16", described.getKubernetesNetworkConfig().getServiceIpv4Cidr());
+    }
+
+    @Test
+    void createClusterWithInvalidServiceIpv4CidrThrowsInvalidParameterException() {
+        CreateClusterRequest req = createTestClusterRequest("bad-cidr-cluster");
+        KubernetesNetworkConfig netConfig = new KubernetesNetworkConfig();
+        netConfig.setServiceIpv4Cidr("invalid-cidr");
+        req.setKubernetesNetworkConfig(netConfig);
+
+        AwsException ex = assertThrows(AwsException.class, () -> eksService.createCluster(req));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertTrue(ex.getMessage().contains("kubernetesNetworkConfig.serviceIpv4Cidr is not valid"));
+    }
+
+    @Test
+    void createClusterWithNonRfc1918ServiceIpv4CidrThrowsInvalidParameterException() {
+        CreateClusterRequest req = createTestClusterRequest("public-ip-cluster");
+        KubernetesNetworkConfig netConfig = new KubernetesNetworkConfig();
+        netConfig.setServiceIpv4Cidr("8.8.8.0/24");
+        req.setKubernetesNetworkConfig(netConfig);
+
+        AwsException ex = assertThrows(AwsException.class, () -> eksService.createCluster(req));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertTrue(ex.getMessage().contains("must fall within RFC 1918 private address ranges"));
+    }
+
+    @Test
+    void createClusterWithInvalidPrefixServiceIpv4CidrThrowsInvalidParameterException() {
+        CreateClusterRequest req1 = createTestClusterRequest("wide-cidr-cluster");
+        KubernetesNetworkConfig netConfig1 = new KubernetesNetworkConfig();
+        netConfig1.setServiceIpv4Cidr("10.0.0.0/8");
+        req1.setKubernetesNetworkConfig(netConfig1);
+
+        AwsException ex1 = assertThrows(AwsException.class, () -> eksService.createCluster(req1));
+        assertEquals("InvalidParameterException", ex1.getErrorCode());
+        assertTrue(ex1.getMessage().contains("must have a prefix between /12 and /24"));
+
+        CreateClusterRequest req2 = createTestClusterRequest("narrow-cidr-cluster");
+        KubernetesNetworkConfig netConfig2 = new KubernetesNetworkConfig();
+        netConfig2.setServiceIpv4Cidr("10.0.0.0/28");
+        req2.setKubernetesNetworkConfig(netConfig2);
+
+        AwsException ex2 = assertThrows(AwsException.class, () -> eksService.createCluster(req2));
+        assertEquals("InvalidParameterException", ex2.getErrorCode());
+        assertTrue(ex2.getMessage().contains("must have a prefix between /12 and /24"));
+    }
+
+    @Test
+    void createClusterUsesStandardK3sPodCidrToAvoidDockerCollisions() {
+        Ec2Service ec2 = realEc2Service();
+        ec2.ensureDefaultResources("us-east-1");
+        String vpcId = ec2.createVpc("us-east-1", "172.31.0.0/16", false).getVpcId();
+        String subnetId = ec2.createSubnet("us-east-1", vpcId, "172.31.1.0/24", "us-east-1a").getSubnetId();
+
+        EksService service = new EksService(storageFactory, testConfig(), regionResolver, null, ec2,
+                new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class),
+                mock(EksPodIdentityAssociationService.class));
+
+        CreateClusterRequest req = createTestClusterRequest("vpc-cidr-cluster");
+        ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
+        vpcConfig.setSubnetIds(List.of(subnetId));
+        req.setResourcesVpcConfig(vpcConfig);
+
+        Cluster cluster = service.createCluster(req);
+        assertEquals("10.42.0.0/16", cluster.getPodCidr());
+    }
+
+    @Test
+    void createClusterWithOverlappingServiceIpv4CidrThrowsInvalidParameterException() {
+        Ec2Service ec2 = realEc2Service();
+        ec2.ensureDefaultResources("us-east-1");
+        String vpcId = ec2.createVpc("us-east-1", "10.0.0.0/16", false).getVpcId();
+        String subnetId = ec2.createSubnet("us-east-1", vpcId, "10.0.1.0/24", "us-east-1a").getSubnetId();
+
+        EksService service = new EksService(storageFactory, testConfig(), regionResolver, null, ec2,
+                new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class),
+                mock(EksPodIdentityAssociationService.class));
+
+        CreateClusterRequest req = createTestClusterRequest("overlap-cidr-cluster");
+        ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
+        vpcConfig.setSubnetIds(List.of(subnetId));
+        req.setResourcesVpcConfig(vpcConfig);
+
+        KubernetesNetworkConfig netConfig = new KubernetesNetworkConfig();
+        netConfig.setServiceIpv4Cidr("10.0.50.0/24");
+        req.setKubernetesNetworkConfig(netConfig);
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.createCluster(req));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertTrue(ex.getMessage().contains("overlaps with the VPC CIDR"));
+    }
+
+    @Test
+    void createClusterWithDefaultServiceCidrOverlappingVpcPicksAlternative() {
+        Ec2Service ec2 = realEc2Service();
+        ec2.ensureDefaultResources("us-east-1");
+        String vpcId = ec2.createVpc("us-east-1", "10.100.0.0/16", false).getVpcId();
+        String subnetId = ec2.createSubnet("us-east-1", vpcId, "10.100.1.0/24", "us-east-1a").getSubnetId();
+
+        EksService service = new EksService(storageFactory, testConfig(), regionResolver, null, ec2,
+                new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class),
+                mock(EksPodIdentityAssociationService.class));
+
+        CreateClusterRequest req = createTestClusterRequest("alt-cidr-cluster");
+        ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
+        vpcConfig.setSubnetIds(List.of(subnetId));
+        req.setResourcesVpcConfig(vpcConfig);
+
+        Cluster cluster = service.createCluster(req);
+        assertEquals(EksService.ALTERNATIVE_SERVICE_IPV4_CIDR, cluster.getKubernetesNetworkConfig().getServiceIpv4Cidr());
+    }
+
+    @Test
+    void createClusterWithBothDefaultServiceCidrsOverlappingVpcThrowsInvalidParameterException() {
+        Ec2Service ec2 = realEc2Service();
+        ec2.ensureDefaultResources("us-east-1");
+        String vpcId = ec2.createVpc("us-east-1", "0.0.0.0/0", false).getVpcId();
+        String subnetId = ec2.createSubnet("us-east-1", vpcId, "0.0.0.0/24", "us-east-1a").getSubnetId();
+
+        EksService service = new EksService(storageFactory, testConfig(), regionResolver, null, ec2,
+                new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class),
+                mock(EksPodIdentityAssociationService.class));
+
+        CreateClusterRequest req = createTestClusterRequest("both-overlap-cluster");
+        ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
+        vpcConfig.setSubnetIds(List.of(subnetId));
+        req.setResourcesVpcConfig(vpcConfig);
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.createCluster(req));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertTrue(ex.getMessage().contains("Default service IPv4 CIDR blocks"));
+    }
+
+    @Test
+    void createClusterWithoutVpcDefaultsToK3sPodCidr() {
+        CreateClusterRequest req = createTestClusterRequest("no-vpc-cluster");
+        Cluster cluster = eksService.createCluster(req);
+        assertEquals("10.42.0.0/16", cluster.getPodCidr());
     }
 }

@@ -2799,6 +2799,13 @@ public interface EmulatorConfig {
         @WithDefault("rancher/k3s:latest")
         String defaultImage();
 
+        /**
+         * Optional image template for k3s images when version is specified.
+         * For example: "custom-registry.internal/k3s:v%s".
+         * If omitted, Floci maps supported Kubernetes versions to stable upstream k3s images.
+         */
+        Optional<String> imageTemplate();
+
         @WithDefault("6500")
         int apiServerBasePort();
 

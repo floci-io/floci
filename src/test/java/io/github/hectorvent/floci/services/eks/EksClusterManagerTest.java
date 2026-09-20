@@ -1137,4 +1137,164 @@ class EksClusterManagerTest {
             assertEquals("pub-key-3", Files.readString(files3.publicKeyPath()));
         }
     }
+
+    @Nested
+    class NativeClusterRuntime {
+
+        private EmulatorConfig config;
+        private EmulatorConfig.EksServiceConfig eks;
+        private ContainerLifecycleManager lifecycleManager;
+        private ContainerBuilder containerBuilder;
+        private ContainerBuilder.Builder builder;
+        private PortAllocator portAllocator;
+        private EksClusterManager manager;
+
+        @BeforeEach
+        void setUp() {
+            config = Mockito.mock(EmulatorConfig.class);
+            EmulatorConfig.ServicesConfig services = Mockito.mock(EmulatorConfig.ServicesConfig.class);
+            eks = Mockito.mock(EmulatorConfig.EksServiceConfig.class);
+            when(config.services()).thenReturn(services);
+            when(services.eks()).thenReturn(eks);
+            when(eks.defaultImage()).thenReturn("rancher/k3s:latest");
+            when(eks.imageTemplate()).thenReturn(Optional.empty());
+            when(eks.apiServerBasePort()).thenReturn(6500);
+            when(eks.apiServerMaxPort()).thenReturn(6599);
+            when(eks.dockerNetwork()).thenReturn(Optional.empty());
+            when(eks.disableCni()).thenReturn(false);
+            when(eks.iamAuthWebhook()).thenReturn(false);
+            when(eks.ecrRegistryMirror()).thenReturn(false);
+            when(eks.imds()).thenReturn(false);
+            when(eks.endpointMode()).thenReturn("host");
+            when(config.defaultAccountId()).thenReturn("000000000000");
+
+            lifecycleManager = Mockito.mock(ContainerLifecycleManager.class);
+            when(lifecycleManager.create(any())).thenReturn("container-id");
+            when(lifecycleManager.startCreated(any(), any())).thenReturn(
+                    new ContainerInfo("container-id", Map.of()));
+
+            containerBuilder = Mockito.mock(ContainerBuilder.class);
+            builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
+            when(containerBuilder.newContainer(anyString())).thenReturn(builder);
+            when(builder.build()).thenReturn(Mockito.mock(ContainerSpec.class));
+
+            portAllocator = Mockito.mock(PortAllocator.class);
+            when(portAllocator.allocate(6500, 6599)).thenReturn(6500);
+
+            RegionResolver regionResolver = Mockito.mock(RegionResolver.class);
+            when(regionResolver.getAccountId()).thenReturn("000000000000");
+            when(regionResolver.getDefaultRegion()).thenReturn("us-east-1");
+
+            manager = new EksClusterManager(containerBuilder, lifecycleManager,
+                    Mockito.mock(ContainerDetector.class), portAllocator,
+                    Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
+                    config, regionResolver, null, Mockito.mock(EksOidcService.class));
+        }
+
+        @Test
+        void resolveClusterImageMapsSupportedVersions() {
+            Cluster cluster = new Cluster();
+            cluster.setName("test-cluster");
+            cluster.setExplicitVersion(true);
+
+            cluster.setVersion("1.28");
+            assertEquals("rancher/k3s:v1.28.15-k3s1", manager.resolveClusterImage(cluster));
+
+            cluster.setVersion("1.29");
+            assertEquals("rancher/k3s:v1.29.14-k3s1", manager.resolveClusterImage(cluster));
+
+            cluster.setVersion("1.30");
+            assertEquals("rancher/k3s:v1.30.10-k3s1", manager.resolveClusterImage(cluster));
+
+            cluster.setVersion("1.31");
+            assertEquals("rancher/k3s:v1.31.5-k3s1", manager.resolveClusterImage(cluster));
+
+            cluster.setVersion("1.32");
+            assertEquals("rancher/k3s:v1.32.2-k3s1", manager.resolveClusterImage(cluster));
+
+            cluster.setVersion("1.33");
+            assertEquals("rancher/k3s:v1.33.1-k3s1", manager.resolveClusterImage(cluster));
+
+            cluster.setVersion("1.34");
+            assertEquals("rancher/k3s:v1.34.1-k3s1", manager.resolveClusterImage(cluster));
+
+            cluster.setVersion("1.35");
+            assertEquals("rancher/k3s:v1.35.0-k3s1", manager.resolveClusterImage(cluster));
+
+            cluster.setVersion("1.36");
+            assertEquals("rancher/k3s:v1.36.0-k3s1", manager.resolveClusterImage(cluster));
+        }
+
+        @Test
+        void resolveClusterImageDynamicallyFormatsUnmappedVersions() {
+            Cluster cluster = new Cluster();
+            cluster.setName("future-cluster");
+            cluster.setExplicitVersion(true);
+            cluster.setVersion("1.37");
+
+            assertEquals("rancher/k3s:v1.37.0-k3s1", manager.resolveClusterImage(cluster));
+        }
+
+        @Test
+        void resolveClusterImageFallsBackToDefaultWhenVersionNullOrDefaultWithoutExplicit() {
+            Cluster cluster = new Cluster();
+            cluster.setName("test-cluster");
+            cluster.setVersion(null);
+            assertEquals("rancher/k3s:latest", manager.resolveClusterImage(cluster));
+
+            cluster.setVersion("1.29");
+            cluster.setExplicitVersion(false);
+            assertEquals("rancher/k3s:latest", manager.resolveClusterImage(cluster));
+
+            cluster.setExplicitVersion(true);
+            assertEquals("rancher/k3s:v1.29.14-k3s1", manager.resolveClusterImage(cluster));
+        }
+
+        @Test
+        void resolveClusterImageUsesConfiguredImageTemplate() {
+            when(eks.imageTemplate()).thenReturn(Optional.of("internal.registry.io/k3s:v%s-custom"));
+
+            Cluster cluster = new Cluster();
+            cluster.setName("test-cluster");
+            cluster.setVersion("1.31");
+
+            assertEquals("internal.registry.io/k3s:v1.31-custom", manager.resolveClusterImage(cluster));
+        }
+
+        @Test
+        void defaultPodCidrConstantIsK3sStandard() {
+            assertEquals("10.42.0.0/16", EksClusterManager.DEFAULT_POD_CIDR);
+        }
+
+        @Test
+        void buildServerArgsPropagatesServiceAndPodCidr() {
+            List<String> args = EksClusterManager.buildServerArgs(false, "172.20.0.0/16", "10.44.0.0/16");
+            assertTrue(args.contains("--service-cidr=172.20.0.0/16"));
+            assertTrue(args.contains("--cluster-cidr=10.44.0.0/16"));
+            assertFalse(args.contains("--flannel-backend=none"));
+        }
+
+        @Test
+        void buildServerArgsWithDisableCniAndCidrs() {
+            List<String> args = EksClusterManager.buildServerArgs(true, "10.100.0.0/16", "10.42.0.0/16");
+            assertTrue(args.contains("--flannel-backend=none"));
+            assertTrue(args.contains("--disable-network-policy"));
+            assertTrue(args.contains("--disable-kube-proxy"));
+            assertTrue(args.contains("--service-cidr=10.100.0.0/16"));
+            assertTrue(args.contains("--cluster-cidr=10.42.0.0/16"));
+        }
+
+        @Test
+        void startClusterCleansUpContainerOnStartFailure() {
+            when(lifecycleManager.startCreated(any(), any()))
+                    .thenThrow(new RuntimeException("Container failed to boot"));
+
+            Cluster cluster = new Cluster();
+            cluster.setName("fail-cluster");
+            cluster.setVersion("1.30");
+
+            assertThrows(RuntimeException.class, () -> manager.startCluster(cluster));
+            verify(lifecycleManager, Mockito.times(2)).removeIfExists("floci-eks-fail-cluster");
+        }
+    }
 }

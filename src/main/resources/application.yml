@@ -591,6 +591,7 @@ floci:
       mock: false
       provider: k3s
       default-image: "rancher/k3s:latest"
+      # image-template: "myregistry.io/k3s:v%s" # optional custom image format template taking cluster version
       api-server-base-port: 6500
       api-server-max-port: 6599
       data-path: ./data/eks
