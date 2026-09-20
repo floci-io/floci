@@ -86,9 +86,14 @@ class CloudFormationIntegrationTest {
      * or after ten seconds, so a test can assert on the deleted resources afterwards.
      */
     private static void awaitStackDeleted(String stackNameOrArn) {
+        awaitStackStatus(stackNameOrArn, "DELETE_COMPLETE");
+    }
+
+    private static void awaitStackStatus(String stackNameOrArn, String expectedStatus) {
         long deadline = System.currentTimeMillis() + 10_000;
+        String statusXml = "";
         while (System.currentTimeMillis() < deadline) {
-            String statusXml = given()
+            statusXml = given()
                 .contentType("application/x-www-form-urlencoded")
                 .formParam("Action", "DescribeStacks")
                 .formParam("StackName", stackNameOrArn)
@@ -96,18 +101,23 @@ class CloudFormationIntegrationTest {
                 .post("/")
             .then()
                 .extract().body().asString();
-            assertThat(statusXml, not(containsString("<StackStatus>DELETE_FAILED</StackStatus>")));
-            if (statusXml.contains("<StackStatus>DELETE_COMPLETE</StackStatus>") || statusXml.contains("does not exist")) {
+            if ("DELETE_COMPLETE".equals(expectedStatus)) {
+                assertThat(statusXml, not(containsString("<StackStatus>DELETE_FAILED</StackStatus>")));
+                if (statusXml.contains("<StackStatus>DELETE_COMPLETE</StackStatus>")
+                        || statusXml.contains("does not exist")) {
+                    return;
+                }
+            } else if (statusXml.contains("<StackStatus>" + expectedStatus + "</StackStatus>")) {
                 return;
             }
             try {
-                Thread.sleep(200);
+                Thread.sleep(50);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                throw new AssertionError("Interrupted while waiting for stack " + stackNameOrArn + " to be deleted", e);
+                throw new AssertionError("Interrupted while waiting for stack " + stackNameOrArn + " to reach " + expectedStatus, e);
             }
         }
-        throw new AssertionError("Stack " + stackNameOrArn + " did not reach DELETE_COMPLETE within timeout");
+        assertThat(statusXml, containsString("<StackStatus>" + expectedStatus + "</StackStatus>"));
     }
 
     private static String firstPhysicalResourceId(String xml) {
@@ -4165,15 +4175,7 @@ class CloudFormationIntegrationTest {
             .statusCode(200);
 
         // 4. Stack should reach CREATE_COMPLETE
-        given()
-            .contentType("application/x-www-form-urlencoded")
-            .formParam("Action", "DescribeStacks")
-            .formParam("StackName", "cfn-cs-arn-stack")
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
-            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+        awaitStackStatus("cfn-cs-arn-stack", "CREATE_COMPLETE");
     }
 
     @Test
@@ -10881,12 +10883,7 @@ class CloudFormationIntegrationTest {
             .formParam("ChangeSetName", "deploy-attempt-2")
         .when().post("/").then().statusCode(200);
 
-        given()
-            .contentType("application/x-www-form-urlencoded")
-            .formParam("Action", "DescribeStacks")
-            .formParam("StackName", stackName)
-        .when().post("/")
-        .then().statusCode(200).body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+        awaitStackStatus(stackName, "CREATE_COMPLETE");
     }
 
     @Test
