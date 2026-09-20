@@ -82,6 +82,14 @@ public final class CfnRollback {
     public static final String DASHBOARD_UPDATE_SNAPSHOT_ATTR = "__FlociDashboardUpdateSnapshot";
 
     /**
+     * Holds the complete prior metric filter, identity, name mode and per-address mutation outcomes
+     * and ownership states.
+     * Written before either an in-place put or a delete-then-create replacement; retained across
+     * failed restoration attempts and spent only after rollback or commit succeeds.
+     */
+    public static final String METRIC_FILTER_UPDATE_SNAPSHOT_ATTR = "__FlociMetricFilterUpdateSnapshot";
+
+    /**
      * Holds the pipe a rename displaced: the name it still lives under, the region that addresses
      * it, how many times deleting it has been attempted, and when the replacement was created.
      * Written by {@code PipesCfnProvisioner} when it creates the replacement, and spent by whichever

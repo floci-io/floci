@@ -11,13 +11,18 @@ import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.codeartifact.CodeArtifactService.DomainView;
+import io.github.hectorvent.floci.services.codeartifact.CodeArtifactService.PackageVersionAssetResult;
+import io.github.hectorvent.floci.services.codeartifact.CodeArtifactService.PublishPackageVersionResult;
 import io.github.hectorvent.floci.services.codeartifact.CodeArtifactService.ResourcePolicy;
+import io.github.hectorvent.floci.services.codeartifact.model.CodeArtifactPackageVersion;
 import io.github.hectorvent.floci.services.codeartifact.model.CodeArtifactRepository;
 import io.github.hectorvent.floci.services.codeartifact.model.ExternalConnection;
+import io.github.hectorvent.floci.services.codeartifact.model.PackageAsset;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.GET;
+import jakarta.ws.rs.HeaderParam;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.PUT;
 import jakarta.ws.rs.Path;
@@ -272,6 +277,64 @@ public class CodeArtifactController {
         return ok(single("repository", repositoryDescription(r)));
     }
 
+    // ------------------------------------------------------- package versions
+
+    @POST
+    @Path("/v1/package/version/publish")
+    @Consumes(MediaType.WILDCARD)
+    public Response publishPackageVersion(@Context HttpHeaders headers, @QueryParam("domain") String domain,
+                                           @QueryParam("domain-owner") String domainOwner,
+                                           @QueryParam("repository") String repository,
+                                           @QueryParam("format") String format,
+                                           @QueryParam("namespace") String namespace,
+                                           @QueryParam("package") String packageName,
+                                           @QueryParam("version") String version,
+                                           @QueryParam("asset") String assetName,
+                                           @QueryParam("unfinished") String unfinished,
+                                           @HeaderParam("x-amz-content-sha256") String assetSha256,
+                                           byte[] body) {
+        String region = regionResolver.resolveRegion(headers);
+        PublishPackageVersionResult result = service.publishPackageVersion(region, domain, domainOwner, repository,
+                format, namespace, packageName, version, assetName, assetSha256, unfinished, body);
+        return ok(publishPackageVersionResponse(result));
+    }
+
+    @GET
+    @Path("/v1/package/version")
+    public Response describePackageVersion(@Context HttpHeaders headers, @QueryParam("domain") String domain,
+                                            @QueryParam("domain-owner") String domainOwner,
+                                            @QueryParam("repository") String repository,
+                                            @QueryParam("format") String format,
+                                            @QueryParam("namespace") String namespace,
+                                            @QueryParam("package") String packageName,
+                                            @QueryParam("version") String version) {
+        String region = regionResolver.resolveRegion(headers);
+        CodeArtifactPackageVersion pv = service.describePackageVersion(region, domain, domainOwner, repository,
+                format, namespace, packageName, version);
+        return ok(single("packageVersion", packageVersionDescription(pv)));
+    }
+
+    @GET
+    @Path("/v1/package/version/asset")
+    public Response getPackageVersionAsset(@Context HttpHeaders headers, @QueryParam("domain") String domain,
+                                            @QueryParam("domain-owner") String domainOwner,
+                                            @QueryParam("repository") String repository,
+                                            @QueryParam("format") String format,
+                                            @QueryParam("namespace") String namespace,
+                                            @QueryParam("package") String packageName,
+                                            @QueryParam("version") String version,
+                                            @QueryParam("asset") String assetName,
+                                            @QueryParam("revision") String revision) {
+        String region = regionResolver.resolveRegion(headers);
+        PackageVersionAssetResult result = service.getPackageVersionAsset(region, domain, domainOwner, repository,
+                format, namespace, packageName, version, assetName, revision);
+        return Response.ok(result.asset().getContent(), MediaType.APPLICATION_OCTET_STREAM)
+                .header("X-AssetName", result.asset().getName())
+                .header("X-PackageVersion", version)
+                .header("X-PackageVersionRevision", result.packageVersionRevision())
+                .build();
+    }
+
     // -------------------------------------------------------------------- tags
 
     @POST
@@ -375,6 +438,48 @@ public class CodeArtifactController {
             response.put("nextToken", page.nextToken());
         }
         return response;
+    }
+
+    private ObjectNode publishPackageVersionResponse(PublishPackageVersionResult result) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("format", result.packageVersion().getFormat());
+        if (result.packageVersion().getNamespace() != null) {
+            node.put("namespace", result.packageVersion().getNamespace());
+        }
+        node.put("package", result.packageVersion().getPackageName());
+        node.put("version", result.packageVersion().getVersion());
+        node.put("versionRevision", result.packageVersion().getRevision());
+        node.put("status", result.packageVersion().getStatus());
+        node.set("asset", assetSummary(result.asset()));
+        return node;
+    }
+
+    private ObjectNode packageVersionDescription(CodeArtifactPackageVersion pv) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("format", pv.getFormat());
+        if (pv.getNamespace() != null) {
+            node.put("namespace", pv.getNamespace());
+        }
+        node.put("packageName", pv.getPackageName());
+        node.put("version", pv.getVersion());
+        node.put("revision", pv.getRevision());
+        node.put("status", pv.getStatus());
+        if (pv.getPublishedTime() != null) {
+            node.put("publishedTime", pv.getPublishedTime());
+        }
+        ObjectNode origin = node.putObject("origin");
+        origin.put("originType", "INTERNAL");
+        node.putArray("licenses");
+        return node;
+    }
+
+    private ObjectNode assetSummary(PackageAsset asset) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("name", asset.getName());
+        node.put("size", asset.getSize());
+        ObjectNode hashes = node.putObject("hashes");
+        asset.getHashes().forEach(hashes::put);
+        return node;
     }
 
     private ObjectNode resourcePolicy(ResourcePolicy policy) {

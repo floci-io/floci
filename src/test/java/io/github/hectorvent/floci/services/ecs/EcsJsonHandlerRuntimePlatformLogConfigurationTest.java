@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ecs;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.ecs.container.HostVolumePolicy;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import jakarta.ws.rs.core.Response;
@@ -12,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -148,5 +150,90 @@ class EcsJsonHandlerRuntimePlatformLogConfigurationTest {
                 "runtimePlatform must stay absent for a task definition that never set it");
         assertTrue(td.path("containerDefinitions").get(0).path("logConfiguration").isMissingNode(),
                 "logConfiguration must stay absent for a container that never set it");
+    }
+
+    @Test
+    void registerTaskDefinitionRoundTripsFirelensConfiguration() throws Exception {
+        String requestJson = """
+                {
+                  "family": "firelens-family",
+                  "containerDefinitions": [
+                    {
+                      "name": "log_router",
+                      "image": "amazon/aws-for-fluent-bit:stable",
+                      "firelensConfiguration": {
+                        "type": "fluentbit",
+                        "options": {
+                          "enable-ecs-log-metadata": "true",
+                          "config-file-type": "file",
+                          "config-file-value": "/extra.conf"
+                        }
+                      }
+                    }
+                  ]
+                }
+                """;
+        JsonNode request = objectMapper.readTree(requestJson);
+
+        Response response = handler.handle("RegisterTaskDefinition", request, "us-east-1");
+        JsonNode firelens = objectMapper.valueToTree(response.getEntity())
+                .path("taskDefinition").path("containerDefinitions").get(0).path("firelensConfiguration");
+
+        assertEquals("fluentbit", firelens.path("type").asText());
+        assertEquals("true", firelens.path("options").path("enable-ecs-log-metadata").asText());
+        assertEquals("file", firelens.path("options").path("config-file-type").asText());
+        assertEquals("/extra.conf", firelens.path("options").path("config-file-value").asText());
+    }
+
+    @Test
+    void registerTaskDefinitionRejectsFirelensConfigurationWithMissingType() throws Exception {
+        JsonNode request = objectMapper.readTree("""
+                {
+                  "family": "missing-type",
+                  "containerDefinitions": [
+                    {
+                      "name": "log_router",
+                      "image": "amazon/aws-for-fluent-bit:stable",
+                      "firelensConfiguration": {
+                        "options": {"enable-ecs-log-metadata": "true"}
+                      }
+                    }
+                  ]
+                }
+                """);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                handler.handle("RegisterTaskDefinition", request, "us-east-1"));
+        assertEquals("ClientException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("1 validation error detected: Value null at "
+                        + "'containerDefinitions.1.member.firelensConfiguration.type' failed to satisfy "
+                        + "constraint: Member must not be null",
+                ex.getMessage());
+    }
+
+    @Test
+    void registerTaskDefinitionRejectsFirelensConfigurationWithUnknownType() throws Exception {
+        JsonNode request = objectMapper.readTree("""
+                {
+                  "family": "unknown-type",
+                  "containerDefinitions": [
+                    {
+                      "name": "log_router",
+                      "image": "amazon/aws-for-fluent-bit:stable",
+                      "firelensConfiguration": {"type": "foo"}
+                    }
+                  ]
+                }
+                """);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                handler.handle("RegisterTaskDefinition", request, "us-east-1"));
+        assertEquals("ClientException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("1 validation error detected: Value 'foo' at "
+                        + "'containerDefinitions.1.member.firelensConfiguration.type' failed to satisfy "
+                        + "constraint: Member must satisfy enum value set: [fluentd, fluentbit]",
+                ex.getMessage());
     }
 }

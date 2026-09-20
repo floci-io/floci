@@ -122,6 +122,28 @@ public class Route53Controller {
         }
     }
 
+    @POST
+    @Path("/hostedzone/{Id}")
+    public Response updateHostedZoneComment(@PathParam("Id") String id, String body) {
+        try {
+            if (body != null && !body.isBlank()
+                    && !"UpdateHostedZoneCommentRequest".equals(XmlParser.rootElementName(body))) {
+                throw new AwsException("InvalidInput",
+                        "The request body must be an UpdateHostedZoneCommentRequest document.", 400);
+            }
+            String comment = XmlParser.extractFirst(body, "Comment", null);
+            HostedZone zone = service.updateHostedZoneComment(id, comment);
+            String xml = new XmlBuilder()
+                    .start("UpdateHostedZoneCommentResponse", NS)
+                    .raw(xmlHostedZone(zone))
+                    .end("UpdateHostedZoneCommentResponse")
+                    .build();
+            return Response.ok(xml, XML).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
     @DELETE
     @Path("/hostedzone/{Id}")
     public Response deleteHostedZone(@PathParam("Id") String id) {

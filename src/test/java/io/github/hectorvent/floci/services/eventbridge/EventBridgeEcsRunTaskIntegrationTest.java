@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.eventbridge;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -198,7 +199,7 @@ class EventBridgeEcsRunTaskIntegrationTest {
             .extract().path("taskDefinition.taskDefinitionArn");
     }
 
-    private static io.restassured.specification.RequestSpecification ecs(String action) {
+    private static RequestSpecification ecs(String action) {
         return given()
                 .contentType(EVENT_BRIDGE_CONTENT_TYPE)
                 .header("X-Amz-Target", ECS_TARGET_PREFIX + action);

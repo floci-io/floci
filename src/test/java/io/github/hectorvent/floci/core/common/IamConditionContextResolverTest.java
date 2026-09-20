@@ -19,8 +19,10 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.io.ByteArrayInputStream;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
@@ -248,7 +250,7 @@ class IamConditionContextResolverTest {
 
         resolver.resolve("s3", "s3:PutBucketTagging", containerRequest);
 
-        var restored = org.mockito.ArgumentCaptor.forClass(java.io.InputStream.class);
+        ArgumentCaptor<InputStream> restored = ArgumentCaptor.forClass(InputStream.class);
         verify(containerRequest).setEntityStream(restored.capture());
         assertArrayEquals(body.getBytes(StandardCharsets.UTF_8), restored.getValue().readAllBytes());
     }
@@ -486,6 +488,51 @@ class IamConditionContextResolverTest {
         // The handler terminates i-denied, the first value, so that is what must be authorized.
         assertEquals(Decision.DENY, decisionForEveryTarget(policy, "ec2:TerminateInstances",
                 formRequest("Action=TerminateInstances&InstanceId.1=i-denied&InstanceId.1=i-allowed")));
+    }
+
+    @Test
+    void globalKeysArePopulatedForEveryServiceAndAction() {
+        Map<String, List<String>> conditions = IamConditionContextResolver.withGlobalContext(
+                null, "arn:aws:lambda:eu-west-2:000000000000:function:task", "eu-west-2",
+                "000000000000", "000000000000");
+
+        assertEquals(List.of("000000000000"), conditions.get("aws:ResourceAccount"));
+        assertEquals(List.of("000000000000"), conditions.get("aws:PrincipalAccount"));
+        assertEquals(List.of("eu-west-2"), conditions.get("aws:RequestedRegion"));
+    }
+
+    @Test
+    void resourceAccountComesFromTheResourceArnWhenItCarriesOne() {
+        Map<String, List<String>> conditions = IamConditionContextResolver.withGlobalContext(
+                Map.of("service:key", List.of("value")),
+                "arn:aws:sqs:eu-west-2:111111111111:queue", "eu-west-2", "000000000000", "000000000000");
+
+        assertEquals(List.of("111111111111"), conditions.get("aws:ResourceAccount"));
+        assertEquals(List.of("value"), conditions.get("service:key"));
+        assertFalse(conditions.containsKey("aws:SecureTransport"));
+    }
+
+    @Test
+    void resourceAccountIsTheBucketOwnerWhenAnS3ArnCarriesNoAccount() {
+        // S3 bucket and object ARNs have an empty account segment by design, so the owner has to
+        // come from service state. Falling back to the caller would make a cross-account bucket
+        // look like the caller's own.
+        Map<String, List<String>> conditions = IamConditionContextResolver.withGlobalContext(
+                null, "arn:aws:s3:::partner-bucket/report.csv", "eu-west-2",
+                "000000000000", "111111111111");
+
+        assertEquals(List.of("111111111111"), conditions.get("aws:ResourceAccount"));
+        assertEquals(List.of("000000000000"), conditions.get("aws:PrincipalAccount"));
+    }
+
+    @Test
+    void resourceAccountIsOmittedWhenNeitherTheArnNorServiceStateKnowsTheOwner() {
+        Map<String, List<String>> conditions = IamConditionContextResolver.withGlobalContext(
+                null, "arn:aws:s3:::orphan-bucket", "eu-west-2", "000000000000", null);
+
+        assertFalse(conditions.containsKey("aws:ResourceAccount"),
+                "guessing the owner would authorize cross-account access a Condition meant to refuse");
+        assertEquals(List.of("000000000000"), conditions.get("aws:PrincipalAccount"));
     }
 
     private Decision decisionForEveryTarget(String policy, String action, ContainerRequestContext request) {

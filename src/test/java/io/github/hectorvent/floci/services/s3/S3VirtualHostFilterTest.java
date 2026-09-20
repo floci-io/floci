@@ -258,25 +258,6 @@ class S3VirtualHostFilterTest {
     // --- Host resolution: HTTP/1.1 Host header vs HTTP/2 :authority fallback ---
 
     @Test
-    void resolveHostPrefersHostHeaderOverUriAuthority() {
-        URI uri = URI.create("https://my-bucket.s3.us-east-1.localhost:4566/key.txt");
-        assertEquals("my-bucket.localhost:4566", S3VirtualHostFilter.resolveHost("my-bucket.localhost:4566", uri));
-    }
-
-    @Test
-    void resolveHostFallsBackToUriAuthorityWhenHostHeaderAbsent() {
-        // HTTP/2 request: no Host header, authority carried by the URI (:authority).
-        URI uri = URI.create("https://my-bucket.s3.us-east-1.localhost:4566/key.txt");
-        assertEquals("my-bucket.s3.us-east-1.localhost:4566", S3VirtualHostFilter.resolveHost(null, uri));
-    }
-
-    @Test
-    void resolveHostReturnsNullWhenNeitherAvailable() {
-        assertNull(S3VirtualHostFilter.resolveHost(null, null));
-        assertNull(S3VirtualHostFilter.resolveHost(null, URI.create("/relative/path")));
-    }
-
-    @Test
     void http2VirtualHostedRequestResolvesBucketWithoutHostHeader() {
         // Regression for #1866: over HTTP/2 the Host header is null, so the bucket must
         // be recovered from the URI authority instead of falling through to path-style.

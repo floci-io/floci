@@ -333,58 +333,67 @@ public class WafV2Service {
     // ──────────────────────────── Tags ────────────────────────────
 
     public Map<String, String> listTagsForResource(String resourceArn) {
-        return taggable(resourceArn).getTags();
+        return tagsOf(taggable(resourceArn));
     }
 
     public void tagResource(String resourceArn, Map<String, String> tags) {
         Object resource = taggable(resourceArn);
-        applyTagged(resource, r -> r.getTags().putAll(tags));
+        tagsOf(resource).putAll(tags);
+        persistTagged(resource);
     }
 
     public void untagResource(String resourceArn, List<String> keys) {
         Object resource = taggable(resourceArn);
-        applyTagged(resource, r -> keys.forEach(r.getTags()::remove));
+        keys.forEach(tagsOf(resource)::remove);
+        persistTagged(resource);
     }
 
     // ──────────────────────────── Helpers ────────────────────────────
 
-    private interface Tagged { Map<String, String> getTags(); }
-
-    private Tagged taggable(String resourceArn) {
+    private Object taggable(String resourceArn) {
         if (resourceArn == null) {
             throw new AwsException("WAFInvalidParameterException", "ResourceARN is required.", 400);
         }
         WebAcl acl = scanArn(webAclStore, resourceArn);
         if (acl != null) {
-            return acl::getTags;
+            return acl;
         }
         IpSet ip = scanArn(ipSetStore, resourceArn);
         if (ip != null) {
-            return ip::getTags;
+            return ip;
         }
         RegexPatternSet rx = scanArn(regexStore, resourceArn);
         if (rx != null) {
-            return rx::getTags;
+            return rx;
         }
         RuleGroup rg = scanArn(ruleGroupStore, resourceArn);
         if (rg != null) {
-            return rg::getTags;
+            return rg;
         }
         throw new AwsException("WAFNonexistentItemException", "Resource not found: " + resourceArn, 404);
     }
 
-    private void applyTagged(Object resource, java.util.function.Consumer<Tagged> mutation) {
+    private Map<String, String> tagsOf(Object resource) {
         if (resource instanceof WebAcl a) {
-            mutation.accept(a::getTags);
+            return a.getTags();
+        } else if (resource instanceof IpSet i) {
+            return i.getTags();
+        } else if (resource instanceof RegexPatternSet r) {
+            return r.getTags();
+        } else if (resource instanceof RuleGroup g) {
+            return g.getTags();
+        }
+        throw new AwsException("WAFNonexistentItemException", "Resource not found.", 404);
+    }
+
+    private void persistTagged(Object resource) {
+        if (resource instanceof WebAcl a) {
             webAclStore.put(key(a.getScope(), a.getId()), a);
         } else if (resource instanceof IpSet i) {
-            mutation.accept(i::getTags);
             ipSetStore.put(key(i.getScope(), i.getId()), i);
         } else if (resource instanceof RegexPatternSet r) {
-            mutation.accept(r::getTags);
             regexStore.put(key(r.getScope(), r.getId()), r);
         } else if (resource instanceof RuleGroup g) {
-            mutation.accept(g::getTags);
             ruleGroupStore.put(key(g.getScope(), g.getId()), g);
         }
     }

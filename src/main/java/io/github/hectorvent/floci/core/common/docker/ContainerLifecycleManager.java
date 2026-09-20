@@ -40,6 +40,7 @@ import java.util.OptionalInt;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
 
 /**
@@ -58,6 +59,8 @@ public class ContainerLifecycleManager {
     private static final Pattern KEYRING_QUOTA_PATTERN =
             Pattern.compile("join keyctl.*disk quota exceeded", Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
 
+    private static final long NANO_CPUS_PER_CPU = 1_000_000_000L;
+
     private final DockerClient dockerClient;
     private final ImageCacheService imageCacheService;
     private final ContainerDetector containerDetector;
@@ -66,6 +69,9 @@ public class ContainerLifecycleManager {
 
     /** Volumes whose shared-ownership root has already been initialised this process (run-once guard). */
     private final ConcurrentHashMap<String, Boolean> initializedSharedVolumes = new ConcurrentHashMap<>();
+
+    /** Daemon CPU count, resolved on first use. Null until then, so that empty can mean "unknown". */
+    private final AtomicReference<OptionalInt> hostCpuCount = new AtomicReference<>();
 
     @Inject
     public ContainerLifecycleManager(DockerClient dockerClient,
@@ -86,12 +92,13 @@ public class ContainerLifecycleManager {
      * filesystem modifications are needed between creation and start.
      *
      * @param spec the container specification
-     * @return information about the created container including resolved endpoints
+     * @return information about the created container including resolved endpoints and published ports
      */
     public ContainerInfo createAndStart(ContainerSpec spec) {
         String containerId = create(spec);
         try {
-            return startCreated(containerId, spec);
+            ContainerInfo info = startCreated(containerId, spec);
+            return withPublishedHostPorts(info, spec);
         } catch (Exception e) {
             // A failed start (e.g. host-port conflict) must not leak the created
             // container: retrying callers would accumulate Created containers and
@@ -245,6 +252,22 @@ public class ContainerLifecycleManager {
 
         Map<Integer, EndpointInfo> endpoints = resolveEndpoints(containerId, spec);
         return new ContainerInfo(containerId, endpoints);
+    }
+
+    private ContainerInfo withPublishedHostPorts(ContainerInfo info, ContainerSpec spec) {
+        if (spec.portBindings() == null || spec.portBindings().isEmpty()) {
+            return info;
+        }
+
+        InspectContainerResponse inspect = dockerClient.inspectContainerCmd(info.containerId()).exec();
+        Map<Integer, Integer> publishedHostPorts = new HashMap<>();
+        for (Integer containerPort : spec.portBindings().keySet()) {
+            OptionalInt published = readPublishedHostPort(inspect, containerPort);
+            if (published.isPresent()) {
+                publishedHostPorts.put(containerPort, published.getAsInt());
+            }
+        }
+        return new ContainerInfo(info.containerId(), info.endpoints(), publishedHostPorts);
     }
 
     /**
@@ -893,6 +916,17 @@ public class ContainerLifecycleManager {
             hostConfig.withMemory(spec.memoryBytes());
         }
 
+        // CPU quota and weight
+        if (spec.nanoCpus() != null && spec.nanoCpus() > 0) {
+            hostConfig.withNanoCPUs(clampToHostCpus(spec.nanoCpus()));
+        }
+        if (spec.cpuShares() != null && spec.cpuShares() > 0) {
+            hostConfig.withCpuShares(spec.cpuShares());
+        }
+        if (spec.readonlyRootfs()) {
+            hostConfig.withReadonlyRootfs(true);
+        }
+
         // Port bindings — services decide whether to request them based on their
         // own in-container-vs-native logic. When Floci runs inside Docker, most
         // backends are reached via the docker network IP, so services omit the
@@ -937,8 +971,14 @@ public class ContainerLifecycleManager {
             hostConfig.withBinds(spec.binds().toArray(new Bind[0]));
         }
 
-        // Extra hosts (e.g., host.docker.internal on Linux)
-        if (spec.extraHosts() != null && !spec.extraHosts().isEmpty()) {
+        if (spec.volumesFrom() != null && !spec.volumesFrom().isEmpty()) {
+            hostConfig.withVolumesFrom(spec.volumesFrom());
+        }
+
+        // Docker rejects extra_hosts together with container:<id> network mode. Containers
+        // sharing another container's network namespace already inherit its network path.
+        if (spec.extraHosts() != null && !spec.extraHosts().isEmpty()
+                && !isContainerNetworkMode(spec.networkMode())) {
             hostConfig.withExtraHosts(spec.extraHosts().toArray(new String[0]));
         }
 
@@ -953,7 +993,58 @@ public class ContainerLifecycleManager {
             hostConfig.withDns(spec.dnsServers().toArray(new String[0]));
         }
 
+        // Device requests (GPUs). Only set when a caller asked: a daemon configured with an
+        // accelerator runtime as its default must not start handing devices to every
+        // container Floci launches.
+        if (spec.hasDeviceRequests()) {
+            hostConfig.withDeviceRequests(spec.deviceRequests());
+        }
+
         return hostConfig;
+    }
+
+    /**
+     * Holds a CPU quota to what the daemon will accept. Docker rejects a NanoCpus above the
+     * host's CPU count ("range of CPUs is from 0.01 to 8.00, as there are only 8 CPUs
+     * available"), while ECS accepts a task cpu of up to 196608 units, so a 16 vCPU task
+     * asked for verbatim would simply fail to start on a smaller machine. Emulating the
+     * larger task on fewer CPUs is closer to the caller's intent than refusing to run it.
+     */
+    private long clampToHostCpus(long nanoCpus) {
+        OptionalInt cpus = hostCpuCount();
+        if (cpus.isEmpty()) {
+            return nanoCpus;
+        }
+        long ceiling = cpus.getAsInt() * NANO_CPUS_PER_CPU;
+        if (nanoCpus <= ceiling) {
+            return nanoCpus;
+        }
+        LOG.warnv("Requested {0} nanoCPUs but the Docker daemon reports {1} CPUs; clamping to {2}",
+                nanoCpus, cpus.getAsInt(), ceiling);
+        return ceiling;
+    }
+
+    /** The daemon's CPU count, resolved once. Empty when the daemon did not report one. */
+    private OptionalInt hostCpuCount() {
+        OptionalInt cached = hostCpuCount.get();
+        if (cached != null) {
+            return cached;
+        }
+        OptionalInt resolved = OptionalInt.empty();
+        try {
+            Integer ncpu = dockerClient.infoCmd().exec().getNCPU();
+            if (ncpu != null && ncpu > 0) {
+                resolved = OptionalInt.of(ncpu);
+            }
+        } catch (RuntimeException e) {
+            LOG.debugv(e, "Could not read the Docker daemon's CPU count; leaving CPU quotas unclamped");
+        }
+        hostCpuCount.set(resolved);
+        return resolved;
+    }
+
+    private static boolean isContainerNetworkMode(String networkMode) {
+        return networkMode != null && networkMode.startsWith("container:");
     }
 
     private Map<Integer, EndpointInfo> resolveEndpoints(String containerId, ContainerSpec spec) {

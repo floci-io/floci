@@ -2,9 +2,10 @@ package io.github.hectorvent.floci.services.verifiedpermissions;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import com.sun.net.httpserver.HttpServer;
-import io.github.hectorvent.floci.cedar.CedarSidecarServer;
-import org.junit.jupiter.api.AfterAll;
+import io.quarkus.test.junit.QuarkusTestProfile;
+import io.quarkus.test.junit.TestProfile;
+import org.eclipse.microprofile.config.ConfigProvider;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -16,21 +17,58 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasEntry;
 import static org.hamcrest.Matchers.matchesPattern;
 
+/**
+ * Runs against the real Cedar sidecar image ({@code floci.services.verifiedpermissions.cedar-image}),
+ * started by {@link CedarSidecarManager} exactly as in production. Needs Docker; skipped without
+ * it. Locally it is also skipped when the pinned image is not present, so a developer without
+ * registry access is not stuck; in CI a missing image is a failure, since a vanished tag must
+ * not pass silently.
+ */
 @QuarkusTest
+@TestProfile(VerifiedPermissionsIntegrationTest.CedarSidecarProfile.class)
 class VerifiedPermissionsIntegrationTest {
-    private static HttpServer cedarServer;
     private static final String CONTENT_TYPE = "application/x-amz-json-1.0";
     private static final String AUTH = "AWS4-HMAC-SHA256 Credential=111122223333/20260101/us-east-1/verifiedpermissions/aws4_request";
 
-    @BeforeAll
-    static void configureRestAssured() throws Exception {
-        cedarServer = CedarSidecarServer.start(18180);
-        RestAssuredJsonUtils.configureAwsContentTypes();
+    /**
+     * Namespaces the sidecar container as {@code floci-vp-test-cedar}: the manager removes any
+     * container of its name before starting, and the test config uses the same empty namespace
+     * as a developer's running Floci, whose live sidecar would otherwise be killed.
+     */
+    public static class CedarSidecarProfile implements QuarkusTestProfile {
+        @Override
+        public Map<String, String> getConfigOverrides() {
+            return Map.of("floci.docker.resource-namespace", "vp-test");
+        }
     }
 
-    @AfterAll
-    static void stopCedarSidecar() {
-        cedarServer.stop(0);
+    @BeforeAll
+    static void requireDockerAndTheSidecarImage() {
+        RestAssuredJsonUtils.configureAwsContentTypes();
+        Assumptions.assumeTrue(isDockerAvailable(),
+                "Docker daemon must be available for Verified Permissions integration tests");
+        String image = ConfigProvider.getConfig().getValue("floci.services.verifiedpermissions.cedar-image", String.class);
+        Assumptions.assumeTrue(imageUsable(image), "Cedar sidecar image " + image + " is not present locally");
+    }
+
+    private static boolean isDockerAvailable() {
+        return run("docker", "version", "--format", "{{.Server.Version}}");
+    }
+
+    private static boolean imageUsable(String image) {
+        if ("true".equals(System.getenv("CI"))) {
+            return true;
+        }
+        return run("docker", "image", "inspect", image);
+    }
+
+    private static boolean run(String... command) {
+        try {
+            Process process = new ProcessBuilder(command).redirectErrorStream(true).start();
+            return process.waitFor() == 0;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     @Test

@@ -46,6 +46,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -124,7 +125,7 @@ class KmsServiceTest {
         assertEquals(KmsKeyUsage.SIGN_VERIFY, key.getKeyUsage());
         assertNotNull(key.getPrivateKeyEncoded());
         assertNotNull(key.getPublicKeyEncoded());
-        assertTrue(kmsService.verify(key.getKeyId(), message, signature, "SM2DSA", region));
+        assertDoesNotThrow(() -> kmsService.verify(key.getKeyId(), message, signature, "SM2DSA", region));
     }
 
     @Test
@@ -1167,7 +1168,8 @@ class KmsServiceTest {
                     kmsService.encrypt(key.getKeyId(), new byte[0], Map.of(), "RSAES_OAEP_SHA_256", REGION));
 
             assertEquals("ValidationException", ex.getErrorCode());
-            assertEquals("Plaintext must be between 1 and 4096 bytes for Encrypt.", ex.getMessage());
+            assertEquals("1 validation error detected: Value at 'plaintext' failed to satisfy constraint: "
+                    + "Member must have length greater than or equal to 1", ex.getMessage());
         }
 
         @Test
@@ -1203,10 +1205,10 @@ class KmsServiceTest {
             KmsKey key = createRsaKey();
 
             AwsException ex = assertThrows(AwsException.class, () ->
-                    kmsService.generateDataKey(key.getKeyId(), "AES_256", 0, REGION));
+                    kmsService.generateDataKey(key.getKeyId(), "AES_256", null, REGION));
 
             assertEquals("InvalidKeyUsageException", ex.getErrorCode());
-            assertEquals("Algorithm SYMMETRIC_DEFAULT is incompatible with key spec RSA_2048.", ex.getMessage());
+            assertEquals("You cannot generate a data key with an asymmetric CMK", ex.getMessage());
         }
 
         @Test
@@ -1214,7 +1216,7 @@ class KmsServiceTest {
             KmsKey key = kmsService.createKey("sign key", "SIGN_VERIFY", "RSA_2048", null, Map.of(), REGION);
 
             AwsException ex = assertThrows(AwsException.class, () ->
-                    kmsService.generateDataKey(key.getKeyId(), "AES_256", 0, REGION));
+                    kmsService.generateDataKey(key.getKeyId(), "AES_256", null, REGION));
 
             assertEquals("InvalidKeyUsageException", ex.getErrorCode());
             assertEquals(key.getArn() + " key usage is SIGN_VERIFY which is not valid for GenerateDataKey.",
@@ -1558,14 +1560,19 @@ class KmsServiceTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"ECC_NIST_P256", "ECC_NIST_P384", "ECC_NIST_P521", "ECC_SECG_P256K1"})
-    void signAndVerify(String keySpec) {
+    @CsvSource({
+            "ECC_NIST_P256, ECDSA_SHA_256",
+            "ECC_NIST_P384, ECDSA_SHA_384",
+            "ECC_NIST_P521, ECDSA_SHA_512",
+            "ECC_SECG_P256K1, ECDSA_SHA_256",
+    })
+    void signAndVerify(String keySpec, String algorithm) {
         KmsKey key = kmsService.createKey("ecdsa key", "SIGN_VERIFY", keySpec, null, Map.of(), REGION);
         byte[] message = "sign me".getBytes(StandardCharsets.UTF_8);
 
-        byte[] sig = kmsService.sign(key.getKeyId(), message, "ECDSA_SHA_256", REGION);
+        byte[] sig = kmsService.sign(key.getKeyId(), message, algorithm, REGION);
         assertNotNull(sig);
-        assertTrue(kmsService.verify(key.getKeyId(), message, sig, "ECDSA_SHA_256", REGION));
+        assertDoesNotThrow(() -> kmsService.verify(key.getKeyId(), message, sig, algorithm, REGION));
     }
 
     @Test
@@ -1575,7 +1582,7 @@ class KmsServiceTest {
 
         byte[] sig = kmsService.sign(key.getKeyId(), message, "RSASSA_PKCS1_V1_5_SHA_256", REGION);
         assertNotNull(sig);
-        assertTrue(kmsService.verify(key.getKeyId(), message, sig, "RSASSA_PKCS1_V1_5_SHA_256", REGION));
+        assertDoesNotThrow(() -> kmsService.verify(key.getKeyId(), message, sig, "RSASSA_PKCS1_V1_5_SHA_256", REGION));
     }
 
     @Test
@@ -1588,7 +1595,7 @@ class KmsServiceTest {
                 "RSASSA_PKCS1_V1_5_SHA_512", KmsMessageType.DIGEST, REGION);
 
         // floci's own Verify round-trips.
-        assertTrue(kmsService.verify(key.getKeyId(), digest, sig,
+        assertDoesNotThrow(() -> kmsService.verify(key.getKeyId(), digest, sig,
                 "RSASSA_PKCS1_V1_5_SHA_512", KmsMessageType.DIGEST, REGION));
 
         // External verifier (standard JCA, standing in for openssl/python) reconstructs
@@ -1631,9 +1638,9 @@ class KmsServiceTest {
                 "RSASSA_PSS_SHA_256", KmsMessageType.DIGEST, REGION);
 
         // floci's own Verify round-trips, against the digest and against the raw message.
-        assertTrue(kmsService.verify(key.getKeyId(), digest, sig,
+        assertDoesNotThrow(() -> kmsService.verify(key.getKeyId(), digest, sig,
                 "RSASSA_PSS_SHA_256", KmsMessageType.DIGEST, REGION));
-        assertTrue(kmsService.verify(key.getKeyId(), message, sig,
+        assertDoesNotThrow(() -> kmsService.verify(key.getKeyId(), message, sig,
                 "RSASSA_PSS_SHA_256", KmsMessageType.RAW, REGION));
 
         // External verifier with the PSS parameters AWS documents for RSASSA_PSS_SHA_256.
@@ -1647,34 +1654,52 @@ class KmsServiceTest {
     }
 
     @Test
-    void signWithInvalidAlgorithmThrowsInvalidSigningAlgorithm() {
-        var key = kmsService.createKey("ecdsa key", "SIGN_VERIFY", "ECC_NIST_P256", null, Map.of(), REGION);
+    void signWithInvalidAlgorithmFailsValidation() {
+        KmsKey key = kmsService.createKey("ecdsa key", "SIGN_VERIFY", "ECC_NIST_P256", null, Map.of(), REGION);
 
-        var ex = assertThrows(AwsException.class, () ->
+        AwsException ex = assertThrows(AwsException.class, () ->
                 kmsService.sign(key.getKeyId(), "sign me".getBytes(StandardCharsets.UTF_8), "NOT_AN_ALGORITHM", REGION));
 
-        assertEquals("InvalidSigningAlgorithmException", ex.getErrorCode());
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertTrue(ex.getMessage().startsWith(
+                "1 validation error detected: Value 'NOT_AN_ALGORITHM' at 'signingAlgorithm' failed to satisfy constraint"));
     }
 
     @Test
-    void verifyWithInvalidAlgorithmThrowsInvalidSigningAlgorithm() {
-        var key = kmsService.createKey("ecdsa key", "SIGN_VERIFY", "ECC_NIST_P256", null, Map.of(), REGION);
-        var message = "sign me".getBytes(StandardCharsets.UTF_8);
-        var sig = kmsService.sign(key.getKeyId(), message, "ECDSA_SHA_256", REGION);
+    void verifyWithInvalidAlgorithmFailsValidation() {
+        KmsKey key = kmsService.createKey("ecdsa key", "SIGN_VERIFY", "ECC_NIST_P256", null, Map.of(), REGION);
+        byte[] message = "sign me".getBytes(StandardCharsets.UTF_8);
+        byte[] sig = kmsService.sign(key.getKeyId(), message, "ECDSA_SHA_256", REGION);
 
-        var ex = assertThrows(AwsException.class, () ->
+        AwsException ex = assertThrows(AwsException.class, () ->
                 kmsService.verify(key.getKeyId(), message, sig, "NOT_AN_ALGORITHM", REGION));
 
-        assertEquals("InvalidSigningAlgorithmException", ex.getErrorCode());
+        assertEquals("ValidationException", ex.getErrorCode());
     }
 
     @Test
-    void verifyWithWrongSignatureReturnsFalse() {
+    void verifyWithWrongSignatureThrowsInvalidSignature() {
         KmsKey key = kmsService.createKey("ecdsa key", "SIGN_VERIFY", "ECC_NIST_P256", null, Map.of(), REGION);
         byte[] message = "sign me".getBytes(StandardCharsets.UTF_8);
 
-        assertFalse(kmsService.verify(key.getKeyId(), message,
+        AwsException ex = assertThrows(AwsException.class, () -> kmsService.verify(key.getKeyId(), message,
                 "not-a-valid-sig".getBytes(StandardCharsets.UTF_8), "ECDSA_SHA_256", REGION));
+
+        assertEquals("KMSInvalidSignatureException", ex.getErrorCode());
+        assertNull(ex.getMessage());
+    }
+
+    @Test
+    void verifyWithCorruptKeyMaterialIsAnInternalFailure() {
+        KmsKey key = kmsService.createKey("ecdsa key", "SIGN_VERIFY", "ECC_NIST_P256", null, Map.of(), REGION);
+        KmsKey stored = keyStore.get(REGION + "::" + key.getKeyId()).orElseThrow();
+        stored.setPublicKeyEncoded(Base64.getEncoder().encodeToString(new byte[16]));
+        keyStore.put(REGION + "::" + key.getKeyId(), stored);
+
+        AwsException ex = assertThrows(AwsException.class, () -> kmsService.verify(key.getKeyId(),
+                "sign me".getBytes(StandardCharsets.UTF_8), new byte[64], "ECDSA_SHA_256", REGION));
+
+        assertEquals("InternalFailure", ex.getErrorCode());
     }
 
     @Test
@@ -1694,11 +1719,22 @@ class KmsServiceTest {
     @Test
     void generateDataKey() {
         KmsKey key = kmsService.createKey(null, REGION);
-        Map<String, Object> result = kmsService.generateDataKey(key.getKeyId(), "AES_256", 0, REGION);
+        Map<String, Object> result = kmsService.generateDataKey(key.getKeyId(), "AES_256", null, REGION);
 
         assertNotNull(result.get("Plaintext"));
         assertNotNull(result.get("CiphertextBlob"));
         assertEquals(32, ((byte[]) result.get("Plaintext")).length);
+    }
+
+    @Test
+    void generateDataKeyWithoutPlaintextKeepsThePlaintextToItself() {
+        KmsKey key = kmsService.createKey(null, REGION);
+
+        Map<String, Object> result = kmsService.generateDataKeyWithoutPlaintext(key.getKeyId(), "AES_256", null,
+                Map.of(), REGION);
+
+        assertFalse(result.containsKey("Plaintext"));
+        assertNotNull(result.get("CiphertextBlob"));
     }
 
     @Test
@@ -2132,7 +2168,7 @@ class KmsServiceTest {
         String algo = "RSASSA_PKCS1_V1_5_SHA_256";
         byte[] sig = kmsService.sign(key.getKeyId(), message, algo, REGION);
         assertNotNull(sig);
-        assertTrue(kmsService.verify(key.getKeyId(), message, sig, algo, REGION));
+        assertDoesNotThrow(() -> kmsService.verify(key.getKeyId(), message, sig, algo, REGION));
     }
 
     @ParameterizedTest
@@ -2150,7 +2186,7 @@ class KmsServiceTest {
 
         byte[] sig = kmsService.sign(key.getKeyId(), digest, algorithm.getAlgName(), KmsMessageType.DIGEST, REGION);
         assertNotNull(sig);
-        assertTrue(kmsService.verify(key.getKeyId(), digest, sig, algorithm.getAlgName(), KmsMessageType.DIGEST, REGION));
+        assertDoesNotThrow(() -> kmsService.verify(key.getKeyId(), digest, sig, algorithm.getAlgName(), KmsMessageType.DIGEST, REGION));
     }
 
     @Test
@@ -2161,7 +2197,8 @@ class KmsServiceTest {
         String keyId = key.getKeyId();
         AwsException ex = assertThrows(AwsException.class, () ->
                 kmsService.sign(keyId, message, "RSASSA_PKCS1_V1_5_SHA_256", REGION));
-        assertEquals("UnsupportedOperationException", ex.getErrorCode());
+        assertEquals("InvalidKeyUsageException", ex.getErrorCode());
+        assertEquals(key.getArn() + " key usage is ENCRYPT_DECRYPT which is not valid for Sign.", ex.getMessage());
     }
 
     @Test
@@ -2261,6 +2298,7 @@ class KmsServiceTest {
             AwsException ex = assertThrows(AwsException.class, () -> kmsService.importKeyMaterial(
                     keyId, token, wrongly, "KEY_MATERIAL_DOES_NOT_EXPIRE", null, null, REGION));
             assertEquals("InvalidCiphertextException", ex.getErrorCode());
+            assertNull(ex.getMessage());
             assertEquals("PendingImport", kmsService.describeKey(keyId, REGION).getKeyState());
         }
 

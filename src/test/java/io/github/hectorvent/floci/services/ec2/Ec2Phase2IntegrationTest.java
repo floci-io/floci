@@ -124,6 +124,8 @@ class Ec2Phase2IntegrationTest {
     @Order(12)
     void runInstancesWithIamInstanceProfileName() {
         String profileName = "my-app-profile";
+        given().header("Authorization", AUTH_HEADER.replace("/ec2/", "/iam/")).formParam("Action", "CreateInstanceProfile")
+                .formParam("InstanceProfileName", profileName).post("/").then().statusCode(200);
 
         instanceWithProfileName = given()
             .formParam("Action", "RunInstances")

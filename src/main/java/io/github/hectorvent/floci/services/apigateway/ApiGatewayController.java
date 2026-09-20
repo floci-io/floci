@@ -10,6 +10,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import com.fasterxml.jackson.core.io.JsonStringEncoder;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -770,7 +771,9 @@ public class ApiGatewayController {
         String region = regionResolver.resolveRegion(headers);
         List<Map<String, String>> patchOperations = parsePatchOperations(body);
         ApiKey key = service.updateApiKey(region, apiKeyId, patchOperations);
-        return Response.ok(toApiKeyNode(key).toString()).type(MediaType.APPLICATION_JSON).build();
+        ObjectNode node = toApiKeyNode(key);
+        node.remove("value");
+        return Response.ok(node.toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
     @DELETE
@@ -2143,7 +2146,19 @@ public class ApiGatewayController {
         node.put("apiKeySource", "HEADER");
         node.put("disableExecuteApiEndpoint", false);
 
+        // AWS returns the policy JSON-escaped inside the string ({\"Version\":...}), and the
+        // Terraform provider unquotes it on read, so a raw document here would fail to parse.
+        if (api.getPolicy() != null) {
+            node.put("policy", escapePolicy(api.getPolicy()));
+        }
+
         return node;
+    }
+
+    // Full JSON string escaping, not just quotes: a pretty-printed policy carries newlines, and
+    // those must be escaped too or the provider's quote-and-unquote step fails to parse it.
+    private static String escapePolicy(String policy) {
+        return new String(JsonStringEncoder.getInstance().quoteAsString(policy));
     }
 
     private ObjectNode toResourceNode(ApiGatewayResource r) {
@@ -2162,6 +2177,10 @@ public class ApiGatewayController {
         node.put("apiKeyRequired", m.isApiKeyRequired());
         if (m.getAuthorizerId() != null) node.put("authorizerId", m.getAuthorizerId());
         if (m.getRequestValidatorId() != null) node.put("requestValidatorId", m.getRequestValidatorId());
+        if (m.getRequestParameters() != null && !m.getRequestParameters().isEmpty()) {
+            ObjectNode params = node.putObject("requestParameters");
+            m.getRequestParameters().forEach(params::put);
+        }
         if (m.getRequestModels() != null && !m.getRequestModels().isEmpty()) {
             ObjectNode models = objectMapper.createObjectNode();
             m.getRequestModels().forEach(models::put);
@@ -2250,6 +2269,20 @@ public class ApiGatewayController {
         node.put("cacheClusterEnabled", s.isCacheClusterEnabled());
         node.put("cacheClusterStatus", s.getCacheClusterStatus());
         if (s.getCacheClusterSize() != null) node.put("cacheClusterSize", s.getCacheClusterSize());
+        node.put("tracingEnabled", s.isTracingEnabled());
+        if (s.getAccessLogSettings() != null) {
+            ObjectNode logs = node.putObject("accessLogSettings");
+            if (s.getAccessLogSettings().destinationArn() != null) {
+                logs.put("destinationArn", s.getAccessLogSettings().destinationArn());
+            }
+            if (s.getAccessLogSettings().format() != null) {
+                logs.put("format", s.getAccessLogSettings().format());
+            }
+        }
+        if (!s.getTags().isEmpty()) {
+            ObjectNode tags = node.putObject("tags");
+            s.getTags().forEach(tags::put);
+        }
         if (!s.getVariables().isEmpty()) {
             ObjectNode vars = node.putObject("variables");
             s.getVariables().forEach(vars::put);
@@ -2297,11 +2330,20 @@ public class ApiGatewayController {
         node.put("name", k.getName());
         node.put("value", k.getValue());
         node.put("enabled", k.isEnabled());
+        node.put("createdDate", k.getCreatedDate());
+        node.put("lastUpdatedDate", k.getLastUpdatedDate());
+        if (k.getCustomerId() != null) {
+            node.put("customerId", k.getCustomerId());
+        }
         if (k.getDescription() != null) {
             node.put("description", k.getDescription());
         }
-        if (k.getTags() != null && !k.getTags().isEmpty()) {
-            ObjectNode tags = node.putObject("tags");
+        ArrayNode stageKeys = node.putArray("stageKeys");
+        if (k.getStageKeys() != null) {
+            k.getStageKeys().forEach(stageKeys::add);
+        }
+        ObjectNode tags = node.putObject("tags");
+        if (k.getTags() != null) {
             k.getTags().forEach(tags::put);
         }
         return node;

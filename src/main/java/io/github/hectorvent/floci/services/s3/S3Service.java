@@ -735,6 +735,30 @@ public class S3Service implements Resettable, ResourceProvider {
         authorizeDeleteObject(bucketName, key, null, RequestAuthorization.unsigned());
     }
 
+    /**
+     * Authorize {@code s3:GetObject} as a signed principal (an IAM role session's access key),
+     * reusing the identity-policy + resource-policy evaluation a genuine SigV4 request goes
+     * through. Used for Redshift {@code COPY ... IAM_ROLE '<arn>'}.
+     */
+    public void authorizeSignedGetObject(String accessKeyId, String sessionToken, String bucketName, String key) {
+        authorizeGetObject(bucketName, key, null, new RequestAuthorization(true, accessKeyId, sessionToken));
+    }
+
+    /** Authorize a signed {@code s3:PutObject}; see {@link #authorizeSignedGetObject}. */
+    public void authorizeSignedPutObject(String accessKeyId, String sessionToken, String bucketName, String key) {
+        authorizePutObject(bucketName, key, new RequestAuthorization(true, accessKeyId, sessionToken));
+    }
+
+    /** Authorize a signed {@code s3:ListBucket}; see {@link #authorizeSignedGetObject}. */
+    public void authorizeSignedListBucket(String accessKeyId, String sessionToken, String bucketName) {
+        authorizeListBucket(bucketName, new RequestAuthorization(true, accessKeyId, sessionToken));
+    }
+
+    /** Authorize a signed {@code s3:DeleteObject}; see {@link #authorizeSignedGetObject}. */
+    public void authorizeSignedDeleteObject(String accessKeyId, String sessionToken, String bucketName, String key) {
+        authorizeDeleteObject(bucketName, key, null, new RequestAuthorization(true, accessKeyId, sessionToken));
+    }
+
     public void authorizeCloudFrontOacGetObject(
             String bucketName, String key, String distributionArn) {
         authorizeCloudFrontGetObject(
@@ -929,7 +953,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 .orElse(false);
     }
 
-    boolean isAuthEnforced() {
+    public boolean isAuthEnforced() {
         return enforceAuth;
     }
 
@@ -1213,6 +1237,15 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     public S3Object getObject(String bucketName, String key, String versionId) {
+        if ("null".equals(versionId)) {
+            String bucketOwnerAccount = resolveBucketEntry(bucketName)
+                    .orElseThrow(() -> new AwsException("NoSuchBucket",
+                            "The specified bucket does not exist.", 404))
+                    .account();
+            S3Object obj = getObjectMetadata(bucketName, key, versionId);
+            obj.setData(readFile(bucketOwnerAccount, bucketName, key));
+            return obj;
+        }
         if (versionId != null) {
             // An explicit version's file is immutable once written (see storeObjectInternal) and
             // never reused by a later PUT, so this pairing can never race a concurrent overwrite.
@@ -1306,7 +1339,7 @@ public class S3Service implements Resettable, ResourceProvider {
                         "The specified bucket does not exist.", 404))
                 .account();
         if (inMemory) {
-            byte[] data = versionId != null
+            byte[] data = versionId != null && !"null".equals(versionId)
                     ? memoryDataStore.get(physicalVersionedKey(bucketOwnerAccount, bucketName, key, versionId))
                     : memoryDataStore.get(physicalKey(bucketOwnerAccount, bucketName, key));
             if (data == null) {
@@ -1315,7 +1348,7 @@ public class S3Service implements Resettable, ResourceProvider {
             return new ByteArrayInputStream(data);
         }
         try {
-            Path path = versionId != null
+            Path path = versionId != null && !"null".equals(versionId)
                     ? resolveVersionedPathForRead(bucketOwnerAccount, bucketName, key, versionId)
                     : resolveObjectPathForRead(bucketOwnerAccount, bucketName, key);
             return Files.newInputStream(path);
@@ -1325,7 +1358,7 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     public S3Object getObjectMetadata(String bucketName, String key, String versionId) {
-        return copyObject(getStoredObject(bucketName, key, versionId));
+        return copyObject(getStoredObject(bucketName, key, "null".equals(versionId) ? null : versionId));
     }
 
     public GetObjectAttributesResult getObjectAttributes(String bucketName, String key, String versionId,
@@ -1465,6 +1498,21 @@ public class S3Service implements Resettable, ResourceProvider {
             LOG.debugv("Created delete marker: {0}/{1} v={2}", bucketName, key, markerId);
             fireNotifications(bucketName, key, "ObjectRemoved:DeleteMarkerCreated", deleteMarker);
             return deleteMarker;
+        } else if ("null".equals(versionId)) {
+            // A null version is stored at the plain object key until a versioned write replaces it.
+            // Treat the literal request value as that null version, not as a versioned key named
+            // "null". A delete marker is not the null version and must remain untouched.
+            S3Object existing = objectStore.get(objectKey(bucketName, key)).orElse(null);
+            if (existing == null || existing.isDeleteMarker() || existing.getVersionId() != null) {
+                return null;
+            }
+            checkLockProtection(existing, bypassGovernance);
+            objectStore.delete(objectKey(bucketName, key));
+            deleteFile(bucketName, key);
+            deleteAllAnnotationsFor(annotationParentKey(bucketName, key, null));
+            LOG.debugv("Permanently deleted null version: {0}/{1}", bucketName, key);
+            fireNotifications(bucketName, key, "ObjectRemoved:Delete", null);
+            return existing;
         } else if (versionId != null) {
             // Get the specific version before permanent deletion
             S3Object toDelete = objectStore.get(versionedKey(bucketName, key, versionId)).orElse(null);

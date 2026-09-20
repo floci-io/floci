@@ -8,6 +8,7 @@ import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.CountDownLatch;
 
 /**
  * Shared TCP auth-proxy skeleton for the Redis (RESP) wire protocol. Intercepts the
@@ -19,6 +20,7 @@ import java.nio.charset.StandardCharsets;
  * <p>Uses Java virtual threads to accept connections and run the AUTH handshake.
  */
 public abstract class AbstractRedisAuthProxy {
+    private static final long RELAY_JOIN_TIMEOUT_MILLIS = 1_000;
 
     private static final byte[] OK_RESPONSE = "+OK\r\n".getBytes(StandardCharsets.UTF_8);
     private static final byte[] NOAUTH_RESPONSE =
@@ -164,13 +166,27 @@ public abstract class AbstractRedisAuthProxy {
      * relays under load can stall delivery of backend responses (e.g. PING/PONG) to the client.
      */
     private void bridge(Socket client, Socket backend) {
+        CountDownLatch firstRelayDone = new CountDownLatch(1);
         Thread t1 = Thread.ofPlatform().daemon(true).name(threadPrefix + "-relay-c2b-" + resourceId)
-                .start(() -> relay(client, backend));
+                .start(() -> {
+                    try {
+                        relay(client, backend);
+                    } finally {
+                        firstRelayDone.countDown();
+                    }
+                });
         Thread t2 = Thread.ofPlatform().daemon(true).name(threadPrefix + "-relay-b2c-" + resourceId)
-                .start(() -> relay(backend, client));
+                .start(() -> {
+                    try {
+                        relay(backend, client);
+                    } finally {
+                        firstRelayDone.countDown();
+                    }
+                });
         try {
-            t1.join();
-            t2.join();
+            firstRelayDone.await();
+            t1.join(RELAY_JOIN_TIMEOUT_MILLIS);
+            t2.join(RELAY_JOIN_TIMEOUT_MILLIS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         } finally {
@@ -191,6 +207,16 @@ public abstract class AbstractRedisAuthProxy {
             }
         } catch (IOException ignored) {
             // Normal when either side closes the connection
+        } finally {
+            shutdownOutput(to);
+        }
+    }
+
+    private static void shutdownOutput(Socket socket) {
+        try {
+            socket.shutdownOutput();
+        } catch (IOException ignored) {
+            // The bridge closes both sockets after both relay directions finish.
         }
     }
 

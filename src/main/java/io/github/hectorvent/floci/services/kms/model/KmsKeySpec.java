@@ -129,14 +129,6 @@ public enum KmsKeySpec {
                 Algorithm.RSAES_OAEP_SHA_1, Algorithm.RSAES_OAEP_SHA_256);
     }
 
-    public static Algorithm getSignVerifyAlgorithm(String signingAlgorithm) {
-        try {
-           return Algorithm.valueOf(signingAlgorithm);
-        } catch (IllegalArgumentException _) {
-            throw new AwsException("InvalidSigningAlgorithmException", "Unsupported algorithm: " + signingAlgorithm, 400);
-        }
-    }
-
     public enum Algorithm  {
         SYMMETRIC_DEFAULT("SYMMETRIC_DEFAULT", "", KmsKeyUsage.ENCRYPT_DECRYPT),
         RSASSA_PSS_SHA_256("RSASSA_PSS_SHA_256","SHA256withRSA/PSS", KmsKeyUsage.SIGN_VERIFY),

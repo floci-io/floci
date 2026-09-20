@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.apigatewayv2.proxy;
 
+import io.github.hectorvent.floci.core.common.SsrfProtection;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Integration;
 import org.jboss.logging.Logger;
 
@@ -12,6 +13,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.URI;
@@ -346,6 +348,7 @@ public class HttpProxyInvoker {
         }
 
         try {
+            resolveNonMetadataTarget(hrb.build().uri().getHost());
             HttpResponse<byte[]> resp =
                     clientFor(options).send(hrb.build(), HttpResponse.BodyHandlers.ofByteArray());
             Map<String, List<String>> respHeaders = new LinkedHashMap<>();
@@ -358,6 +361,19 @@ public class HttpProxyInvoker {
             LOG.warnv("HTTP_PROXY backend call failed: {0}", e.getMessage());
             return errorResult("Bad Gateway: " + e.getMessage());
         }
+    }
+
+    private static InetAddress[] resolveNonMetadataTarget(String host) throws IOException {
+        if (host == null || host.isBlank()) {
+            throw new IOException("integration URI has no host");
+        }
+        InetAddress[] addresses = InetAddress.getAllByName(host);
+        for (InetAddress address : addresses) {
+            if (SsrfProtection.isMetadataAddress(address)) {
+                throw new IOException("integration URI resolves to a link-local or metadata address: " + host);
+            }
+        }
+        return addresses;
     }
 
     private static boolean hasHeader(ProxyRequestBuilder builder, String headerName) {
@@ -386,8 +402,9 @@ public class HttpProxyInvoker {
             path += "?" + uri.getRawQuery();
         }
 
+        InetAddress[] targets = resolveNonMetadataTarget(uri.getHost());
         try (Socket socket = new Socket()) {
-            socket.connect(new InetSocketAddress(uri.getHost(), port), 10_000);
+            socket.connect(new InetSocketAddress(targets[0], port), 10_000);
             socket.setSoTimeout((int) Math.min(timeout.toMillis(), Integer.MAX_VALUE));
 
             OutputStream out = socket.getOutputStream();

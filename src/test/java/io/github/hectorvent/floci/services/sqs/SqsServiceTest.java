@@ -14,6 +14,9 @@ import jakarta.enterprise.context.ContextNotActiveException;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -179,7 +182,7 @@ class SqsServiceTest {
     @Test
     void createQueue_acceptsTheAwsCeilingWhenTheConfiguredMaximumIsLower() {
         String region = "eu-west-1";
-        var service = new SqsService(new InMemoryStorage<>(), 30, 131072, BASE_URL, clock);
+        SqsService service = new SqsService(new InMemoryStorage<>(), 30, 131072, BASE_URL, clock);
 
         Queue defaulted = service.createQueue("lowered-config-default-queue", null, region);
         assertEquals("131072",
@@ -201,8 +204,8 @@ class SqsServiceTest {
     @Test
     void getQueueAttributes_clampsAStoredMaximumMessageSizeAboveTheCeiling() {
         String region = "us-east-1";
-        var store = new InMemoryStorage<String, Queue>();
-        var service = new SqsService(store, 30, 1048576, BASE_URL, clock);
+        InMemoryStorage<String, Queue> store = new InMemoryStorage<>();
+        SqsService service = new SqsService(store, 30, 1048576, BASE_URL, clock);
         Queue queue = service.createQueue("legacy-size-queue", null, region);
 
         // A queue persisted by a build that allowed 2 MB, which no validation path can produce.
@@ -716,14 +719,14 @@ class SqsServiceTest {
     @Test
     void purgeQueueClearsFifoDeduplicationCacheWhenEnabled() {
         String region = "eu-west-1";
-        final var service = new SqsService(
+        SqsService service = new SqsService(
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 30, 1048576, BASE_URL, new RegionResolver("us-east-1", "000000000000"), true, null);
 
-        final var queue = service.createQueue("dedup-clear.fifo", Map.of("ContentBasedDeduplication", "true"), region);
+        Queue queue = service.createQueue("dedup-clear.fifo", Map.of("ContentBasedDeduplication", "true"), region);
 
         // First send — message M1 added, dedup cache populated with "dedup-1"
-        final var m1 = service.sendMessage(queue.getQueueUrl(), "msg", 0, "group1", "dedup-1", region);
+        Message m1 = service.sendMessage(queue.getQueueUrl(), "msg", 0, "group1", "dedup-1", region);
         assertNotNull(m1.getMessageId());
 
         // Purge clears both messages and the dedup cache
@@ -732,14 +735,14 @@ class SqsServiceTest {
                 "Queue must be empty after purge");
 
         // Re-send with the same dedup ID — cache was cleared so this is treated as a fresh send
-        final var m2 = service.sendMessage(queue.getQueueUrl(), "msg", 0, "group1", "dedup-1", region);
+        Message m2 = service.sendMessage(queue.getQueueUrl(), "msg", 0, "group1", "dedup-1", region);
         assertNotNull(m2.getMessageId());
 
-        final var received = service.receiveMessage(queue.getQueueUrl(), 10, 30, 0, region);
+        List<Message> received = service.receiveMessage(queue.getQueueUrl(), 10, 30, 0, region);
         assertEquals(1, received.size(), "One message must be in the queue after re-send");
 
         // Third send with same dedup ID — fresh cache entry from m2 deduplicates correctly
-        final var m3 = service.sendMessage(queue.getQueueUrl(), "msg", 0, "group1", "dedup-1", region);
+        Message m3 = service.sendMessage(queue.getQueueUrl(), "msg", 0, "group1", "dedup-1", region);
         assertEquals(m2.getMessageId(), m3.getMessageId(),
                 "Dedup must work with the fresh cache entry after purge");
     }
@@ -748,7 +751,7 @@ class SqsServiceTest {
     void purgeQueuePreservesFifoDeduplicationCacheByDefault() {
         String region = "eu-west-1";
         // Default service has clearFifoDeduplicationCacheOnPurge=false
-        final var queue = sqsService.createQueue("dedup-preserve.fifo",
+        Queue queue = sqsService.createQueue("dedup-preserve.fifo",
                 Map.of("ContentBasedDeduplication", "true"), region);
 
         // Send and then purge — messages are gone but dedup cache is intact
@@ -762,7 +765,7 @@ class SqsServiceTest {
         // so it falls through and creates a new message
         sqsService.sendMessage(queue.getQueueUrl(), "msg", 0, "group1", "dedup-1", region);
 
-        final var received = sqsService.receiveMessage(queue.getQueueUrl(), 10, 30, 0, region);
+        List<Message> received = sqsService.receiveMessage(queue.getQueueUrl(), 10, 30, 0, region);
         assertEquals(1, received.size(),
                 "Re-send after purge must produce exactly one message in the queue");
     }
@@ -771,12 +774,12 @@ class SqsServiceTest {
     void purgeQueueClearsDedupStoreWhenEnabled() {
         String region = "eu-west-1";
 
-        final var dedupStore = new InMemoryStorage<String, Map<String, Long>>();
-        final var service = new SqsService(
+        InMemoryStorage<String, Map<String, Long>> dedupStore = new InMemoryStorage<>();
+        SqsService service = new SqsService(
                 new InMemoryStorage<>(), new InMemoryStorage<>(), dedupStore,
                 30, 1048576, BASE_URL, new RegionResolver("us-east-1", "000000000000"), true, null);
 
-        final var queue = service.createQueue("dedup-store-clear.fifo",
+        Queue queue = service.createQueue("dedup-store-clear.fifo",
                 Map.of("ContentBasedDeduplication", "true"), region);
 
         // Send a message — dedup entry must be persisted to the store
@@ -980,8 +983,8 @@ class SqsServiceTest {
      * null, the move block was skipped, and messages stayed on the source queue with nothing
      * logged. A silent redrive failure is the worst shape this bug takes.
      */
-    @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.CsvSource({
+    @ParameterizedTest
+    @CsvSource({
             "us-east-1,      arn:aws:sqs:us-east-1:000000000000:",
             "us-gov-west-1,  arn:aws-us-gov:sqs:us-gov-west-1:000000000000:",
             "cn-north-1,     arn:aws-cn:sqs:cn-north-1:000000000000:"})
@@ -1003,8 +1006,8 @@ class SqsServiceTest {
      * The ARN the emulator itself hands back must be the one it accepts. This is the assertion
      * that ties the two halves together rather than trusting a hand-written prefix.
      */
-    @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.ValueSource(strings = {"us-east-1", "us-gov-west-1", "cn-north-1"})
+    @ParameterizedTest
+    @ValueSource(strings = {"us-east-1", "us-gov-west-1", "cn-north-1"})
     void startMessageMoveTask_acceptsTheQueueArnGetQueueAttributesReturned(String region) {
         sqsService.createQueue("rt-dlq", null, region);
         String dlqArn = sqsService.getQueueAttributes(
@@ -1604,7 +1607,7 @@ class SqsServiceTest {
         Queue q = sqsService.createQueue("traced", null, "us-east-1");
         sqsService.sendMessage(q.getQueueUrl(), "hi", 0, null, null, null,
                 "Root=1-abc-def", "us-east-1");
-        var received = sqsService.receiveMessage(q.getQueueUrl(), 1, 30, 0, "us-east-1");
+        List<Message> received = sqsService.receiveMessage(q.getQueueUrl(), 1, 30, 0, "us-east-1");
         assertEquals(1, received.size());
         assertEquals("Root=1-abc-def", received.get(0).getAwsTraceHeader());
     }
@@ -1612,11 +1615,11 @@ class SqsServiceTest {
     @Test
     void purgeQueueWithClearFifoDelegatesToSnsForFifoDedupOnSubscribedTopics() {
         String region = "us-east-1";
-        final var sns = mock(SnsService.class);
-        final var service = new SqsService(
+        SnsService sns = mock(SnsService.class);
+        SqsService service = new SqsService(
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 30, 1048576, BASE_URL, new RegionResolver("us-east-1", "000000000000"), true, sns);
-        final var queue = service.createQueue("sns-dedup-delegate.fifo", Map.of("FifoQueue", "true"),region);
+        Queue queue = service.createQueue("sns-dedup-delegate.fifo", Map.of("FifoQueue", "true"), region);
         service.purgeQueue(queue.getQueueUrl(), region);
         verify(sns).clearFifoDeduplicationCacheForSqsQueueSubscriptions(
                 queue.getQueueUrl(), "us-east-1");
@@ -1659,8 +1662,8 @@ class SqsServiceTest {
         Queue queue = sqsService.createQueue("longpoll-release-queue", null, region);
         String queueUrl = queue.getQueueUrl();
 
-        final var pollerEntered = new CountDownLatch(1);
-        final var staleResult = new AtomicReference<List<Message>>();
+        CountDownLatch pollerEntered = new CountDownLatch(1);
+        AtomicReference<List<Message>> staleResult = new AtomicReference<>();
         Thread stalePoller = new Thread(() -> {
             pollerEntered.countDown();
             staleResult.set(sqsService.receiveMessage(queueUrl, 1, 30, 8, region));
@@ -1686,8 +1689,8 @@ class SqsServiceTest {
 
         // A long poll opened before the delete, e.g. a listener generation
         // that is being torn down while its queue is recreated.
-        final var pollerEntered = new CountDownLatch(1);
-        final var staleResult = new AtomicReference<List<Message>>();
+        CountDownLatch pollerEntered = new CountDownLatch(1);
+        AtomicReference<List<Message>> staleResult = new AtomicReference<>();
         Thread stalePoller = new Thread(() -> {
             pollerEntered.countDown();
             staleResult.set(sqsService.receiveMessage(queueUrl, 1, 30, 8, region));
@@ -1791,8 +1794,8 @@ class SqsServiceTest {
         String queueUrl = queue.getQueueUrl();
         sqsService.setQueueAttributes(queueUrl, Map.of("ReceiveMessageWaitTimeSeconds", "20"), region);
 
-        final var pollerEntered = new CountDownLatch(1);
-        final var result = new AtomicReference<List<Message>>();
+        CountDownLatch pollerEntered = new CountDownLatch(1);
+        AtomicReference<List<Message>> result = new AtomicReference<>();
         Thread poller = new Thread(() -> {
             pollerEntered.countDown();
             result.set(sqsService.receiveMessage(queueUrl, 1, 30, null, region));

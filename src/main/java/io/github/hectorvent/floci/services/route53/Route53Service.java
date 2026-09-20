@@ -137,6 +137,17 @@ public class Route53Service {
         return newChange(null);
     }
 
+    /**
+     * The comment is cleared when the request carries none, which is what AWS does rather than
+     * leaving the previous comment in place.
+     */
+    public synchronized HostedZone updateHostedZoneComment(String id, String comment) {
+        HostedZone zone = getHostedZoneOwnedByCaller(id);
+        zone.setComment(comment);
+        zoneStore.put(id, zone);
+        return zone;
+    }
+
     public List<HostedZone> listHostedZones(String marker, int maxItems) {
         List<HostedZone> all = new ArrayList<>(zoneStore.scan(k -> true));
         all.sort((a, b) -> a.getName().compareTo(b.getName()));

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.dynamodb;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -12,6 +13,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -182,6 +184,44 @@ class KinesisStreamingForwarderTest {
         forwarder.forward("INSERT", null, item("k1"), tableWithDestination(), "us-east-1", ACCOUNT);
         verifyNoInteractions(kinesisService);
         assertTrue(forwarder.forwardingStats().isEmpty());
+    }
+
+    // ──────────────────────────── ApproximateCreationDateTimePrecision ────────────────────────────
+
+    @Test
+    void stampsEachDestinationAtItsConfiguredPrecision() throws Exception {
+        String microArn = "arn:aws:kinesis:us-east-1:000000000000:stream/micro-stream";
+        TableDefinition table = tableWithDestination(STREAM_ARN);
+        table.getKinesisStreamingDestinations().add(new KinesisStreamingDestination(microArn,
+                KinesisStreamingDestination.PRECISION_MICROSECOND));
+        Map<String, byte[]> sent = new HashMap<>();
+        when(kinesisService.putRecordForAccount(anyString(), anyString(), any(byte[].class), anyString(), anyString()))
+                .thenAnswer(inv -> {
+                    sent.put(inv.getArgument(1), inv.getArgument(2));
+                    return "seq-1";
+                });
+
+        forwarder.forward("INSERT", null, item("k1"), table, "us-east-1", ACCOUNT);
+        scheduler.runUntilQuiet();
+
+        JsonNode milli = objectMapper.readTree(sent.get("test-stream"));
+        JsonNode micro = objectMapper.readTree(sent.get("micro-stream"));
+        assertEquals("MILLISECOND", milli.path("dynamodb").path("ApproximateCreationDateTimePrecision").asText());
+        assertEquals("MICROSECOND", micro.path("dynamodb").path("ApproximateCreationDateTimePrecision").asText());
+        long millis = milli.path("dynamodb").path("ApproximateCreationDateTime").asLong();
+        long micros = micro.path("dynamodb").path("ApproximateCreationDateTime").asLong();
+        assertEquals(millis, micros / 1_000L, "both stamps describe the same instant");
+        assertEquals(milli.path("eventID").asText(), micro.path("eventID").asText(),
+                "one change is one event across destinations");
+    }
+
+    @Test
+    void microsecondStampKeepsSubMillisecondResolution() {
+        Instant t = Instant.ofEpochSecond(1_789_736_088L, 383_456_789L);
+        assertEquals(1_789_736_088_383L,
+                KinesisStreamingForwarder.approximateCreationDateTime(t, "MILLISECOND"));
+        assertEquals(1_789_736_088_383_456L,
+                KinesisStreamingForwarder.approximateCreationDateTime(t, "MICROSECOND"));
     }
 
     // ──────────────────────────── happy-path drain ────────────────────────────

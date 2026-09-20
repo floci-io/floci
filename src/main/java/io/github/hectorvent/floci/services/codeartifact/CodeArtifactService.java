@@ -8,23 +8,40 @@ import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.common.ServiceConfigAccess;
+import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.codeartifact.model.CodeArtifactDomain;
+import io.github.hectorvent.floci.services.codeartifact.model.CodeArtifactPackageVersion;
 import io.github.hectorvent.floci.services.codeartifact.model.CodeArtifactRepository;
 import io.github.hectorvent.floci.services.codeartifact.model.ExternalConnection;
+import io.github.hectorvent.floci.services.codeartifact.model.PackageAsset;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 @ApplicationScoped
 public class CodeArtifactService implements Resettable {
@@ -46,26 +63,75 @@ public class CodeArtifactService implements Resettable {
             Set.of("npm", "pypi", "maven", "nuget", "generic", "ruby", "swift", "cargo");
     private static final Set<String> ENDPOINT_TYPES = Set.of("dualstack", "ipv4");
 
+    private static final Logger LOG = Logger.getLogger(CodeArtifactService.class);
+
     private static final Pattern DOMAIN_NAME = Pattern.compile("[a-z][a-z0-9\\-]{0,48}[a-z0-9]");
     private static final Pattern REPOSITORY_NAME = Pattern.compile("[A-Za-z0-9][A-Za-z0-9._\\-]{1,99}");
     private static final Pattern ACCOUNT_ID = Pattern.compile("[0-9]{12}");
+    private static final Pattern PACKAGE_TOKEN = Pattern.compile("[^#/\\s]+");
+    // Matches the wire model's AssetName pattern exactly: any non-empty string with no
+    // control/format/unassigned/surrogate/private-use characters. Without this, an asset name
+    // containing '\r'/'\n' would be echoed back verbatim in the X-AssetName response header.
+    private static final Pattern ASSET_NAME = Pattern.compile("\\P{C}+");
+    private static final List<String> ASSET_HASH_ALGORITHMS = List.of("MD5", "SHA-1", "SHA-256", "SHA-512");
+    private static final long MAX_ASSET_FILE_SIZE_BYTES = 5L * 1024 * 1024 * 1024;
+    private static final int MAX_ASSETS_PER_PACKAGE_VERSION = 350;
+    private static final int MAX_DOMAINS_PER_ACCOUNT = 10;
+    private static final int MAX_REPOSITORIES_PER_DOMAIN = 1000;
+    private static final String ASSET_STORAGE_DIR = "codeartifact-assets";
 
     public record DomainView(CodeArtifactDomain domain, int repositoryCount) {}
     public record ResourcePolicy(String resourceArn, String revision, String document) {}
+    public record PublishPackageVersionResult(CodeArtifactPackageVersion packageVersion, PackageAsset asset) {}
+    public record PackageVersionAssetResult(PackageAsset asset, String packageVersionRevision) {}
 
     private final AccountAwareStorageBackend<CodeArtifactDomain> domains;
     private final AccountAwareStorageBackend<CodeArtifactRepository> repositories;
+    private final AccountAwareStorageBackend<CodeArtifactPackageVersion> packageVersions;
     private final RegionResolver regionResolver;
     private final EmulatorConfig config;
+    // Asset bytes never go through the JSON/WAL-backed `packageVersions` store (see PackageAsset's
+    // @JsonIgnore content field): they're kept here instead, on disk in persistent/hybrid/wal mode
+    // or in this map in memory mode, so a publish only ever rewrites metadata.
+    private final boolean inMemory;
+    private final Path assetRoot;
+    private final ConcurrentHashMap<String, byte[]> memoryAssetStore = new ConcurrentHashMap<>();
 
     @Inject
-    public CodeArtifactService(StorageFactory storageFactory, RegionResolver regionResolver, EmulatorConfig config) {
-        this.domains = storageFactory.create("codeartifact", "codeartifact-domains.json",
-                new TypeReference<Map<String, CodeArtifactDomain>>() {});
-        this.repositories = storageFactory.create("codeartifact", "codeartifact-repositories.json",
-                new TypeReference<Map<String, CodeArtifactRepository>>() {});
+    public CodeArtifactService(StorageFactory storageFactory, RegionResolver regionResolver, EmulatorConfig config,
+                                ServiceConfigAccess serviceConfigAccess) {
+        this(
+                storageFactory.create("codeartifact", "codeartifact-domains.json",
+                        new TypeReference<Map<String, CodeArtifactDomain>>() {}),
+                storageFactory.create("codeartifact", "codeartifact-repositories.json",
+                        new TypeReference<Map<String, CodeArtifactRepository>>() {}),
+                storageFactory.create("codeartifact", "codeartifact-package-versions.json",
+                        new TypeReference<Map<String, CodeArtifactPackageVersion>>() {}),
+                regionResolver, config,
+                "memory".equals(serviceConfigAccess.storageMode("codeartifact")),
+                Path.of(config.storage().persistentPath()).resolve(ASSET_STORAGE_DIR));
+    }
+
+    /** Package-private constructor for testing. */
+    CodeArtifactService(AccountAwareStorageBackend<CodeArtifactDomain> domains,
+                         AccountAwareStorageBackend<CodeArtifactRepository> repositories,
+                         AccountAwareStorageBackend<CodeArtifactPackageVersion> packageVersions,
+                         RegionResolver regionResolver, EmulatorConfig config,
+                         boolean inMemory, Path assetRoot) {
+        this.domains = domains;
+        this.repositories = repositories;
+        this.packageVersions = packageVersions;
         this.regionResolver = regionResolver;
         this.config = config;
+        this.inMemory = inMemory;
+        this.assetRoot = assetRoot;
+        if (!inMemory) {
+            try {
+                Files.createDirectories(assetRoot);
+            } catch (IOException e) {
+                throw new UncheckedIOException("Failed to create CodeArtifact asset data directory: " + assetRoot, e);
+            }
+        }
     }
 
     // ---------------------------------------------------------------- domains
@@ -77,6 +143,11 @@ public class CodeArtifactService implements Resettable {
         String key = domainKey(region, domain);
         if (domains.getForAccount(owner, key).isPresent()) {
             throw conflict("Domain with name '" + domain + "' already exists.");
+        }
+        if (domainCountForAccount(owner, region) >= MAX_DOMAINS_PER_ACCOUNT) {
+            throw new AwsException("ServiceQuotaExceededException",
+                    "An AWS account can have a maximum of " + MAX_DOMAINS_PER_ACCOUNT + " domains.", 402,
+                    Map.of("resourceId", domain, "resourceType", "domain"));
         }
         CodeArtifactDomain d = new CodeArtifactDomain();
         d.setName(domain);
@@ -170,6 +241,11 @@ public class CodeArtifactService implements Resettable {
         String key = repositoryKey(region, domain, repository);
         if (repositories.getForAccount(owner, key).isPresent()) {
             throw conflict("Repository with name '" + repository + "' already exists in domain '" + domain + "'.");
+        }
+        if (repositoryCountForDomain(owner, region, domain) >= MAX_REPOSITORIES_PER_DOMAIN) {
+            throw new AwsException("ServiceQuotaExceededException",
+                    "A domain can have a maximum of " + MAX_REPOSITORIES_PER_DOMAIN + " repositories.", 402,
+                    Map.of("resourceId", repository, "resourceType", "repository"));
         }
         validateUpstreams(owner, region, domain, repository, upstreams);
         validateDescription(description);
@@ -350,6 +426,120 @@ public class CodeArtifactService implements Resettable {
         return r;
     }
 
+    // ------------------------------------------------------- package versions
+
+    public synchronized PublishPackageVersionResult publishPackageVersion(String region, String domain,
+            String domainOwner, String repository, String format, String namespace, String packageName,
+            String version, String assetName, String assetSha256, String unfinishedParam, byte[] content) {
+        if (!"generic".equals(format)) {
+            throw validation("format must be 'generic'; PublishPackageVersion only supports the generic "
+                    + "package format.");
+        }
+        boolean unfinished = parseBoolean(unfinishedParam);
+        validatePackageToken("package", packageName);
+        validatePackageToken("packageVersion", version);
+        if (namespace != null) {
+            validatePackageToken("namespace", namespace);
+        }
+        validateAssetName(assetName);
+        if (assetSha256 == null || !SigV4RequestValidator.isSha256Hex(assetSha256)) {
+            throw validation("assetSHA256 is required and must be a 64-character SHA-256 hex digest.");
+        }
+        byte[] assetContent = content != null ? content : new byte[0];
+        if (assetContent.length > MAX_ASSET_FILE_SIZE_BYTES) {
+            throw new AwsException("ServiceQuotaExceededException",
+                    "The maximum asset file size is 5 Gigabytes.", 402);
+        }
+        String actualSha256 = sha256Hex(assetContent);
+        if (!assetSha256.equalsIgnoreCase(actualSha256)) {
+            throw validation("assetSHA256 does not match the SHA-256 hash of the uploaded content.");
+        }
+
+        String owner = effectiveOwner(domainOwner);
+        requireRepository(owner, repositoryKey(region, domain, repository));
+        String key = packageVersionKey(region, domain, repository, format, namespace, packageName, version);
+
+        CodeArtifactPackageVersion pv = packageVersions.getForAccount(owner, key).orElse(null);
+        if (pv != null && "Published".equals(pv.getStatus())) {
+            throw conflict("Package version '" + version + "' of package '" + packageName + "' is already "
+                    + "Published; no additional assets can be uploaded to it.");
+        }
+        if (pv == null) {
+            pv = new CodeArtifactPackageVersion();
+            pv.setDomainName(domain);
+            pv.setDomainOwner(owner);
+            pv.setRegion(region);
+            pv.setRepositoryName(repository);
+            pv.setFormat(format);
+            pv.setNamespace(namespace);
+            pv.setPackageName(packageName);
+            pv.setVersion(version);
+        }
+
+        Map<String, PackageAsset> assets = new LinkedHashMap<>(pv.getAssets());
+        if (!assets.containsKey(assetName) && assets.size() >= MAX_ASSETS_PER_PACKAGE_VERSION) {
+            throw new AwsException("ServiceQuotaExceededException",
+                    "A package version can have a maximum of " + MAX_ASSETS_PER_PACKAGE_VERSION + " assets.", 402);
+        }
+
+        PackageAsset asset = new PackageAsset();
+        asset.setName(assetName);
+        asset.setSize(assetContent.length);
+        asset.setContent(assetContent);
+        asset.setHashes(computeHashes(assetContent));
+        writeAssetContent(owner, key, assetName, assetContent);
+        assets.put(assetName, asset);
+        pv.setAssets(assets);
+
+        pv.setStatus(unfinished ? "Unfinished" : "Published");
+        if (!unfinished && pv.getPublishedTime() == null) {
+            pv.setPublishedTime(Instant.now().getEpochSecond());
+        }
+        pv.setRevision(newRevision());
+
+        packageVersions.putForAccount(owner, key, pv);
+        return new PublishPackageVersionResult(pv, asset);
+    }
+
+    public CodeArtifactPackageVersion describePackageVersion(String region, String domain, String domainOwner,
+            String repository, String format, String namespace, String packageName, String version) {
+        if (format == null || !PACKAGE_FORMATS.contains(format)) {
+            throw validation("format must be one of " + PACKAGE_FORMATS + ".");
+        }
+        String owner = effectiveOwner(domainOwner);
+        String key = packageVersionKey(region, domain, repository, format, namespace, packageName, version);
+        return packageVersions.getForAccount(owner, key)
+                .orElseThrow(() -> notFound("Package version '" + version + "' of package '" + packageName
+                        + "' was not found."));
+    }
+
+    public PackageVersionAssetResult getPackageVersionAsset(String region, String domain, String domainOwner,
+            String repository, String format, String namespace, String packageName, String version,
+            String assetName, String packageVersionRevision) {
+        if (format == null || !PACKAGE_FORMATS.contains(format)) {
+            throw validation("format must be one of " + PACKAGE_FORMATS + ".");
+        }
+        String owner = effectiveOwner(domainOwner);
+        String key = packageVersionKey(region, domain, repository, format, namespace, packageName, version);
+        CodeArtifactPackageVersion pv = packageVersions.getForAccount(owner, key)
+                .orElseThrow(() -> notFound("Package version '" + version + "' of package '" + packageName
+                        + "' was not found."));
+        if (packageVersionRevision != null && !packageVersionRevision.equals(pv.getRevision())) {
+            throw notFound("Package version '" + version + "' was not found at revision '"
+                    + packageVersionRevision + "'.");
+        }
+        PackageAsset asset = pv.getAssets().get(assetName);
+        if (asset == null) {
+            throw notFound("Asset '" + assetName + "' was not found on package version '" + version + "'.");
+        }
+        // The live object's content may already be populated (same JVM as the publish that set
+        // it), but it isn't guaranteed to be: a reload from the persisted store never restores it,
+        // since it's excluded from that JSON/WAL. Always re-read from the asset store itself
+        // rather than trusting whatever happens to already be on the object.
+        asset.setContent(readAssetContent(owner, key, assetName));
+        return new PackageVersionAssetResult(asset, pv.getRevision());
+    }
+
     // -------------------------------------------------------------------- tags
 
     public synchronized void tagResource(String resourceArn, Map<String, String> newTags) {
@@ -398,6 +588,12 @@ public class CodeArtifactService implements Resettable {
     public void clear() {
         domains.clear();
         repositories.clear();
+        packageVersions.clear();
+        if (inMemory) {
+            memoryAssetStore.clear();
+        } else {
+            deleteAssetRoot();
+        }
     }
 
     // ----------------------------------------------------------------- helpers
@@ -436,6 +632,10 @@ public class CodeArtifactService implements Resettable {
 
     private int repositoryCountForDomain(String owner, String region, String domain) {
         return repositories.scanForAccount(owner, k -> k.startsWith(region + "::" + domain + "::")).size();
+    }
+
+    private int domainCountForAccount(String owner, String region) {
+        return domains.scanForAccount(owner, k -> k.startsWith(region + "::")).size();
     }
 
     private void validateUpstreams(String owner, String region, String domain, String repository,
@@ -522,12 +722,137 @@ public class CodeArtifactService implements Resettable {
         return merged;
     }
 
+    private static void validatePackageToken(String field, String value) {
+        if (value == null || value.isEmpty() || value.length() > 255 || !PACKAGE_TOKEN.matcher(value).matches()) {
+            throw validation(field + " must be 1-255 characters with no '#', '/', or whitespace.");
+        }
+    }
+
+    private static void validateAssetName(String assetName) {
+        if (assetName == null || assetName.isEmpty() || assetName.length() > 255
+                || !ASSET_NAME.matcher(assetName).matches()) {
+            throw validation("asset must be 1-255 characters with no control characters.");
+        }
+    }
+
+    // ----------------------------------------------------------- asset bytes
+
+    private void writeAssetContent(String owner, String packageVersionKey, String assetName, byte[] content) {
+        if (inMemory) {
+            memoryAssetStore.put(assetStoreKey(owner, packageVersionKey, assetName), content);
+            return;
+        }
+        Path filePath = resolveAssetPath(owner, packageVersionKey, assetName);
+        try {
+            Files.createDirectories(filePath.getParent());
+            Path tmp = filePath.resolveSibling(filePath.getFileName() + ".tmp-" + UUID.randomUUID());
+            try {
+                Files.write(tmp, content);
+                try {
+                    Files.move(tmp, filePath, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+                } catch (AtomicMoveNotSupportedException e) {
+                    Files.move(tmp, filePath, StandardCopyOption.REPLACE_EXISTING);
+                }
+            } finally {
+                Files.deleteIfExists(tmp);
+            }
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to write CodeArtifact asset file: " + filePath, e);
+        }
+    }
+
+    private byte[] readAssetContent(String owner, String packageVersionKey, String assetName) {
+        if (inMemory) {
+            byte[] content = memoryAssetStore.get(assetStoreKey(owner, packageVersionKey, assetName));
+            return content != null ? content : new byte[0];
+        }
+        Path filePath = resolveAssetPath(owner, packageVersionKey, assetName);
+        try {
+            return Files.readAllBytes(filePath);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to read CodeArtifact asset file: " + filePath, e);
+        }
+    }
+
+    private static String assetStoreKey(String owner, String packageVersionKey, String assetName) {
+        return owner + "::" + packageVersionKey + "::" + assetName;
+    }
+
+    /**
+     * Both path segments are SHA-256 hex digests, never the raw names: an asset name may contain
+     * '/', '.', '..' or run long, and the version key can exceed a filesystem's filename limit, so
+     * using either directly would let distinct legal names collide or fail. Digests are fixed
+     * length, path-safe, and cannot escape the directory.
+     */
+    private Path resolveAssetPath(String owner, String packageVersionKey, String assetName) {
+        return assetRoot.resolve(owner)
+                .resolve(sha256Hex(packageVersionKey.getBytes(StandardCharsets.UTF_8)))
+                .resolve(sha256Hex(assetName.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    private void deleteAssetRoot() {
+        if (!Files.isDirectory(assetRoot)) {
+            return;
+        }
+        try (Stream<Path> paths = Files.walk(assetRoot)) {
+            paths.sorted(Comparator.reverseOrder()).forEach(p -> {
+                try {
+                    Files.deleteIfExists(p);
+                } catch (IOException e) {
+                    LOG.errorv(e, "Failed to delete CodeArtifact asset file: {0}", p);
+                }
+            });
+        } catch (IOException e) {
+            LOG.errorv(e, "Failed to reset CodeArtifact asset storage under {0}", assetRoot);
+        }
+    }
+
+    private static boolean parseBoolean(String value) {
+        if (value == null || value.isBlank()) {
+            return false;
+        }
+        if ("true".equalsIgnoreCase(value) || "false".equalsIgnoreCase(value)) {
+            return Boolean.parseBoolean(value);
+        }
+        throw validation("unfinished must be 'true' or 'false'.");
+    }
+
+    private static Map<String, String> computeHashes(byte[] content) {
+        Map<String, String> hashes = new LinkedHashMap<>();
+        for (String algorithm : ASSET_HASH_ALGORITHMS) {
+            hashes.put(algorithm, SigV4RequestValidator.hexEncode(digest(algorithm, content)));
+        }
+        return hashes;
+    }
+
+    private static String sha256Hex(byte[] content) {
+        try {
+            return SigV4RequestValidator.sha256Hex(content);
+        } catch (Exception e) {
+            throw new IllegalStateException("JVM does not support SHA-256", e);
+        }
+    }
+
+    private static byte[] digest(String algorithm, byte[] content) {
+        try {
+            return MessageDigest.getInstance(algorithm).digest(content);
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("JVM does not support " + algorithm, e);
+        }
+    }
+
     private static String domainKey(String region, String domain) {
         return region + "::" + domain;
     }
 
     private static String repositoryKey(String region, String domain, String repository) {
         return region + "::" + domain + "::" + repository;
+    }
+
+    private static String packageVersionKey(String region, String domain, String repository, String format,
+                                             String namespace, String packageName, String version) {
+        return region + "::" + domain + "::" + repository + "::" + format + "::"
+                + (namespace == null ? "" : namespace) + "::" + packageName + "::" + version;
     }
 
     private static AwsException validation(String message) {

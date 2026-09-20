@@ -1,8 +1,10 @@
 package io.github.hectorvent.floci.core.common.docker;
 
 import com.github.dockerjava.api.model.Bind;
+import com.github.dockerjava.api.model.DeviceRequest;
 import com.github.dockerjava.api.model.LogConfig;
 import com.github.dockerjava.api.model.Mount;
+import com.github.dockerjava.api.model.VolumesFrom;
 
 import java.util.List;
 import java.util.Map;
@@ -23,6 +25,7 @@ import java.util.Map;
  * @param networkMode Docker network name or mode (null = default bridge)
  * @param mounts Volume mounts (named volumes, bind mounts, tmpfs)
  * @param binds Legacy bind mounts (prefer mounts for new code)
+ * @param volumesFrom Volumes inherited from other containers
  * @param extraHosts Extra /etc/hosts entries as "hostname:ip" strings
  * @param labels Container labels merged over the default floci-aws labels
  * @param logConfig Docker log driver configuration (null = daemon default)
@@ -32,6 +35,10 @@ import java.util.Map;
  * @param workingDir Working directory inside the container (overrides image WORKDIR)
  * @param user User the container process runs as, formatted "uid[:gid]" (null = image USER)
  * @param groupAdd Supplementary group IDs added to the container process
+ * @param deviceRequests Device requests for accelerators such as GPUs (empty = none)
+ * @param nanoCpus Hard CPU quota in billionths of a CPU (null = no quota)
+ * @param cpuShares Relative CPU weight against other containers (null = daemon default)
+ * @param readonlyRootfs Whether the container's own filesystem is mounted read only
  */
 public record ContainerSpec(
         String image,
@@ -46,6 +53,7 @@ public record ContainerSpec(
         String networkMode,
         List<Mount> mounts,
         List<Bind> binds,
+        List<VolumesFrom> volumesFrom,
         List<String> extraHosts,
         Map<String, String> labels,
         LogConfig logConfig,
@@ -54,18 +62,25 @@ public record ContainerSpec(
         List<String> dnsServers,
         String workingDir,
         String user,
-        List<String> groupAdd
+        List<String> groupAdd,
+        List<DeviceRequest> deviceRequests,
+        Long nanoCpus,
+        Integer cpuShares,
+        boolean readonlyRootfs
 ) {
     /**
      * Creates a minimal spec with just the image name.
      * All other fields will be null or empty lists.
      */
     public ContainerSpec(String image) {
-        this(image, null, List.of(), null, null, null, Map.of(), List.of(), List.of(), null, List.of(), List.of(), List.of(), Map.of(), null, false, null, List.of(), null, null, List.of());
+        this(image, null, List.of(), null, null, null, Map.of(), List.of(), List.of(), null,
+                List.of(), List.of(), List.of(), List.of(), Map.of(), null, false, null, List.of(),
+                null, null, List.of(), List.of(), null, null, false);
     }
 
     /**
-     * Backward-compatible constructor that defaults {@code loopbackPortBindings} to empty.
+     * Backward-compatible constructor that defaults {@code loopbackPortBindings},
+     * {@code volumesFrom}, and {@code deviceRequests} to empty.
      */
     public ContainerSpec(
             String image,
@@ -89,7 +104,77 @@ public record ContainerSpec(
             String user,
             List<String> groupAdd
     ) {
-        this(image, name, env, cmd, entrypoint, memoryBytes, portBindings, List.of(), exposedPorts, networkMode, mounts, binds, extraHosts, labels, logConfig, privileged, cgroupnsMode, dnsServers, workingDir, user, groupAdd);
+        this(image, name, env, cmd, entrypoint, memoryBytes, portBindings, List.of(), exposedPorts,
+                networkMode, mounts, binds, List.of(), extraHosts, labels, logConfig, privileged,
+                cgroupnsMode, dnsServers, workingDir, user, groupAdd, List.of(), null, null, false);
+    }
+
+    /**
+     * Backward-compatible constructor that defaults {@code volumesFrom} and
+     * {@code deviceRequests} to empty, so callers that predate volume inheritance and
+     * accelerator support keep their existing behaviour.
+     */
+    public ContainerSpec(
+            String image,
+            String name,
+            List<String> env,
+            List<String> cmd,
+            List<String> entrypoint,
+            Long memoryBytes,
+            Map<Integer, Integer> portBindings,
+            List<Integer> loopbackPortBindings,
+            List<Integer> exposedPorts,
+            String networkMode,
+            List<Mount> mounts,
+            List<Bind> binds,
+            List<String> extraHosts,
+            Map<String, String> labels,
+            LogConfig logConfig,
+            boolean privileged,
+            String cgroupnsMode,
+            List<String> dnsServers,
+            String workingDir,
+            String user,
+            List<String> groupAdd
+    ) {
+        this(image, name, env, cmd, entrypoint, memoryBytes, portBindings, loopbackPortBindings,
+                exposedPorts, networkMode, mounts, binds, List.of(), extraHosts, labels, logConfig,
+                privileged, cgroupnsMode, dnsServers, workingDir, user, groupAdd, List.of(),
+                null, null, false);
+    }
+
+    /**
+     * Backward-compatible constructor that defaults {@code volumesFrom} to empty while
+     * preserving explicitly requested devices.
+     */
+    public ContainerSpec(
+            String image,
+            String name,
+            List<String> env,
+            List<String> cmd,
+            List<String> entrypoint,
+            Long memoryBytes,
+            Map<Integer, Integer> portBindings,
+            List<Integer> loopbackPortBindings,
+            List<Integer> exposedPorts,
+            String networkMode,
+            List<Mount> mounts,
+            List<Bind> binds,
+            List<String> extraHosts,
+            Map<String, String> labels,
+            LogConfig logConfig,
+            boolean privileged,
+            String cgroupnsMode,
+            List<String> dnsServers,
+            String workingDir,
+            String user,
+            List<String> groupAdd,
+            List<DeviceRequest> deviceRequests
+    ) {
+        this(image, name, env, cmd, entrypoint, memoryBytes, portBindings, loopbackPortBindings,
+                exposedPorts, networkMode, mounts, binds, List.of(), extraHosts, labels, logConfig,
+                privileged, cgroupnsMode, dnsServers, workingDir, user, groupAdd, deviceRequests,
+                null, null, false);
     }
 
     /**
@@ -111,5 +196,12 @@ public record ContainerSpec(
      */
     public boolean hasLogConfig() {
         return logConfig != null;
+    }
+
+    /**
+     * Returns true if this spec asks the daemon for any device, such as a GPU.
+     */
+    public boolean hasDeviceRequests() {
+        return deviceRequests != null && !deviceRequests.isEmpty();
     }
 }

@@ -32,9 +32,68 @@ ECS emulates clusters, task definitions, tasks, and services. In the default con
 
 `runtimePlatform` and a container's `logConfiguration` are stored and returned exactly as
 registered, so a client that reads back what it wrote (Terraform, or a deploy tool verifying its
-own `RegisterTaskDefinition`) sees no drift. Neither changes how a local task runs: Floci launches
-every task on the host's own architecture, and a task's output stays with its Docker container
-rather than being routed to the configured log driver.
+own `RegisterTaskDefinition`) sees no drift. `runtimePlatform` does not change where a local task
+runs: Floci launches every task on the host's own architecture.
+
+`firelensConfiguration` is stored and returned the same way. `RegisterTaskDefinition` rejects a
+missing or unsupported `type` (`fluentd` and `fluentbit` only), and a task using `awsfirelens`
+must name exactly one router: a task definition with two FireLens routers, or a router publishing
+port `24224`, is rejected at launch. A `fluentbit` or `fluentd` FireLens
+container is acted on at launch: Floci generates the router config (unix socket input, TCP forward
+on bridge/awsvpc, ECS metadata, optional include of a `config-file-type=file` or `s3` extra
+config, and one output per `awsfirelens` container), starts that router first, and points application
+containers with `logDriver: awsfirelens` at the generated unix socket. Other log drivers,
+including `awslogs`, still stream to CloudWatch via Floci rather than the configured driver.
+An `[OUTPUT]` for an AWS destination whose plugin reads a URL from `endpoint` (`s3`,
+`cloudwatch`, `firehose`) also gets `Endpoint` set to Floci's container-reachable base URL. The
+Fluent Bit AWS plugins take a custom endpoint only from their own configuration and ignore the
+`AWS_ENDPOINT_URL` injected into the container, so without it the router would ship logs to the
+real service. An `endpoint` set in the task definition's log options is never overwritten, so
+aiming one output at real AWS still works, and outputs declared in an `@INCLUDE`d or
+`config-file-type=s3` config are not visible to Floci and keep whatever endpoint they were
+written with.
+The upstream C plugins (`cloudwatch_logs`, `kinesis_firehose`, `kinesis_streams`) are left
+alone instead. They hand `endpoint` to `getaddrinfo` as a bare host name rather than parsing it as
+a URL, and they always dial TLS, so Floci's `http://host:port` base URL fails there as
+`Misformatted domain name` and a bare host fails certificate verification; no output-level switch
+disables either. On the `aws-for-fluent-bit` 3.x line these plugins also honour a separate `port`
+(undocumented for `kinesis_firehose` and `cloudwatch_logs`, but it works), so an output can be
+aimed at Floci's port, but it still cannot complete the TLS handshake. Those outputs go wherever
+the task definition points them.
+An injected `http://` endpoint also gets `tls Off`. Fluent Bit 1.9 (the `aws-for-fluent-bit` 2.x
+and `:latest` line) still calls `flb_tls_session_create` on HTTP S3 and SIGSEGVs on a NULL
+TLS context; the scheme alone is not enough. A `tls` the task definition already set is left
+alone.
+The TCP forward listens on `0.0.0.0` rather than AWS's awsvpc `127.0.0.1` because Floci only
+shares a network namespace when security-group enforcement is enabled for an awsvpc task. In every
+other case, the injected `FLUENT_HOST` (the router's container IP) must be reachable. Fluent Bit
+config is written to `/fluent-bit/etc/fluent-bit.conf`. Fluentd config is
+written to `/fluentd/etc/fluent.conf` and uses `@type` (not `Name`) for output plugins; Floci
+does not inject an `endpoint` into Fluentd outputs.
+`config-file-type=s3` follows where ECS itself draws the line. `RegisterTaskDefinition` rejects
+it for a Fargate-compatible task definition, with `Fargate launch type does not support
+FirelensConfiguration config file from 's3'`, and rejects a `config-file-value` that is not an S3
+object ARN with `Invalid arn syntax`. A Fargate task can still take its config from S3 the way AWS
+documents, by giving the aws-for-fluent-bit init process its `aws_fluent_bit_init_s3_*`
+environment variables. ECS never inspects those and Floci passes them through, so that
+registration is accepted here too; it fetches nothing locally either, because Floci serves no ECS
+task metadata endpoint, which the init process reads before downloading.
+Floci also does not validate a task definition's `compatibilities` /
+`requiresCompatibilities` against `RunTask` `launchType`; a Fargate-compatible
+definition can still be run with `launchType=EC2` (and the reverse) the same
+way a missing metadata endpoint is accepted at registration.
+On an EC2-compatible task definition Floci reads the object from its own S3, writes it to the
+fixed `external.conf` path next to the generated config (`/fluent-bit/etc/external.conf` or
+`/fluentd/etc/external.conf`), and includes it from there, matching the paths the ECS agent uses.
+The object is read before any container is created, so a missing bucket or key stops the task with
+the agent's reason, `Unable to download firelens s3 config file: unable to download s3 config
+<key> from bucket <bucket>: <detail>`, instead of leaking a started router. Shared network
+namespaces (AppConfig agent on `127.0.0.1:2772`) are not implemented.
+
+Container `volumesFrom` entries are also stored and returned. In Docker mode, source containers
+are launched before their consumers and their declared volumes are inherited with the requested
+read-only or read-write access mode. Startup ordering also respects FireLens router dependencies;
+cycles involving both volume inheritance and log routing are rejected before containers start.
 
 ### Tasks
 
@@ -199,7 +258,7 @@ unchanged.
 
 ## Configuration
 
-Docker-backed `awsvpc` tasks receive an emulated ENI and share one protected network namespace across their containers by default. A task without explicit security groups uses its subnet VPC's default group. Containers in the same task can communicate over localhost. Bridge and host task networking do not attach task-level `awsvpc` security groups. Mock mode reports control-plane state and does not enforce packet filtering. Set `FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED=false` to retain legacy networking during migration.
+With `FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED=true`, Docker-backed `awsvpc` tasks receive an emulated ENI and share one protected network namespace across their containers. Enforcement is disabled by default. A task without explicit security groups uses its subnet VPC's default group. Containers in the same task can communicate over localhost. Bridge and host task networking do not attach task-level `awsvpc` security groups. Mock mode reports control-plane state and does not enforce packet filtering.
 
 | Variable | Default | Description |
 |---|---|---|
@@ -290,6 +349,24 @@ services:
     environment:
       FLOCI_SERVICES_ECS_DOCKER_NETWORK: aws-local_default
 ```
+
+### Host access to awsvpc task ports
+
+By default, Floci preserves the isolation expected from `awsvpc`: native runs use a dynamic Docker host port, while Floci-in-Docker exposes the container port only on the configured Docker network. A process running directly on the Docker host therefore has no stable port for an `awsvpc` task.
+
+Set `FLOCI_SERVICES_ECS_PUBLISH_AWSVPC_PORTS_TO_HOST=true` to opt into stable host publishing. Floci binds each `containerPort` to the same host port, or uses an explicit non-zero `hostPort` when one is present. A host-side Terraform provider can then connect to `localhost:<port>`.
+
+```yaml
+services:
+  floci:
+    image: floci/floci:latest
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      FLOCI_SERVICES_ECS_PUBLISH_AWSVPC_PORTS_TO_HOST: "true"
+```
+
+This setting is an emulator-specific networking convenience and defaults to `false`. Docker cannot bind the same host port twice, so use it only when at most one running task publishes each port.
 
 ## Examples
 

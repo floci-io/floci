@@ -304,6 +304,60 @@ class WafV2IntegrationTest {
 
     @Test
     @Order(15)
+    void tagResourcePersistsTagsForIpSet() {
+        call("TagResource",
+                "{\"ResourceARN\":\"" + ipSetArn + "\",\"Tags\":[{\"Key\":\"env\",\"Value\":\"test\"},"
+                        + "{\"Key\":\"team\",\"Value\":\"waf\"}]}")
+                .then().statusCode(200);
+
+        call("ListTagsForResource", "{\"ResourceARN\":\"" + ipSetArn + "\"}")
+                .then().statusCode(200)
+                .body("TagInfoForResource.ResourceARN", equalTo(ipSetArn))
+                .body("TagInfoForResource.TagList", hasSize(2))
+                .body("TagInfoForResource.TagList.find { it.Key == 'env' }.Value", equalTo("test"))
+                .body("TagInfoForResource.TagList.find { it.Key == 'team' }.Value", equalTo("waf"));
+
+        call("UntagResource", "{\"ResourceARN\":\"" + ipSetArn + "\",\"TagKeys\":[\"team\"]}")
+                .then().statusCode(200);
+
+        call("ListTagsForResource", "{\"ResourceARN\":\"" + ipSetArn + "\"}")
+                .then().statusCode(200)
+                .body("TagInfoForResource.TagList", hasSize(1))
+                .body("TagInfoForResource.TagList[0].Key", equalTo("env"));
+    }
+
+    @Test
+    @Order(16)
+    void tagResourcePersistsTagsForWebAcl() {
+        call("TagResource",
+                "{\"ResourceARN\":\"" + webAclArn + "\",\"Tags\":[{\"Key\":\"owner\",\"Value\":\"floci\"}]}")
+                .then().statusCode(200);
+
+        call("ListTagsForResource", "{\"ResourceARN\":\"" + webAclArn + "\"}")
+                .then().statusCode(200)
+                .body("TagInfoForResource.TagList", hasSize(1))
+                .body("TagInfoForResource.TagList[0].Key", equalTo("owner"))
+                .body("TagInfoForResource.TagList[0].Value", equalTo("floci"));
+
+        call("TagResource",
+                "{\"ResourceARN\":\"" + webAclArn + "\",\"Tags\":[{\"Key\":\"owner\",\"Value\":\"floci-team\"}]}")
+                .then().statusCode(200);
+
+        call("ListTagsForResource", "{\"ResourceARN\":\"" + webAclArn + "\"}")
+                .then().statusCode(200)
+                .body("TagInfoForResource.TagList", hasSize(1))
+                .body("TagInfoForResource.TagList[0].Value", equalTo("floci-team"));
+
+        call("UntagResource", "{\"ResourceARN\":\"" + webAclArn + "\",\"TagKeys\":[\"owner\"]}")
+                .then().statusCode(200);
+
+        call("ListTagsForResource", "{\"ResourceARN\":\"" + webAclArn + "\"}")
+                .then().statusCode(200)
+                .body("TagInfoForResource.TagList", hasSize(0));
+    }
+
+    @Test
+    @Order(17)
     void teardown() {
         call("DisassociateWebACL", "{\"ResourceArn\":\"" + API_RESOURCE_ARN + "\"}")
                 .then().statusCode(200);
@@ -325,7 +379,7 @@ class WafV2IntegrationTest {
     }
 
     @Test
-    @Order(16)
+    @Order(18)
     void getMissingWebAclReturnsNotFound() {
         call("GetWebACL",
                 "{\"Name\":\"nope\",\"Scope\":\"REGIONAL\",\"Id\":\"00000000-0000-0000-0000-000000000000\"}")

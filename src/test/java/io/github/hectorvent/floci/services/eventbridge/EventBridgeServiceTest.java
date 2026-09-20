@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.eventbridge;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -17,6 +18,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mockito;
 
 import java.util.List;
 import java.util.Map;
@@ -741,9 +744,9 @@ class EventBridgeServiceTest {
         EventBridgeService.PutEventsResult result = service.putEvents(entries, "eu-west-1");
         assertEquals(0, result.failedCount());
 
-        org.mockito.ArgumentCaptor<String> json = org.mockito.ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<String> json = ArgumentCaptor.forClass(String.class);
         verify(invokerMock).invokeTarget(eq(target), json.capture(), eq("eu-west-1"));
-        com.fasterxml.jackson.databind.JsonNode envelope = OBJECT_MAPPER.readTree(json.getValue());
+        JsonNode envelope = OBJECT_MAPPER.readTree(json.getValue());
         assertEquals("eu-west-1", envelope.path("region").asText(),
                 "envelope.region should reflect the PutEvents call's region, not the resolver default");
         assertEquals("000000000000", envelope.path("account").asText());
@@ -769,9 +772,9 @@ class EventBridgeServiceTest {
 
         service.putEvents(List.of(entry), "us-west-2");
 
-        org.mockito.ArgumentCaptor<String> json = org.mockito.ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<String> json = ArgumentCaptor.forClass(String.class);
         verify(invokerMock).invokeTarget(eq(target), json.capture(), eq("us-west-2"));
-        com.fasterxml.jackson.databind.JsonNode envelope = OBJECT_MAPPER.readTree(json.getValue());
+        JsonNode envelope = OBJECT_MAPPER.readTree(json.getValue());
         assertEquals("ap-northeast-1", envelope.path("region").asText(),
                 "entry.Region should win over the PutEvents call region");
         assertEquals("111111111111", envelope.path("account").asText(),
@@ -796,9 +799,9 @@ class EventBridgeServiceTest {
         service.putEvents(List.of(
                 Map.of("Source", "my.app", "DetailType", "Test", "Detail", "{}")), "eu-west-1");
 
-        org.mockito.ArgumentCaptor<String> json = org.mockito.ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<String> json = ArgumentCaptor.forClass(String.class);
         verify(invokerMock).invokeTarget(eq(target), json.capture(), eq("eu-west-1"));
-        com.fasterxml.jackson.databind.JsonNode envelope = OBJECT_MAPPER.readTree(json.getValue());
+        JsonNode envelope = OBJECT_MAPPER.readTree(json.getValue());
         assertEquals("eu-west-1", envelope.path("region").asText(),
                 "envelope and pattern matching must agree on the entry's effective region");
     }
@@ -821,7 +824,7 @@ class EventBridgeServiceTest {
         service.putEvents(List.of(
                 Map.of("Source", "my.app", "DetailType", "Test", "Detail", "{}")), "eu-west-1");
 
-        verify(invokerMock, org.mockito.Mockito.never()).invokeTarget(eq(target), any(), any());
+        verify(invokerMock, Mockito.never()).invokeTarget(eq(target), any(), any());
     }
 
     @Test
@@ -839,9 +842,9 @@ class EventBridgeServiceTest {
         service.putEvents(List.of(
                 Map.of("Source", "my.app", "DetailType", "Test", "Detail", "{}")), REGION);
 
-        org.mockito.ArgumentCaptor<String> json = org.mockito.ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<String> json = ArgumentCaptor.forClass(String.class);
         verify(invokerMock).invokeTarget(eq(target), json.capture(), eq(REGION));
-        com.fasterxml.jackson.databind.JsonNode envelope = OBJECT_MAPPER.readTree(json.getValue());
+        JsonNode envelope = OBJECT_MAPPER.readTree(json.getValue());
         assertEquals(REGION, envelope.path("region").asText());
         assertEquals("000000000000", envelope.path("account").asText());
     }

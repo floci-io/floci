@@ -153,6 +153,10 @@ class EcsCfnProvisionerTest {
         container.putArray("Environment").addObject().put("Name", "MODE").put("Value", "prod");
         container.putArray("Secrets").addObject().put("Name", "DB").put("ValueFrom", "arn:aws:secretsmanager:x");
         container.putArray("Command").add("run").add("--fast");
+        ObjectNode log = container.putObject("LogConfiguration");
+        log.put("LogDriver", "awsfirelens");
+        log.putObject("Options").put("Name", "s3").put("bucket", "logs");
+        container.putObject("FirelensConfiguration").put("Type", "fluentbit");
 
         StackResource r = resource("AWS::ECS::TaskDefinition", "TaskDef");
         provisioner.provision(r, props, ctx());
@@ -174,6 +178,10 @@ class EcsCfnProvisionerTest {
         assertEquals("prod", def.getEnvironment().get(0).value());
         assertEquals("arn:aws:secretsmanager:x", def.getSecrets().get(0).valueFrom());
         assertEquals(List.of("run", "--fast"), def.getCommand());
+        assertEquals("awsfirelens", def.getLogConfiguration().logDriver());
+        assertEquals("s3", def.getLogConfiguration().options().get("Name"));
+        assertEquals("logs", def.getLogConfiguration().options().get("bucket"));
+        assertEquals("fluentbit", def.getFirelensConfiguration().type());
     }
 
     @Test

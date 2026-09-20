@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.s3;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.RequestHost;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.services.cloudfront.CloudFrontDistributionFilter;
@@ -203,10 +204,7 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
                 return first;
             }
         }
-        if (hostHeader != null && !hostHeader.isBlank()) {
-            return hostHeader.trim();
-        }
-        return requestUri != null ? requestUri.getAuthority() : null;
+        return RequestHost.of(hostHeader, requestUri);
     }
 
     static String resolveHost(String hostHeader, URI requestUri) {

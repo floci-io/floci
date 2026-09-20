@@ -100,11 +100,11 @@ See [Storage Modes](./storage.md) for a full explanation of each mode.
 
 ## Docker Daemon
 
-Security-group filtering is enabled by default for EC2 Docker instances and ECS `awsvpc` tasks. It requires rootful Linux Docker and Linux workload containers. Before upgrading, terminate existing EC2 instances and ECS tasks, then launch replacements so Floci can prepare their protected namespaces before application code starts. To retain the legacy unrestricted Docker networking during migration, set `FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED=false` and restart Floci. Mock mode remains a control-plane simulation and does not filter packets.
+Security-group filtering is opt-in for EC2 Docker instances and ECS `awsvpc` tasks. It requires rootful Linux Docker and Linux workload containers, including Linux containers on Docker Desktop. Before enabling it, terminate existing EC2 instances and ECS tasks, restart Floci with `FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED=true`, then launch replacements so their policies are installed before application code starts. EC2 application ports, including ports authorized after launch, are not published on the host while enforcement is enabled. Mock mode remains a control-plane simulation and does not filter packets.
 
 | Variable | Default | Description |
 |---|---|---|
-| `FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED` | `true` | Filter Docker-backed EC2 and ECS `awsvpc` traffic by attached security groups; set to `false` for legacy networking |
+| `FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED` | `false` | Opt in to filtering Docker-backed EC2 and ECS `awsvpc` traffic by attached security groups |
 | `FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_HELPER_IMAGE` | `floci/network-helper:local` | Linux helper image containing nftables; Floci builds the default image locally when missing |
 | `FLOCI_DOCKER_DOCKER_HOST` | `unix:///var/run/docker.sock` | Docker daemon socket path or TCP address |
 | `FLOCI_DOCKER_DOCKER_CONFIG_PATH` | _(none)_ | Path to a directory containing Docker's `config.json` for registry auth |
@@ -220,6 +220,7 @@ See [Initialization Hooks](./initialization-hooks.md) for lifecycle phases and s
 | `FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ENABLED` | `false` | Watch Lambda code directories for changes and reload without redeployment |
 | `FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ALLOWED_PATHS` | _(none)_ | Comma-separated host paths that hot-reload is allowed to watch |
 | `FLOCI_SERVICES_LAMBDA_DOCKER_NETWORK` | _(none)_ | Docker network for Lambda containers (overrides `FLOCI_SERVICES_DOCKER_NETWORK`) |
+| `FLOCI_SERVICES_LAMBDA_DOCKER_FLAGS` | _(none)_ | Additional Docker flags applied to Lambda containers, such as `--env`, `--volume`, `--publish`, `--add-host`, `--dns`, `--label`, `--network`, `--user`, `--privileged`, and `--platform`. Published ports support `host:container` and `127.0.0.1:host:container` forms |
 | `FLOCI_SERVICES_LAMBDA_CONTAINER_NAME_PREFIX` | `floci` | Base name prefix for Lambda-spawned containers and code volumes (must match `[A-Za-z0-9][A-Za-z0-9_.-]*`) |
 | `FLOCI_SERVICES_LAMBDA_DOCKER_HOST_OVERRIDE` | _(none)_ | Explicit host/IP Lambda containers use to reach the Runtime API, bypassing auto-detection (e.g. rootless Podman) |
 | `FLOCI_SERVICES_LAMBDA_AWS_CONFIG_PATH` | _(none)_ | Host path bind-mounted read-only at `/opt/aws-config` inside Lambda containers for real credential discovery |
@@ -387,6 +388,7 @@ These services spawn Docker containers. They require access to the Docker socket
 | `FLOCI_SERVICES_RDS_DEFAULT_POSTGRES_IMAGE` | `postgres:16-alpine` | Default PostgreSQL Docker image |
 | `FLOCI_SERVICES_RDS_DEFAULT_MYSQL_IMAGE` | `mysql:8.0` | Default MySQL Docker image |
 | `FLOCI_SERVICES_RDS_DEFAULT_MARIADB_IMAGE` | `mariadb:11` | Default MariaDB Docker image |
+| `FLOCI_SERVICES_RDS_DEFAULT_SQL_SERVER_IMAGE` | `mcr.microsoft.com/mssql/server:2022-latest` | Default SQL Server Docker image |
 | `FLOCI_SERVICES_RDS_DOCKER_NETWORK` | _(none)_ | Docker network for RDS containers (overrides `FLOCI_SERVICES_DOCKER_NETWORK`) |
 | `FLOCI_SERVICES_RDS_DATA_ENABLED` | `true` | Enable the RDS Data API service. Requires `FLOCI_SERVICES_RDS_ENABLED=true` |
 | `FLOCI_SERVICES_RDS_DATA_TRANSACTION_TTL_SECONDS` | `180` | Idle timeout, in seconds, before leaked RDS Data API transactions expire |
@@ -464,6 +466,7 @@ These services spawn Docker containers. They require access to the Docker socket
 |---|---|---|
 | `FLOCI_SERVICES_ECS_ENABLED` | `true` | Enable the ECS service |
 | `FLOCI_SERVICES_ECS_MOCK` | `false` | When `true`, tasks are registered but not actually run |
+| `FLOCI_SERVICES_ECS_PUBLISH_AWSVPC_PORTS_TO_HOST` | `false` | Publish `awsvpc` task ports on stable Docker host ports for host-side clients |
 | `FLOCI_SERVICES_ECS_DEFAULT_MEMORY_MB` | `512` | Default task memory when not specified in the task definition |
 | `FLOCI_SERVICES_ECS_DEFAULT_CPU_UNITS` | `256` | Default task CPU units when not specified in the task definition |
 | `FLOCI_SERVICES_ECS_DOCKER_NETWORK` | _(none)_ | Docker network for ECS task containers |

@@ -39,6 +39,10 @@ The data plane is used by applications to retrieve the active configuration for 
 - `StartConfigurationSession`
 - `GetLatestConfiguration`
 
+Basic `AWS.AppConfig.FeatureFlags` profiles are returned in AWS retrieval-time JSON format. Multi-variant
+feature flags require context evaluation and Amazon Ion output, which Floci does not yet emulate. Floci
+returns those configurations unchanged.
+
 ## Configuration
 
 | Variable | Default | Description |

@@ -78,9 +78,9 @@ Key pairs created with `CreateKeyPair` return real RSA private key material, and
 
 ## Security Group Port Publishing
 
-By default, Floci prepares a separate Linux network namespace and an nftables default-deny policy before starting each Docker-backed instance. It checks new managed connections against both the sender's egress rules and the receiver's ingress rules, using emulated ENI addresses and security-group membership before translating to Docker addresses. Established replies use connection tracking. This filters packets but does not emulate VPC routing, NACLs, NAT gateways, or peering. Rootless Docker and Windows containers are unsupported.
+With `FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED=true`, Floci prepares a separate Linux network namespace and an nftables default-deny policy before starting each Docker-backed instance. Enforcement is disabled by default. It checks new managed connections against both the sender's egress rules and the receiver's ingress rules, using emulated ENI addresses and security-group membership before translating to Docker addresses. Established replies use connection tracking. This filters packets but does not emulate VPC routing, NACLs, NAT gateways, or peering. Rootless Docker and Windows containers are unsupported.
 
-Security-group permissions on a host-published port use the source visible inside Docker. Docker Desktop may replace the original external-client address. SSH and application ports are published directly by the protected namespace, so their packets pass through the same nftables policy as direct container traffic. Direct managed container traffic uses the logical ENI identity.
+Security-group permissions on a host-published port use the source visible inside Docker. Docker Desktop may replace the original external-client address. SSH is published through the protected namespace. EC2 application ports, including ports authorized after launch, are not published while enforcement is enabled. The socat publisher remains available with enforcement disabled and supports live port additions. Direct managed container traffic uses the logical ENI identity.
 
 When enforcement is disabled, an instance's security groups can open a TCP port to a CIDR source and Floci publishes that port on the host so you can reach the app from `localhost`. For each opened port Floci starts a small `alpine/socat` sidecar container that binds an allocated host port (default range 30000–30999) and forwards it to the instance container's IP. This works both for rules present at launch and for rules added later with `authorize-security-group-ingress`; revoking the rule removes the forward. The mapping (`app port -> host port`) is written to the logs:
 
@@ -194,7 +194,7 @@ Floci seeds the following resources on first use in each region so Terraform, th
 |--------|-------------|
 | CreateVpc | Creates a VPC with the requested CIDR block. |
 | DescribeVpcs | Lists or returns stored VPCs. |
-| DeleteVpc | Deletes a VPC from the local EC2 store. |
+| DeleteVpc | Deletes a VPC from the local EC2 store, together with its default security group and rules, main route table and default network ACL. Fails with `DependencyViolation` while the VPC still has a subnet, a security group, route table or network ACL other than those defaults, a VPC endpoint, or an attached internet gateway. Instances, NAT gateways and other subnet-resident resources are not checked. |
 | ModifyVpcAttribute | Updates supported VPC attributes. |
 | DescribeVpcAttribute | Returns a supported VPC attribute. |
 | DescribeVpcEndpointServices | Returns an empty local VPC endpoint service catalog. |
@@ -202,9 +202,16 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | DescribeVpcEndpoints | Lists or returns stored VPC endpoints. |
 | ModifyVpcEndpoint | Associates or disassociates route tables, subnets and security groups, and sets or resets the endpoint policy. `SubnetConfiguration.N` replaces the addresses pinned for a subnet, under the same address validation as CreateVpcEndpoint. `DnsOptions` and `IpAddressType` are accepted and ignored. |
 | DeleteVpcEndpoints | Deletes VPC endpoint records. |
+| DescribeVpnGateways | Validates filters and returns empty discovery results; explicit IDs return not-found errors. |
+| DescribeEgressOnlyInternetGateways | Validates filters and pagination parameters and returns an empty set, including for explicit IDs, as AWS does. |
 | CreateDefaultVpc | Creates or returns the default VPC for the region. |
 | AssociateVpcCidrBlock | Adds a secondary CIDR block association to a VPC. |
 | DisassociateVpcCidrBlock | Removes a secondary CIDR block association from a VPC. |
+
+The two describe-only network actions above provide discovery compatibility when no
+resources exist. Egress-only gateway discovery validates its pagination parameters before
+returning an empty page. Neither models virtual private gateway or egress-only internet
+gateway lifecycles.
 
 ### Subnets
 
@@ -248,6 +255,14 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | DescribeImages | Returns AMI metadata known to the local EC2 service. |
 | CreateImage | Captures an instance as a new AMI. Reboots the source unless `NoReboot=true`. |
 | RegisterImage | Registers an AMI from supplied metadata and block device mappings. |
+
+Every resource EC2 creates is owned by the account the request resolves to, the same account
+[STS](sts.md) reports for those credentials, and that account is what `ownerId` and the resource ARN
+carry. So `DescribeImages` with `--owners <your account id>` matches the AMIs that account
+registered, and `--owners self` resolves to the same account. This is what lets a Terraform
+`aws_ami` data source pin `owners` to the account under test instead of the emulator's default
+`000000000000`. The `amazon` and `aws-marketplace` aliases still resolve to the AWS-owned accounts
+that publish those images.
 
 ### Tags
 
@@ -596,8 +611,10 @@ starts from empty data and is how a template moves between the two selection mod
 Two behaviours worth calling out, because they are what Terraform reads back:
 
 - **`IamInstanceProfile` keeps the form it was given.** A profile submitted as `Name` reads back as
-  `Name`, not rewritten to `Arn`. The instance-profile ARN is derived at launch time instead, so
-  `aws_launch_template.iam_instance_profile.name` converges.
+  `Name`, not rewritten to `Arn`. At launch time, Floci resolves that name against IAM in the
+  caller's account and preserves the profile's full path in its ARN. A name missing from that
+  account is rejected with `InvalidParameterValue`. This also applies to direct `RunInstances`
+  requests and `CreateFleet` launches, so `aws_launch_template.iam_instance_profile.name` converges.
 - **`NetworkInterfaces` stays a `NetworkInterfaces` block.** Its `Groups` are not hoisted into
   top-level `SecurityGroupIds`; on AWS the two are mutually exclusive. A launch from the template
   resolves its security groups from whichever of the two is populated.
@@ -730,9 +747,9 @@ State is reported settled rather than transitional, as elsewhere in this service
 | `FLOCI_SERVICES_EC2_IMDS_PORT` | `9169` | Host port for the IMDS server |
 | `FLOCI_SERVICES_EC2_SSH_PORT_RANGE_START` | `2200` | Start of SSH host port range |
 | `FLOCI_SERVICES_EC2_SSH_PORT_RANGE_END` | `2299` | End of SSH host port range |
-| `FLOCI_SERVICES_EC2_PUBLISH_SECURITY_GROUP_PORTS` | `true` | Publish security-group TCP ingress ports on the host; legacy mode uses socat sidecars |
-| `FLOCI_SERVICES_EC2_APP_PORT_RANGE_START` | `30000` | Start of the legacy socat host-port range |
-| `FLOCI_SERVICES_EC2_APP_PORT_RANGE_END` | `30999` | End of the legacy socat host-port range |
+| `FLOCI_SERVICES_EC2_PUBLISH_SECURITY_GROUP_PORTS` | `true` | Publish security-group TCP ingress ports on the host via socat when enforcement is disabled |
+| `FLOCI_SERVICES_EC2_APP_PORT_RANGE_START` | `30000` | Start of the host-port range for published app ports |
+| `FLOCI_SERVICES_EC2_APP_PORT_RANGE_END` | `30999` | End of the host-port range for published app ports |
 | `FLOCI_SERVICES_EC2_MAX_PUBLISHED_PORTS_PER_INSTANCE` | `20` | Max published ports per instance; also the widest single-rule span published |
 | `FLOCI_SERVICES_EC2_SOCAT_IMAGE` | `alpine/socat` | Image used for the port-forwarding sidecar |
 | `FLOCI_SERVICES_EC2_MOCK` | `false` | Skip Docker; instances jump directly to final state (useful for tests) |
@@ -766,7 +783,7 @@ true or it is in the log.
 
 Limits worth knowing before reading a passing test as evidence:
 
-- **Security groups are enforced by default.** NACLs remain outside this networking layer.
+- **Security groups are enforced only when explicitly enabled.** NACLs remain outside this networking layer.
 - **Between-VPC isolation is the daemon's, not Floci's.** It comes from Docker's own
   `DOCKER-ISOLATION-STAGE` rules. OrbStack does not apply them: measured on OrbStack 29.4.0,
   two containers on separate networks reach each other in both directions, `--internal` included.
@@ -868,5 +885,5 @@ aws ec2 associate-address \
 ## Notes
 
 - `DescribeImages` returns AMIs from the EC2 image catalog, including common AMIs and Floci-native AMI IDs.
-- Security groups are enforced for Docker-backed instances unless `FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED=false`; see [Security Group Port Publishing](#security-group-port-publishing).
+- Security groups are enforced for Docker-backed instances when `FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED=true`; see [Security Group Port Publishing](#security-group-port-publishing).
 - The IMDS server identifies which instance is calling via IMDSv2 tokens (mapped at token issuance time) or by the container's bridge IP for IMDSv1.

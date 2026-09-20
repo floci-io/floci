@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.kms.keytype.KmsKeyTypes;
 import io.github.hectorvent.floci.services.kms.model.KmsAlias;
 import io.github.hectorvent.floci.services.kms.model.KmsGrant;
 import io.github.hectorvent.floci.services.kms.model.KmsImportParameters;
@@ -19,67 +20,20 @@ import io.github.hectorvent.floci.services.kms.model.KmsKeyUsage;
 import io.github.hectorvent.floci.services.kms.model.KmsMessageType;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import org.bouncycastle.asn1.ASN1Integer;
-import org.bouncycastle.asn1.ASN1ObjectIdentifier;
-import org.bouncycastle.asn1.ASN1Primitive;
-import org.bouncycastle.asn1.ASN1Sequence;
-import org.bouncycastle.asn1.DERNull;
-import org.bouncycastle.asn1.DERSequenceGenerator;
-import org.bouncycastle.asn1.nist.NISTObjectIdentifiers;
-import org.bouncycastle.asn1.pkcs.PrivateKeyInfo;
-import org.bouncycastle.asn1.x509.AlgorithmIdentifier;
-import org.bouncycastle.asn1.x509.DigestInfo;
-import org.bouncycastle.asn1.x509.SubjectPublicKeyInfo;
-import org.bouncycastle.crypto.Digest;
-import org.bouncycastle.crypto.digests.SHA256Digest;
-import org.bouncycastle.crypto.digests.SHA384Digest;
-import org.bouncycastle.crypto.digests.SHA512Digest;
-import org.bouncycastle.crypto.engines.RSABlindedEngine;
-import org.bouncycastle.crypto.params.ECDomainParameters;
-import org.bouncycastle.crypto.params.Ed25519PublicKeyParameters;
-import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters;
-import org.bouncycastle.crypto.params.ECPrivateKeyParameters;
-import org.bouncycastle.crypto.params.ECPublicKeyParameters;
-import org.bouncycastle.crypto.params.ParametersWithRandom;
-import org.bouncycastle.crypto.signers.ECDSASigner;
-import org.bouncycastle.crypto.signers.Ed25519phSigner;
-import org.bouncycastle.crypto.signers.PSSSigner;
-import org.bouncycastle.crypto.signers.SM2Signer;
-import org.bouncycastle.crypto.util.PrivateKeyFactory;
-import org.bouncycastle.crypto.util.PublicKeyFactory;
-import org.bouncycastle.jcajce.provider.asymmetric.ec.BCECPrivateKey;
-import org.bouncycastle.jcajce.provider.asymmetric.ec.BCECPublicKey;
-import org.bouncycastle.jcajce.provider.asymmetric.ec.KeyFactorySpi;
-import org.bouncycastle.jcajce.provider.asymmetric.ec.KeyPairGeneratorSpi;
-import org.bouncycastle.jcajce.provider.util.AsymmetricKeyInfoConverter;
-import org.bouncycastle.jce.ECNamedCurveTable;
-import org.bouncycastle.jce.spec.ECNamedCurveParameterSpec;
 import org.jboss.logging.Logger;
 
 import javax.crypto.Cipher;
-import javax.crypto.Mac;
 import javax.crypto.spec.GCMParameterSpec;
-import javax.crypto.spec.OAEPParameterSpec;
-import javax.crypto.spec.PSource;
 import javax.crypto.spec.SecretKeySpec;
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
-import java.math.BigInteger;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.*;
-import java.security.interfaces.EdECPrivateKey;
-import java.security.spec.ECGenParameterSpec;
-import java.security.spec.MGF1ParameterSpec;
-import java.security.spec.PKCS8EncodedKeySpec;
-import java.security.spec.PSSParameterSpec;
-import java.security.spec.X509EncodedKeySpec;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.regex.Pattern;
 
-import static io.github.hectorvent.floci.services.kms.model.KmsMessageType.DIGEST;
 import static io.github.hectorvent.floci.services.kms.model.KmsMessageType.RAW;
 
 @ApplicationScoped
@@ -102,6 +56,7 @@ public class KmsService implements ResourceProvider {
     private final StorageBackend<String, KmsGrant> grantStore;
     private final RegionResolver regionResolver;
     private final SecureRandom secureRandom;
+    private final KmsKeyTypes keyTypes;
     // Guards the check-generate-put sequence in ensureBackingKeyMaterial so two concurrent
     // first uses of the same legacy key cannot each mint a different backing key.
     private final Object backingKeyMaterialLock = new Object();
@@ -134,13 +89,17 @@ public class KmsService implements ResourceProvider {
         this.grantStore = grantStore;
         this.regionResolver = regionResolver;
         this.secureRandom = secureRandom;
+        this.keyTypes = new KmsKeyTypes(secureRandom);
     }
 
     public byte[] generateRandom(int numberOfBytes) {
-        if (numberOfBytes < 1 || numberOfBytes > 1024) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + numberOfBytes + "' at 'numberOfBytes' failed to satisfy constraint: Member must have value greater than or equal to 1 and less than or equal to 1024",
-                    400);
+        if (numberOfBytes < 1) {
+            throw new AwsException("ValidationException", "1 validation error detected: Value '" + numberOfBytes
+                    + "' at 'numberOfBytes' failed to satisfy constraint: Member must have value greater than or equal to 1", 400);
+        }
+        if (1024 < numberOfBytes) {
+            throw new AwsException("ValidationException", "1 validation error detected: Value '" + numberOfBytes
+                    + "' at 'numberOfBytes' failed to satisfy constraint: Member must have value less than or equal to 1024", 400);
         }
         byte[] bytes = new byte[numberOfBytes];
         secureRandom.nextBytes(bytes);
@@ -222,84 +181,11 @@ public class KmsService implements ResourceProvider {
     }
 
     private void generateKeyMaterial(KmsKey key, String region) {
-        KmsKeySpec spec = key.getKeySpec();
         try {
-            switch (spec.getKeyType()) {
-                case HMAC -> {
-                    // HMAC keys are symmetric byte strings; generate outside the try block
-                    // so ValidationException (400) isn't rewrapped as InternalFailure (500).
-                    byte[] material = new byte[hmacKeyByteLength(spec)];
-                    new SecureRandom().nextBytes(material);
-                    key.setPrivateKeyEncoded(Base64.getEncoder().encodeToString(material));
-                }
-                case SYMMETRIC -> generateBackingKey(key);
-                case RSA -> {
-                    KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
-                    int size = Integer.parseInt(spec.name().substring(4));
-                    generator.initialize(size);
-                    KeyPair pair = generator.generateKeyPair();
-                    key.setPrivateKeyEncoded(Base64.getEncoder().encodeToString(pair.getPrivate().getEncoded()));
-                    key.setPublicKeyEncoded(Base64.getEncoder().encodeToString(pair.getPublic().getEncoded()));
-                }
-                case ED25519 -> {
-                    var pair = KeyPairGenerator.getInstance("Ed25519").generateKeyPair();
-                    key.setPrivateKeyEncoded(Base64.getEncoder().encodeToString(pair.getPrivate().getEncoded()));
-                    key.setPublicKeyEncoded(Base64.getEncoder().encodeToString(pair.getPublic().getEncoded()));
-                }
-                case ML_DSA -> {
-                    String algorithm = spec.name().replace('_', '-');
-                    var pair = KeyPairGenerator.getInstance(algorithm).generateKeyPair();
-                    key.setPrivateKeyEncoded(Base64.getEncoder().encodeToString(pair.getPrivate().getEncoded()));
-                    key.setPublicKeyEncoded(Base64.getEncoder().encodeToString(pair.getPublic().getEncoded()));
-                }
-                case ECC -> {
-                    String curveName = spec.curveName();
-
-                    // For secp256k1 (ECC_SECG_P256K1), instantiate BC's SPI directly.
-                    // JCA's ClassLoader.loadClass cannot find BC SPI classes in GraalVM native image
-                    // unless they are allocated directly in code (GraalVM escape analysis eliminates
-                    // unused allocations, keeping them out of the native image type registry).
-                    KeyPairGenerator generator = isSecgP256k1(spec)
-                            ? new KeyPairGeneratorSpi.EC()
-                            : KeyPairGenerator.getInstance("EC");
-                    generator.initialize(new ECGenParameterSpec(curveName));
-                    KeyPair pair = generator.generateKeyPair();
-                    key.setPrivateKeyEncoded(Base64.getEncoder().encodeToString(pair.getPrivate().getEncoded()));
-                    key.setPublicKeyEncoded(Base64.getEncoder().encodeToString(pair.getPublic().getEncoded()));
-                }
-                case SM2 -> {
-                    if (!region.equals("cn-north-1") && !region.equals("cn-northwest-1")) {
-                        throw new AwsException("UnsupportedOperationException",
-                                "KeySpec SM2 is not supported in this Region", 400);
-                    }
-                    KeyPairGenerator generator = new KeyPairGeneratorSpi.EC();
-                    generator.initialize(new ECGenParameterSpec("sm2p256v1"));
-                    KeyPair pair = generator.generateKeyPair();
-                    key.setPrivateKeyEncoded(Base64.getEncoder().encodeToString(pair.getPrivate().getEncoded()));
-                    key.setPublicKeyEncoded(Base64.getEncoder().encodeToString(pair.getPublic().getEncoded()));
-                }
-                default ->
-                        throw new AwsException("InvalidCustomerMasterKeySpecException", "Unsupported key spec: " + spec, 400);
-            }
-        } catch (NoSuchAlgorithmException | InvalidAlgorithmParameterException e) {
+            keyTypes.of(key.getKeySpec()).generateKeyMaterial(key, region);
+        } catch (GeneralSecurityException e) {
             throw new AwsException("InternalFailure", "Failed to generate key material: " + e.getMessage(), 500);
         }
-    }
-
-    /**
-     * Mints a new AES-256 backing key for the AES-GCM ciphertext envelope and makes it the
-     * current one, keeping any earlier backing keys in the map so ciphertext produced under
-     * them keeps decrypting (AWS KMS never discards prior backing keys either).
-     */
-    private void generateBackingKey(KmsKey key) {
-        byte[] material = new byte[AES_KEY_BYTES];
-        SECURE_RANDOM.nextBytes(material);
-        String backingKeyId = UUID.randomUUID().toString();
-        if (key.getBackingKeys() == null) {
-            key.setBackingKeys(new HashMap<>());
-        }
-        key.getBackingKeys().put(backingKeyId, Base64.getEncoder().encodeToString(material));
-        key.setCurrentBackingKeyId(backingKeyId);
     }
 
     /**
@@ -348,7 +234,7 @@ public class KmsService implements ResourceProvider {
             if (hasBackingKeyMaterial(current)) {
                 return current;
             }
-            generateBackingKey(current);
+            keyTypes.symmetric().addBackingKey(current);
             keyStore.put(region + "::" + current.getKeyId(), current);
             LOG.infov("Generated backing key material for legacy KMS key: {0} in {1}", current.getKeyId(), region);
             return current;
@@ -368,9 +254,11 @@ public class KmsService implements ResourceProvider {
 
     public KmsKey getPublicKey(String keyId, String region) {
         KmsKey key = resolveKey(keyId, region);
+        requireNotPendingDeletion(key);
+        requireImportedKeyMaterial(key);
         KmsKeySpec spec = key.getKeySpec();
         if (KmsKeySpec.SYMMETRIC_DEFAULT == spec || isHmac(spec)) {
-            throw new AwsException("UnsupportedOperationException", "GetPublicKey is not supported for symmetric keys.", 400);
+            throw new AwsException("UnsupportedOperationException", null, 400);
         }
         return key;
     }
@@ -391,14 +279,6 @@ public class KmsService implements ResourceProvider {
             throw new AwsException("ValidationException",
                     "KeyUsage " + keyUsage + " is not compatible with KeySpec " + spec + ".", 400);
         }
-    }
-
-    private static int hmacKeyByteLength(KmsKeySpec spec) {
-        if (!isHmac(spec)) {
-            throw new AwsException("InvalidCustomerMasterKeySpecException",
-                    "Unsupported HMAC key spec: " + spec, 400);
-        }
-        return spec.materialByteLength();
     }
 
     public KmsKey describeKey(String keyId, String region) {
@@ -521,6 +401,7 @@ public class KmsService implements ResourceProvider {
         validateGrantConstraints(constraints);
 
         KmsKey key = resolveKey(keyId, region);
+        requireNotPendingDeletion(key);
         String grantId = UUID.randomUUID().toString();
         byte[] tokenBytes = new byte[32];
         ThreadLocalRandom.current().nextBytes(tokenBytes);
@@ -713,6 +594,7 @@ public class KmsService implements ResourceProvider {
 
     public void scheduleKeyDeletion(String keyId, int pendingWindowInDays, String region) {
         KmsKey key = resolveKey(keyId, region);
+        requireNotPendingDeletion(key);
         key.setKeyState("PendingDeletion");
         key.setDeletionDate(Instant.now().plusSeconds((long) pendingWindowInDays * 86400).getEpochSecond());
         keyStore.put(region + "::" + key.getKeyId(), key);
@@ -777,6 +659,7 @@ public class KmsService implements ResourceProvider {
 
     public void updateKeyDescription(String keyId, String description, String region) {
         KmsKey key = resolveKey(keyId, region);
+        requireNotPendingDeletion(key);
         key.setDescription(description);
         keyStore.put(region + "::" + key.getKeyId(), key);
         LOG.infov("Updated description for KMS key: {0} in {1}", key.getKeyId(), region);
@@ -795,7 +678,9 @@ public class KmsService implements ResourceProvider {
 
     public void enableKeyRotation(String keyId, String region) {
         KmsKey key = resolveKey(keyId, region);
-        validateRotationSupported(key);
+        validateRotationOrigin(key);
+        validateKeyIsUsableForCryptoOperations(key);
+        validateRotationKeySpec(key);
         key.setKeyRotationEnabled(true);
         keyStore.put(region + "::" + key.getKeyId(), key);
         LOG.infov("Enabled key rotation for KMS key: {0} in {1}", key.getKeyId(), region);
@@ -803,7 +688,8 @@ public class KmsService implements ResourceProvider {
 
     public void disableKeyRotation(String keyId, String region) {
         KmsKey key = resolveKey(keyId, region);
-        validateRotationSupported(key);
+        validateRotationOrigin(key);
+        validateKeyIsUsableForCryptoOperations(key);
         key.setKeyRotationEnabled(false);
         keyStore.put(region + "::" + key.getKeyId(), key);
         LOG.infov("Disabled key rotation for KMS key: {0} in {1}", key.getKeyId(), region);
@@ -811,11 +697,8 @@ public class KmsService implements ResourceProvider {
 
     public void enableKey(String keyId, String region) {
         KmsKey key = resolveKey(keyId, region);
-        if (PENDING_DELETION.equals(key.getKeyState())) {
-            throw new AwsException("KMSInvalidStateException",
-                    "KMS key " + key.getKeyId() + " is pending deletion.", 400);
-        }
-        requireImportedKeyMaterial(key, "EnableKey");
+        requireNotPendingDeletion(key);
+        requireImportedKeyMaterial(key);
         key.setEnabled(true);
         key.setKeyState("Enabled");
         keyStore.put(region + "::" + key.getKeyId(), key);
@@ -824,7 +707,8 @@ public class KmsService implements ResourceProvider {
 
     public void disableKey(String keyId, String region) {
         KmsKey key = resolveKey(keyId, region);
-        requireImportedKeyMaterial(key, "DisableKey");
+        requireNotPendingDeletion(key);
+        requireImportedKeyMaterial(key);
         key.setEnabled(false);
         key.setKeyState("Disabled");
         keyStore.put(region + "::" + key.getKeyId(), key);
@@ -835,37 +719,35 @@ public class KmsService implements ResourceProvider {
     public String rotateKeyOnDemand(String keyId, String region) {
         synchronized (backingKeyMaterialLock) {
             KmsKey key = resolveKey(keyId, region);
-            if (!key.isEnabled()) {
-                throw new AwsException("DisabledException",
-                        "KMS key " + key.getKeyId() + " is disabled.", 400);
+            validateKeyIsUsableForCryptoOperations(key);
+            validateRotationKeySpec(key);
+            if (EXTERNAL_ORIGIN.equals(key.getOrigin())) {
+                throw new AwsException("KMSInvalidStateException",
+                        "No available key material pending rotation for the key: " + key.getArn() + ".", 400);
             }
-            validateRotationSupported(key);
             if (key.getOnDemandRotationCount() >= ON_DEMAND_ROTATION_LIMIT) {
                 throw new AwsException("LimitExceededException",
                         "On-demand rotation quota for KMS key " + key.getKeyId() + " is exceeded.", 400);
             }
             key.setOnDemandRotationCount(key.getOnDemandRotationCount() + 1);
             // AWS keeps prior backing keys after rotation so ciphertext encrypted under them keeps
-            // decrypting; generateBackingKey adds a new entry rather than replacing the map.
-            generateBackingKey(key);
+            // decrypting.
+            keyTypes.symmetric().addBackingKey(key);
             keyStore.put(region + "::" + key.getKeyId(), key);
             return key.getKeyId();
         }
     }
 
-    private void validateRotationSupported(KmsKey key) {
+    private static void validateRotationOrigin(KmsKey key) {
         if (EXTERNAL_ORIGIN.equals(key.getOrigin())) {
-            throw new AwsException(
-                    "UnsupportedOperationException",
-                    "You cannot enable automatic rotation of imported key material.",
-                    400);
+            throw invalidOrigin(key);
         }
+    }
+
+    private static void validateRotationKeySpec(KmsKey key) {
         if (KmsKeyUsage.ENCRYPT_DECRYPT != key.getKeyUsage()
                 || KmsKeySpec.SYMMETRIC_DEFAULT != key.getKeySpec()) {
-            throw new AwsException(
-                    "UnsupportedOperationException",
-                    "You cannot perform this operation on a non-symmetric key or a key with non-ENCRYPT_DECRYPT key usage.",
-                    400);
+            throw new AwsException("UnsupportedOperationException", null, 400);
         }
     }
 
@@ -877,7 +759,7 @@ public class KmsService implements ResourceProvider {
     public ImportParameters getParametersForImport(String keyId, String wrappingAlgorithm,
                                                    String wrappingKeySpec, String region) {
         KmsKey key = resolveKey(keyId, region);
-        requireExternalOrigin(key, "GetParametersForImport");
+        requireExternalOrigin(key);
         requireNotPendingDeletion(key);
         KmsKeyImport.validateWrappingAlgorithm(wrappingAlgorithm);
 
@@ -903,7 +785,7 @@ public class KmsService implements ResourceProvider {
     public KmsKey importKeyMaterial(String keyId, String importToken, byte[] encryptedKeyMaterial,
                                     String expirationModel, Long validTo, String importType, String region) {
         KmsKey key = resolveKey(keyId, region);
-        requireExternalOrigin(key, "ImportKeyMaterial");
+        requireExternalOrigin(key);
         requireNotPendingDeletion(key);
         validateImportType(importType, key);
 
@@ -957,7 +839,7 @@ public class KmsService implements ResourceProvider {
      */
     public KmsKey deleteImportedKeyMaterial(String keyId, String region) {
         KmsKey key = resolveKey(keyId, region);
-        requireExternalOrigin(key, "DeleteImportedKeyMaterial");
+        requireExternalOrigin(key);
         clearImportedKeyMaterial(key);
         keyStore.put(region + "::" + key.getKeyId(), key);
         LOG.infov("Deleted imported key material for KMS key {0} in {1}", key.getKeyId(), region);
@@ -1155,26 +1037,26 @@ public class KmsService implements ResourceProvider {
         return EXTERNAL_ORIGIN;
     }
 
-    private static void requireExternalOrigin(KmsKey key, String operation) {
+    private static void requireExternalOrigin(KmsKey key) {
         if (!EXTERNAL_ORIGIN.equals(key.getOrigin())) {
-            throw new AwsException("UnsupportedOperationException",
-                    operation + " is only supported for KMS keys with Origin EXTERNAL; key "
-                            + key.getKeyId() + " has origin " + key.getOrigin() + ".", 400);
+            throw invalidOrigin(key);
         }
+    }
+
+    private static AwsException invalidOrigin(KmsKey key) {
+        return new AwsException("UnsupportedOperationException",
+                key.getArn() + " origin is " + key.getOrigin() + " which is not valid for this operation.", 400);
     }
 
     private static void requireNotPendingDeletion(KmsKey key) {
         if (PENDING_DELETION.equals(key.getKeyState())) {
-            throw new AwsException("KMSInvalidStateException",
-                    "KMS key " + key.getKeyId() + " is pending deletion.", 400);
+            throw new AwsException("KMSInvalidStateException", key.getArn() + " is pending deletion.", 400);
         }
     }
 
-    private static void requireImportedKeyMaterial(KmsKey key, String operation) {
+    private static void requireImportedKeyMaterial(KmsKey key) {
         if (PENDING_IMPORT.equals(key.getKeyState())) {
-            throw new AwsException("KMSInvalidStateException",
-                    operation + " is not valid for KMS key " + key.getKeyId()
-                            + " because it has no key material. Its state is PendingImport.", 400);
+            throw new AwsException("KMSInvalidStateException", key.getArn() + " is pending import.", 400);
         }
     }
 
@@ -1185,6 +1067,7 @@ public class KmsService implements ResourceProvider {
             throw new AwsException("InvalidAliasNameException", "Alias name must begin with 'alias/'", 400);
         }
         KmsKey key = resolveKey(targetKeyId, region); // Validate key exists and normalize to plain key ID
+        requireNotPendingDeletion(key);
 
         String aliasArn = regionResolver.buildArn("kms", region, aliasName);
         KmsAlias alias = new KmsAlias(aliasName, aliasArn, key.getKeyId());
@@ -1195,15 +1078,12 @@ public class KmsService implements ResourceProvider {
     public void updateAlias(String aliasName, String targetKeyId, String region) {
         String storageKey = region + "::" + aliasName;
         KmsAlias existing = aliasStore.get(storageKey)
-                .orElseThrow(() -> new AwsException("NotFoundException", "Alias not found: " + aliasName, 404));
+                .orElseThrow(() -> aliasNotFound(aliasName, region));
 
         KmsKey currentKey = resolveKey(existing.getTargetKeyId(), region);
         KmsKey newKey = resolveKey(targetKeyId, region); // Validate key exists and normalize to plain key ID
 
-        if ("PendingDeletion".equals(newKey.getKeyState())) {
-            throw new AwsException("KMSInvalidStateException",
-                    "KMS key " + newKey.getKeyId() + " is pending deletion.", 400);
-        }
+        requireNotPendingDeletion(newKey);
         if (currentKey.getKeyUsage() != newKey.getKeyUsage() || !sameKeyFamily(currentKey.getKeySpec(), newKey.getKeySpec())) {
             throw new AwsException("ValidationException",
                     "The replacement KMS key must have the same key usage and key type "
@@ -1219,7 +1099,7 @@ public class KmsService implements ResourceProvider {
     public void deleteAlias(String aliasName, String region) {
         String key = region + "::" + aliasName;
         if (aliasStore.get(key).isEmpty()) {
-            throw new AwsException("NotFoundException", "Alias not found", 404);
+            throw aliasNotFound(aliasName, region);
         }
         aliasStore.delete(key);
     }
@@ -1261,16 +1141,11 @@ public class KmsService implements ResourceProvider {
     private static final String AES_GCM_TRANSFORMATION = "AES/GCM/NoPadding";
     private static final int GCM_IV_BYTES = 12;
     private static final int GCM_TAG_BITS = 128;
-    private static final int AES_KEY_BYTES = 32;
+    private static final int AES_KEY_BYTES = KmsKeySpec.SYMMETRIC_DEFAULT.materialByteLength();
     private static final String BLOB_PREFIX_V2 = "kms:v2:";
     private static final String BLOB_PREFIX_V1 = "kms:";
-    private static final int SHA_512_DIGEST_BYTES = 64;
-    private static final int MIN_MAC_MESSAGE_BYTES = 1;
-    private static final int MAX_MAC_MESSAGE_BYTES = 4096;
-    private static final int MIN_ENCRYPT_PLAINTEXT_BYTES = 1;
-    private static final int MAX_ENCRYPT_PLAINTEXT_BYTES = 4096;
-    private static final int MIN_MAC_BYTES = 1;
-    private static final int MAX_MAC_BYTES = 6144;
+    static final int MAX_PLAINTEXT_BYTES = 4096;
+    static final int MAX_CIPHERTEXT_BYTES = 6144;
     private static final SecureRandom SECURE_RANDOM = new SecureRandom();
 
     public byte[] encrypt(String keyId, byte[] plaintext, String region) {
@@ -1289,16 +1164,15 @@ public class KmsService implements ResourceProvider {
     private EncryptResult encrypt(String keyId, byte[] plaintext, Map<String, String> encryptionContext,
                                   String encryptionAlgorithm, String region, String operation) {
         KmsKeySpec.Algorithm algorithm = resolveEncryptionAlgorithm(encryptionAlgorithm);
-        validatePlaintextLength(plaintext, operation);
+        validateBlobLength("plaintext", plaintext, MAX_PLAINTEXT_BYTES);
         KmsKey kmsKey = resolveKey(keyId, region);
+        validateKeyUsage(kmsKey, KmsKeyUsage.ENCRYPT_DECRYPT, operation);
         validateKeyIsUsableForCryptoOperations(kmsKey);
-        validateKeyUsageForEncryptionOperation(kmsKey, operation);
-        validateEncryptionAlgorithmForSpec(algorithm, kmsKey.getKeySpec());
+        validateAlgorithmForSpec(algorithm, kmsKey.getKeySpec());
 
-        if (kmsKey.getKeySpec().getKeyType() == KmsKeySpec.KeyType.RSA) {
+        if (algorithm != KmsKeySpec.Algorithm.SYMMETRIC_DEFAULT) {
             rejectEncryptionContextForAsymmetricKey(encryptionContext);
-            validateRsaPlaintextLength(plaintext, algorithm, kmsKey.getKeySpec());
-            byte[] ciphertext = rsaOaep(Cipher.ENCRYPT_MODE, kmsKey, algorithm, plaintext);
+            byte[] ciphertext = keyTypes.of(kmsKey.getKeySpec()).encrypt(kmsKey, algorithm, plaintext);
             return new EncryptResult(ciphertext, kmsKey.getArn(), algorithm.getAlgName());
         }
 
@@ -1318,7 +1192,7 @@ public class KmsService implements ResourceProvider {
         }
         ParsedBlob parsed = parseBlob(ciphertext);
         if (!parsed.contextFingerprint.equals(contextFingerprint(encryptionContext))) {
-            throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
+            throw new AwsException("InvalidCiphertextException", null, 400);
         }
         return decodePayload(parsed);
     }
@@ -1359,11 +1233,11 @@ public class KmsService implements ResourceProvider {
                 throw new AwsException("ValidationException", "KeyId must not be null", 400);
             }
             KmsKey requestKey = resolveKey(requestKeyId, region);
+            validateKeyUsage(requestKey, KmsKeyUsage.ENCRYPT_DECRYPT, "Decrypt");
             validateKeyIsUsableForCryptoOperations(requestKey);
-            validateKeyUsageForEncryptionOperation(requestKey, "Decrypt");
-            validateEncryptionAlgorithmForSpec(algorithm, requestKey.getKeySpec());
+            validateAlgorithmForSpec(algorithm, requestKey.getKeySpec());
             rejectEncryptionContextForAsymmetricKey(encryptionContext);
-            byte[] plaintext = rsaOaep(Cipher.DECRYPT_MODE, requestKey, algorithm, ciphertext);
+            byte[] plaintext = keyTypes.of(requestKey.getKeySpec()).decrypt(requestKey, algorithm, ciphertext);
             return new DecryptResult(plaintext, requestKey.getArn(), algorithm.getAlgName());
         }
 
@@ -1372,7 +1246,7 @@ public class KmsService implements ResourceProvider {
             KmsKey key = resolveEnvelopeKey(envelope.keyId(), region);
             // A key whose imported material was deleted or expired no longer holds the backing
             // key this blob names; answer with the key's state, as AWS does, not "invalid ciphertext".
-            requireImportedKeyMaterial(key, "Decrypt");
+            requireImportedKeyMaterial(key);
             byte[] plaintext = decryptEnvelopeV3(envelope, key, encryptionContext);
 
             if (requestKeyId != null && !requestKeyId.isBlank()) {
@@ -1380,7 +1254,7 @@ public class KmsService implements ResourceProvider {
                 if (!requestKey.getKeyId().equals(key.getKeyId())) {
                     throw new AwsException(
                             "IncorrectKeyException",
-                            "The request was rejected because the specified KMS key cannot decrypt the data.",
+                            "The key ID in the request does not identify a CMK that can perform this operation.",
                             400
                     );
                 }
@@ -1398,7 +1272,7 @@ public class KmsService implements ResourceProvider {
         // InvalidCiphertextException, not InvalidKeyUsageException (measured in us-east-1).
         ParsedBlob parsed = parseBlob(ciphertext);
         if (!parsed.contextFingerprint.equals(contextFingerprint(encryptionContext))) {
-            throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
+            throw new AwsException("InvalidCiphertextException", null, 400);
         }
         byte[] plaintext = decodePayload(parsed);
 
@@ -1407,7 +1281,7 @@ public class KmsService implements ResourceProvider {
             if (!requestKey.getKeyId().equals(parsed.keyId)) {
                 throw new AwsException(
                         "IncorrectKeyException",
-                        "The request was rejected because the specified KMS key cannot decrypt the data.",
+                        "The key ID in the request does not identify a CMK that can perform this operation.",
                         400
                 );
             }
@@ -1465,7 +1339,7 @@ public class KmsService implements ResourceProvider {
             buffer.get(magic);
             byte version = buffer.get();
             if (version != ENVELOPE_VERSION_V3) {
-                throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
+                throw new AwsException("InvalidCiphertextException", null, 400);
             }
             byte[] keyIdBytes = new byte[buffer.getShort() & 0xFFFF];
             buffer.get(keyIdBytes);
@@ -1477,7 +1351,7 @@ public class KmsService implements ResourceProvider {
             byte[] ciphertextAndTag = new byte[buffer.remaining()];
             buffer.get(ciphertextAndTag);
             if (ciphertextAndTag.length == 0) {
-                throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
+                throw new AwsException("InvalidCiphertextException", null, 400);
             }
             byte[] aadHeader = Arrays.copyOfRange(blob, 0, headerLength + GCM_IV_BYTES);
             return new EnvelopeV3(new String(keyIdBytes, StandardCharsets.UTF_8),
@@ -1485,7 +1359,7 @@ public class KmsService implements ResourceProvider {
         } catch (AwsException e) {
             throw e;
         } catch (RuntimeException e) {
-            throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
+            throw new AwsException("InvalidCiphertextException", null, 400);
         }
     }
 
@@ -1546,7 +1420,7 @@ public class KmsService implements ResourceProvider {
         try {
             return resolveKey(keyId, region);
         } catch (AwsException e) {
-            throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
+            throw new AwsException("InvalidCiphertextException", null, 400);
         }
     }
 
@@ -1562,7 +1436,7 @@ public class KmsService implements ResourceProvider {
             materialB64 = key.getBackingKeys() == null ? null : key.getBackingKeys().get(envelope.backingKeyId());
         }
         if (materialB64 == null) {
-            throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
+            throw new AwsException("InvalidCiphertextException", null, 400);
         }
         byte[] dek = decodeBackingMaterial(materialB64);
         try {
@@ -1570,7 +1444,7 @@ public class KmsService implements ResourceProvider {
                     envelope.aadHeader(), contextFingerprint(encryptionContext).getBytes(StandardCharsets.UTF_8));
             return cipher.doFinal(envelope.ciphertextAndTag());
         } catch (GeneralSecurityException e) {
-            throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
+            throw new AwsException("InvalidCiphertextException", null, 400);
         }
     }
 
@@ -1592,7 +1466,7 @@ public class KmsService implements ResourceProvider {
             }
             return material;
         } catch (IllegalArgumentException e) {
-            throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
+            throw new AwsException("InvalidCiphertextException", null, 400);
         }
     }
 
@@ -1604,7 +1478,7 @@ public class KmsService implements ResourceProvider {
             // v2: keyId, nonce, contextFingerprint, payload
             String[] parts = data.substring(BLOB_PREFIX_V2.length()).split(":", 4);
             if (parts.length < 4) {
-                throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
+                throw new AwsException("InvalidCiphertextException", null, 400);
             }
             return new ParsedBlob(parts[0], parts[1], parts[2], parts[3]);
         }
@@ -1616,7 +1490,7 @@ public class KmsService implements ResourceProvider {
                 return new ParsedBlob(parts[0], "", "", parts[1]);
             }
         }
-        throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
+        throw new AwsException("InvalidCiphertextException", null, 400);
     }
 
     /** A blob whose payload is not valid base64 is a bad ciphertext, not a server fault. */
@@ -1624,7 +1498,7 @@ public class KmsService implements ResourceProvider {
         try {
             return Base64.getDecoder().decode(parsed.payload);
         } catch (IllegalArgumentException e) {
-            throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
+            throw new AwsException("InvalidCiphertextException", null, 400);
         }
     }
 
@@ -1656,7 +1530,7 @@ public class KmsService implements ResourceProvider {
 
     /**
      * Resolves the wire EncryptionAlgorithm value. Real KMS models the enum as
-     * [RSAES_OAEP_SHA_256, RSAES_OAEP_SHA_1, SYMMETRIC_DEFAULT, SM2PKE]. A null or blank
+     * [RSAES_OAEP_SHA_1, RSAES_OAEP_SHA_256, SM2PKE, SYMMETRIC_DEFAULT]. A null or blank
      * value falls back to the SYMMETRIC_DEFAULT default.
      */
     private static KmsKeySpec.Algorithm resolveEncryptionAlgorithm(String encryptionAlgorithm) {
@@ -1671,30 +1545,34 @@ public class KmsService implements ResourceProvider {
             default -> throw new AwsException("ValidationException",
                     "1 validation error detected: Value '" + name + "' at 'encryptionAlgorithm' failed to satisfy "
                             + "constraint: Member must satisfy enum value set: "
-                            + "[RSAES_OAEP_SHA_256, RSAES_OAEP_SHA_1, SYMMETRIC_DEFAULT, SM2PKE]", 400);
+                            + "[RSAES_OAEP_SHA_1, RSAES_OAEP_SHA_256, SM2PKE, SYMMETRIC_DEFAULT]", 400);
         };
     }
 
-    private static void validateKeyUsageForEncryptionOperation(KmsKey key, String operation) {
-        if (KmsKeyUsage.ENCRYPT_DECRYPT != key.getKeyUsage()) {
+    private static void validateKeyUsage(KmsKey key, KmsKeyUsage keyUsage, String operation) {
+        if (keyUsage != key.getKeyUsage()) {
             throw new AwsException("InvalidKeyUsageException",
                     key.getArn() + " key usage is " + key.getKeyUsage() + " which is not valid for "
                             + operation + ".", 400);
         }
     }
 
-    private static void validateEncryptionAlgorithmForSpec(KmsKeySpec.Algorithm algorithm, KmsKeySpec spec) {
+    private static void validateAlgorithmForSpec(KmsKeySpec.Algorithm algorithm, KmsKeySpec spec) {
         if (!spec.getAlgorithm().contains(algorithm)) {
             throw new AwsException("InvalidKeyUsageException",
                     "Algorithm " + algorithm.getAlgName() + " is incompatible with key spec " + spec.name() + ".", 400);
         }
     }
 
-    private static void validatePlaintextLength(byte[] plaintext, String operation) {
-        int length = plaintext == null ? 0 : plaintext.length;
-        if (length < MIN_ENCRYPT_PLAINTEXT_BYTES || length > MAX_ENCRYPT_PLAINTEXT_BYTES) {
-            throw new AwsException("ValidationException",
-                    "Plaintext must be between 1 and 4096 bytes for " + operation + ".", 400);
+    static void validateBlobLength(String member, byte[] value, int max) {
+        int length = value == null ? 0 : value.length;
+        if (length < 1) {
+            throw new AwsException("ValidationException", "1 validation error detected: Value at '" + member
+                    + "' failed to satisfy constraint: Member must have length greater than or equal to 1", 400);
+        }
+        if (max < length) {
+            throw new AwsException("ValidationException", "1 validation error detected: Value at '" + member
+                    + "' failed to satisfy constraint: Member must have length less than or equal to " + max, 400);
         }
     }
 
@@ -1705,105 +1583,40 @@ public class KmsService implements ResourceProvider {
         }
     }
 
-    /** RFC 8017 7.1.1: OAEP holds at most k - 2*hLen - 2 bytes, k being the modulus length. */
-    private static void validateRsaPlaintextLength(byte[] plaintext, KmsKeySpec.Algorithm algorithm, KmsKeySpec spec) {
-        int modulusBytes = switch (spec) {
-            case RSA_2048 -> 256;
-            case RSA_3072 -> 384;
-            case RSA_4096 -> 512;
-            default -> throw new AwsException("InvalidKeyUsageException",
-                    "Algorithm " + algorithm.getAlgName() + " is incompatible with key spec " + spec.name() + ".", 400);
-        };
-        int digestBytes = algorithm == KmsKeySpec.Algorithm.RSAES_OAEP_SHA_1 ? 20 : 32;
-        int maxBytes = modulusBytes - 2 * digestBytes - 2;
-        if (plaintext.length > maxBytes) {
-            throw new AwsException("ValidationException",
-                    "Algorithm " + algorithm.getAlgName() + " and key spec " + spec.name()
-                            + " cannot encrypt data larger than " + maxBytes + " bytes.", 400);
-        }
-    }
+    private static final List<String> SIGNING_ALGORITHMS = List.of(
+            "RSASSA_PSS_SHA_256", "RSASSA_PSS_SHA_384", "RSASSA_PSS_SHA_512",
+            "RSASSA_PKCS1_V1_5_SHA_256", "RSASSA_PKCS1_V1_5_SHA_384", "RSASSA_PKCS1_V1_5_SHA_512",
+            "ECDSA_SHA_256", "ECDSA_SHA_384", "ECDSA_SHA_512", "ED25519_SHA_512", "ED25519_PH_SHA_512",
+            "SM2DSA", "ML_DSA_SHAKE_256");
 
-    /**
-     * RSAES-OAEP with an explicit OAEPParameterSpec. The JDK's named OAEP transformations
-     * default MGF1 to SHA-1 whatever the main digest is, while KMS RSAES_OAEP_SHA_256 uses
-     * MGF1 over SHA-256, so the parameters are always spelled out.
-     */
-    private byte[] rsaOaep(int mode, KmsKey key, KmsKeySpec.Algorithm algorithm, byte[] input) {
-        try {
-            var digest = algorithm == KmsKeySpec.Algorithm.RSAES_OAEP_SHA_1 ? "SHA-1" : "SHA-256";
-            var cipher = Cipher.getInstance("RSA/ECB/OAEPPadding");
-            var params = new OAEPParameterSpec(digest, "MGF1", new MGF1ParameterSpec(digest),
-                    PSource.PSpecified.DEFAULT);
-            if (mode == Cipher.ENCRYPT_MODE) {
-                cipher.init(mode, loadPublicKey(key.getPublicKeyEncoded(), key.getKeySpec()), params);
-            } else {
-                cipher.init(mode, loadPrivateKey(key.getPrivateKeyEncoded(), key.getKeySpec()), params);
-            }
-            return cipher.doFinal(input);
-        } catch (Exception e) {
-            if (mode == Cipher.DECRYPT_MODE) {
-                // Real KMS answers any OAEP failure the same way: the padding check hides
-                // whether the bytes were garbage, the wrong length, or made for another key.
-                // The log line keeps broken key material or a missing cipher diagnosable.
-                LOG.debugv(e, "RSA OAEP decrypt failed for key {0}", key.getKeyId());
-                throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
-            }
-            LOG.warnv(e, "RSA OAEP encrypt failed for key {0}", key.getKeyId());
-            throw new AwsException("InternalFailure", "Failed to encrypt: " + e.getMessage(), 500);
-        }
-    }
+    private static final List<String> MAC_ALGORITHMS =
+            List.of("HMAC_SHA_384", "HMAC_SHA_256", "HMAC_SHA_224", "HMAC_SHA_512");
+
+    private static final Map<KmsKeySpec.Algorithm, Integer> DIGEST_BYTES = Map.of(
+            KmsKeySpec.Algorithm.RSASSA_PSS_SHA_256, 32,
+            KmsKeySpec.Algorithm.RSASSA_PKCS1_V1_5_SHA_256, 32,
+            KmsKeySpec.Algorithm.ECDSA_SHA_256, 32,
+            KmsKeySpec.Algorithm.RSASSA_PSS_SHA_384, 48,
+            KmsKeySpec.Algorithm.RSASSA_PKCS1_V1_5_SHA_384, 48,
+            KmsKeySpec.Algorithm.ECDSA_SHA_384, 48,
+            KmsKeySpec.Algorithm.RSASSA_PSS_SHA_512, 64,
+            KmsKeySpec.Algorithm.RSASSA_PKCS1_V1_5_SHA_512, 64,
+            KmsKeySpec.Algorithm.ECDSA_SHA_512, 64,
+            KmsKeySpec.Algorithm.ED25519_PH_SHA_512, 64);
 
     public byte[] sign(String keyId, byte[] message, String algorithm, String region) {
         return sign(keyId, message, algorithm, RAW, region);
     }
 
     public byte[] sign(String keyId, byte[] message, String algorithm, KmsMessageType messageType, String region) {
+        KmsKeySpec.Algorithm signingAlgorithm = resolveSigningAlgorithm(algorithm);
         KmsKey kmsKey = resolveKey(keyId, region);
-        if (KmsKeySpec.SYMMETRIC_DEFAULT == kmsKey.getKeySpec()) {
-            throw new AwsException("UnsupportedOperationException", "Unsupported key spec for signing.", 400);
-        }
-
-        var ed25519 = kmsKey.getKeySpec().getKeyType() == KmsKeySpec.KeyType.ED25519;
-        var sm2 = kmsKey.getKeySpec().getKeyType() == KmsKeySpec.KeyType.SM2;
-        if (ed25519) {
-            validateEd25519Request(kmsKey.getKeySpec(), algorithm, messageType, message);
-        }
-        if (kmsKey.getKeySpec().getKeyType() == KmsKeySpec.KeyType.ML_DSA) {
-            validateMlDsaRequest(kmsKey.getKeySpec(), algorithm, messageType);
-        }
-        if (sm2) {
-            validateSm2Request(kmsKey.getKeySpec(), algorithm, messageType);
-        }
-
+        validateKeyUsage(kmsKey, KmsKeyUsage.SIGN_VERIFY, "Sign");
+        validateKeyIsUsableForCryptoOperations(kmsKey);
+        validateAlgorithmForSpec(signingAlgorithm, kmsKey.getKeySpec());
+        validateDigestLength(signingAlgorithm, messageType, message);
         try {
-            PrivateKey privateKey = loadPrivateKey(kmsKey.getPrivateKeyEncoded(), kmsKey.getKeySpec());
-            if (ed25519) {
-                return signEd25519(privateKey, message, algorithm);
-            }
-            if (sm2) {
-                return signSm2(privateKey, message);
-            }
-            if (messageType == DIGEST && isRsaPssRequest(kmsKey.getKeySpec(), algorithm)) {
-                return signRsaPssDigest(privateKey, message, algorithm);
-            }
-            String jcaAlgo = switch (messageType) {
-                // If message is already a digest, we need a "NONEwith..." algorithm
-                case DIGEST -> "NONEwith" + (kmsKey.getKeySpec().getKeyType() == KmsKeySpec.KeyType.RSA ? "RSA" : "ECDSA");
-                case RAW -> KmsKeySpec.getSignVerifyAlgorithm(algorithm).getJavaName();
-            };
-            if (messageType == DIGEST && isPKCS1v1_5(kmsKey.getKeySpec().getAlgorithm().getFirst())) {
-                // RFC 8017 9.2: PKCS#1 v1.5 signs DigestInfo{hashOID, digest}, not the
-                // bare digest, so the signature validates with external verifiers and
-                // real KMS (NONEwithRSA only pads the bytes it is given).
-                message = wrapInDigestInfo(message, algorithm);
-            }
-            if (isSecgP256k1(kmsKey.getKeySpec())) {
-                return signSecgP256k1(privateKey, message, jcaAlgo);
-            }
-            var sig = signatureFor(jcaAlgo);
-            sig.initSign(privateKey);
-            sig.update(message);
-            return sig.sign();
+            return keyTypes.of(kmsKey.getKeySpec()).sign(kmsKey, message, signingAlgorithm, messageType);
         } catch (AwsException e) {
             throw e;
         } catch (Exception e) {
@@ -1811,83 +1624,75 @@ public class KmsService implements ResourceProvider {
         }
     }
 
-    public boolean verify(String keyId, byte[] message, byte[] signature, String algorithm, String region) {
-        return verify(keyId, message, signature, algorithm, RAW, region);
+    private static void validateDigestLength(KmsKeySpec.Algorithm algorithm, KmsMessageType messageType,
+                                             byte[] message) {
+        Integer expected = DIGEST_BYTES.get(algorithm);
+        if (messageType == KmsMessageType.DIGEST && expected != null && expected != message.length) {
+            throw new AwsException("ValidationException",
+                    "Digest is invalid length for algorithm " + algorithm.getAlgName() + ".", 400);
+        }
     }
 
-    public boolean verify(String keyId, byte[] message, byte[] signature, String algorithm, KmsMessageType messageType, String region) {
+    private static KmsKeySpec.Algorithm resolveSigningAlgorithm(String algorithm) {
+        if (!"SYMMETRIC_DEFAULT".equals(algorithm)) {
+            validateEnumMember("signingAlgorithm", algorithm, SIGNING_ALGORITHMS);
+        }
+        return KmsKeySpec.Algorithm.valueOf(algorithm);
+    }
+
+    private static void validateEnumMember(String member, String value, List<String> allowed) {
+        if (value == null) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value null at '" + member + "' failed to satisfy "
+                            + "constraint: Member must not be null", 400);
+        }
+        if (!allowed.contains(value)) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + value + "' at '" + member + "' failed to "
+                            + "satisfy constraint: Member must satisfy enum value set: ["
+                            + String.join(", ", allowed) + "]", 400);
+        }
+    }
+
+    public void verify(String keyId, byte[] message, byte[] signature, String algorithm, String region) {
+        verify(keyId, message, signature, algorithm, RAW, region);
+    }
+
+    public void verify(String keyId, byte[] message, byte[] signature, String algorithm, KmsMessageType messageType, String region) {
+        KmsKeySpec.Algorithm signingAlgorithm = resolveSigningAlgorithm(algorithm);
         KmsKey kmsKey = resolveKey(keyId, region);
-        if (KmsKeySpec.SYMMETRIC_DEFAULT == kmsKey.getKeySpec()) {
-            return false;
-        }
-
-        var ed25519 = kmsKey.getKeySpec().getKeyType() == KmsKeySpec.KeyType.ED25519;
-        var sm2 = kmsKey.getKeySpec().getKeyType() == KmsKeySpec.KeyType.SM2;
-        if (ed25519) {
-            validateEd25519Request(kmsKey.getKeySpec(), algorithm, messageType, message);
-        }
-        if (kmsKey.getKeySpec().getKeyType() == KmsKeySpec.KeyType.ML_DSA) {
-            validateMlDsaRequest(kmsKey.getKeySpec(), algorithm, messageType);
-        }
-        if (sm2) {
-            validateSm2Request(kmsKey.getKeySpec(), algorithm, messageType);
-        }
-
+        validateKeyUsage(kmsKey, KmsKeyUsage.SIGN_VERIFY, "Verify");
+        validateKeyIsUsableForCryptoOperations(kmsKey);
+        validateAlgorithmForSpec(signingAlgorithm, kmsKey.getKeySpec());
+        validateDigestLength(signingAlgorithm, messageType, message);
+        boolean valid;
         try {
-            PublicKey publicKey = loadPublicKey(kmsKey.getPublicKeyEncoded(), kmsKey.getKeySpec());
-            if (ed25519) {
-                return verifyEd25519(publicKey, message, signature, algorithm);
-            }
-            if (sm2) {
-                return verifySm2(publicKey, message, signature);
-            }
-            String jcaAlgo = KmsKeySpec.getSignVerifyAlgorithm(algorithm).getJavaName();
-
-            if (DIGEST.equals(messageType)) {
-                if (isRsaPssRequest(kmsKey.getKeySpec(), algorithm)) {
-                    return verifyRsaPssDigest(publicKey, message, signature, algorithm);
-                }
-                jcaAlgo = "NONEwith" + (kmsKey.getKeySpec().getKeyType() == KmsKeySpec.KeyType.RSA ? "RSA" : "ECDSA");
-                if (isPKCS1v1_5(kmsKey.getKeySpec().getAlgorithm().getFirst())) {
-                    // Mirror sign(): verify against DigestInfo{hashOID, digest} (RFC 8017 9.2).
-                    message = wrapInDigestInfo(message, algorithm);
-                }
-            }
-            if (isSecgP256k1(kmsKey.getKeySpec())) {
-                return verifySecgP256k1(publicKey, message, signature, jcaAlgo);
-            }
-            var sig = signatureFor(jcaAlgo);
-            sig.initVerify(publicKey);
-            sig.update(message);
-            return sig.verify(signature);
+            valid = keyTypes.of(kmsKey.getKeySpec()).verify(kmsKey, message, signature, signingAlgorithm, messageType);
         } catch (AwsException e) {
             throw e;
         } catch (Exception e) {
-            LOG.warnv("Verification failed for key {0}: {1}", keyId, e.getMessage());
-            return false;
+            throw new AwsException("InternalFailure", "Failed to verify signature: " + e.getMessage(), 500);
+        }
+        if (!valid) {
+            throw new AwsException("KMSInvalidSignatureException", null, 400);
         }
     }
 
     public byte[] generateMac(String keyId, byte[] message, String algorithm, String region) {
-        KmsKey kmsKey = validateMacOperationKey(keyId, algorithm, region);
+        KmsKey kmsKey = validateMacOperationKey(keyId, algorithm, "GenerateMac", region);
         return generateMac(kmsKey, message, algorithm);
     }
 
     public GenerateMacResult generateMacAndResolveKey(String keyId, byte[] message, String algorithm, String region) {
-        KmsKey kmsKey = validateMacOperationKey(keyId, algorithm, region);
+        KmsKey kmsKey = validateMacOperationKey(keyId, algorithm, "GenerateMac", region);
         return new GenerateMacResult(generateMac(kmsKey, message, algorithm), kmsKey.getArn());
     }
 
     private byte[] generateMac(KmsKey kmsKey, byte[] message, String algorithm) {
-        validateMacMessageLength(message);
+        validateBlobLength("message", message, MAX_PLAINTEXT_BYTES);
 
         try {
-            byte[] keyBytes = Base64.getDecoder().decode(kmsKey.getPrivateKeyEncoded());
-            String jcaAlgorithm = mapMacAlgorithm(algorithm);
-            Mac mac = Mac.getInstance(jcaAlgorithm);
-            mac.init(new SecretKeySpec(keyBytes, jcaAlgorithm));
-            mac.update(message);
-            return mac.doFinal();
+            return keyTypes.of(kmsKey.getKeySpec()).generateMac(kmsKey, message, algorithm);
         } catch (AwsException e) {
             throw e;
         } catch (Exception e) {
@@ -1896,14 +1701,14 @@ public class KmsService implements ResourceProvider {
     }
 
     public void verifyMac(String keyId, byte[] message, byte[] mac, String algorithm, String region) {
-        validateMacLength(mac);
-        KmsKey kmsKey = validateMacOperationKey(keyId, algorithm, region);
+        validateBlobLength("mac", mac, MAX_CIPHERTEXT_BYTES);
+        KmsKey kmsKey = validateMacOperationKey(keyId, algorithm, "VerifyMac", region);
         verifyMac(kmsKey, message, mac, algorithm);
     }
 
     public VerifyMacResult verifyMacAndResolveKey(String keyId, byte[] message, byte[] mac, String algorithm, String region) {
-        validateMacLength(mac);
-        KmsKey kmsKey = validateMacOperationKey(keyId, algorithm, region);
+        validateBlobLength("mac", mac, MAX_CIPHERTEXT_BYTES);
+        KmsKey kmsKey = validateMacOperationKey(keyId, algorithm, "VerifyMac", region);
         verifyMac(kmsKey, message, mac, algorithm);
         return new VerifyMacResult(kmsKey.getArn());
     }
@@ -1911,110 +1716,55 @@ public class KmsService implements ResourceProvider {
     private void verifyMac(KmsKey kmsKey, byte[] message, byte[] mac, String algorithm) {
         byte[] expected = generateMac(kmsKey, message, algorithm);
         if (!MessageDigest.isEqual(expected, mac)) {
-            throw new AwsException("KMSInvalidMacException", "The MAC is not valid.", 400);
+            throw new AwsException("KMSInvalidMacException", null, 400);
         }
     }
 
-    private KmsKey validateMacOperationKey(String keyId, String algorithm, String region) {
+    private KmsKey validateMacOperationKey(String keyId, String algorithm, String operation, String region) {
+        validateEnumMember("macAlgorithm", algorithm, MAC_ALGORITHMS);
         KmsKey kmsKey = resolveKey(keyId, region);
-        requireImportedKeyMaterial(kmsKey, "MAC operations");
-        KmsKeySpec spec = kmsKey.getKeySpec();
-        if (!isHmac(spec) || !KmsKeyUsage.GENERATE_VERIFY_MAC.equals(kmsKey.getKeyUsage())) {
-            throw new AwsException("InvalidKeyUsageException",
-                    "MAC operations require an HMAC key with KeyUsage GENERATE_VERIFY_MAC.", 400);
-        }
-
-        String expectedAlgorithm = kmsKey.getKeySpec().getAlgorithm().getFirst().getAlgName();
-        if (!Objects.equals(expectedAlgorithm, algorithm)) {
-            throw new AwsException("InvalidKeyUsageException",
-                    "MacAlgorithm " + algorithm + " is not valid for KeySpec " + spec + ".", 400);
-        }
+        validateKeyUsage(kmsKey, KmsKeyUsage.GENERATE_VERIFY_MAC, operation);
+        validateKeyIsUsableForCryptoOperations(kmsKey);
+        validateAlgorithmForSpec(KmsKeySpec.Algorithm.valueOf(algorithm), kmsKey.getKeySpec());
         return kmsKey;
     }
 
-    private String mapMacAlgorithm(String awsAlgo) {
-        return switch (awsAlgo) {
-            case "HMAC_SHA_224" -> "HmacSHA224";
-            case "HMAC_SHA_256" -> "HmacSHA256";
-            case "HMAC_SHA_384" -> "HmacSHA384";
-            case "HMAC_SHA_512" -> "HmacSHA512";
-            default -> throw new AwsException("InvalidMacAlgorithmException", "Unsupported MAC algorithm: " + awsAlgo, 400);
-        };
-    }
 
-    private static void validateMacMessageLength(byte[] message) {
-        int length = message == null ? 0 : message.length;
-        if (length < MIN_MAC_MESSAGE_BYTES || length > MAX_MAC_MESSAGE_BYTES) {
-            throw new AwsException("ValidationException",
-                    "Message must be between 1 and 4096 bytes for MAC operations.", 400);
-        }
-    }
-
-    private static void validateMacLength(byte[] mac) {
-        int length = mac == null ? 0 : mac.length;
-        if (length < MIN_MAC_BYTES || length > MAX_MAC_BYTES) {
-            throw new AwsException("ValidationException",
-                    "Mac must be between 1 and 6144 bytes for VerifyMac.", 400);
-        }
-    }
-
-    private PrivateKey loadPrivateKey(String encoded, KmsKeySpec spec) throws Exception {
-        byte[] decoded = Base64.getDecoder().decode(encoded);
-        if (isSecgP256k1(spec) || isSm2(spec)) {
-            // For secp256k1, use BC's KeyFactorySpi.EC directly as AsymmetricKeyInfoConverter.
-            // This bypasses JCA and ClassLoader.loadClass; the allocation is live (generatePrivate
-            // is called), so GraalVM's escape analysis keeps the class in the native image.
-            AsymmetricKeyInfoConverter converter = new KeyFactorySpi.EC();
-            return converter.generatePrivate(PrivateKeyInfo.getInstance(decoded));
-        }
-        return buildKeyFactory(spec).generatePrivate(new PKCS8EncodedKeySpec(decoded));
-    }
-
-    private PublicKey loadPublicKey(String encoded, KmsKeySpec spec) throws Exception {
-        byte[] decoded = Base64.getDecoder().decode(encoded);
-        if (isSecgP256k1(spec) || isSm2(spec)) {
-            AsymmetricKeyInfoConverter converter = new KeyFactorySpi.EC();
-            return converter.generatePublic(SubjectPublicKeyInfo.getInstance(decoded));
-        }
-        return buildKeyFactory(spec).generatePublic(new X509EncodedKeySpec(decoded));
-    }
-
-    /**
-     * Wraps a pre-computed digest in the ASN.1 {@code DigestInfo} structure that PKCS#1
-     * v1.5 signing prepends before padding (RFC 8017 9.2). Needed for {@code MessageType=DIGEST}
-     * RSA signatures because {@code NONEwithRSA} pads only the bytes it is given.
-     */
-    private byte[] wrapInDigestInfo(byte[] digest, String algorithm) {
-        ASN1ObjectIdentifier hashOid;
-        if (algorithm.endsWith("SHA_256")) {
-            hashOid = NISTObjectIdentifiers.id_sha256;
-        } else if (algorithm.endsWith("SHA_384")) {
-            hashOid = NISTObjectIdentifiers.id_sha384;
-        } else if (algorithm.endsWith("SHA_512")) {
-            hashOid = NISTObjectIdentifiers.id_sha512;
-        } else {
-            throw new AwsException("InvalidSigningAlgorithmException", "Unsupported algorithm: " + algorithm, 400);
-        }
-        try {
-            return new DigestInfo(new AlgorithmIdentifier(hashOid, DERNull.INSTANCE), digest).getEncoded();
-        } catch (IOException e) {
-            throw new AwsException("InternalFailure", "Failed to encode DigestInfo: " + e.getMessage(), 500);
-        }
-    }
-
-    public Map<String, Object> generateDataKey(String keyId, String keySpec, int numberOfBytes, String region) {
+    public Map<String, Object> generateDataKey(String keyId, String keySpec, Integer numberOfBytes, String region) {
         return generateDataKey(keyId, keySpec, numberOfBytes, Map.of(), region);
     }
 
-    public Map<String, Object> generateDataKey(String keyId, String keySpec, int numberOfBytes,
+    public Map<String, Object> generateDataKey(String keyId, String keySpec, Integer numberOfBytes,
                                                Map<String, String> encryptionContext, String region) {
-        resolveKey(keyId, region);
-        int len = (keySpec != null && keySpec.contains("256")) ? 32 : (numberOfBytes > 0 ? numberOfBytes : 32);
+        return generateDataKey(keyId, keySpec, numberOfBytes, encryptionContext, region, "GenerateDataKey");
+    }
+
+    Map<String, Object> generateDataKeyWithoutPlaintext(String keyId, String keySpec, Integer numberOfBytes,
+                                                        Map<String, String> encryptionContext, String region) {
+        Map<String, Object> dataKey = generateDataKey(keyId, keySpec, numberOfBytes, encryptionContext, region,
+                "GenerateDataKeyWithoutPlaintext");
+        dataKey.remove("Plaintext");
+        return dataKey;
+    }
+
+    private Map<String, Object> generateDataKey(String keyId, String keySpec, Integer numberOfBytes,
+                                                Map<String, String> encryptionContext, String region,
+                                                String operation) {
+        KmsKey key = resolveKey(keyId, region);
+        if ((keySpec == null) == (numberOfBytes == null)) {
+            throw new AwsException("ValidationException", "Please specify either number of bytes or key spec.", 400);
+        }
+        validateKeyUsage(key, KmsKeyUsage.ENCRYPT_DECRYPT, operation);
+        validateKeyIsUsableForCryptoOperations(key);
+        if (KmsKeySpec.SYMMETRIC_DEFAULT != key.getKeySpec()) {
+            throw new AwsException("InvalidKeyUsageException", "You cannot generate a data key with an asymmetric CMK", 400);
+        }
+        int len = keySpec == null ? numberOfBytes : "AES_128".equals(keySpec) ? 16 : 32;
 
         byte[] plaintext = new byte[len];
         ThreadLocalRandom.current().nextBytes(plaintext);
 
-        EncryptResult encrypted = encrypt(keyId, plaintext, encryptionContext, null, region, "GenerateDataKey");
+        EncryptResult encrypted = encrypt(keyId, plaintext, encryptionContext, null, region, operation);
 
         Map<String, Object> result = new HashMap<>();
         result.put("Plaintext", plaintext);
@@ -2027,6 +1777,7 @@ public class KmsService implements ResourceProvider {
 
     public void tagResource(String keyId, Map<String, String> tags, String region) {
         KmsKey key = resolveKey(keyId, region);
+        requireNotPendingDeletion(key);
         ReservedTags.rejectReservedTagsOnUpdate(tags);
         key.getTags().putAll(tags);
         keyStore.put(region + "::" + key.getKeyId(), key);
@@ -2034,280 +1785,20 @@ public class KmsService implements ResourceProvider {
 
     public void untagResource(String keyId, List<String> tagKeys, String region) {
         KmsKey key = resolveKey(keyId, region);
+        requireNotPendingDeletion(key);
         tagKeys.forEach(key.getTags()::remove);
         keyStore.put(region + "::" + key.getKeyId(), key);
     }
 
     // ──────────────────────────── Helpers ────────────────────────────
 
-    private static boolean isSecgP256k1(KmsKeySpec spec) {
-        return KmsKeySpec.ECC_SECG_P256K1 == spec;
-    }
-
-    private static boolean isSm2(KmsKeySpec spec) {
-        return KmsKeySpec.SM2 == spec;
-    }
-
-    private static void validateSm2Request(KmsKeySpec spec, String algorithm, KmsMessageType messageType) {
-        if (KmsKeySpec.getSignVerifyAlgorithm(algorithm) != KmsKeySpec.Algorithm.SM2DSA) {
-            throw new AwsException("InvalidKeyUsageException",
-                    "Algorithm " + algorithm + " is incompatible with key spec " + spec.name() + ".", 400);
-        }
-        if (messageType != RAW) {
-            throw new AwsException("ValidationException",
-                    "Message type " + messageType + " is incompatible with key spec " + spec.name() + ".", 400);
-        }
-    }
-
-    private static byte[] signSm2(PrivateKey privateKey, byte[] message) throws Exception {
-        ECNamedCurveParameterSpec spec = ECNamedCurveTable.getParameterSpec("sm2p256v1");
-        ECDomainParameters domain = new ECDomainParameters(spec.getCurve(), spec.getG(), spec.getN(), spec.getH());
-        ECPrivateKeyParameters parameters = new ECPrivateKeyParameters(((BCECPrivateKey) privateKey).getD(), domain);
-
-        var signer = new SM2Signer();
-        signer.init(true, new ParametersWithRandom(parameters, SECURE_RANDOM));
-        signer.update(message, 0, message.length);
-        return signer.generateSignature();
-    }
-
-    private static boolean verifySm2(PublicKey publicKey, byte[] message, byte[] signature) {
-        ECNamedCurveParameterSpec spec = ECNamedCurveTable.getParameterSpec("sm2p256v1");
-        ECDomainParameters domain = new ECDomainParameters(spec.getCurve(), spec.getG(), spec.getN(), spec.getH());
-        ECPublicKeyParameters parameters = new ECPublicKeyParameters(((BCECPublicKey) publicKey).getQ(), domain);
-
-        var verifier = new SM2Signer();
-        verifier.init(false, parameters);
-        verifier.update(message, 0, message.length);
-        return verifier.verifySignature(signature);
-    }
-
-    /**
-     * Validates what an Ed25519 key accepts, matching the errors real KMS returns.
-     *
-     * <p>ED25519_SHA_512 only takes {@code MessageType=RAW} and ED25519_PH_SHA_512 only takes
-     * {@code MessageType=DIGEST}, whose value has to be exactly one SHA-512 digest. Real KMS
-     * rejects the other pairing and a wrong digest length with a ValidationException, and rejects
-     * any other signing algorithm with an InvalidKeyUsageException. Sign and Verify both enforce
-     * all three.
-     */
-    private static void validateEd25519Request(KmsKeySpec spec, String algorithm, KmsMessageType messageType,
-                                               byte[] message) {
-        var algo = KmsKeySpec.getSignVerifyAlgorithm(algorithm);
-        if (algo != KmsKeySpec.Algorithm.ED25519_SHA_512 && algo != KmsKeySpec.Algorithm.ED25519_PH_SHA_512) {
-            throw new AwsException("InvalidKeyUsageException",
-                    "Algorithm " + algorithm + " is incompatible with key spec " + spec.name() + ".", 400);
-        }
-        var required = algo == KmsKeySpec.Algorithm.ED25519_SHA_512 ? KmsMessageType.RAW : KmsMessageType.DIGEST;
-        if (messageType != required) {
-            throw new AwsException("ValidationException",
-                    "Message type " + messageType + " is incompatible with algorithm " + algorithm + ".", 400);
-        }
-        if (algo == KmsKeySpec.Algorithm.ED25519_PH_SHA_512 && message.length != SHA_512_DIGEST_BYTES) {
-            throw new AwsException("ValidationException",
-                    "Digest is invalid length for algorithm " + algorithm + ".", 400);
-        }
-    }
-
-    private static void validateMlDsaRequest(KmsKeySpec spec, String algorithm, KmsMessageType messageType) {
-        var signingAlgorithm = KmsKeySpec.getSignVerifyAlgorithm(algorithm);
-        if (signingAlgorithm != KmsKeySpec.Algorithm.ML_DSA_SHAKE_256) {
-            throw new AwsException("InvalidKeyUsageException",
-                    "Algorithm " + algorithm + " is incompatible with key spec " + spec.name() + ".", 400);
-        }
-        if (messageType != RAW) {
-            throw new AwsException("ValidationException",
-                    "Message type " + messageType + " is incompatible with key spec " + spec.name() + ".", 400);
-        }
-    }
-
-    /**
-     * Signs with an Ed25519 key.
-     *
-     * <p>ED25519_SHA_512 is pure Ed25519 over the message. ED25519_PH_SHA_512 is RFC 8032
-     * Ed25519ph, and real KMS applies the SHA-512 pre-hash to the bytes the caller sends rather
-     * than treating them as an already computed digest. That is measurably different from
-     * MessageType=DIGEST on RSA and ECDSA keys, where the bytes are signed as they arrive.
-     *
-     * <p>The JDK has no Ed25519ph, so that branch uses BouncyCastle's lightweight signer,
-     * instantiated directly rather than resolved through a JCA provider, the same way the
-     * secp256k1 path does.
-     */
-    private static byte[] signEd25519(PrivateKey privateKey, byte[] message, String algorithm) throws Exception {
-        if (KmsKeySpec.Algorithm.ED25519_SHA_512.name().equals(algorithm)) {
-            var signature = Signature.getInstance("Ed25519");
-            signature.initSign(privateKey);
-            signature.update(message);
-            return signature.sign();
-        }
-        var signer = new Ed25519phSigner(new byte[0]);
-        signer.init(true, new Ed25519PrivateKeyParameters(ed25519Seed(privateKey), 0));
-        signer.update(message, 0, message.length);
-        return signer.generateSignature();
-    }
-
-    private static boolean verifyEd25519(PublicKey publicKey, byte[] message, byte[] signature, String algorithm)
-            throws Exception {
-        if (KmsKeySpec.Algorithm.ED25519_SHA_512.name().equals(algorithm)) {
-            var verifier = Signature.getInstance("Ed25519");
-            verifier.initVerify(publicKey);
-            verifier.update(message);
-            return verifier.verify(signature);
-        }
-        var verifier = new Ed25519phSigner(new byte[0]);
-        verifier.init(false, new Ed25519PublicKeyParameters(ed25519Point(publicKey), 0));
-        verifier.update(message, 0, message.length);
-        return verifier.verifySignature(signature);
-    }
-
-    private static byte[] ed25519Seed(PrivateKey privateKey) throws InvalidKeyException {
-        if (privateKey instanceof EdECPrivateKey edEC) {
-            return edEC.getBytes().orElseThrow(() -> new InvalidKeyException("Ed25519 private key is not extractable"));
-        }
-        throw new InvalidKeyException("Expected an Ed25519 private key but got " + privateKey.getAlgorithm());
-    }
-
-    private static byte[] ed25519Point(PublicKey publicKey) {
-        return SubjectPublicKeyInfo.getInstance(publicKey.getEncoded()).getPublicKeyData().getBytes();
-    }
-
-    /**
-     * Builds the {@link Signature} for a KMS signing algorithm.
-     *
-     * <p>BouncyCastle names PSS signatures {@code SHAnnnwithRSA/PSS}, and only its provider
-     * answers to that name. The JDK exposes one {@code RSASSA-PSS} Signature whose digest,
-     * mask generation function and salt length come from a parameter spec instead. AWS KMS
-     * RSASSA_PSS_SHA_nnn uses MGF1 over the same digest with a salt as long as that digest,
-     * which is what BouncyCastle's alias defaults to, so a signature made either way verifies
-     * against the other. Every other name Floci asks for is a standard JCA name.
-     */
-    private static Signature signatureFor(String jcaAlgorithm) throws GeneralSecurityException {
-        if (!jcaAlgorithm.endsWith("withRSA/PSS")) {
-            return Signature.getInstance(jcaAlgorithm);
-        }
-        var digest = "SHA-" + jcaAlgorithm.substring("SHA".length(), jcaAlgorithm.indexOf("with"));
-        var maskGeneration = switch (digest) {
-            case "SHA-256" -> MGF1ParameterSpec.SHA256;
-            case "SHA-384" -> MGF1ParameterSpec.SHA384;
-            case "SHA-512" -> MGF1ParameterSpec.SHA512;
-            default -> throw new NoSuchAlgorithmException("Unsupported PSS digest: " + digest);
-        };
-        var saltLength = MessageDigest.getInstance(digest).getDigestLength();
-        var signature = Signature.getInstance("RSASSA-PSS");
-        signature.setParameter(new PSSParameterSpec(digest, "MGF1", maskGeneration, saltLength, 1));
-        return signature;
-    }
-
-    private static boolean isRsaPssRequest(KmsKeySpec spec, String algorithm) {
-        return spec.getKeyType() == KmsKeySpec.KeyType.RSA && algorithm.startsWith("RSASSA_PSS");
-    }
-
-    /**
-     * Signs a pre-computed digest with RSASSA-PSS.
-     *
-     * <p>Real KMS applies the PSS encoding directly to the digest a {@code MessageType=DIGEST}
-     * caller sends. The JDK's {@code RSASSA-PSS} Signature always hashes its input first, so
-     * this uses BouncyCastle's lightweight raw PSS signer, instantiated directly like the
-     * secp256k1 and Ed25519ph paths. The raw signer defaults to MGF1 over the same digest with
-     * a salt as long as that digest, matching {@link #signatureFor(String)}, so RAW and DIGEST
-     * signatures verify against each other.
-     */
-    private static byte[] signRsaPssDigest(PrivateKey privateKey, byte[] digest, String algorithm) throws Exception {
-        var signer = rawPssSigner(algorithm);
-        signer.init(true, new ParametersWithRandom(PrivateKeyFactory.createKey(privateKey.getEncoded()), SECURE_RANDOM));
-        signer.update(digest, 0, digest.length);
-        return signer.generateSignature();
-    }
-
-    private static boolean verifyRsaPssDigest(PublicKey publicKey, byte[] digest, byte[] signature, String algorithm) throws Exception {
-        var signer = rawPssSigner(algorithm);
-        signer.init(false, PublicKeyFactory.createKey(publicKey.getEncoded()));
-        signer.update(digest, 0, digest.length);
-        return signer.verifySignature(signature);
-    }
-
-    private static PSSSigner rawPssSigner(String algorithm) {
-        Digest digest = switch (algorithm) {
-            case "RSASSA_PSS_SHA_256" -> new SHA256Digest();
-            case "RSASSA_PSS_SHA_384" -> new SHA384Digest();
-            case "RSASSA_PSS_SHA_512" -> new SHA512Digest();
-            default -> throw new AwsException("InvalidSigningAlgorithmException", "Unsupported algorithm: " + algorithm, 400);
-        };
-        return PSSSigner.createRawSigner(new RSABlindedEngine(), digest);
-    }
-
-    private static boolean isPKCS1v1_5(KmsKeySpec.Algorithm spec) {
-        return spec == KmsKeySpec.Algorithm.RSASSA_PKCS1_V1_5_SHA_256
-                || spec == KmsKeySpec.Algorithm.RSASSA_PKCS1_V1_5_SHA_384
-                || spec == KmsKeySpec.Algorithm.RSASSA_PKCS1_V1_5_SHA_512;
-    }
-
-    /**
-     * Signs {@code message} with secp256k1 using BC's lightweight {@link ECDSASigner}.
-     *
-     * <p>BC's {@code SignatureSpi} subclasses extend {@code java.security.SignatureSpi} (not
-     * {@code java.security.Signature}), so they cannot be used as a drop-in {@code Signature}.
-     * Using the lightweight API avoids JCA's {@code ClassLoader.loadClass} entirely — every
-     * class referenced here is directly allocated in reachable code and is always in GraalVM's
-     * native image type registry.</p>
-     */
-    private static byte[] signSecgP256k1(PrivateKey privateKey, byte[] message, String jcaAlgo) throws Exception {
-        ECNamedCurveParameterSpec spec = ECNamedCurveTable.getParameterSpec("secp256k1");
-        ECDomainParameters domain = new ECDomainParameters(spec.getCurve(), spec.getG(), spec.getN(), spec.getH());
-        ECPrivateKeyParameters privParams = new ECPrivateKeyParameters(((BCECPrivateKey) privateKey).getD(), domain);
-
-        byte[] hash = "NONEwithECDSA".equals(jcaAlgo) ? message : hashForEcdsa(message, jcaAlgo);
-
-        ECDSASigner signer = new ECDSASigner();
-        signer.init(true, new ParametersWithRandom(privParams, new SecureRandom()));
-        BigInteger[] rs = signer.generateSignature(hash);
-
-        ByteArrayOutputStream bOut = new ByteArrayOutputStream();
-        DERSequenceGenerator seq = new DERSequenceGenerator(bOut);
-        seq.addObject(new ASN1Integer(rs[0]));
-        seq.addObject(new ASN1Integer(rs[1]));
-        seq.close();
-        return bOut.toByteArray();
-    }
-
-    /**
-     * Verifies a DER-encoded ECDSA signature over secp256k1.
-     */
-    private static boolean verifySecgP256k1(PublicKey publicKey, byte[] message, byte[] signature, String jcaAlgo) throws Exception {
-        ECNamedCurveParameterSpec spec = ECNamedCurveTable.getParameterSpec("secp256k1");
-        ECDomainParameters domain = new ECDomainParameters(spec.getCurve(), spec.getG(), spec.getN(), spec.getH());
-        ECPublicKeyParameters pubParams = new ECPublicKeyParameters(((BCECPublicKey) publicKey).getQ(), domain);
-
-        byte[] hash = "NONEwithECDSA".equals(jcaAlgo) ? message : hashForEcdsa(message, jcaAlgo);
-
-        ASN1Sequence asn1 = ASN1Sequence.getInstance(ASN1Primitive.fromByteArray(signature));
-        BigInteger r = ASN1Integer.getInstance(asn1.getObjectAt(0)).getValue();
-        BigInteger s = ASN1Integer.getInstance(asn1.getObjectAt(1)).getValue();
-
-        ECDSASigner verifier = new ECDSASigner();
-        verifier.init(false, pubParams);
-        return verifier.verifySignature(hash, r, s);
-    }
-
-    private static byte[] hashForEcdsa(byte[] message, String jcaAlgo) throws Exception {
-        String mdAlgo = switch (jcaAlgo) {
-            case "SHA256withECDSA" -> "SHA-256";
-            case "SHA384withECDSA" -> "SHA-384";
-            case "SHA512withECDSA" -> "SHA-512";
-            default -> throw new AwsException("InvalidSigningAlgorithmException", "Unsupported EC algorithm: " + jcaAlgo, 400);
-        };
-        return MessageDigest.getInstance(mdAlgo).digest(message);
-    }
-
-    private static KeyFactory buildKeyFactory(KmsKeySpec spec) throws Exception {
-        return KeyFactory.getInstance(switch (spec.getKeyType()) {
-            case RSA -> "RSA";
-            case ED25519 -> "Ed25519";
-            case ML_DSA -> "ML-DSA";
-            default -> "EC";
-        });
-    }
-
     private KmsKey resolveKey(String keyIdOrArn, String region) {
+        if (AwsArnUtils.isArnFor(keyIdOrArn, "kms")) {
+            String arnRegion = AwsArnUtils.parse(keyIdOrArn).region();
+            if (!region.equals(arnRegion)) {
+                throw new AwsException("NotFoundException", "Invalid arn " + arnRegion, 400);
+            }
+        }
         String id = keyIdOrArn;
         // Alias arn
         if (id.contains(":alias/")) {
@@ -2315,7 +1806,7 @@ public class KmsService implements ResourceProvider {
             String aliasKey = region + "::" + aliasName;
             id = aliasStore.get(aliasKey)
                     .map(KmsAlias::getTargetKeyId)
-                    .orElseThrow(() -> new AwsException("NotFoundException", "Alias not found: " + keyIdOrArn, 404));
+                    .orElseThrow(() -> aliasNotFound(aliasName, region));
         } else if (AwsArnUtils.isArnFor(id, "kms")) {
             // Key arn
             id = id.substring(id.lastIndexOf("/") + 1);
@@ -2324,30 +1815,48 @@ public class KmsService implements ResourceProvider {
             String aliasKey = region + "::" + id;
             id = aliasStore.get(aliasKey)
                     .map(KmsAlias::getTargetKeyId)
-                    .orElseThrow(() -> new AwsException("NotFoundException", "Alias not found: " + keyIdOrArn, 404));
+                    .orElseThrow(() -> aliasNotFound(keyIdOrArn, region));
         }
 
         // Key id
+        String keyId = id;
         KmsKey key = keyStore.get(region + "::" + id)
-                .orElseThrow(() -> new AwsException("NotFoundException", "Key not found: " + keyIdOrArn, 404));
+                .orElseThrow(() -> keyNotFound(keyIdOrArn, keyId, region));
         key = expireImportedKeyMaterialIfDue(key, region);
         key = ensureBackingKeyMaterial(key, region);
         return key;
+    }
+
+    private AwsException aliasNotFound(String aliasName, String region) {
+        return new AwsException("NotFoundException",
+                "Alias " + regionResolver.buildArn("kms", region, aliasName) + " is not found.", 400);
+    }
+
+    private static final Pattern KEY_ID_PATTERN = Pattern.compile(
+            "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|mrk-[0-9a-fA-F]{32}");
+
+    private AwsException keyNotFound(String keyIdOrArn, String keyId, String region) {
+        if (!KEY_ID_PATTERN.matcher(keyId).matches()) {
+            String shown = AwsArnUtils.isArnFor(keyIdOrArn, "kms") ? keyId : "'" + keyId + "'";
+            return new AwsException("NotFoundException", "Invalid keyId " + shown, 400);
+        }
+        return new AwsException("NotFoundException",
+                "Key '" + regionResolver.buildArn("kms", region, "key/" + keyId) + "' does not exist", 400);
     }
 
     private static void validateKeyIsUsableForCryptoOperations(KmsKey key) {
         if (PENDING_DELETION.equals(key.getKeyState())) {
             throw new AwsException(
                     "KMSInvalidStateException",
-                    "KMS key " + key.getKeyId() + " is pending deletion.",
+                    key.getArn() + " is pending deletion.",
                     400
             );
         }
-        requireImportedKeyMaterial(key, "This operation");
+        requireImportedKeyMaterial(key);
         if (!key.isEnabled()) {
             throw new AwsException(
                     "DisabledException",
-                    "The request was rejected because the specified KMS key is not enabled.",
+                    key.getArn() + " is disabled.",
                     400
             );
         }

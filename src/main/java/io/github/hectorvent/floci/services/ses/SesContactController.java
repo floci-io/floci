@@ -37,10 +37,10 @@ import static io.github.hectorvent.floci.services.ses.SesV2Json.requireJsonObjec
 import static io.github.hectorvent.floci.services.ses.SesV2Json.unexpectedStartError;
 
 /**
- * SES V2 contact-list and contact endpoints ({@code /v2/email/contact-lists}), split out of
- * {@link SesController}. Every operation is a single-domain call on {@link SesContactService}, so
- * this controller does not touch the {@link SesService} facade at all; the send-path opt-out
- * collection that also reads contacts stays behind the facade.
+ * SES V2 contact-list and contact endpoints ({@code /v2/email/contact-lists}). Every operation
+ * is a single-domain call on {@link SesContactService}, so this controller does not touch the
+ * {@link SesService} facade at all; the send-path opt-out collection that also reads contacts
+ * stays behind the facade.
  */
 @Path("/v2/email")
 @Produces(MediaType.APPLICATION_JSON)

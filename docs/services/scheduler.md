@@ -36,7 +36,11 @@ background dispatcher fires schedule targets on time. Supported expressions:
 window are skipped. The dispatcher ticks every
 `floci.services.scheduler.tick-interval-seconds` (default `10`).
 
-Supported target types: SQS, Lambda, SNS, EventBridge `PutEvents`.
+Supported target types: SQS, Lambda, SNS, ECS `RunTask`, EventBridge
+`PutEvents`, and unqualified Step Functions state machine ARNs. A Step Functions
+target starts an asynchronous execution with the schedule target's `Input`, or
+`{}` when `Input` is absent. Scheduler delivery succeeds when `StartExecution`
+is accepted; a later workflow failure does not trigger Scheduler retries.
 
 ### Retries and dead-letter queues
 

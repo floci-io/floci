@@ -1,15 +1,19 @@
 package io.github.hectorvent.floci.services.codeartifact;
 
+import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+
+import java.nio.charset.StandardCharsets;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.emptyIterable;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 
 @QuarkusTest
 class CodeArtifactIntegrationTest {
@@ -128,5 +132,78 @@ class CodeArtifactIntegrationTest {
         given().contentType("application/json").header("Authorization", AUTH)
                 .body("{}").post("/v1/domain?domain=NOT-VALID")
                 .then().statusCode(400).body("__type", equalTo("ValidationException"));
+    }
+
+    @Test
+    void publishDescribeAndGetPackageVersionAssetRoundTripExactBytes() {
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{}").post("/v1/domain?domain=pkg-domain").then().statusCode(200);
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{}").post("/v1/repository?domain=pkg-domain&repository=pkg-repo").then().statusCode(200);
+
+        byte[] content = "hello codeartifact".getBytes(StandardCharsets.UTF_8);
+        String sha256 = sha256Hex(content);
+
+        given().header("Authorization", AUTH).header("x-amz-content-sha256", sha256)
+                .contentType("application/octet-stream").body(content)
+                .post("/v1/package/version/publish?domain=pkg-domain&repository=pkg-repo&format=generic"
+                        + "&package=my-pkg&version=1.0.0&asset=asset.txt")
+                .then().statusCode(200)
+                .body("status", equalTo("Published"))
+                .body("versionRevision", notNullValue())
+                .body("asset.name", equalTo("asset.txt"))
+                .body("asset.size", equalTo(content.length))
+                .body("asset.hashes.'SHA-256'", equalTo(sha256));
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package/version?domain=pkg-domain&repository=pkg-repo&format=generic"
+                        + "&package=my-pkg&version=1.0.0")
+                .then().statusCode(200)
+                .body("packageVersion.status", equalTo("Published"))
+                .body("packageVersion.origin.originType", equalTo("INTERNAL"));
+
+        byte[] downloaded = given().header("Authorization", AUTH)
+                .get("/v1/package/version/asset?domain=pkg-domain&repository=pkg-repo&format=generic"
+                        + "&package=my-pkg&version=1.0.0&asset=asset.txt")
+                .then().statusCode(200)
+                .header("X-AssetName", equalTo("asset.txt"))
+                .extract().asByteArray();
+        assertArrayEquals(content, downloaded);
+
+        given().header("Authorization", AUTH).header("x-amz-content-sha256", sha256)
+                .contentType("application/octet-stream").body(content)
+                .post("/v1/package/version/publish?domain=pkg-domain&repository=pkg-repo&format=generic"
+                        + "&package=my-pkg&version=1.0.0&asset=another.txt")
+                .then().statusCode(409).body("__type", equalTo("ConflictException"));
+    }
+
+    @Test
+    void unfinishedPublishKeepsVersionOpenForMoreAssets() {
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{}").post("/v1/domain?domain=unfinished-domain").then().statusCode(200);
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{}").post("/v1/repository?domain=unfinished-domain&repository=repo").then().statusCode(200);
+
+        byte[] content = "partial".getBytes(StandardCharsets.UTF_8);
+        String sha256 = sha256Hex(content);
+
+        given().header("Authorization", AUTH).header("x-amz-content-sha256", sha256)
+                .contentType("application/octet-stream").body(content)
+                .post("/v1/package/version/publish?domain=unfinished-domain&repository=repo&format=generic"
+                        + "&package=my-pkg&version=1.0.0&asset=a.txt&unfinished=true")
+                .then().statusCode(200).body("status", equalTo("Unfinished"));
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package/version?domain=unfinished-domain&repository=repo&format=generic"
+                        + "&package=my-pkg&version=1.0.0")
+                .then().statusCode(200).body("packageVersion.status", equalTo("Unfinished"));
+    }
+
+    private static String sha256Hex(byte[] content) {
+        try {
+            return SigV4RequestValidator.sha256Hex(content);
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
     }
 }

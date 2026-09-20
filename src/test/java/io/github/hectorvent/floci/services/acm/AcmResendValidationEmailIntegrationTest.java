@@ -6,6 +6,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.equalTo;
 
 @QuarkusTest
 class AcmResendValidationEmailIntegrationTest {
@@ -54,7 +55,7 @@ class AcmResendValidationEmailIntegrationTest {
                 .post("/")
                 .then()
                 .statusCode(400)
-                .body("__type", org.hamcrest.Matchers.equalTo("InvalidDomainValidationOptionsException"));
+                .body("__type", equalTo("InvalidDomainValidationOptionsException"));
     }
 
     @Test
@@ -80,7 +81,7 @@ class AcmResendValidationEmailIntegrationTest {
                 .post("/")
                 .then()
                 .statusCode(400)
-                .body("__type", org.hamcrest.Matchers.equalTo("InvalidDomainValidationOptionsException"));
+                .body("__type", equalTo("InvalidDomainValidationOptionsException"));
     }
 
     @Test

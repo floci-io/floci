@@ -832,6 +832,7 @@ class RdsDataServiceTest {
         return switch (engine) {
             case MYSQL, MARIADB -> "MySQL";
             case POSTGRES -> "PostgreSQL";
+            case SQLSERVER -> "MSSQLServer";
         };
     }
 

@@ -246,4 +246,52 @@ class HttpProxyInvokerTest {
         assertTrue(q.contains("page=2"));
         assertTrue(q.contains("user=u-42"));
     }
+
+    @Test
+    void rejectsLinkLocalMetadataTarget() {
+        Integration integration = httpProxyIntegration("http://169.254.169.254/latest/meta-data/", null);
+        RequestContext ctx = ctxFor("GET", "/wallet/x", "x", Map.of(), Map.of(), null, Map.of());
+
+        ProxyResult result = new HttpProxyInvoker().invoke(integration, ctx);
+
+        assertEquals(502, result.statusCode());
+        assertTrue(new String(result.body(), StandardCharsets.UTF_8).contains("link-local or metadata address"),
+                "the target must be rejected before any connection is attempted");
+    }
+
+    @Test
+    void rejectsLinkLocalMetadataTargetWhenHostHeaderIsOverridden() {
+        Integration integration = httpProxyIntegration("http://169.254.169.254/latest/meta-data/",
+                Map.of("overwrite:header.Host", "lb.localhost.test"));
+        RequestContext ctx = ctxFor("GET", "/wallet/x", "x", Map.of(), Map.of(), null, Map.of());
+
+        ProxyResult result = new HttpProxyInvoker().invoke(integration, ctx);
+
+        assertEquals(502, result.statusCode());
+        assertTrue(new String(result.body(), StandardCharsets.UTF_8).contains("link-local or metadata address"),
+                "the target must be rejected before any connection is attempted");
+    }
+
+    @Test
+    void rejectsAwsIpv6MetadataTarget() {
+        Integration integration = httpProxyIntegration("http://[fd00:ec2::254]/latest/meta-data/", null);
+        RequestContext ctx = ctxFor("GET", "/wallet/x", "x", Map.of(), Map.of(), null, Map.of());
+
+        ProxyResult result = new HttpProxyInvoker().invoke(integration, ctx);
+
+        assertEquals(502, result.statusCode());
+        assertTrue(new String(result.body(), StandardCharsets.UTF_8).contains("link-local or metadata address"),
+                "the target must be rejected before any connection is attempted");
+    }
+
+    @Test
+    void stillReachesLoopbackBackend() {
+        Integration integration = httpProxyIntegration("http://127.0.0.1:" + backendPort + "/ok", null);
+        RequestContext ctx = ctxFor("GET", "/wallet/x", "x", Map.of(), Map.of(), null, Map.of());
+
+        ProxyResult result = new HttpProxyInvoker().invoke(integration, ctx);
+
+        assertEquals(200, result.statusCode());
+        assertNotNull(received.get(), "loopback backends must stay reachable");
+    }
 }

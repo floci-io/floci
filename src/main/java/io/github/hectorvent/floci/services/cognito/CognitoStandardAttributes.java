@@ -4,6 +4,8 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 final class CognitoStandardAttributes {
 
@@ -69,6 +71,15 @@ final class CognitoStandardAttributes {
         attr.put("Required", false);
         attr.put("NumberAttributeConstraints", Map.of("MinValue", "0"));
         return attr;
+    }
+
+    private static final Set<String> DEFAULT_NAMES = DEFAULTS.stream()
+            .map(attr -> (String) attr.get("Name"))
+            .collect(Collectors.toUnmodifiableSet());
+
+    /** True when {@code name} is one of the standard OIDC attributes every pool carries. */
+    static boolean isStandard(String name) {
+        return name != null && DEFAULT_NAMES.contains(name);
     }
 
     /**

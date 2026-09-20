@@ -11,7 +11,9 @@ public enum KmsMessageType {
         try {
             return KmsMessageType.valueOf(messageType);
         } catch (IllegalArgumentException _) {
-            throw new AwsException("ValidationException", "1 validation error detected: Value '" + messageType + "' at 'MessageType' failed to satisfy constraint", 400);
+            throw new AwsException("ValidationException", "1 validation error detected: Value '" + messageType
+                    + "' at 'messageType' failed to satisfy constraint: Member must satisfy enum value set: "
+                    + "[RAW, DIGEST, EXTERNAL_MU]", 400);
         }
     }
 }

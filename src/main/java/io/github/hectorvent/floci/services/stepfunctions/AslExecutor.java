@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
+import io.github.hectorvent.floci.core.common.CsvParser;
 import io.github.hectorvent.floci.core.common.CustomResourceLiveness;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.XmlParser;
@@ -70,6 +71,7 @@ import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
+import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
@@ -1150,7 +1152,7 @@ public class AslExecutor {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         flattenQueryParams(input, "", params);
 
-        jakarta.ws.rs.core.Response response;
+        Response response;
         try {
             response = cloudFormationHandler.handle(pascalAction, params, region);
         } catch (AwsException e) {
@@ -1405,7 +1407,7 @@ public class AslExecutor {
      * which entry it was.
      */
     private JsonNode invokeOptimizedPutEvents(JsonNode input, String region) throws Exception {
-        jakarta.ws.rs.core.Response response;
+        Response response;
         try {
             response = eventBridgeHandler.handle("PutEvents", input, region);
         } catch (AwsException e) {
@@ -1874,7 +1876,7 @@ public class AslExecutor {
         // Convert camelCase to PascalCase (e.g., putItem → PutItem)
         String pascalAction = Character.toUpperCase(camelCaseAction.charAt(0)) + camelCaseAction.substring(1);
 
-        jakarta.ws.rs.core.Response response;
+        Response response;
         try {
             response = dynamoDbJsonHandler.handle(pascalAction, input, region);
         } catch (AwsException e) {
@@ -1932,7 +1934,7 @@ public class AslExecutor {
     }
 
     private JsonNode invokeSqsAction(String action, JsonNode input, String region, String errorPrefix, boolean awsSdkStyleErrors) {
-        jakarta.ws.rs.core.Response response;
+        Response response;
         try {
             response = sqsJsonHandler.handle(action, input, region);
         } catch (AwsException e) {
@@ -1980,7 +1982,7 @@ public class AslExecutor {
             request.put("Message", message.toString());
         }
 
-        jakarta.ws.rs.core.Response response;
+        Response response;
         try {
             response = snsJsonHandler.handle("Publish", request, region);
         } catch (AwsException e) {
@@ -3077,7 +3079,7 @@ public class AslExecutor {
         }
 
         String inputType = itemReader.path("ReaderConfig").path("InputType").asText(null);
-        if (!"JSON".equals(inputType) && !"JSONL".equals(inputType)) {
+        if (!"JSON".equals(inputType) && !"JSONL".equals(inputType) && !"CSV".equals(inputType)) {
             throw new FailStateException("States.ItemReaderFailed",
                     "ItemReader InputType " + inputType + " is not yet implemented by the emulator");
         }
@@ -3093,6 +3095,10 @@ public class AslExecutor {
             S3Object object = s3Service.getObject(bucket, key);
             if ("JSONL".equals(inputType)) {
                 return new ResolvedMapItems(applyMaxItems(itemReader, readJsonLines(object.getData())),
+                        MapItemsSource.ITEM_READER_ARRAY);
+            }
+            if ("CSV".equals(inputType)) {
+                return new ResolvedMapItems(applyMaxItems(itemReader, readCsvRows(itemReader, object.getData())),
                         MapItemsSource.ITEM_READER_ARRAY);
             }
             JsonNode items = objectMapper.readTree(object.getData());
@@ -3128,6 +3134,56 @@ public class AslExecutor {
             }
         }
         return items;
+    }
+
+    /**
+     * Each data row becomes an object keyed by the headers. A row shorter than the headers pads
+     * with empty strings and a longer one drops the surplus, as on AWS. Every value is a string.
+     */
+    private ArrayNode readCsvRows(JsonNode itemReader, byte[] data) {
+        JsonNode readerConfig = itemReader.path("ReaderConfig");
+        String headerLocation = readerConfig.path("CSVHeaderLocation").asText("FIRST_ROW");
+        List<List<String>> rows = CsvParser.parseAll(new String(data, StandardCharsets.UTF_8),
+                csvDelimiter(readerConfig.path("CSVDelimiter").asText("COMMA")));
+
+        List<String> headers;
+        int firstDataRow;
+        if ("GIVEN".equals(headerLocation)) {
+            headers = new ArrayList<>();
+            for (JsonNode header : readerConfig.path("CSVHeaders")) {
+                headers.add(header.asText());
+            }
+            firstDataRow = 0;
+        } else if ("FIRST_ROW".equals(headerLocation)) {
+            headers = rows.isEmpty() ? List.of() : rows.get(0);
+            firstDataRow = 1;
+        } else {
+            throw new FailStateException("States.ItemReaderFailed",
+                    "ItemReader CSVHeaderLocation " + headerLocation + " is not supported");
+        }
+
+        ArrayNode items = objectMapper.createArrayNode();
+        for (int row = firstDataRow; row < rows.size(); row++) {
+            List<String> values = rows.get(row);
+            ObjectNode item = objectMapper.createObjectNode();
+            for (int column = 0; column < headers.size(); column++) {
+                item.put(headers.get(column), column < values.size() ? values.get(column) : "");
+            }
+            items.add(item);
+        }
+        return items;
+    }
+
+    private char csvDelimiter(String delimiter) {
+        return switch (delimiter) {
+            case "COMMA" -> ',';
+            case "PIPE" -> '|';
+            case "SEMICOLON" -> ';';
+            case "SPACE" -> ' ';
+            case "TAB" -> '\t';
+            default -> throw new FailStateException("States.ItemReaderFailed",
+                    "ItemReader CSVDelimiter " + delimiter + " is not supported");
+        };
     }
 
     private JsonNode resolveItemReaderParameters(JsonNode itemReader, JsonNode input, JsonNode context,

@@ -95,14 +95,11 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
 
     private void provisionCluster(StackResource r, JsonNode props, ProvisionContext ctx,
                                   Map<String, String> attributesBefore) {
-        if (Boolean.parseBoolean(ctx.resolveOptional(props, "ManageMasterPassword"))) {
-            throw new AwsException("ValidationException",
-                    "ManageMasterPassword is not emulated by Floci; set MasterUserPassword instead", 400);
-        }
+        boolean manageMasterPassword = Boolean.parseBoolean(ctx.resolveOptional(props, "ManageMasterPassword"));
         String nodeType = ctx.resolveOptional(props, "NodeType");
         String masterUsername = ctx.resolveOptional(props, "MasterUsername");
         String masterUserPassword = ctx.resolveOptional(props, "MasterUserPassword");
-        if (masterUserPassword == null || masterUserPassword.isBlank()) {
+        if (!manageMasterPassword && (masterUserPassword == null || masterUserPassword.isBlank())) {
             throw new AwsException("ValidationException",
                     "MasterUserPassword is required unless ManageMasterPassword is set", 400);
         }
@@ -135,12 +132,19 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
 
         // provision() is the update path too. A same-id cluster already on file is reconciled;
         // a derived id that differs from the prior physical id is a replacement handled via ReplacementCleanup.
-        Cluster cluster = ctx.reusesPriorEntity(id)
-                ? redshiftService.modifyCluster(id, nodeType, numberOfNodes(props, ctx),
-                        masterUserPassword, ctx.resolveOptional(props, "ClusterParameterGroupName"),
-                        securityGroups)
-                : redshiftService.createCluster(id, nodeType, masterUsername, masterUserPassword,
-                        subnetGroup, securityGroups);
+        Cluster cluster;
+        if (ctx.reusesPriorEntity(id)) {
+            cluster = redshiftService.modifyCluster(id, nodeType, numberOfNodes(props, ctx),
+                    masterUserPassword, ctx.resolveOptional(props, "ClusterParameterGroupName"),
+                    securityGroups);
+        } else if (manageMasterPassword) {
+            String kmsKeyId = props.path("MasterPasswordSecretKmsKeyId").asText(null);
+            cluster = redshiftService.createClusterWithManagedMasterPassword(id, nodeType, masterUsername,
+                    subnetGroup, securityGroups, List.of(), kmsKeyId, ctx.region());
+        } else {
+            cluster = redshiftService.createCluster(id, nodeType, masterUsername, masterUserPassword,
+                    subnetGroup, securityGroups);
+        }
 
         Map<String, String> tags = ctx.resolveTags(props, "Tags");
         if (!tags.isEmpty()) {
@@ -154,6 +158,9 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
         if (cluster.getEndpoint() != null) {
             r.getAttributes().put("Endpoint.Address", cluster.getEndpoint().getAddress());
             r.getAttributes().put("Endpoint.Port", String.valueOf(cluster.getEndpoint().getPort()));
+        }
+        if (cluster.getMasterPasswordSecretArn() != null) {
+            r.getAttributes().put("MasterPasswordSecretArn", cluster.getMasterPasswordSecretArn());
         }
         r.getAttributes().put("ClusterNamespaceArn", namespaceArn(ctx, id));
     }

@@ -297,7 +297,7 @@ Floci supports local emulation for application services, data services, eventing
 | API and identity | API Gateway REST, API Gateway v2, AppSync, Cognito, Cognito Identity, ACM, Route53, Route 53 Resolver, Cloud Map, Global Accelerator |
 | Containers and compute | ECS, EC2, Lightsail, EKS, MWAA, ECR, EFS, CodeBuild, CodeDeploy, CodePipeline, CodeGuru Reviewer, CodeArtifact, AWS Batch, Auto Scaling, Application Auto Scaling, Elastic Beanstalk, ELB v2, ELB Classic |
 | Data, analytics, and AI | Athena, Glue, Lake Formation, EMR, EMR Serverless, Redshift, Redshift Data API, Firehose, Managed Service for Apache Flink, OpenSearch, S3 Tables, S3 Vectors, Textract, Transcribe, Comprehend, Rekognition, Translate, Bedrock, Bedrock Runtime, Bedrock AgentCore, Bedrock AgentCore Control, SageMaker |
-| Databases and caching | RDS, RDS Data API, Neptune, DocumentDB, MemoryDB, ElastiCache |
+| Databases and caching | RDS, RDS Data API, Neptune, DocumentDB, MemoryDB, ElastiCache, Timestream for InfluxDB |
 | Messaging and transfer | SES, Kinesis, MSK, Amazon MQ, Transfer Family, DataSync, IoT Core, Amazon Connect, Amazon AppIntegrations |
 | Security and governance | AWS Network Firewall, AWS RAM, Service Quotas, WAF v2, GuardDuty, Amazon Inspector, CloudTrail, CloudFront, Resource Groups Tagging API, Resource Explorer 2, CloudHSM v2, Organizations, AWS Account Management, IAM Access Analyzer, IAM Identity Center (SSO Admin, OIDC, Access Portal, SCIM), Identity Store, Amazon Macie, Amazon Detective, Security Hub, Amazon Verified Permissions, Control Catalog, Control Tower, Service Catalog, AWS Marketplace |
 | Cost and billing | AWS Budgets, Pricing, Cost Explorer, Cost and Usage Reports, BCM Pricing Calculator, BCM Data Exports |
@@ -337,6 +337,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | ElastiCache | Real Docker | Redis / Valkey protocol, IAM auth, SigV4 validation |
 | MemoryDB | Real Docker | Redis / Valkey protocol via real containers; JSON 1.1 control plane; reuses ElastiCache RESP proxy |
 | RDS | Real Docker | PostgreSQL, MySQL, MariaDB, IAM auth, JDBC-compatible engines |
+| Timestream for InfluxDB | Real Docker, mock mode available | InfluxDB 2.x DB instances and read replica clusters via `influxdb:2.7`; initial auth secret in Secrets Manager; backups and restore through the influx CLI |
 | RDS Data API | REST JSON over real RDS containers | Raw SQL execution and transactions for local MySQL / MariaDB RDS resources |
 | Neptune | Real Docker | Graph DB via TinkerPop Gremlin Server (default) or Neo4j for openCypher/Bolt (`NEPTUNE_DB_TYPE`); RDS-shaped control plane; SigV4 proxy on port 8182 |
 | DocumentDB | Real Docker, mock mode available | MongoDB-compatible cluster via real MongoDB containers; RDS-shaped control plane; MongoDB wire protocol on port 27017 |
@@ -418,6 +419,8 @@ Floci uses real Docker containers when in-process emulation would reduce fidelit
 | CodeBuild | User-specified environment image | Buildspec execution, log streaming, S3 artifact upload |
 | OpenSearch | `opensearchproject/opensearch:2` | Full OpenSearch engine with REST API |
 | ECR | `registry:2` | OCI-compatible registry for docker push and docker pull |
+| Verified Permissions | `floci/floci-sidecar-cedar:1.1.0` | Cedar 4 policy parsing, schema validation and authorization decisions, via a [Floci sidecar](https://github.com/floci-io/floci-sidecars) |
+| AppSync | `floci/floci-sidecar-graphql:0.2.0` | graphql-java schema validation, query planning and execution, via a [Floci sidecar](https://github.com/floci-io/floci-sidecars) |
 
 Docker-backed services require the Docker socket:
 
@@ -428,6 +431,27 @@ docker run -d --name floci \
   -u root \
   floci/floci:latest
 ```
+
+### EC2 and ECS security-group enforcement
+
+Security-group enforcement is opt-in and disabled by default. Set
+`FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED=true` to filter ingress and egress
+for Docker-backed EC2 instances and ECS `awsvpc` tasks. Policies match managed peers
+using emulated ENI addresses and security-group membership, then translate permitted
+peers to Docker transport addresses. Established replies use connection tracking.
+
+Enforcement requires rootful Linux Docker, including Linux containers on Docker
+Desktop. Rootless Docker and Windows containers are unsupported. Recreate existing
+instances and tasks after enabling it so policies are installed before workloads start.
+Mock mode does not enforce traffic; ECS bridge and host networking have no task-level
+`awsvpc` security-group attachment.
+
+While enforcement is enabled, EC2 application ports are not published on the host,
+including ports authorized after launch. SSH remains published through its protected
+namespace. With enforcement disabled, the socat publisher continues to publish ports
+added to running instances. Host-published ingress uses the source visible inside
+Docker; original external-client IP fidelity on Docker Desktop is not guaranteed.
+Security-group permission does not establish VPC routing, NACLs, NAT, or peering.
 
 ### Overriding default images
 

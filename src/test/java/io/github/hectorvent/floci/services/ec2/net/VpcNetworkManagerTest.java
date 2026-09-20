@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ec2.net;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.ConnectToNetworkCmd;
 import com.github.dockerjava.api.command.CreateNetworkCmd;
@@ -31,6 +32,7 @@ import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -330,6 +332,48 @@ class VpcNetworkManagerTest {
 
         verify(docker, never()).createNetworkCmd();
         assertTrue(removedNetworks.isEmpty(), "a matching network is reused, not churned");
+    }
+
+    @Test
+    void connectsCurrentFlociContainerBeforeAttachingInstanceToVpcNetwork() {
+        CurrentContainerNetworkResolver currentContainerNetworkResolver =
+                mock(CurrentContainerNetworkResolver.class);
+        when(currentContainerNetworkResolver.resolveContainerId()).thenReturn(Optional.of("floci-container"));
+        VpcNetworkManager dockerHostedManager =
+                new VpcNetworkManager(config, docker, currentContainerNetworkResolver);
+        String networkName = dockerHostedManager.networkName(REGION, "vpc-1");
+        existingNetwork(networkName, "10.0.0.0/16", ourLabels("vpc-1", "4650"));
+        dockerHostedManager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+        dockerHostedManager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+        String address = dockerHostedManager.allocatePrivateIp(REGION, "subnet-a").orElseThrow();
+
+        assertTrue(dockerHostedManager.attach(REGION, "vpc-1", "subnet-a", "instance-1", address).isPresent());
+
+        ConnectToNetworkCmd connect = docker.connectToNetworkCmd();
+        verify(connect).withContainerId("floci-container");
+        verify(connect).withContainerId("instance-1");
+        verify(connect, times(2)).withNetworkId(networkName);
+    }
+
+    @Test
+    void doesNotReconnectCurrentFlociContainerAlreadyAttachedToVpcNetwork() {
+        CurrentContainerNetworkResolver currentContainerNetworkResolver =
+                mock(CurrentContainerNetworkResolver.class);
+        when(currentContainerNetworkResolver.resolveContainerId()).thenReturn(Optional.of("floci-container"));
+        VpcNetworkManager dockerHostedManager =
+                new VpcNetworkManager(config, docker, currentContainerNetworkResolver);
+        String networkName = dockerHostedManager.networkName(REGION, "vpc-1");
+        existingNetwork(networkName, "10.0.0.0/16", ourLabels("vpc-1", "4650"), Map.of(
+                "floci-container", mock(Network.ContainerNetworkConfig.class)));
+        dockerHostedManager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+        dockerHostedManager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+        String address = dockerHostedManager.allocatePrivateIp(REGION, "subnet-a").orElseThrow();
+
+        assertTrue(dockerHostedManager.attach(REGION, "vpc-1", "subnet-a", "instance-1", address).isPresent());
+
+        ConnectToNetworkCmd connect = docker.connectToNetworkCmd();
+        verify(connect, never()).withContainerId("floci-container");
+        verify(connect).withContainerId("instance-1");
     }
 
     @Test

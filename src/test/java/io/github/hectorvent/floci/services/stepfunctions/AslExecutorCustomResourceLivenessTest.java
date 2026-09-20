@@ -22,6 +22,7 @@ import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentMatchers;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -147,7 +148,7 @@ class AslExecutorCustomResourceLivenessTest {
                 """.formatted(FUNCTION_ARN),
                 "{\"Records\":[{\"body\":\"hello\"}]}");
 
-        verify(customResourceLiveness, never()).touch(org.mockito.ArgumentMatchers.anyString());
+        verify(customResourceLiveness, never()).touch(ArgumentMatchers.anyString());
     }
 
     private void run(String definition, String input) {

@@ -1322,6 +1322,24 @@ class DynamoDbJsonHandlerTest {
         assertEquals(NESTING_MESSAGE, ex.getMessage());
     }
 
+    @Test
+    void updateItemRejectsAValueThatLeavesALeafAtLevel33UnderANestedPath() throws Exception {
+        createUsersTable("eu-west-1");
+        ObjectNode create = updateUserRequest();
+        create.put("UpdateExpression", "SET parent = :empty");
+        ObjectNode emptyMap = mapper.createObjectNode();
+        emptyMap.putObject("M");
+        create.set("ExpressionAttributeValues", mapper.createObjectNode().set(":empty", emptyMap));
+        handler.handle("UpdateItem", create, "eu-west-1");
+
+        ObjectNode request = updateUserRequest();
+        request.put("UpdateExpression", "SET parent.deep = :deep");
+        request.set("ExpressionAttributeValues", mapper.createObjectNode().set(":deep", nestedMaps(31)));
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("Nesting Levels have exceeded supported limits", ex.getMessage());
+    }
+
     private ObjectNode transactWrite(String action, ObjectNode op) {
         op.put("TableName", "Users");
         var member = mapper.createObjectNode();
@@ -1662,17 +1680,30 @@ class DynamoDbJsonHandlerTest {
         createUsersTable("eu-west-1");
         var request = mapper.createObjectNode();
         request.put("Statement", "UPDATE \"Users\" SET deep=? WHERE userId=?");
-        request.set("Parameters", mapper.createArrayNode().add(nestedMaps(32)).add(attributeValue("S", "u1")));
+        request.set("Parameters", mapper.createArrayNode().add(nestedMaps(33)).add(attributeValue("S", "u1")));
 
         var ex = assertThrows(AwsException.class,
                 () -> handler.handle("ExecuteStatement", request, "eu-west-1"));
         assertEquals("ValidationException", ex.getErrorCode());
-        assertEquals("Nesting Levels have exceeded supported limits", ex.getMessage());
+        assertEquals("Nesting Levels have exceeded supported limits: "
+                + "Attributes in the item have nested levels beyond supported limit", ex.getMessage());
     }
 
     @Test
-    void executeTransactionCancelsOnATooDeepParameterWithThatStatementsReason() throws Exception {
+    void executeStatementReadsAParameterWithALeafAtLevel33() throws Exception {
         createUsersTable("eu-west-1");
+        ObjectNode request = mapper.createObjectNode();
+        request.put("Statement", "SELECT * FROM \"Users\" WHERE userId=? AND deep=?");
+        request.set("Parameters", mapper.createArrayNode().add(attributeValue("S", "u1")).add(nestedMaps(32)));
+
+        Response response = handler.handle("ExecuteStatement", request, "eu-west-1");
+        assertEquals(200, response.getStatus());
+    }
+
+    @Test
+    void executeTransactionCancelsOnAnItemLeftTooDeepWithThatStatementsReason() throws Exception {
+        createUsersTable("eu-west-1");
+        service.putItem("Users", item("userId", "u1"), "eu-west-1");
         var fine = mapper.createObjectNode();
         fine.put("Statement", "UPDATE \"Users\" SET x=? WHERE userId=?");
         fine.set("Parameters", mapper.createArrayNode().add(attributeValue("S", "x")).add(attributeValue("S", "u1")));

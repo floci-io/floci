@@ -9,14 +9,16 @@ import io.github.hectorvent.floci.services.ecs.model.CapacityProvider;
 import io.github.hectorvent.floci.services.ecs.model.ClusterSetting;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.ContainerInstance;
+import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
 import io.github.hectorvent.floci.services.ecs.model.Deployment;
 import io.github.hectorvent.floci.services.ecs.model.Failure;
+import io.github.hectorvent.floci.services.ecs.model.FirelensConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.HealthCheck;
-import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
 import io.github.hectorvent.floci.services.ecs.model.EcsCluster;
 import io.github.hectorvent.floci.services.ecs.model.EcsLoadBalancer;
 import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
+import io.github.hectorvent.floci.services.ecs.model.FirelensConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.KeyValuePair;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import io.github.hectorvent.floci.services.ecs.model.LogConfiguration;
@@ -34,6 +36,7 @@ import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.ecs.model.TaskSet;
 import io.github.hectorvent.floci.services.ecs.model.EfsVolumeConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.Volume;
+import io.github.hectorvent.floci.services.ecs.model.VolumeFrom;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -1100,6 +1103,17 @@ public class EcsJsonHandler {
             n.set("mountPoints", mps);
         }
 
+        if (def.getVolumesFrom() != null && !def.getVolumesFrom().isEmpty()) {
+            ArrayNode volumesFrom = objectMapper.createArrayNode();
+            for (VolumeFrom volumeFrom : def.getVolumesFrom()) {
+                ObjectNode volumeFromNode = objectMapper.createObjectNode();
+                volumeFromNode.put("sourceContainer", volumeFrom.sourceContainer());
+                volumeFromNode.put("readOnly", volumeFrom.readOnly());
+                volumesFrom.add(volumeFromNode);
+            }
+            n.set("volumesFrom", volumesFrom);
+        }
+
         if (def.getLogConfiguration() != null) {
             LogConfiguration logConfig = def.getLogConfiguration();
             ObjectNode logNode = objectMapper.createObjectNode();
@@ -1124,6 +1138,19 @@ public class EcsJsonHandler {
             n.set("logConfiguration", logNode);
         }
 
+        if (def.getFirelensConfiguration() != null) {
+            FirelensConfiguration firelens = def.getFirelensConfiguration();
+            ObjectNode firelensNode = objectMapper.createObjectNode();
+            if (firelens.type() != null) {
+                firelensNode.put("type", firelens.type());
+            }
+            if (firelens.options() != null) {
+                ObjectNode options = objectMapper.createObjectNode();
+                firelens.options().forEach(options::put);
+                firelensNode.set("options", options);
+            }
+            n.set("firelensConfiguration", firelensNode);
+        }
         if (def.getHealthCheck() != null) {
             HealthCheck hc = def.getHealthCheck();
             ObjectNode hcNode = objectMapper.createObjectNode();
@@ -1481,7 +1508,10 @@ public class EcsJsonHandler {
                 def.setSecrets(parseSecrets(item.path("secrets")));
             }
             def.setMountPoints(parseMountPoints(item.path("mountPoints")));
+            def.setVolumesFrom(parseVolumesFrom(item.path("volumesFrom")));
             def.setLogConfiguration(parseLogConfiguration(item.path("logConfiguration")));
+            def.setFirelensConfiguration(parseFirelensConfiguration(
+                    item.path("firelensConfiguration"), result.size() + 1));
             if (item.has("healthCheck")) {
                 def.setHealthCheck(parseHealthCheck(item.path("healthCheck")));
             }
@@ -1538,6 +1568,19 @@ public class EcsJsonHandler {
         return result;
     }
 
+    private List<VolumeFrom> parseVolumesFrom(JsonNode node) {
+        List<VolumeFrom> result = new ArrayList<>();
+        if (!node.isArray()) {
+            return result;
+        }
+        for (JsonNode item : node) {
+            result.add(new VolumeFrom(
+                    item.path("sourceContainer").asText(),
+                    item.path("readOnly").asBoolean(false)));
+        }
+        return result;
+    }
+
     private RuntimePlatform parseRuntimePlatform(JsonNode node) {
         if (node == null || !node.isObject()) {
             return null;
@@ -1569,6 +1612,33 @@ public class EcsJsonHandler {
         return new LogConfiguration(logDriver, options, secretOptions);
     }
 
+    private FirelensConfiguration parseFirelensConfiguration(JsonNode node, int containerIndex) {
+        if (node == null || !node.isObject()) {
+            return null;
+        }
+        if (!node.hasNonNull("type")) {
+            throw new AwsException("ClientException",
+                    "1 validation error detected: Value null at 'containerDefinitions." + containerIndex
+                            + ".member.firelensConfiguration.type' failed to satisfy constraint: Member must not be null",
+                    400);
+        }
+        String type = node.path("type").asText();
+        if (!"fluentd".equals(type) && !"fluentbit".equals(type)) {
+            throw new AwsException("ClientException",
+                    "1 validation error detected: Value '" + type + "' at 'containerDefinitions." + containerIndex
+                            + ".member.firelensConfiguration.type' failed to satisfy constraint: "
+                            + "Member must satisfy enum value set: [fluentd, fluentbit]",
+                    400);
+        }
+        Map<String, String> options = null;
+        if (node.path("options").isObject()) {
+            LinkedHashMap<String, String> parsed = new LinkedHashMap<>();
+            node.path("options").fields()
+                    .forEachRemaining(entry -> parsed.put(entry.getKey(), entry.getValue().asText()));
+            options = parsed;
+        }
+        return new FirelensConfiguration(type, options);
+    }
     private HealthCheck parseHealthCheck(JsonNode node) {
         if (node == null || !node.isObject()) {
             return null;

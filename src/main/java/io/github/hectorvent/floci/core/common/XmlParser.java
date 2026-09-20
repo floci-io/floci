@@ -468,6 +468,10 @@ public final class XmlParser {
                     .findFirst()
                     .orElse(null);
         }
+
+        public long count(String childName) {
+            return children.stream().filter(child -> childName.equals(child.name())).count();
+        }
     }
 
     /**

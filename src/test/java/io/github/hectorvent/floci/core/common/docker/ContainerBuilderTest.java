@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.core.common.docker;
 
+import com.github.dockerjava.api.model.DeviceRequest;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import org.junit.jupiter.api.Test;
@@ -8,7 +9,9 @@ import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -122,6 +125,118 @@ class ContainerBuilderTest {
 
         assertNull(spec.user());
         assertEquals(List.of(), spec.groupAdd());
+    }
+
+    @Test
+    void withGpuCountRequestsThatManyGpus() {
+        TestFixture fixture = new TestFixture();
+
+        ContainerSpec spec = fixture.builder.newContainer("alpine")
+                .withGpuCount(2)
+                .build();
+
+        assertEquals(1, spec.deviceRequests().size());
+        DeviceRequest request = spec.deviceRequests().get(0);
+        assertEquals(2, request.getCount());
+        assertEquals(List.of(List.of("gpu")), request.getCapabilities());
+        // Docker rejects a request carrying both a count and explicit ids.
+        assertNull(request.getDeviceIds());
+        assertNull(request.getDriver());
+    }
+
+    @Test
+    void withAllGpusRequestsEveryDevice() {
+        TestFixture fixture = new TestFixture();
+
+        ContainerSpec spec = fixture.builder.newContainer("alpine")
+                .withAllGpus()
+                .build();
+
+        assertEquals(-1, spec.deviceRequests().get(0).getCount());
+        assertEquals(List.of(List.of("gpu")), spec.deviceRequests().get(0).getCapabilities());
+    }
+
+    @Test
+    void withGpuDeviceIdsPinsSpecificDevicesAndLeavesCountUnset() {
+        TestFixture fixture = new TestFixture();
+
+        ContainerSpec spec = fixture.builder.newContainer("alpine")
+                .withGpuDeviceIds(List.of("0", "GPU-1fc572c4-6cd7-0e21-dceb-fa71af82eed5"))
+                .build();
+
+        DeviceRequest request = spec.deviceRequests().get(0);
+        assertEquals(List.of("0", "GPU-1fc572c4-6cd7-0e21-dceb-fa71af82eed5"), request.getDeviceIds());
+        assertEquals(List.of(List.of("gpu")), request.getCapabilities());
+        assertNull(request.getCount());
+    }
+
+    @Test
+    void withCdiDevicesSelectsDevicesByCdiName() {
+        TestFixture fixture = new TestFixture();
+
+        ContainerSpec spec = fixture.builder.newContainer("alpine")
+                .withCdiDevices(List.of("nvidia.com/gpu=GPU-1fc572c4-6cd7-0e21-dceb-fa71af82eed5"))
+                .build();
+
+        DeviceRequest request = spec.deviceRequests().get(0);
+        assertEquals("cdi", request.getDriver());
+        assertEquals(List.of("nvidia.com/gpu=GPU-1fc572c4-6cd7-0e21-dceb-fa71af82eed5"), request.getDeviceIds());
+        // The CDI name already names the device, so no capability is negotiated.
+        assertNull(request.getCapabilities());
+        assertNull(request.getCount());
+    }
+
+    @Test
+    void containersRequestNoDevicesByDefault() {
+        TestFixture fixture = new TestFixture();
+
+        ContainerSpec spec = fixture.builder.newContainer("alpine").build();
+
+        assertEquals(List.of(), spec.deviceRequests());
+        assertFalse(spec.hasDeviceRequests());
+    }
+
+    @Test
+    void gpuCountMustBePositive() {
+        TestFixture fixture = new TestFixture();
+        ContainerBuilder.Builder builder = fixture.builder.newContainer("alpine");
+
+        assertThrows(IllegalArgumentException.class, () -> builder.withGpuCount(0));
+        assertThrows(IllegalArgumentException.class, () -> builder.withGpuCount(-1));
+    }
+
+    @Test
+    void deviceIdsMustBePresentAndNonBlank() {
+        TestFixture fixture = new TestFixture();
+        ContainerBuilder.Builder builder = fixture.builder.newContainer("alpine");
+
+        assertThrows(IllegalArgumentException.class, () -> builder.withGpuDeviceIds(List.of()));
+        assertThrows(IllegalArgumentException.class, () -> builder.withGpuDeviceIds(List.of("  ")));
+    }
+
+    @Test
+    void cdiDeviceNameMustBeFullyQualified() {
+        TestFixture fixture = new TestFixture();
+        ContainerBuilder.Builder builder = fixture.builder.newContainer("alpine");
+
+        // A device path is the mistake this guards: the daemon would otherwise fail the
+        // start with an unresolvable-device error that does not name the real problem.
+        assertThrows(IllegalArgumentException.class, () -> builder.withCdiDevices(List.of("/dev/nvidia0")));
+        assertThrows(IllegalArgumentException.class, () -> builder.withCdiDevices(List.of("nvidia.com/gpu")));
+    }
+
+    @Test
+    void countAndExplicitDevicesAreMutuallyExclusive() {
+        TestFixture fixture = new TestFixture();
+
+        assertThrows(IllegalStateException.class,
+                () -> fixture.builder.newContainer("alpine").withGpuCount(1).withAllGpus());
+        assertThrows(IllegalStateException.class,
+                () -> fixture.builder.newContainer("alpine").withGpuCount(1).withGpuDeviceIds(List.of("0")));
+        assertThrows(IllegalStateException.class,
+                () -> fixture.builder.newContainer("alpine")
+                        .withCdiDevices(List.of("nvidia.com/gpu=all"))
+                        .withGpuCount(1));
     }
 
     @Test

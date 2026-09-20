@@ -130,7 +130,11 @@ GET/HEAD/OPTIONS delivery from S3 or custom origins.
 
 - All distributions are immediately set to `Deployed` state (no async `InProgress` delay).
 - Distribution IDs are 14 uppercase alphanumeric characters starting with `E` (e.g. `E1Z2X3C4V5B6N7`).
-- Distribution domain names follow the pattern `{id}.cloudfront.net`.
+- Distribution domain names follow the pattern `{id}.cloudfront.net`, with the id lower-cased as AWS
+  writes it in a host name.
+- Public key IDs are `K` followed by 13 uppercase alphanumeric characters (e.g. `K2JCJMDEHXQW5F`),
+  the value a signed URL carries as `Key-Pair-Id`. Key group, cache policy, origin request policy and
+  response headers policy IDs are UUIDs, as they are on AWS.
 - ARNs are global — no region segment: `arn:aws:cloudfront::{accountId}:distribution/{id}`.
 - Invalidations are immediately marked `Completed`.
 - `DeleteDistribution` returns `DistributionNotDisabled` (409) if `Enabled` is `true` in the config.
@@ -149,6 +153,12 @@ GET/HEAD/OPTIONS delivery from S3 or custom origins.
 - Viewer GET/HEAD requests, and OPTIONS requests allowed by the matched cache behavior, addressed to
   an enabled distribution's generated domain or alias are routed to the matching S3 or custom
   origin. Origin forwarding preserves the raw path; custom-origin redirects are not followed.
+- Every distribution is also served as `{id}.cloudfront.{host}` for each endpoint host Floci
+  resolves: `localhost`, `localhost.floci.io`, `localhost.localstack.cloud`, `FLOCI_HOSTNAME` and
+  every `FLOCI_DNS_EXTRA_SUFFIXES` entry. `{id}.cloudfront.localhost.floci.io` and
+  `{id}.cloudfront.localhost` reach loopback with no host-file edit and are covered by the generated
+  HTTPS certificate, so a signed URL for either can be downloaded over `https://`. See
+  [Downloading over HTTPS](#downloading-over-https).
 - Origin custom headers are persisted through the CloudFront API and CloudFormation. They replace
   same-named viewer headers on custom-origin GET/HEAD/OPTIONS requests. For in-process S3 origins, a
   configured `Origin` header is used for S3 CORS evaluation. AWS-prohibited names, malformed
@@ -278,6 +288,43 @@ ETAG=$(aws cloudfront get-distribution --id E1Z2X3C4V5B6N7 \
   --query 'ETag' --output text)
 aws cloudfront delete-distribution --id E1Z2X3C4V5B6N7 --if-match "$ETAG"
 ```
+
+## Downloading over HTTPS
+
+A distribution's own domain name (`{id}.cloudfront.net` by default) resolves to nothing local, so
+address the distribution by one of its local delivery hostnames instead. `*.cloudfront.localhost.floci.io`
+resolves to `127.0.0.1` through public DNS and works on Linux, macOS and in containers.
+`*.cloudfront.localhost` needs no DNS at all but only resolves where the runtime handles `.localhost`
+itself, which macOS and browsers do and Debian-based images do not.
+
+Start Floci with [TLS](../configuration/tls.md) enabled and trust its CA once:
+
+```bash
+docker run -e FLOCI_TLS_ENABLED=true -p 4566:4566 floci/floci:latest
+curl -s http://localhost:4566/_floci/ca.pem -o floci-root-ca.pem
+```
+
+Sign the URL of the hostname you download from — the port is part of what a canned policy signs —
+and fetch it:
+
+```bash
+HOST=e1z2x3c4v5b6n7.cloudfront.localhost.floci.io:4566
+
+SIGNED=$(aws cloudfront sign \
+  --url "https://$HOST/hello.txt" \
+  --key-pair-id K2JCJMDEHXQW5F \
+  --private-key file://private_key.pem \
+  --date-less-than 2026-12-31T00:00:00Z)
+
+curl --cacert floci-root-ca.pem "$SIGNED"
+```
+
+To drop the `:4566`, publish the HTTPS port Floci also binds when TLS is on (`-p 443:443`, see
+`FLOCI_TLS_AWS_HTTPS_PORT`) and sign `https://e1z2x3c4v5b6n7.cloudfront.localhost.floci.io/hello.txt`.
+
+Set `FLOCI_SERVICES_CLOUDFRONT_DOMAIN_SUFFIX=cloudfront.localhost.floci.io` to have
+`CreateDistribution` return that hostname as the `DomainName`, so test code can sign the API response
+as it is.
 
 ## Not Supported (Phase 2)
 

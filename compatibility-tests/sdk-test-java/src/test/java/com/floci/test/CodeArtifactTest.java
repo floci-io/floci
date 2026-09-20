@@ -2,11 +2,16 @@ package com.floci.test;
 
 import org.jboss.logging.Logger;
 import org.junit.jupiter.api.*;
+import software.amazon.awssdk.core.ResponseBytes;
+import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.codeartifact.CodeartifactClient;
 import software.amazon.awssdk.services.codeartifact.model.*;
 // Explicit import: this file's Tag usage is the CodeArtifact model type, not JUnit's @Tag.
 import software.amazon.awssdk.services.codeartifact.model.Tag;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -220,10 +225,93 @@ class CodeArtifactTest {
     }
 
     @Test
+    @Order(70)
+    @DisplayName("PublishPackageVersion - publishes a generic asset and verifies its hashes")
+    void publishPackageVersion() {
+        byte[] content = "hello from the compat suite".getBytes(StandardCharsets.UTF_8);
+        String sha256 = sha256Hex(content);
+
+        PublishPackageVersionResponse resp = codeArtifact.publishPackageVersion(r -> r
+                        .domain(DOMAIN)
+                        .repository(REPO)
+                        .format(PackageFormat.GENERIC)
+                        .namespace("compat-ns")
+                        .packageValue("compat-pkg")
+                        .packageVersion("1.0.0")
+                        .assetName("asset.txt")
+                        .assetSHA256(sha256),
+                RequestBody.fromBytes(content));
+
+        assertThat(resp.status()).isEqualTo(PackageVersionStatus.PUBLISHED);
+        assertThat(resp.asset().name()).isEqualTo("asset.txt");
+        assertThat(resp.asset().size()).isEqualTo(content.length);
+        assertThat(resp.asset().hashes().get(HashAlgorithm.SHA_256)).isEqualTo(sha256);
+    }
+
+    // No SDK-level bad-assetSHA256 test: the Java SDK overwrites that header during SigV4 signing; see CodeArtifactServiceTest instead.
+
+    @Test
+    @Order(72)
+    @DisplayName("DescribePackageVersion / GetPackageVersionAsset - round-trip exact bytes")
+    void describeAndDownloadPackageVersionAsset() {
+        DescribePackageVersionResponse described = codeArtifact.describePackageVersion(r -> r
+                .domain(DOMAIN)
+                .repository(REPO)
+                .format(PackageFormat.GENERIC)
+                .namespace("compat-ns")
+                .packageValue("compat-pkg")
+                .packageVersion("1.0.0"));
+        assertThat(described.packageVersion().status()).isEqualTo(PackageVersionStatus.PUBLISHED);
+        assertThat(described.packageVersion().origin().originType()).isEqualTo(PackageVersionOriginType.INTERNAL);
+
+        ResponseBytes<GetPackageVersionAssetResponse> downloaded = codeArtifact.getPackageVersionAssetAsBytes(r -> r
+                .domain(DOMAIN)
+                .repository(REPO)
+                .format(PackageFormat.GENERIC)
+                .namespace("compat-ns")
+                .packageValue("compat-pkg")
+                .packageVersion("1.0.0")
+                .asset("asset.txt"));
+        assertThat(downloaded.response().assetName()).isEqualTo("asset.txt");
+        assertThat(downloaded.asByteArray()).isEqualTo("hello from the compat suite".getBytes(StandardCharsets.UTF_8));
+    }
+
+    @Test
+    @Order(73)
+    @DisplayName("PublishPackageVersion - a second publish to a Published version conflicts")
+    void republishingAPublishedVersionConflicts() {
+        byte[] content = "won't land".getBytes(StandardCharsets.UTF_8);
+        assertThatThrownBy(() -> codeArtifact.publishPackageVersion(r -> r
+                        .domain(DOMAIN)
+                        .repository(REPO)
+                        .format(PackageFormat.GENERIC)
+                        .namespace("compat-ns")
+                        .packageValue("compat-pkg")
+                        .packageVersion("1.0.0")
+                        .assetName("another.txt")
+                        .assetSHA256(sha256Hex(content)),
+                RequestBody.fromBytes(content)))
+                .isInstanceOf(ConflictException.class);
+    }
+
+    @Test
     @Order(90)
     @DisplayName("DeleteDomain - fails while repositories still exist")
     void deleteDomainWithRepositoriesFails() {
         assertThatThrownBy(() -> codeArtifact.deleteDomain(r -> r.domain(DOMAIN)))
                 .isInstanceOf(ConflictException.class);
+    }
+
+    private static String sha256Hex(byte[] content) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(content);
+            StringBuilder sb = new StringBuilder(digest.length * 2);
+            for (byte b : digest) {
+                sb.append(String.format("%02x", b));
+            }
+            return sb.toString();
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
     }
 }

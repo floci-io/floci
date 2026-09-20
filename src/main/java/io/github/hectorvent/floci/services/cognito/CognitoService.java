@@ -311,11 +311,7 @@ public class CognitoService implements ResourceProvider {
                 throw new AwsException("InvalidParameterException", "Attribute name contains invalid characters.", 400);
             }
 
-            boolean developerOnly = Boolean.TRUE.equals(attr.get("DeveloperOnlyAttribute"));
-            String prefix = developerOnly ? "dev:" : "custom:";
-            if (!name.startsWith("custom:") && !name.startsWith("dev:")) {
-                attr.put("Name", prefix + name);
-            }
+            attr.put("Name", prefixedAttributeName(name, Boolean.TRUE.equals(attr.get("DeveloperOnlyAttribute"))));
 
             String finalName = (String) attr.get("Name");
             boolean exists = schema.stream().anyMatch(existing -> finalName.equals(existing.get("Name")));
@@ -366,12 +362,37 @@ public class CognitoService implements ResourceProvider {
         pool.setPolicies(normalized);
     }
 
+    private static String prefixedAttributeName(String name, boolean developerOnly) {
+        if (name.startsWith("custom:") || name.startsWith("dev:")) {
+            return name;
+        }
+        return (developerOnly ? "dev:" : "custom:") + name;
+    }
+
+    private static List<Map<String, Object>> prefixCustomSchemaAttributes(List<Map<String, Object>> schema) {
+        if (schema == null) {
+            return null;
+        }
+        List<Map<String, Object>> prefixed = new ArrayList<>(schema.size());
+        for (Map<String, Object> attr : schema) {
+            String name = attr == null ? null : (String) attr.get("Name");
+            if (name == null || name.isBlank() || CognitoStandardAttributes.isStandard(name)) {
+                prefixed.add(attr);
+                continue;
+            }
+            Map<String, Object> copy = new HashMap<>(attr);
+            copy.put("Name", prefixedAttributeName(name, Boolean.TRUE.equals(attr.get("DeveloperOnlyAttribute"))));
+            prefixed.add(copy);
+        }
+        return prefixed;
+    }
+
     @SuppressWarnings("unchecked")
     private void populateUserPool(UserPool pool, Map<String, Object> request) {
         if (request.containsKey("Policies")) pool.setPolicies((Map<String, Object>) request.get("Policies"));
         if (request.containsKey("DeletionProtection")) pool.setDeletionProtection((String) request.get("DeletionProtection"));
         if (request.containsKey("LambdaConfig")) pool.setLambdaConfig((Map<String, Object>) request.get("LambdaConfig"));
-        if (request.containsKey("Schema")) pool.setSchemaAttributes((List<Map<String, Object>>) request.get("Schema"));
+        if (request.containsKey("Schema")) pool.setSchemaAttributes(prefixCustomSchemaAttributes((List<Map<String, Object>>) request.get("Schema")));
         if (request.containsKey("AutoVerifiedAttributes")) pool.setAutoVerifiedAttributes((List<String>) request.get("AutoVerifiedAttributes"));
         if (request.containsKey("AliasAttributes")) pool.setAliasAttributes((List<String>) request.get("AliasAttributes"));
         if (request.containsKey("UsernameAttributes")) pool.setUsernameAttributes((List<String>) request.get("UsernameAttributes"));
@@ -578,6 +599,15 @@ public class CognitoService implements ResourceProvider {
     }
 
     public void deleteUserPool(String id) {
+        // Deletion protection is the pool's own guard against this call: with it ACTIVE, AWS
+        // refuses until an UpdateUserPool switches it to INACTIVE (developer guide, "User pool
+        // deletion protection"), and a CloudFormation delete of the pool reports DELETE_FAILED.
+        String deletionProtection = poolStore.get(id).map(UserPool::getDeletionProtection).orElse(null);
+        if ("ACTIVE".equalsIgnoreCase(deletionProtection)) {
+            throw new AwsException("InvalidParameterException",
+                    "The user pool cannot be deleted because deletion protection is activated. "
+                            + "Deletion protection must be inactivated first.", 400);
+        }
         // AWS refuses to delete a pool that still has a hosted UI / custom domain; the
         // DeleteUserPool API reference documents this exact InvalidParameterException.
         boolean hasDomain = domainStore.scan(k -> true).stream()
@@ -2034,6 +2064,59 @@ public class CognitoService implements ResourceProvider {
         return MAPPER.createArrayNode();
     }
 
+    public Optional<CognitoUser> findFederatedUser(String userPoolId, String providerName, String subject) {
+        describeUserPool(userPoolId);
+        String prefix = userPoolId + "::";
+        return userStore.scan(key -> key.startsWith(prefix)).stream()
+                .filter(user -> providerName.equals(user.getFederatedProviderName())
+                        && subject.equals(user.getFederatedSubject()))
+                .findFirst();
+    }
+
+    public CognitoUser provisionFederatedUser(String userPoolId, IdentityProvider provider, String subject,
+                                               String issuer, Map<String, String> mappedAttributes) {
+        describeUserPool(userPoolId);
+        synchronized (identityLinkLock) {
+            CognitoUser user = findFederatedUser(userPoolId, provider.getProviderName(), subject).orElse(null);
+            if (user == null) {
+                user = new CognitoUser();
+                user.setUsername(provider.getProviderName() + "_" + UUID.randomUUID());
+                user.setUserPoolId(userPoolId);
+                user.getAttributes().put("sub", UUID.randomUUID().toString());
+            }
+            user.getAttributes().putAll(mappedAttributes);
+            user.setFederatedProviderName(provider.getProviderName());
+            user.setFederatedSubject(subject);
+            updateFederatedIdentity(user, provider, subject, issuer);
+            user.setEnabled(true);
+            user.setUserStatus("CONFIRMED");
+            user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+            userStore.put(userKey(userPoolId, user.getUsername()), user);
+            LOG.infov("Reconciled federated user {0} from provider {1} in pool {2}",
+                    user.getUsername(), provider.getProviderName(), userPoolId);
+            return user;
+        }
+    }
+
+    private void updateFederatedIdentity(CognitoUser user, IdentityProvider provider, String subject, String issuer) {
+        ArrayNode identities = readIdentities(user);
+        ArrayNode reconciled = MAPPER.createArrayNode();
+        for (JsonNode identity : identities) {
+            if (!provider.getProviderName().equals(identity.path("providerName").asText())
+                    || !subject.equals(identity.path("userId").asText())) {
+                reconciled.add(identity);
+            }
+        }
+        reconciled.addObject()
+                .put("userId", subject)
+                .put("providerName", provider.getProviderName())
+                .put("providerType", provider.getProviderType())
+                .put("issuer", issuer)
+                .put("primary", false)
+                .put("dateCreated", System.currentTimeMillis());
+        user.getAttributes().put(IDENTITIES_ATTRIBUTE, reconciled.toString());
+    }
+
     public List<CognitoUser> listUsers(String userPoolId, String filter) {
         describeUserPool(userPoolId);
         String prefix = userPoolId + "::";
@@ -2996,6 +3079,16 @@ public class CognitoService implements ResourceProvider {
 
     public String getUserInfoEndpoint(String poolId) {
         return oauthEndpoint(poolId, "userInfo");
+    }
+
+    /**
+     * Returns the callback endpoint that an external identity provider uses to return its
+     * authorization response to Cognito.
+     */
+    public String getIdentityProviderCallbackEndpoint(String poolId) {
+        return findCustomDomainForPool(poolId)
+                .map(d -> "https://" + d.getDomain() + "/oauth2/idpresponse")
+                .orElse(baseUrl + "/cognito-idp/oauth2/idpresponse");
     }
 
     private String oauthEndpoint(String poolId, String operation) {

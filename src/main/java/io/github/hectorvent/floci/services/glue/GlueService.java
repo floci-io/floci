@@ -243,6 +243,198 @@ public class GlueService {
         return resolved;
     }
 
+    /**
+     * SearchTables over every table of the catalog. SearchText matches a substring of the name,
+     * database, description, owner, column names and comments and parameter values, or the whole
+     * name when quoted, as the reference describes. String filters use the reference's tokenised
+     * match (the field split on punctuation, each token compared whole), time filters honour the
+     * Comparator, and any other key is looked up in the table's parameters.
+     */
+    public Page<Table> searchTables(String searchText, List<SearchFilter> filters,
+                                    List<SearchSort> sortCriteria, Integer maxResults, String nextToken) {
+        List<Table> matches = new ArrayList<>();
+        for (Table stored : tableStore.scan(k -> true)) {
+            Table table = withResolvedSchemaReference(stored);
+            if (matchesSearchText(table, searchText) && matchesFilters(table, filters)) {
+                matches.add(table);
+            }
+        }
+        matches.sort(searchComparator(sortCriteria));
+        return paginate(matches, maxResults, nextToken);
+    }
+
+    @RegisterForReflection
+    public record SearchFilter(
+            @JsonProperty("Key") String key,
+            @JsonProperty("Value") String value,
+            @JsonProperty("Comparator") String comparator) {}
+
+    @RegisterForReflection
+    public record SearchSort(
+            @JsonProperty("FieldName") String fieldName,
+            @JsonProperty("Sort") String sort) {}
+
+    private static boolean matchesSearchText(Table table, String searchText) {
+        if (searchText == null || searchText.isBlank()) {
+            return true;
+        }
+        String text = searchText.trim();
+        boolean exact = text.length() >= 2 && text.startsWith("\"") && text.endsWith("\"");
+        if (exact) {
+            text = text.substring(1, text.length() - 1);
+        }
+        String needle = text.toLowerCase(Locale.ROOT);
+        if (exact) {
+            return searchableValues(table).stream().anyMatch(value -> value.equalsIgnoreCase(needle));
+        }
+        return searchableValues(table).stream()
+                .anyMatch(value -> value.toLowerCase(Locale.ROOT).contains(needle));
+    }
+
+    private static List<String> searchableValues(Table table) {
+        List<String> values = new ArrayList<>();
+        addIfPresent(values, table.getName());
+        addIfPresent(values, table.getDatabaseName());
+        addIfPresent(values, table.getDescription());
+        addIfPresent(values, table.getOwner());
+        if (table.getStorageDescriptor() != null && table.getStorageDescriptor().getColumns() != null) {
+            for (Column column : table.getStorageDescriptor().getColumns()) {
+                addIfPresent(values, column.getName());
+                addIfPresent(values, column.getComment());
+            }
+        }
+        if (table.getPartitionKeys() != null) {
+            for (Column column : table.getPartitionKeys()) {
+                addIfPresent(values, column.getName());
+                addIfPresent(values, column.getComment());
+            }
+        }
+        if (table.getParameters() != null) {
+            table.getParameters().values().forEach(value -> addIfPresent(values, value));
+        }
+        return values;
+    }
+
+    private static void addIfPresent(List<String> values, String value) {
+        if (value != null && !value.isBlank()) {
+            values.add(value);
+        }
+    }
+
+    private static boolean matchesFilters(Table table, List<SearchFilter> filters) {
+        if (filters == null) {
+            return true;
+        }
+        for (SearchFilter filter : filters) {
+            if (filter == null || filter.key() == null || filter.key().isBlank()) {
+                throw new AwsException("InvalidInputException", "Filter Key is required.", 400);
+            }
+            if (!matchesFilter(table, filter)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean matchesFilter(Table table, SearchFilter filter) {
+        String key = filter.key();
+        String value = filter.value() == null ? "" : filter.value();
+        switch (key) {
+            case "Name": return tokenMatch(table.getName(), value);
+            case "DatabaseName": return tokenMatch(table.getDatabaseName(), value);
+            case "Owner": return tokenMatch(table.getOwner(), value);
+            case "TableType": return tokenMatch(table.getTableType(), value);
+            case "Description": return tokenMatch(table.getDescription(), value);
+            case "CreateTime": return timeMatch(table.getCreateTime(), value, filter.comparator());
+            case "UpdateTime": return timeMatch(table.getUpdateTime(), value, filter.comparator());
+            case "LastAccessTime": return timeMatch(table.getLastAccessTime(), value, filter.comparator());
+            default:
+                return table.getParameters() != null && tokenMatch(table.getParameters().get(key), value);
+        }
+    }
+
+    /** The reference's fuzzy match: the field split on punctuation, each token compared whole. */
+    private static boolean tokenMatch(String field, String value) {
+        if (field == null) {
+            return false;
+        }
+        if (field.equalsIgnoreCase(value)) {
+            return true;
+        }
+        for (String token : field.split("[\\p{Punct}\\s]+")) {
+            if (!token.isEmpty() && token.equalsIgnoreCase(value)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean timeMatch(Instant field, String value, String comparator) {
+        if (field == null) {
+            return false;
+        }
+        Instant bound = parseSearchTime(value);
+        int cmp = field.compareTo(bound);
+        String op = comparator == null || comparator.isBlank() ? "EQUALS" : comparator;
+        return switch (op) {
+            case "EQUALS" -> cmp == 0;
+            case "GREATER_THAN" -> cmp > 0;
+            case "LESS_THAN" -> cmp < 0;
+            case "GREATER_THAN_EQUALS" -> cmp >= 0;
+            case "LESS_THAN_EQUALS" -> cmp <= 0;
+            default -> throw new AwsException("InvalidInputException",
+                    "Invalid Comparator: " + comparator, 400);
+        };
+    }
+
+    /** A time filter value: epoch seconds as AWS timestamps travel, or an ISO-8601 instant. */
+    private static Instant parseSearchTime(String value) {
+        try {
+            return Instant.ofEpochSecond(Long.parseLong(value.trim()));
+        } catch (NumberFormatException ignored) {
+            // not epoch seconds
+        }
+        try {
+            return Instant.parse(value.trim());
+        } catch (java.time.format.DateTimeParseException e) {
+            throw new AwsException("InvalidInputException", "Invalid time value: " + value, 400);
+        }
+    }
+
+    private static Comparator<Table> searchComparator(List<SearchSort> sortCriteria) {
+        Comparator<Table> byName = Comparator.comparing(Table::getDatabaseName, Comparator.nullsLast(String::compareTo))
+                .thenComparing(Table::getName, Comparator.nullsLast(String::compareTo));
+        if (sortCriteria == null || sortCriteria.isEmpty()) {
+            return byName;
+        }
+        Comparator<Table> result = null;
+        for (SearchSort criterion : sortCriteria) {
+            Comparator<Table> next = sortField(criterion.fieldName());
+            if ("DESC".equalsIgnoreCase(criterion.sort())) {
+                next = next.reversed();
+            } else if (criterion.sort() != null && !"ASC".equalsIgnoreCase(criterion.sort())) {
+                throw new AwsException("InvalidInputException", "Invalid Sort: " + criterion.sort(), 400);
+            }
+            result = result == null ? next : result.thenComparing(next);
+        }
+        return result.thenComparing(byName);
+    }
+
+    private static Comparator<Table> sortField(String fieldName) {
+        String field = fieldName == null ? "" : fieldName;
+        return switch (field) {
+            case "Name" -> Comparator.comparing(Table::getName, Comparator.nullsLast(String::compareTo));
+            case "DatabaseName" -> Comparator.comparing(Table::getDatabaseName, Comparator.nullsLast(String::compareTo));
+            case "Owner" -> Comparator.comparing(Table::getOwner, Comparator.nullsLast(String::compareTo));
+            case "TableType" -> Comparator.comparing(Table::getTableType, Comparator.nullsLast(String::compareTo));
+            case "CreateTime" -> Comparator.comparing(Table::getCreateTime, Comparator.nullsLast(Instant::compareTo));
+            case "UpdateTime" -> Comparator.comparing(Table::getUpdateTime, Comparator.nullsLast(Instant::compareTo));
+            case "LastAccessTime" -> Comparator.comparing(Table::getLastAccessTime, Comparator.nullsLast(Instant::compareTo));
+            default -> throw new AwsException("InvalidInputException",
+                    "Invalid sort FieldName: " + fieldName, 400);
+        };
+    }
+
     public synchronized void updateTable(String databaseName, Table table, String versionId, boolean skipArchive) {
         Database database = getDatabase(databaseName);
         String key = tableKey(databaseName, table.getName());
@@ -280,6 +472,71 @@ public class GlueService {
                         "Table", withResolvedSchemaReference(table),
                         "VersionId", table.getVersionId()))
                 .toList();
+    }
+
+    /** One archived version, or the current table when no VersionId is given, as AWS answers. */
+    public Map<String, Object> getTableVersion(String databaseName, String tableName, String versionId) {
+        Table current = getTable(databaseName, tableName);
+        Table version;
+        if (versionId == null || versionId.isBlank() || versionId.equals(current.getVersionId())) {
+            version = current;
+        } else {
+            requireIntegerVersionId(versionId);
+            version = tableVersionStore.get(tableVersionKey(databaseName, tableName, versionId))
+                    .map(this::withResolvedSchemaReference)
+                    .orElseThrow(() -> new AwsException("EntityNotFoundException", "Version not found.", 400));
+        }
+        return Map.of("Table", version, "VersionId", version.getVersionId());
+    }
+
+    /**
+     * Drops an archived version. The current version is never deletable on AWS (DeleteTable is
+     * the way to drop it), so it is refused rather than silently kept.
+     */
+    public synchronized void deleteTableVersion(String databaseName, String tableName, String versionId) {
+        Table current = getTable(databaseName, tableName);
+        requireIntegerVersionId(versionId);
+        if (versionId.equals(current.getVersionId())) {
+            throw new AwsException("InvalidInputException",
+                    "Cannot delete the latest version " + versionId + " of table " + tableName
+                    + "; delete the table instead.", 400);
+        }
+        String key = tableVersionKey(databaseName, tableName, versionId);
+        if (tableVersionStore.get(key).isEmpty()) {
+            throw new AwsException("EntityNotFoundException", "Version not found.", 400);
+        }
+        tableVersionStore.delete(key);
+        LOG.infov("Deleted Glue Table version: {0}.{1} v{2}", databaseName, tableName, versionId);
+    }
+
+    public synchronized List<TableVersionError> batchDeleteTableVersions(
+            String databaseName, String tableName, List<String> versionIds) {
+        Table current = getTable(databaseName, tableName);
+        if (versionIds.size() > 100) {
+            throw new AwsException("InvalidInputException",
+                    "VersionIds must contain at most 100 versions.", 400);
+        }
+        List<TableVersionError> errors = new ArrayList<>();
+        for (String versionId : versionIds) {
+            try {
+                deleteTableVersion(databaseName, current.getName(), versionId);
+            } catch (AwsException e) {
+                errors.add(new TableVersionError(current.getName(), versionId,
+                        new ErrorDetail(e.getErrorCode(), e.getMessage())));
+            }
+        }
+        return errors;
+    }
+
+    private static void requireIntegerVersionId(String versionId) {
+        if (versionId == null || versionId.isBlank()) {
+            throw new AwsException("InvalidInputException", "VersionId is required.", 400);
+        }
+        try {
+            Long.parseLong(versionId);
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidInputException", "Invalid table VersionId: " + versionId, 400);
+        }
     }
 
     public void deleteTable(String databaseName, String tableName) {
@@ -619,6 +876,26 @@ public class GlueService {
         partitionColumnStatisticsStore.keys().stream()
                 .filter(statisticsKey -> statisticsKey.startsWith(key + ":"))
                 .forEach(partitionColumnStatisticsStore::delete);
+    }
+
+    /** Deletes what exists and reports the rest, the batch shape BatchCreatePartition uses. */
+    public List<BatchCreatePartitionError> batchDeletePartitions(
+            String databaseName, String tableName, List<List<String>> partitionsToDelete) {
+        getTable(databaseName, tableName);
+        if (partitionsToDelete.size() > 25) {
+            throw new AwsException("InvalidInputException",
+                    "PartitionsToDelete must contain at most 25 partitions.", 400);
+        }
+        List<BatchCreatePartitionError> errors = new ArrayList<>();
+        for (List<String> values : partitionsToDelete) {
+            if (partitionStore.get(partitionKey(databaseName, tableName, values)).isEmpty()) {
+                errors.add(new BatchCreatePartitionError(values,
+                        new ErrorDetail("EntityNotFoundException", "Cannot find partition.")));
+                continue;
+            }
+            deletePartition(databaseName, tableName, values);
+        }
+        return errors;
     }
 
     public void updatePartition(String databaseName, String tableName, List<String> partitionValues, Partition partition) {
@@ -1088,6 +1365,12 @@ public class GlueService {
 
     public record BatchDeleteTableError(
             @JsonProperty("TableName") String tableName,
+            @JsonProperty("ErrorDetail") ErrorDetail errorDetail) {}
+
+    @RegisterForReflection
+    public record TableVersionError(
+            @JsonProperty("TableName") String tableName,
+            @JsonProperty("VersionId") String versionId,
             @JsonProperty("ErrorDetail") ErrorDetail errorDetail) {}
 
     @RegisterForReflection

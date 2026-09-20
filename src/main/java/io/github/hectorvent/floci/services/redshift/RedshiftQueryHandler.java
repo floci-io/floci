@@ -42,16 +42,25 @@ public class RedshiftQueryHandler {
     private final EmulatorConfig config;
     private final RedshiftIamDbUserResolver iamDbUserResolver;
     private final RegionResolver regionResolver;
+    private final RedshiftDynamoDbZeroEtlConsumer zeroEtlConsumer;
 
     @Inject
     public RedshiftQueryHandler(RedshiftService service, RedshiftCredentialBroker credentialBroker,
                                 EmulatorConfig config, RedshiftIamDbUserResolver iamDbUserResolver,
-                                RegionResolver regionResolver) {
+                                RegionResolver regionResolver,
+                                RedshiftDynamoDbZeroEtlConsumer zeroEtlConsumer) {
         this.service = service;
         this.credentialBroker = credentialBroker;
         this.config = config;
         this.iamDbUserResolver = iamDbUserResolver;
         this.regionResolver = regionResolver;
+        this.zeroEtlConsumer = zeroEtlConsumer;
+    }
+
+    RedshiftQueryHandler(RedshiftService service, RedshiftCredentialBroker credentialBroker,
+                         EmulatorConfig config, RedshiftIamDbUserResolver iamDbUserResolver,
+                         RegionResolver regionResolver) {
+        this(service, credentialBroker, config, iamDbUserResolver, regionResolver, null);
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params) {
@@ -65,11 +74,21 @@ public class RedshiftQueryHandler {
             String nodeType = params.getFirst("NodeType");
             String masterUsername = params.getFirst("MasterUsername");
             String masterUserPassword = params.getFirst("MasterUserPassword");
+            boolean manageMasterPassword = Boolean.parseBoolean(params.getFirst("ManageMasterPassword"));
             String clusterSubnetGroupName = params.getFirst("ClusterSubnetGroupName");
             List<String> vpcSecurityGroupIds = memberList(params, "VpcSecurityGroupIds");
+            List<String> iamRoleArns = memberList(params, "IamRoles");
 
-            Cluster cluster = service.createCluster(identifier, nodeType, masterUsername, masterUserPassword,
-                    clusterSubnetGroupName, vpcSecurityGroupIds);
+            String region = regionResolver.resolveRegionFromAuth(authorizationHeader);
+            Cluster cluster = manageMasterPassword
+                    ? service.createClusterWithManagedMasterPassword(identifier, nodeType, masterUsername,
+                            clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns,
+                            params.getFirst("MasterPasswordSecretKmsKeyId"), region)
+                    : iamRoleArns.isEmpty()
+                    ? service.createCluster(identifier, nodeType, masterUsername, masterUserPassword,
+                            clusterSubnetGroupName, vpcSecurityGroupIds)
+                    : service.createCluster(identifier, nodeType, masterUsername, masterUserPassword,
+                            clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns);
             String xml = new XmlBuilder()
                     .start("CreateClusterResponse")
                       .start("CreateClusterResult")
@@ -362,6 +381,9 @@ public class RedshiftQueryHandler {
                     encryptionContextMap(params),
                     tagMap(params),
                     regionResolver.resolveRegionFromAuth(authorizationHeader));
+            if (zeroEtlConsumer != null) {
+                zeroEtlConsumer.startPolling(integration);
+            }
             String xml = new XmlBuilder()
                     .start("CreateIntegrationResponse")
                       .start("CreateIntegrationResult")
@@ -404,6 +426,9 @@ public class RedshiftQueryHandler {
         }
         case "DeleteIntegration" -> {
             Integration integration = service.deleteIntegration(params.getFirst("IntegrationArn"));
+            if (zeroEtlConsumer != null) {
+                zeroEtlConsumer.stopPolling(integration.getIntegrationArn());
+            }
             String xml = new XmlBuilder()
                     .start("DeleteIntegrationResponse")
                       .start("DeleteIntegrationResult")
@@ -614,12 +639,25 @@ public class RedshiftQueryHandler {
             .elem("AvailabilityZoneRelocationStatus", "disabled")
             .elem("ClusterSubnetGroupName", cluster.getClusterSubnetGroupName());
 
+        if (cluster.getMasterPasswordSecretArn() != null) {
+            builder.elem("MasterPasswordSecretArn", cluster.getMasterPasswordSecretArn())
+                .elem("MasterPasswordSecretKmsKeyId", cluster.getMasterPasswordSecretKmsKeyId());
+        }
+
         if (cluster.getVpcSecurityGroupIds() != null && !cluster.getVpcSecurityGroupIds().isEmpty()) {
             builder.start("VpcSecurityGroups");
             for (String sgId : cluster.getVpcSecurityGroupIds()) {
                 builder.start("VpcSecurityGroup").elem("VpcSecurityGroupId", sgId).end("VpcSecurityGroup");
             }
             builder.end("VpcSecurityGroups");
+        }
+
+        if (cluster.getIamRoleArns() != null && !cluster.getIamRoleArns().isEmpty()) {
+            builder.start("IamRoles");
+            for (String iamRoleArn : cluster.getIamRoleArns()) {
+                builder.start("IamRole").elem("IamRoleArn", iamRoleArn).end("IamRole");
+            }
+            builder.end("IamRoles");
         }
 
         if (cluster.getClusterParameterGroupName() != null) {
@@ -848,6 +886,7 @@ public class RedshiftQueryHandler {
         return switch (baseName) {
             case "SubnetIds" -> quoted + "(\\.member|\\.SubnetIdentifier)?\\.\\d+";
             case "VpcSecurityGroupIds" -> quoted + "(\\.member|\\.VpcSecurityGroupId)?\\.\\d+";
+            case "IamRoles" -> quoted + "(\\.member|\\.IamRoleArn)?\\.\\d+";
             case "TagKeys" -> quoted + "(\\.member|\\.TagKey)?\\.\\d+";
             case "DbGroups" -> quoted + "(\\.member|\\.DbGroup)?\\.\\d+";
             default -> quoted + "(\\.member)?\\.\\d+";

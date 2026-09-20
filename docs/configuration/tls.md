@@ -58,8 +58,9 @@ When `FLOCI_TLS_ENABLED=true` and no custom certificate is provided, Floci keeps
 
 - Is persisted to `{persistent-path}/tls/` and reused across restarts
 - Includes `localhost`, `127.0.0.1`, `0.0.0.0`, `*.localhost`, `localhost.floci.io`,
-  `*.localhost.floci.io`, `*.execute-api.localhost.floci.io`, and
-  `*.execute-api.localhost.localstack.cloud` as Subject Alternative Names (SANs)
+  `*.localhost.floci.io`, `*.execute-api.localhost.floci.io`,
+  `*.execute-api.localhost.localstack.cloud`, `*.cloudfront.localhost.floci.io`, and
+  `*.cloudfront.localhost` as Subject Alternative Names (SANs)
 - Automatically includes custom hostnames from `FLOCI_HOSTNAME`, `FLOCI_BASE_URL` and `FLOCI_SERVICES_IOT_ENDPOINT_ADDRESS` in the SANs
 - Is regenerated when hostname configuration changes between restarts, or when it was not issued by the current CA
 

@@ -407,17 +407,13 @@ class KmsFeaturesTest {
     void encryptWithPendingDeletionKeyRaisesKmsInvalidStateException() {
         String keyId = kms.createKey(b -> b.description("pending-encrypt")).keyMetadata().keyId();
 
-        try {
-            kms.scheduleKeyDeletion(b -> b.keyId(keyId).pendingWindowInDays(7));
+        kms.scheduleKeyDeletion(b -> b.keyId(keyId).pendingWindowInDays(7));
 
-            assertThatThrownBy(
-                    () -> kms.encrypt(b -> b
-                            .keyId(keyId)
-                            .plaintext(SdkBytes.fromString("secret data", StandardCharsets.UTF_8)))
-            ).isInstanceOf(KmsInvalidStateException.class);
-        } finally {
-            kms.scheduleKeyDeletion(b -> b.keyId(keyId).pendingWindowInDays(7));
-        }
+        assertThatThrownBy(
+                () -> kms.encrypt(b -> b
+                        .keyId(keyId)
+                        .plaintext(SdkBytes.fromString("secret data", StandardCharsets.UTF_8)))
+        ).isInstanceOf(KmsInvalidStateException.class);
     }
 
     @Test
@@ -425,22 +421,18 @@ class KmsFeaturesTest {
     void decryptWithPendingDeletionKeyRaisesKmsInvalidStateException() {
         String keyId = kms.createKey(b -> b.description("pending-decrypt")).keyMetadata().keyId();
 
-        try {
-            SdkBytes ciphertext = kms.encrypt(b -> b
-                            .keyId(keyId)
-                            .plaintext(SdkBytes.fromString("secret data", StandardCharsets.UTF_8)))
-                    .ciphertextBlob();
+        SdkBytes ciphertext = kms.encrypt(b -> b
+                        .keyId(keyId)
+                        .plaintext(SdkBytes.fromString("secret data", StandardCharsets.UTF_8)))
+                .ciphertextBlob();
 
-            kms.scheduleKeyDeletion(b -> b.keyId(keyId).pendingWindowInDays(7));
+        kms.scheduleKeyDeletion(b -> b.keyId(keyId).pendingWindowInDays(7));
 
-            assertThatThrownBy(
-                    () -> kms.decrypt(b -> b
-                            .ciphertextBlob(ciphertext)
-                            .keyId(keyId))
-            ).isInstanceOf(KmsInvalidStateException.class);
-        } finally {
-            kms.scheduleKeyDeletion(b -> b.keyId(keyId).pendingWindowInDays(7));
-        }
+        assertThatThrownBy(
+                () -> kms.decrypt(b -> b
+                        .ciphertextBlob(ciphertext)
+                        .keyId(keyId))
+        ).isInstanceOf(KmsInvalidStateException.class);
     }
 
     // ── Issue #3024: Encrypt/Decrypt apply real RSAES-OAEP for RSA keys ──────

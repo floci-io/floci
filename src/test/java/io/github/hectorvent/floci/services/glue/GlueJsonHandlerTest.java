@@ -402,6 +402,89 @@ class GlueJsonHandlerTest {
         assertEquals("glueetl", job.get("Command").get("Name").asText());
     }
 
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> body(Response response) {
+        assertEquals(200, response.getStatus());
+        return (Map<String, Object>) response.getEntity();
+    }
+
+    /** The version calls answer with the reference's shapes: a TableVersion wrapper, per-version Errors. */
+    @Test
+    void tableVersionCallsUseTheReferenceShapes() throws Exception {
+        createDatabaseAndTable("versions_db", "plain");
+        ObjectNode update = mapper.createObjectNode();
+        update.put("DatabaseName", "versions_db");
+        update.putObject("TableInput").put("Name", "plain").put("Description", "second");
+        assertEquals(200, handler.handle("UpdateTable", update, REGION).getStatus());
+
+        ObjectNode get = mapper.createObjectNode();
+        get.put("DatabaseName", "versions_db").put("TableName", "plain").put("VersionId", "0");
+        Map<String, Object> version = (Map<String, Object>) body(handler.handle("GetTableVersion", get, REGION))
+                .get("TableVersion");
+        assertEquals("0", version.get("VersionId"));
+        assertNotNull(version.get("Table"));
+
+        ObjectNode batch = mapper.createObjectNode();
+        batch.put("DatabaseName", "versions_db").put("TableName", "plain");
+        batch.putArray("VersionIds").add("0").add("5");
+        List<GlueService.TableVersionError> errors = (List<GlueService.TableVersionError>) body(
+                handler.handle("BatchDeleteTableVersion", batch, REGION)).get("Errors");
+        assertEquals(1, errors.size());
+        assertEquals("5", errors.get(0).versionId());
+        assertEquals("plain", errors.get(0).tableName());
+        assertEquals("{\"TableName\":\"plain\",\"VersionId\":\"5\",\"ErrorDetail\":{\"ErrorCode\":\"EntityNotFoundException\",\"ErrorMessage\":\"Version not found.\"}}",
+                mapper.writeValueAsString(errors.get(0)));
+
+        ObjectNode delete = mapper.createObjectNode();
+        delete.put("DatabaseName", "versions_db").put("TableName", "plain").put("VersionId", "0");
+        AwsException gone = assertThrows(AwsException.class, () -> handler.handle("DeleteTableVersion", delete, REGION));
+        assertEquals("EntityNotFoundException", gone.getErrorCode());
+    }
+
+    @Test
+    void batchDeletePartitionReportsMissingPartitionsInErrors() throws Exception {
+        createPartitionedTable("bdp_db", "events", "dt");
+        ObjectNode create = mapper.createObjectNode();
+        create.put("DatabaseName", "bdp_db").put("TableName", "events");
+        create.putObject("PartitionInput").putArray("Values").add("2026-01-01");
+        assertEquals(200, handler.handle("CreatePartition", create, REGION).getStatus());
+
+        ObjectNode batch = mapper.createObjectNode();
+        batch.put("DatabaseName", "bdp_db").put("TableName", "events");
+        ArrayNode toDelete = batch.putArray("PartitionsToDelete");
+        toDelete.addObject().putArray("Values").add("2026-01-01");
+        toDelete.addObject().putArray("Values").add("2026-01-02");
+        List<GlueService.BatchCreatePartitionError> errors = (List<GlueService.BatchCreatePartitionError>) body(
+                handler.handle("BatchDeletePartition", batch, REGION)).get("Errors");
+        assertEquals(1, errors.size());
+        assertEquals(List.of("2026-01-02"), errors.get(0).partitionValues());
+        assertTrue(mapper.writeValueAsString(errors.get(0)).startsWith("{\"PartitionValues\":[\"2026-01-02\"],\"ErrorDetail\":"));
+
+        ObjectNode list = mapper.createObjectNode();
+        list.put("DatabaseName", "bdp_db").put("TableName", "events");
+        assertTrue(((List<?>) body(handler.handle("GetPartitions", list, REGION)).get("Partitions")).isEmpty());
+    }
+
+    @Test
+    void searchTablesReturnsTableListWithPaging() throws Exception {
+        createDatabaseAndTable("search_db", "alpha");
+        createDatabaseAndTable("search_db2", "beta");
+
+        ObjectNode search = mapper.createObjectNode();
+        search.put("MaxResults", 1);
+        Map<String, Object> first = body(handler.handle("SearchTables", search, REGION));
+        assertEquals(1, ((List<?>) first.get("TableList")).size());
+        assertNotNull(first.get("NextToken"));
+
+        ObjectNode filtered = mapper.createObjectNode();
+        filtered.putArray("Filters").addObject().put("Key", "DatabaseName").put("Value", "search_db2");
+        filtered.putArray("SortCriteria").addObject().put("FieldName", "Name").put("Sort", "ASC");
+        Map<String, Object> page = body(handler.handle("SearchTables", filtered, REGION));
+        List<?> tables = (List<?>) page.get("TableList");
+        assertEquals(1, tables.size());
+        assertEquals("beta", ((io.github.hectorvent.floci.services.glue.model.Table) tables.get(0)).getName());
+    }
+
     private static final class InMemoryStorageFactory extends StorageFactory {
         private InMemoryStorageFactory() {
             super(null, null);

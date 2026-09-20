@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.elasticache;
 
 import io.quarkus.test.junit.QuarkusTest;
+import org.jboss.logging.Logger;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
@@ -10,19 +11,18 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import java.io.IOException;
-import java.util.List;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
-
-import org.jboss.logging.Logger;
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
-import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -318,7 +318,7 @@ class ElastiCacheIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("DescribeUsersResponse.DescribeUsersResult.Users.member.UserId", org.hamcrest.Matchers.not(equalTo(USER_ID)));
+            .body("DescribeUsersResponse.DescribeUsersResult.Users.member.UserId", not(equalTo(USER_ID)));
     }
 
     @Test

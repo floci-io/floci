@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudfront.model.CacheBehavior;
@@ -41,6 +42,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.SequencedSet;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
@@ -101,6 +103,16 @@ public class CloudFrontService {
     private final StorageBackend<String, MonitoringSubscription> monitoringStore;
     private final String accountId;
     private final String domainSuffix;
+    /**
+     * Host suffixes under which every distribution is served as {@code <id><suffix>}, whatever
+     * {@code floci.services.cloudfront.domain-suffix} makes the assigned domain name. They carry the
+     * {@code cloudfront} service label on the endpoint hosts the embedded DNS resolves, the same
+     * derivation API Gateway uses for {@code <id>.execute-api.<host>}, so a name that resolves to
+     * Floci is also routed by it. {@code <id>.cloudfront.localhost.floci.io} and
+     * {@code <id>.cloudfront.localhost} are additionally covered by the generated HTTPS
+     * certificate, so a signed URL for either can be downloaded over HTTPS.
+     */
+    private final List<String> localDeliverySuffixes;
 
     @Inject
     public CloudFrontService(StorageFactory factory, EmulatorConfig config) {
@@ -140,6 +152,7 @@ public class CloudFrontService {
                 new TypeReference<Map<String, MonitoringSubscription>>() {});
         this.accountId = config.defaultAccountId();
         this.domainSuffix = config.services().cloudfront().domainSuffix();
+        this.localDeliverySuffixes = localDeliverySuffixes(config);
     }
 
     // ── Distributions ─────────────────────────────────────────────────────────
@@ -152,7 +165,7 @@ public class CloudFrontService {
         String id = generateDistributionId();
         dist.setId(id);
         dist.setArn(AwsArnUtils.Arn.of("cloudfront", "", accountId, "distribution/" + id).toString());
-        dist.setDomainName(id + "." + domainSuffix);
+        dist.setDomainName(domainNameFor(id));
         dist.setStatus("Deployed");
         dist.setLastModifiedTime(Instant.now());
         dist.setEtag(UUID.randomUUID().toString());
@@ -310,15 +323,17 @@ public class CloudFrontService {
     /**
      * Finds the distribution whose data-plane requests should be served for the given {@code Host}
      * header. A distribution matches when the host equals its assigned CloudFront domain name
-     * ({@code <id>.cloudfront.net}) or one of its alternate domain names (CNAME aliases). Any port
-     * suffix is ignored and matching is case-insensitive. Returns {@code null} when nothing matches.
+     * ({@code <id>.cloudfront.net}), one of its alternate domain names (CNAME aliases), or one of
+     * the local delivery hostnames {@code <id>.cloudfront.localhost.floci.io} and
+     * {@code <id>.cloudfront.localhost}. Any port suffix is ignored and matching is
+     * case-insensitive. Returns {@code null} when nothing matches.
      */
     public Distribution findByHost(String host) {
         if (host == null || host.isBlank()) {
             return null;
         }
         String hostname = stripPort(host);
-        List<Distribution> distributions = new ArrayList<>(distStore.scan(k -> true));
+        List<Distribution> distributions = distStore.scan(k -> true);
         for (Distribution dist : distributions) {
             if (hostname.equalsIgnoreCase(dist.getDomainName())) {
                 return dist;
@@ -332,6 +347,11 @@ public class CloudFrontService {
                         return dist;
                     }
                 }
+            }
+        }
+        for (Distribution dist : distributions) {
+            if (matchesLocalDeliveryHost(hostname, dist.getId())) {
+                return dist;
             }
         }
         Distribution best = null;
@@ -349,6 +369,36 @@ public class CloudFrontService {
             }
         }
         return best;
+    }
+
+    /**
+     * The domain name a new distribution is served under. AWS assigns a lower-case host, and a
+     * browser lower-cases the authority it sends, so an upper-case id in the host would never match
+     * the resource a signed URL was signed for.
+     */
+    private String domainNameFor(String id) {
+        return id.toLowerCase(Locale.ROOT) + "." + domainSuffix;
+    }
+
+    private static List<String> localDeliverySuffixes(EmulatorConfig config) {
+        SequencedSet<String> endpointHosts = new LinkedHashSet<>();
+        endpointHosts.add("localhost");
+        EmbeddedDnsServer.BUILTIN_SUFFIXES.forEach(endpointHosts::add);
+        config.hostname().ifPresent(endpointHosts::add);
+        config.dns().extraSuffixes().ifPresent(endpointHosts::addAll);
+        return endpointHosts.stream()
+                .map(host -> ".cloudfront." + host.toLowerCase(Locale.ROOT))
+                .toList();
+    }
+
+    /** True when {@code hostname} is the local delivery host of the distribution with this id. */
+    private boolean matchesLocalDeliveryHost(String hostname, String id) {
+        for (String suffix : localDeliverySuffixes) {
+            if (hostname.equalsIgnoreCase(id + suffix)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void ensureAliasesAvailable(DistributionConfig config, String currentDistributionId) {
@@ -1230,7 +1280,7 @@ public class CloudFrontService {
                     "A public key with this caller reference already exists.",
                     409);
         }
-        key.setId(UUID.randomUUID().toString());
+        key.setId(generatePublicKeyId());
         key.setCreatedTime(Instant.now());
         key.setEtag(UUID.randomUUID().toString());
         publicKeyStore.put(key.getId(), key);
@@ -1596,7 +1646,7 @@ public class CloudFrontService {
         String id = generateDistributionId();
         sd.setId(id);
         sd.setArn(AwsArnUtils.Arn.of("cloudfront", "", accountId, "streaming-distribution/" + id).toString());
-        sd.setDomainName(id + "." + domainSuffix);
+        sd.setDomainName(domainNameFor(id));
         sd.setStatus("Deployed");
         sd.setLastModifiedTime(Instant.now());
         sd.setEtag(UUID.randomUUID().toString());
@@ -1761,6 +1811,15 @@ public class CloudFrontService {
 
     private static String generateDistributionId() {
         StringBuilder sb = new StringBuilder("E");
+        for (int i = 0; i < 13; i++) {
+            sb.append(CHARS.charAt(RANDOM.nextInt(CHARS.length())));
+        }
+        return sb.toString();
+    }
+
+    /** AWS issues public key ids as K + 13 characters; the value travels in Key-Pair-Id. */
+    private static String generatePublicKeyId() {
+        StringBuilder sb = new StringBuilder("K");
         for (int i = 0; i < 13; i++) {
             sb.append(CHARS.charAt(RANDOM.nextInt(CHARS.length())));
         }

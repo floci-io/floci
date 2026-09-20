@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.redshift.proxy;
 
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.jboss.logging.Logger;
@@ -47,7 +48,8 @@ class RedshiftInterceptingBridgeTest {
         testBackendEnd = backendListener.accept();
 
         s3Stub = Mockito.mock(S3Service.class);
-        RedshiftInterceptingBridge bridge = new RedshiftInterceptingBridge(bridgeClientEnd, bridgeBackendEnd, s3Stub);
+        RedshiftInterceptingBridge bridge = new RedshiftInterceptingBridge(
+                bridgeClientEnd, bridgeBackendEnd, s3Stub, Mockito.mock(IamService.class));
         bridgeThread = Thread.ofVirtual().name("bridge-under-test").start(bridge::run);
     }
 

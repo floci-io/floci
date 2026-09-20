@@ -14,4 +14,3 @@
 !native/**
 !.mvn/**
 !mvnw
-!sidecars/cedar/**

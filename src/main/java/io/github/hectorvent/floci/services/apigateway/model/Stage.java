@@ -20,6 +20,36 @@ public class Stage {
     private boolean cacheClusterEnabled;
     private String cacheClusterSize;
     private String cacheClusterStatus = "NOT_AVAILABLE";
+    private AccessLogSettings accessLogSettings;
+    private boolean tracingEnabled;
+    private Map<String, String> tags = new HashMap<>();
+
+    @RegisterForReflection
+    public record AccessLogSettings(String destinationArn, String format) {}
+
+    public AccessLogSettings getAccessLogSettings() {
+        return accessLogSettings;
+    }
+
+    public void setAccessLogSettings(AccessLogSettings accessLogSettings) {
+        this.accessLogSettings = accessLogSettings;
+    }
+
+    public boolean isTracingEnabled() {
+        return tracingEnabled;
+    }
+
+    public void setTracingEnabled(boolean tracingEnabled) {
+        this.tracingEnabled = tracingEnabled;
+    }
+
+    public Map<String, String> getTags() {
+        return tags;
+    }
+
+    public void setTags(Map<String, String> tags) {
+        this.tags = tags != null ? tags : new HashMap<>();
+    }
 
     public boolean isCacheClusterEnabled() {
         return cacheClusterEnabled;

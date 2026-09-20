@@ -17,8 +17,11 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -83,5 +86,38 @@ class EmulatorInfoControllerTest {
 
         verify(sageMakerTeardown).stopManagedContainers();
         verify(storageFactory).clearAll();
+    }
+
+    @Test
+    @DisplayName("Should call beforeReset on every service before the wipe and afterReset after every clear")
+    void reset_bracketsTheWipeWithBeforeAndAfterHooks() {
+        Resettable second = mock(Resettable.class);
+        when(containerTeardowns.iterator()).thenReturn(List.<ContainerTeardown>of().iterator());
+        when(resettables.iterator()).thenReturn(List.of(resettable, second).iterator());
+
+        controller.reset();
+
+        InOrder order = inOrder(storageFactory, resettable, second);
+        order.verify(resettable).beforeReset();
+        order.verify(second).beforeReset();
+        order.verify(storageFactory).clearAll();
+        order.verify(resettable).clear();
+        order.verify(second).clear();
+        order.verify(second).afterReset();
+        order.verify(resettable).afterReset();
+    }
+
+    @Test
+    @DisplayName("Should still call afterReset when the storage wipe fails, then rethrow")
+    void reset_runsAfterResetWhenTheWipeFails() {
+        doThrow(new IllegalStateException("wipe failed")).when(storageFactory).clearAll();
+        when(containerTeardowns.iterator()).thenReturn(List.<ContainerTeardown>of().iterator());
+        when(resettables.iterator()).thenReturn(List.of(resettable).iterator());
+
+        assertThrows(IllegalStateException.class, controller::reset);
+
+        verify(resettable).beforeReset();
+        verify(resettable).afterReset();
+        verify(resettable, never()).clear();
     }
 }

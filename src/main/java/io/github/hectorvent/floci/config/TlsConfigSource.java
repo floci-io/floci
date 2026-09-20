@@ -62,11 +62,15 @@ public class TlsConfigSource implements ConfigSource {
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     // host.docker.internal: how Lambda containers reach Floci when it runs on the host (not in a container).
-    private static final List<String> DEFAULT_SAN_HOSTNAMES = List.of(
+    // A wildcard SAN covers one label, so every two-label service form needs its own entry.
+    // Package-private so the tests assert against this list instead of copying it.
+    static final List<String> DEFAULT_SAN_HOSTNAMES = List.of(
             "localhost", "127.0.0.1", "0.0.0.0", "*.localhost",
             "localhost.floci.io", "*.localhost.floci.io",
             "*.execute-api.localhost.floci.io",
-            "*.execute-api.localhost.localstack.cloud", "host.docker.internal");
+            "*.execute-api.localhost.localstack.cloud",
+            "*.cloudfront.localhost.floci.io", "*.cloudfront.localhost",
+            "host.docker.internal");
 
     private static volatile Path resolvedTlsDir;
 

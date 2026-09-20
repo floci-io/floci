@@ -19,6 +19,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -42,6 +43,7 @@ class RedshiftQueryHandlerTest {
         iamDbUserResolver = mock(RedshiftIamDbUserResolver.class);
         regionResolver = mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn("acc");
+        when(regionResolver.resolveRegionFromAuth(anyString())).thenReturn("us-east-1");
         handler = new RedshiftQueryHandler(service, credentialBroker, config, iamDbUserResolver, regionResolver);
     }
 
@@ -75,6 +77,58 @@ class RedshiftQueryHandlerTest {
         assertTrue(xml.contains("<ClusterIdentifier>test-cluster</ClusterIdentifier>"));
         assertTrue(xml.contains("<ClusterStatus>available</ClusterStatus>"));
         assertTrue(xml.contains("<RequestId>test-req-id</RequestId>"));
+    }
+
+    @Test
+    void createClusterWithManagedMasterPasswordUsesSecretsManagerSecret() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "managed-cluster");
+        params.putSingle("NodeType", "dc2.large");
+        params.putSingle("MasterUsername", "admin");
+        params.putSingle("ManageMasterPassword", "true");
+        params.putSingle("MasterPasswordSecretKmsKeyId", "arn:aws:kms:us-east-1:acc:key/key-1");
+
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("managed-cluster");
+        cluster.setClusterStatus("available");
+        cluster.setMasterPasswordSecretArn("arn:aws:secretsmanager:us-east-1:acc:secret:redshift-managed");
+        cluster.setMasterPasswordSecretKmsKeyId("arn:aws:kms:us-east-1:acc:key/key-1");
+        when(service.createClusterWithManagedMasterPassword(any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(cluster);
+
+        Response response = handler.handle("CreateCluster", params,
+                "AWS4-HMAC-SHA256 Credential=test/20260918/us-east-1/redshift/aws4_request");
+
+        assertEquals(200, response.getStatus());
+        String xml = (String) response.getEntity();
+        assertTrue(xml.contains("<MasterPasswordSecretArn>arn:aws:secretsmanager:us-east-1:acc:secret:redshift-managed</MasterPasswordSecretArn>"));
+        assertTrue(xml.contains("<MasterPasswordSecretKmsKeyId>arn:aws:kms:us-east-1:acc:key/key-1</MasterPasswordSecretKmsKeyId>"));
+        assertFalse(xml.contains("<MasterUserSecret>"));
+        verify(service).createClusterWithManagedMasterPassword(eq("managed-cluster"), eq("dc2.large"),
+                eq("admin"), isNull(), eq(List.of()), eq(List.of()),
+                eq("arn:aws:kms:us-east-1:acc:key/key-1"), eq("us-east-1"));
+    }
+
+    @Test
+    void createClusterParsesIamRoleArnLocationName() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "test-cluster");
+        params.putSingle("NodeType", "dc2.large");
+        params.putSingle("MasterUsername", "admin");
+        params.putSingle("MasterUserPassword", "password123");
+        params.putSingle("IamRoles.IamRoleArn.2", "arn:aws:iam::000000000000:role/second");
+        params.putSingle("IamRoles.IamRoleArn.1", "arn:aws:iam::000000000000:role/first");
+
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("test-cluster");
+        cluster.setClusterStatus("available");
+        when(service.createCluster(any(), any(), any(), any(), any(), any(), any())).thenReturn(cluster);
+
+        handler.handle("CreateCluster", params);
+
+        verify(service).createCluster(eq("test-cluster"), eq("dc2.large"), eq("admin"), eq("password123"),
+                isNull(), eq(List.of()), eq(List.of("arn:aws:iam::000000000000:role/first",
+                        "arn:aws:iam::000000000000:role/second")));
     }
     
     @Test

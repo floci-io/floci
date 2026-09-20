@@ -183,18 +183,44 @@ public class DynamoDbService implements ResourceProvider {
 
     private void loadPersistedItems() {
         if (itemStore == null) return;
+        Map<String, TableDefinition> persistedTables = persistedTablesByScopedKey();
         // No request scope at startup, so itemStore.keys() would only see the default account.
         // scanAllAccountsRaw() returns every account's items already in the "accountId/
         // region::tableName" key format itemsByTable expects.
         if (itemStore instanceof AccountAwareStorageBackend<Map<String, JsonNode>> aware) {
             aware.scanAllAccountsRaw().forEach((rawKey, items) ->
-                itemsByTable.put(rawKey, new ConcurrentSkipListMap<>(items)));
+                itemsByTable.put(rawKey, rekeyPersistedItems(persistedTables.get(rawKey), items)));
             return;
         }
         for (String key : itemStore.keys()) {
-            itemStore.get(key).ifPresent(items ->
-                itemsByTable.put(scopedItemsKey(key), new ConcurrentSkipListMap<>(items)));
+            String scopedKey = scopedItemsKey(key);
+            itemStore.get(key).ifPresent(items -> itemsByTable.put(
+                    scopedKey, rekeyPersistedItems(persistedTables.get(scopedKey), items)));
         }
+    }
+
+    private Map<String, TableDefinition> persistedTablesByScopedKey() {
+        if (tableStore instanceof AccountAwareStorageBackend<TableDefinition> aware) {
+            return aware.scanAllAccountsRaw();
+        }
+        Map<String, TableDefinition> persistedTables = new HashMap<>();
+        for (String key : tableStore.keys()) {
+            tableStore.get(key).ifPresent(table -> persistedTables.put(scopedItemsKey(key), table));
+        }
+        return persistedTables;
+    }
+
+    private ConcurrentSkipListMap<String, JsonNode> rekeyPersistedItems(
+            TableDefinition table, Map<String, JsonNode> persistedItems) {
+        if (table == null) {
+            return new ConcurrentSkipListMap<>(persistedItems);
+        }
+        ConcurrentSkipListMap<String, JsonNode> rekeyedItems = new ConcurrentSkipListMap<>();
+        for (JsonNode item : persistedItems.values()) {
+            rekeyedItems.put(buildItemKeyFromNode(
+                    item, table.getPartitionKeyName(), table.getSortKeyName()), item);
+        }
+        return rekeyedItems;
     }
 
     private void persistItems(String storageKey) {
@@ -607,6 +633,7 @@ public class DynamoDbService implements ResourceProvider {
             if (conditionExpression != null) {
                 evaluateCondition(existing, conditionExpression, exprAttrNames, exprAttrValues, returnValuesOnConditionCheckFailure);
             }
+            requireItemNestingWithinLimit(normalizedItem);
 
             tableItems.put(itemKey, normalizedItem);
             if (shouldPersist) {
@@ -896,6 +923,7 @@ public class DynamoDbService implements ResourceProvider {
 
             // Reject any attempt to modify a key attribute
             validateKeyNotModified(table, key, item);
+            requireItemNestingWithinLimit(item);
 
             // AWS validates index key values against the item the update produces.
             validateIndexKeyTypes(table, item, true);
@@ -1382,9 +1410,9 @@ public class DynamoDbService implements ResourceProvider {
         // prevents deadlock across concurrent transactions; ReentrantLock lets the inner
         // putItem/updateItem/deleteItem calls re-enter the same lock for free.
         //
-        // Ordering uses a tuple comparator — not a delimited string — so user-supplied
-        // bytes in an item's PK/SK value cannot collide two distinct participants
-        // into the same ordering key.
+        // Ordering compares storageKey and itemKey as separate tuple fields. The item key's
+        // PK/SK segments are escaped before they are joined, so delimiter bytes inside a
+        // user-supplied key cannot collapse distinct transaction participants.
         TreeMap<TransactParticipant, ReentrantLock> toAcquire = new TreeMap<>(PARTICIPANT_ORDER);
         Set<TransactParticipant> seenParticipants = new HashSet<>();
         for (JsonNode transactItem : transactItems) {
@@ -1440,7 +1468,7 @@ public class DynamoDbService implements ResourceProvider {
             for (int i = 0; i < transactItems.size(); i++) {
                 try {
                     validateTransactItem(transactItems.get(i), region, staged);
-                } catch (KeySchemaMismatchException e) {
+                } catch (KeySchemaMismatchException | ItemNestingExceededException e) {
                     throw cancelledByMember(transactItems.size(), i, e.getMessage());
                 }
             }
@@ -1584,6 +1612,12 @@ public class DynamoDbService implements ResourceProvider {
         }
     }
 
+    private static void requireItemNestingWithinLimit(JsonNode item) {
+        if (!DynamoDbAttributeValueValidator.nestingWithinLimit(item)) {
+            throw new ItemNestingExceededException();
+        }
+    }
+
     private static TransactionCanceledException cancelledByMember(int memberCount, int failedMember,
                                                                    String message) {
         List<TransactionCanceledException.CancellationReason> reasons = new ArrayList<>();
@@ -1686,6 +1720,7 @@ public class DynamoDbService implements ResourceProvider {
             DynamoDbItemSize.validateSize(normalizedItem);
             buildItemKey(table, normalizedItem);
             validateIndexKeyTypes(table, normalizedItem, false);
+            requireItemNestingWithinLimit(normalizedItem);
         } else if (transactItem.has("Delete")) {
             JsonNode del = transactItem.get("Delete");
             String tableName = canonicalTableName(region, del.path("TableName").asText());
@@ -1717,6 +1752,7 @@ public class DynamoDbService implements ResourceProvider {
                 applyUpdateExpression(item, updateExpression, exprAttrNames, exprAttrValues);
             }
             validateKeyNotModified(table, key, item);
+            requireItemNestingWithinLimit(item);
             validateIndexKeyTypes(table, item, true);
         }
     }
@@ -2245,7 +2281,6 @@ public class DynamoDbService implements ResourceProvider {
 
             String attrPath = clause.substring(0, eqIdx).trim();
             touched.add(attrPath);
-            String attrName = resolveAttributeName(attrPath, exprAttrNames);
 
             String rest = clause.substring(eqIdx + 1).trim();
 
@@ -2309,7 +2344,7 @@ public class DynamoDbService implements ResourceProvider {
                 // if_not_exists(attrRef, fallbackExpr) evaluates to:
                 //   attrRef's current value  — when attrRef exists in the item
                 //   fallbackExpr             — otherwise
-                // The result is always assigned to attrName.
+                // The result is always assigned to attrPath.
                 String[] args = extractFunctionArgs(valuePart);
                 if (args.length == 2) {
                     String checkAttr = resolveAttributeName(args[0].trim(), exprAttrNames);
@@ -2354,7 +2389,7 @@ public class DynamoDbService implements ResourceProvider {
                         ObjectNode result =
                                 JsonNodeFactory.instance.objectNode();
                         result.set("L", merged);
-                        item.set(attrName, result);
+                        setValueAtPath(item, attrPath, result, exprAttrNames);
                     }
                 }
             } else if (valuePart.startsWith(":") && exprAttrValues != null) {
@@ -2506,6 +2541,7 @@ public class DynamoDbService implements ResourceProvider {
      * - For sets (SS, NS, BS): adds elements to the existing set, or creates the set if it doesn't exist
      */
     private JsonNode applyAddOperation(JsonNode existingValue, JsonNode addValue) {
+        requireSameTypeAsOperand(existingValue, addValue, List.of("N", "SS", "NS", "BS"));
         ObjectNode result = JsonNodeFactory.instance.objectNode();
 
         // Handle number addition
@@ -2620,13 +2656,61 @@ public class DynamoDbService implements ResourceProvider {
         return clause;
     }
 
+    private static final Map<String, String> OPERAND_TYPE_NAMES = Map.of(
+            "S", "STRING", "N", "NUMBER", "B", "Binary", "BOOL", "BOOL", "NULL", "NULL", "L", "LIST", "M", "MAP");
+
+    void requireAddOrDeleteOperandTypes(String updateExpression, JsonNode exprAttrValues, boolean inValidationEnvelope) {
+        if (updateExpression == null || exprAttrValues == null) {
+            return;
+        }
+        String remaining = updateExpression.trim().replaceAll("\\s+", " ");
+        while (!remaining.isEmpty()) {
+            String keyword = remaining.substring(0, Math.max(remaining.indexOf(' '), 0)).toUpperCase();
+            String body = remaining.substring(keyword.length()).trim();
+            int nextClause = findNextClauseKeyword(body);
+            String actions = nextClause < 0 ? body : body.substring(0, nextClause);
+            remaining = nextClause < 0 ? "" : body.substring(nextClause);
+            Set<String> allowed = switch (keyword) {
+                case "ADD" -> Set.of("N", "SS", "NS", "BS");
+                case "DELETE" -> Set.of("SS", "NS", "BS");
+                default -> null;
+            };
+            while (allowed != null && !actions.isBlank()) {
+                int comma = findNextComma(actions);
+                String[] words = (comma < 0 ? actions : actions.substring(0, comma)).trim().split(" ");
+                actions = comma < 0 ? "" : actions.substring(comma + 1);
+                JsonNode operand = exprAttrValues.get(words[words.length - 1]);
+                if (operand == null) {
+                    continue;
+                }
+                String type = DynamoDbAttributeValueValidator.typeOf(operand);
+                if (!allowed.contains(type)) {
+                    throw new AwsException("ValidationException", (inValidationEnvelope ? "1 validation error detected: " : "")
+                            + "Invalid UpdateExpression: Incorrect operand type for operator or function;"
+                            + " operator: " + keyword + ", operand type: " + OPERAND_TYPE_NAMES.get(type)
+                            + ", typeSet: ALLOWED_FOR_ADD_OPERAND", 400);
+                }
+            }
+        }
+    }
+
+    private static void requireSameTypeAsOperand(JsonNode existingValue, JsonNode operand, List<String> types) {
+        for (String type : types) {
+            if (operand.has(type) && existingValue != null && !existingValue.has(type)) {
+                throw new AwsException("ValidationException",
+                        "An operand in the update expression has an incorrect data type", 400);
+            }
+        }
+    }
+
     /**
      * Implements DynamoDB DELETE operation semantics:
      * removes the specified elements from a set attribute (SS, NS, BS).
      * Returns null if the resulting set is empty (caller should remove the attribute).
-     * Returns the existing value unchanged if types don't match or the value isn't a set.
+     * Returns the existing value unchanged if the value to delete isn't a set.
      */
     private JsonNode applyDeleteOperation(JsonNode existingValue, JsonNode deleteValue) {
+        requireSameTypeAsOperand(existingValue, deleteValue, List.of("SS", "NS", "BS"));
         ObjectNode result = JsonNodeFactory.instance.objectNode();
 
         if (deleteValue.has("SS") && existingValue.has("SS")) {
@@ -3223,7 +3307,7 @@ public class DynamoDbService implements ResourceProvider {
         validateKeyAttributeValue(table, pkAttr, pkName, surface);
         validateKeySize(pkAttr, true);
 
-        String pk = extractScalarValue(pkAttr);
+        String pk = encodeKeySegment(extractScalarValue(pkAttr));
         String skName = table.getSortKeyName();
         if (skName != null) {
             JsonNode skAttr = item.get(skName);
@@ -3232,9 +3316,21 @@ public class DynamoDbService implements ResourceProvider {
             }
             validateKeyAttributeValue(table, skAttr, skName, surface);
             validateKeySize(skAttr, false);
-            return pk + "#" + extractScalarValue(skAttr);
+            return pk + "#" + encodeKeySegment(extractScalarValue(skAttr));
         }
         return pk;
+    }
+
+    // '#' separates composite key segments in the in-memory map. Escape it and the escape
+    // character inside each segment so legal string key values cannot produce the same map key.
+    static String encodeKeySegment(String value) {
+        if (value == null) {
+            return "";
+        }
+        if (value.indexOf('#') < 0 && value.indexOf('\\') < 0) {
+            return value;
+        }
+        return value.replace("\\", "\\\\").replace("#", "\\#");
     }
 
     private void validateKeySize(JsonNode attr, boolean partitionKey) {
@@ -3384,12 +3480,11 @@ public class DynamoDbService implements ResourceProvider {
     private String buildItemKeyFromNode(JsonNode item, String pkName, List<String> skNames) {
         JsonNode pkAttr = item.get(pkName);
         if (pkAttr == null) return "";
-        String pk = extractScalarValue(pkAttr);
-        StringBuilder key = new StringBuilder(pk != null ? pk : "");
+        StringBuilder key = new StringBuilder(encodeKeySegment(extractScalarValue(pkAttr)));
         for (String skName : skNames) {
             JsonNode skAttr = item.get(skName);
             if (skAttr != null) {
-                key.append("#").append(extractScalarValue(skAttr));
+                key.append("#").append(encodeKeySegment(extractScalarValue(skAttr)));
             }
         }
         return key.toString();

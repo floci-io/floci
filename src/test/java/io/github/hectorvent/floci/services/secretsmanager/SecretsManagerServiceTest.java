@@ -1,18 +1,30 @@
 package io.github.hectorvent.floci.services.secretsmanager;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.services.kms.KmsService;
+import io.github.hectorvent.floci.services.kms.model.KmsKey;
+import io.github.hectorvent.floci.services.lambda.LambdaService;
+import io.github.hectorvent.floci.services.lambda.model.InvocationType;
+import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
 import org.apache.commons.lang3.RandomStringUtils;
-import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.mockito.ArgumentMatchers;
+import org.mockito.Mockito;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
 import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -152,13 +164,13 @@ class SecretsManagerServiceTest {
         service.createSecret("my-secret", "v1", null, null, null, null, REGION);
 
         // no stages
-        Assertions.assertThrows(AwsException.class, () ->
+        assertThrows(AwsException.class, () ->
             service.putSecretValue("my-secret", "v2", null, null, REGION, List.of())
         );
         // more than 20
         List<String> stages =
                 IntStream.range(0, 21).mapToObj(i -> "stage" + i).toList();
-        Assertions.assertThrows(AwsException.class, () ->
+        assertThrows(AwsException.class, () ->
                 service.putSecretValue("my-secret", "v2", null, null, REGION, stages)
         );
     }
@@ -167,12 +179,12 @@ class SecretsManagerServiceTest {
     void putSecretValueInvalidStageName() {
         service.createSecret("my-secret", "v1", null, null, null, null, REGION);
         // Stage name is 0-length
-        Assertions.assertThrows(AwsException.class, () ->
+        assertThrows(AwsException.class, () ->
                 service.putSecretValue("my-secret", "v2", null, null, REGION, List.of(""))
         );
         // Stage name is larger than 256 characters
         String stageName = RandomStringUtils.randomAlphanumeric(257);
-        Assertions.assertThrows(AwsException.class, () ->
+        assertThrows(AwsException.class, () ->
                 service.putSecretValue("my-secret", "v2", null, null, REGION, List.of(stageName))
         );
 
@@ -359,17 +371,17 @@ class SecretsManagerServiceTest {
     void rotateSecret() throws Exception {
         // We need a mocked LambdaService for testing the orchestrator.
         // The service in the setUp method doesn't have it.
-        io.github.hectorvent.floci.services.lambda.LambdaService mockLambda = org.mockito.Mockito.mock(io.github.hectorvent.floci.services.lambda.LambdaService.class);
+        LambdaService mockLambda = Mockito.mock(LambdaService.class);
         
-        io.github.hectorvent.floci.services.lambda.model.InvokeResult successResult = new io.github.hectorvent.floci.services.lambda.model.InvokeResult();
+        InvokeResult successResult = new InvokeResult();
         // Assume success response
-        org.mockito.Mockito.when(mockLambda.invoke(org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.any(byte[].class), org.mockito.Mockito.any()))
+        Mockito.when(mockLambda.invoke(Mockito.anyString(), Mockito.anyString(), Mockito.any(byte[].class), Mockito.any()))
                 .thenReturn(successResult);
 
         SecretsManagerService svc = new SecretsManagerService(
                 new InMemoryStorage<String, Secret>(), 30,
-                new io.github.hectorvent.floci.core.common.RegionResolver("us-east-1", "000000000000"),
-                mockLambda, new com.fasterxml.jackson.databind.ObjectMapper());
+                new RegionResolver("us-east-1", "000000000000"),
+                mockLambda, new ObjectMapper());
 
         svc.createSecret("my-secret", "value", null, null, null, null, REGION);
         
@@ -382,25 +394,25 @@ class SecretsManagerServiceTest {
         assertTrue(rotated.isRotationEnabled());
         
         // Verify lambda invoked 4 times
-        org.mockito.Mockito.verify(mockLambda, org.mockito.Mockito.timeout(5000).times(4))
-                .invoke(org.mockito.Mockito.eq(REGION),
-                        org.mockito.Mockito.eq("arn:aws:lambda:us-east-1:000000000000:function:rotate"), 
-                        org.mockito.Mockito.any(byte[].class),
-                        org.mockito.Mockito.eq(io.github.hectorvent.floci.services.lambda.model.InvocationType.RequestResponse));
+        Mockito.verify(mockLambda, Mockito.timeout(5000).times(4))
+                .invoke(Mockito.eq(REGION),
+                        Mockito.eq("arn:aws:lambda:us-east-1:000000000000:function:rotate"),
+                        Mockito.any(byte[].class),
+                        Mockito.eq(InvocationType.RequestResponse));
     }
 
     @Test
     void rotateSecretNotImmediate() throws Exception {
-        io.github.hectorvent.floci.services.lambda.LambdaService mockLambda = org.mockito.Mockito.mock(io.github.hectorvent.floci.services.lambda.LambdaService.class);
+        LambdaService mockLambda = Mockito.mock(LambdaService.class);
         
-        io.github.hectorvent.floci.services.lambda.model.InvokeResult successResult = new io.github.hectorvent.floci.services.lambda.model.InvokeResult();
-        org.mockito.Mockito.when(mockLambda.invoke(org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.any(byte[].class), org.mockito.Mockito.any()))
+        InvokeResult successResult = new InvokeResult();
+        Mockito.when(mockLambda.invoke(Mockito.anyString(), Mockito.anyString(), Mockito.any(byte[].class), Mockito.any()))
                 .thenReturn(successResult);
 
         SecretsManagerService svc = new SecretsManagerService(
-                new InMemoryStorage<String, Secret>(), 30,
-                new io.github.hectorvent.floci.core.common.RegionResolver("us-east-1", "000000000000"),
-                mockLambda, new com.fasterxml.jackson.databind.ObjectMapper());
+                new InMemoryStorage<>(), 30,
+                new RegionResolver("us-east-1", "000000000000"),
+                mockLambda, new ObjectMapper());
 
         svc.createSecret("my-secret", "value", null, null, null, null, REGION);
         Secret.RotationRules rules = new Secret.RotationRules(30, null, null);
@@ -410,11 +422,11 @@ class SecretsManagerServiceTest {
                 rules, false, REGION);
 
         // Verify lambda invoked 1 time (testSecret only for non-immediate rotation)
-        org.mockito.Mockito.verify(mockLambda, org.mockito.Mockito.timeout(5000).times(1))
-                .invoke(org.mockito.Mockito.eq(REGION),
-                        org.mockito.Mockito.eq("arn:aws:lambda:us-east-1:000000000000:function:rotate"), 
-                        org.mockito.Mockito.any(byte[].class),
-                        org.mockito.Mockito.eq(io.github.hectorvent.floci.services.lambda.model.InvocationType.RequestResponse));
+        Mockito.verify(mockLambda, Mockito.timeout(5000).times(1))
+                .invoke(Mockito.eq(REGION),
+                        Mockito.eq("arn:aws:lambda:us-east-1:000000000000:function:rotate"),
+                        Mockito.any(byte[].class),
+                        Mockito.eq(InvocationType.RequestResponse));
     }
 
     @Test
@@ -430,12 +442,11 @@ class SecretsManagerServiceTest {
 
     @Test
     void rotateServiceManagedSecretNeedsNoLambdaArn() {
-        io.github.hectorvent.floci.services.lambda.LambdaService mockLambda =
-                org.mockito.Mockito.mock(io.github.hectorvent.floci.services.lambda.LambdaService.class);
+        LambdaService mockLambda = Mockito.mock(LambdaService.class);
         SecretsManagerService svc = new SecretsManagerService(
-                new InMemoryStorage<String, Secret>(), 30,
-                new io.github.hectorvent.floci.core.common.RegionResolver("us-east-1", "000000000000"),
-                mockLambda, new com.fasterxml.jackson.databind.ObjectMapper());
+                new InMemoryStorage<>(), 30,
+                new RegionResolver("us-east-1", "000000000000"),
+                mockLambda, new ObjectMapper());
 
         // The secret RDS manages: rotated by RDS itself, so it carries no rotation Lambda.
         svc.createSecret("rds!db-1234", "value", null, null, null, null, "rds", REGION);
@@ -449,7 +460,7 @@ class SecretsManagerServiceTest {
         assertNull(rotated.getLastRotatedDate());
         assertNull(rotated.getRotationLambdaArn());
         // No Lambda exists to drive the rotation lifecycle, so none may be invoked.
-        org.mockito.Mockito.verifyNoInteractions(mockLambda);
+        Mockito.verifyNoInteractions(mockLambda);
     }
 
     @Test
@@ -698,8 +709,8 @@ class SecretsManagerServiceTest {
      * commercial partition a secret's own ARN, minus the random suffix AWS lets clients omit,
      * resolved to nothing. Round trip through the ARN the emulator itself minted.
      */
-    @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.CsvSource({
+    @ParameterizedTest
+    @CsvSource({
             "us-east-1,      arn:aws:secretsmanager:",
             "us-gov-west-1,  arn:aws-us-gov:secretsmanager:",
             "cn-north-1,     arn:aws-cn:secretsmanager:"})
@@ -941,21 +952,21 @@ class SecretsManagerServiceTest {
 
     @Test
     void rotateSecretFailsEarly() throws Exception {
-        io.github.hectorvent.floci.services.lambda.LambdaService mockLambda = org.mockito.Mockito.mock(io.github.hectorvent.floci.services.lambda.LambdaService.class);
+        LambdaService mockLambda = Mockito.mock(LambdaService.class);
 
-        io.github.hectorvent.floci.services.lambda.model.InvokeResult successResult = new io.github.hectorvent.floci.services.lambda.model.InvokeResult();
-        io.github.hectorvent.floci.services.lambda.model.InvokeResult errorResult = new io.github.hectorvent.floci.services.lambda.model.InvokeResult();
+        InvokeResult successResult = new InvokeResult();
+        InvokeResult errorResult = new InvokeResult();
         errorResult.setFunctionError("Unhandled");
 
         // Fail on second invocation (setSecret)
-        org.mockito.Mockito.when(mockLambda.invoke(org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.any(byte[].class), org.mockito.Mockito.any()))
+        Mockito.when(mockLambda.invoke(Mockito.anyString(), Mockito.anyString(), Mockito.any(byte[].class), Mockito.any()))
                 .thenReturn(successResult)
                 .thenReturn(errorResult);
 
         SecretsManagerService svc = new SecretsManagerService(
-                new InMemoryStorage<String, Secret>(), 30,
-                new io.github.hectorvent.floci.core.common.RegionResolver("us-east-1", "000000000000"),
-                mockLambda, new com.fasterxml.jackson.databind.ObjectMapper());
+                new InMemoryStorage<>(), 30,
+                new RegionResolver("us-east-1", "000000000000"),
+                mockLambda, new ObjectMapper());
 
         svc.createSecret("my-secret", "value", null, null, null, null, REGION);
         Secret.RotationRules rules = new Secret.RotationRules(30, null, null);
@@ -965,29 +976,29 @@ class SecretsManagerServiceTest {
                 rules, true, REGION);
 
         // Verify lambda invoked 2 times only (createSecret, setSecret)
-        org.mockito.Mockito.verify(mockLambda, org.mockito.Mockito.timeout(5000).times(2))
-                .invoke(org.mockito.Mockito.eq(REGION),
-                        org.mockito.Mockito.eq("arn:aws:lambda:us-east-1:000000000000:function:rotate"),
-                        org.mockito.Mockito.any(byte[].class),
-                        org.mockito.Mockito.eq(io.github.hectorvent.floci.services.lambda.model.InvocationType.RequestResponse));
+        Mockito.verify(mockLambda, Mockito.timeout(5000).times(2))
+                .invoke(Mockito.eq(REGION),
+                        Mockito.eq("arn:aws:lambda:us-east-1:000000000000:function:rotate"),
+                        Mockito.any(byte[].class),
+                        Mockito.eq(InvocationType.RequestResponse));
     }
 
     @Test
     void rotateSecret_actuallyChangesTheStoredSecretValue() throws Exception {
-        io.github.hectorvent.floci.services.lambda.LambdaService mockLambda = org.mockito.Mockito.mock(io.github.hectorvent.floci.services.lambda.LambdaService.class);
+        LambdaService mockLambda = Mockito.mock(LambdaService.class);
         String lambdaArn = "arn:aws:lambda:us-east-1:000000000000:function:rotate";
 
         SecretsManagerService svc = new SecretsManagerService(
-                new InMemoryStorage<String, Secret>(), 30,
-                new io.github.hectorvent.floci.core.common.RegionResolver("us-east-1", "000000000000"),
-                mockLambda, new com.fasterxml.jackson.databind.ObjectMapper());
+                new InMemoryStorage<>(), 30,
+                new RegionResolver("us-east-1", "000000000000"),
+                mockLambda, new ObjectMapper());
 
         svc.createSecret("my-secret", "old-value", null, null, null, null, REGION);
 
-        org.mockito.Mockito.when(mockLambda.invoke(org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.any(byte[].class), org.mockito.Mockito.any()))
+        Mockito.when(mockLambda.invoke(Mockito.anyString(), Mockito.anyString(), Mockito.any(byte[].class), Mockito.any()))
                 .thenAnswer(invocation -> {
                     byte[] payloadBytes = invocation.getArgument(2);
-                    com.fasterxml.jackson.databind.JsonNode payload = new com.fasterxml.jackson.databind.ObjectMapper().readTree(payloadBytes);
+                    JsonNode payload = new ObjectMapper().readTree(payloadBytes);
                     String step = payload.get("Step").asText();
                     String token = payload.get("ClientRequestToken").asText();
 
@@ -1000,7 +1011,7 @@ class SecretsManagerServiceTest {
                                         "AWSCURRENT", REGION);
                         default -> { /* setSecret, testSecret: no-op for this test */ }
                     }
-                    io.github.hectorvent.floci.services.lambda.model.InvokeResult ok = new io.github.hectorvent.floci.services.lambda.model.InvokeResult();
+                    InvokeResult ok = new InvokeResult();
                     ok.setStatusCode(200);
                     return ok;
                 });
@@ -1025,13 +1036,13 @@ class SecretsManagerServiceTest {
 
     @Test
     void rotateSecret_previousRotationInProgressThrows() throws Exception {
-        io.github.hectorvent.floci.services.lambda.LambdaService mockLambda = org.mockito.Mockito.mock(io.github.hectorvent.floci.services.lambda.LambdaService.class);
+        LambdaService mockLambda = Mockito.mock(LambdaService.class);
         String lambdaArn = "arn:aws:lambda:us-east-1:000000000000:function:rotate";
 
         SecretsManagerService svc = new SecretsManagerService(
                 new InMemoryStorage<String, Secret>(), 30,
-                new io.github.hectorvent.floci.core.common.RegionResolver("us-east-1", "000000000000"),
-                mockLambda, new com.fasterxml.jackson.databind.ObjectMapper());
+                new RegionResolver("us-east-1", "000000000000"),
+                mockLambda, new ObjectMapper());
 
         svc.createSecret("my-secret", "old-value", null, null, null, null, REGION);
 
@@ -1047,23 +1058,23 @@ class SecretsManagerServiceTest {
 
     @Test
     void rotateSecret_concurrentCallsLockingWorks() throws Exception {
-        io.github.hectorvent.floci.services.lambda.LambdaService mockLambda = org.mockito.Mockito.mock(io.github.hectorvent.floci.services.lambda.LambdaService.class);
+        LambdaService mockLambda = Mockito.mock(LambdaService.class);
         String lambdaArn = "arn:aws:lambda:us-east-1:000000000000:function:rotate";
 
         SecretsManagerService svc = new SecretsManagerService(
                 new InMemoryStorage<String, Secret>(), 30,
-                new io.github.hectorvent.floci.core.common.RegionResolver("us-east-1", "000000000000"),
-                mockLambda, new com.fasterxml.jackson.databind.ObjectMapper());
+                new RegionResolver("us-east-1", "000000000000"),
+                mockLambda, new ObjectMapper());
 
         svc.createSecret("my-secret", "old-value", null, null, null, null, REGION);
         
-        java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+        CountDownLatch latch = new CountDownLatch(1);
         
-        org.mockito.Mockito.when(mockLambda.invoke(org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.any(byte[].class), org.mockito.Mockito.any()))
+        Mockito.when(mockLambda.invoke(Mockito.anyString(), Mockito.anyString(), Mockito.any(byte[].class), Mockito.any()))
                 .thenAnswer(invocation -> {
                     // Create secret and hold the lock on executor to simulate delay
                     byte[] payloadBytes = invocation.getArgument(2);
-                    com.fasterxml.jackson.databind.JsonNode payload = new com.fasterxml.jackson.databind.ObjectMapper().readTree(payloadBytes);
+                    JsonNode payload = new ObjectMapper().readTree(payloadBytes);
                     String step = payload.get("Step").asText();
                     String token = payload.get("ClientRequestToken").asText();
 
@@ -1072,7 +1083,7 @@ class SecretsManagerServiceTest {
                         latch.await();
                     }
 
-                    io.github.hectorvent.floci.services.lambda.model.InvokeResult ok = new io.github.hectorvent.floci.services.lambda.model.InvokeResult();
+                    InvokeResult ok = new InvokeResult();
                     ok.setStatusCode(200);
                     return ok;
                 });
@@ -1277,14 +1288,13 @@ class SecretsManagerServiceTest {
      * to {@code services.kms}, so it is mocked here the same way the rotation tests mock
      * LambdaService.
      */
-    private SecretsManagerService serviceWithKms(io.github.hectorvent.floci.services.kms.KmsService kms) {
+    private SecretsManagerService serviceWithKms(KmsService kms) {
         return new SecretsManagerService(new InMemoryStorage<>(), 30,
-                new RegionResolver(REGION, "000000000000"), null, new com.fasterxml.jackson.databind.ObjectMapper(), kms);
+                new RegionResolver(REGION, "000000000000"), null, new ObjectMapper(), kms);
     }
 
-    private static io.github.hectorvent.floci.services.kms.model.KmsKey kmsKey(boolean enabled, String state) {
-        io.github.hectorvent.floci.services.kms.model.KmsKey key =
-                new io.github.hectorvent.floci.services.kms.model.KmsKey();
+    private static KmsKey kmsKey(boolean enabled, String state) {
+        KmsKey key = new KmsKey();
         key.setKeyId("abcd1234-ef56-7890-abcd-ef1234567890");
         key.setEnabled(enabled);
         key.setKeyState(state);
@@ -1293,10 +1303,9 @@ class SecretsManagerServiceTest {
 
     @Test
     void createSecretRejectsAKmsKeyThatDoesNotExist() {
-        io.github.hectorvent.floci.services.kms.KmsService kms =
-                org.mockito.Mockito.mock(io.github.hectorvent.floci.services.kms.KmsService.class);
-        org.mockito.Mockito.when(kms.describeKey(org.mockito.ArgumentMatchers.anyString(),
-                        org.mockito.ArgumentMatchers.anyString()))
+        KmsService kms = Mockito.mock(KmsService.class);
+        Mockito.when(kms.describeKey(ArgumentMatchers.anyString(),
+                        ArgumentMatchers.anyString()))
                 .thenThrow(new AwsException("NotFoundException", "Key not found", 404));
 
         AwsException ex = assertThrows(AwsException.class, () -> serviceWithKms(kms)
@@ -1306,10 +1315,9 @@ class SecretsManagerServiceTest {
 
     @Test
     void createSecretRejectsADisabledKmsKey() {
-        io.github.hectorvent.floci.services.kms.KmsService kms =
-                org.mockito.Mockito.mock(io.github.hectorvent.floci.services.kms.KmsService.class);
-        org.mockito.Mockito.when(kms.describeKey(org.mockito.ArgumentMatchers.anyString(),
-                        org.mockito.ArgumentMatchers.anyString()))
+        KmsService kms = Mockito.mock(KmsService.class);
+        Mockito.when(kms.describeKey(ArgumentMatchers.anyString(),
+                        ArgumentMatchers.anyString()))
                 .thenReturn(kmsKey(false, "Disabled"));
 
         AwsException ex = assertThrows(AwsException.class, () -> serviceWithKms(kms)
@@ -1319,10 +1327,9 @@ class SecretsManagerServiceTest {
 
     @Test
     void createSecretRejectsAKmsKeyPendingDeletion() {
-        io.github.hectorvent.floci.services.kms.KmsService kms =
-                org.mockito.Mockito.mock(io.github.hectorvent.floci.services.kms.KmsService.class);
-        org.mockito.Mockito.when(kms.describeKey(org.mockito.ArgumentMatchers.anyString(),
-                        org.mockito.ArgumentMatchers.anyString()))
+        KmsService kms = Mockito.mock(KmsService.class);
+        Mockito.when(kms.describeKey(ArgumentMatchers.anyString(),
+                        ArgumentMatchers.anyString()))
                 .thenReturn(kmsKey(true, "PendingDeletion"));
 
         AwsException ex = assertThrows(AwsException.class, () -> serviceWithKms(kms)
@@ -1332,10 +1339,9 @@ class SecretsManagerServiceTest {
 
     @Test
     void createSecretAcceptsAnEnabledKmsKey() {
-        io.github.hectorvent.floci.services.kms.KmsService kms =
-                org.mockito.Mockito.mock(io.github.hectorvent.floci.services.kms.KmsService.class);
-        org.mockito.Mockito.when(kms.describeKey(org.mockito.ArgumentMatchers.anyString(),
-                        org.mockito.ArgumentMatchers.anyString()))
+        KmsService kms = Mockito.mock(KmsService.class);
+        Mockito.when(kms.describeKey(ArgumentMatchers.anyString(),
+                        ArgumentMatchers.anyString()))
                 .thenReturn(kmsKey(true, "Enabled"));
 
         Secret secret = serviceWithKms(kms)
@@ -1347,26 +1353,24 @@ class SecretsManagerServiceTest {
     void theAwsManagedDefaultKeyIsNeverLookedUp() {
         // AWS creates aws/secretsmanager on demand, so it always resolves. Looking it up would
         // fail on a fresh emulator where nobody has created it.
-        io.github.hectorvent.floci.services.kms.KmsService kms =
-                org.mockito.Mockito.mock(io.github.hectorvent.floci.services.kms.KmsService.class);
+        KmsService kms = Mockito.mock(KmsService.class);
         SecretsManagerService kmsAware = serviceWithKms(kms);
 
         kmsAware.createSecret("default-key", "v1", null, null, "alias/aws/secretsmanager", null, REGION);
         kmsAware.createSecret("bare-default", "v1", null, null, "aws/secretsmanager", null, REGION);
 
-        org.mockito.Mockito.verify(kms, org.mockito.Mockito.never())
-                .describeKey(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyString());
+        Mockito.verify(kms, Mockito.never())
+                .describeKey(ArgumentMatchers.anyString(), ArgumentMatchers.anyString());
     }
 
     @Test
     void updateSecretRejectsAKmsKeyThatDoesNotExist() {
-        io.github.hectorvent.floci.services.kms.KmsService kms =
-                org.mockito.Mockito.mock(io.github.hectorvent.floci.services.kms.KmsService.class);
+        KmsService kms = Mockito.mock(KmsService.class);
         SecretsManagerService kmsAware = serviceWithKms(kms);
         kmsAware.createSecret("kms-secret", "v1", null, null, null, null, REGION);
 
-        org.mockito.Mockito.when(kms.describeKey(org.mockito.ArgumentMatchers.anyString(),
-                        org.mockito.ArgumentMatchers.anyString()))
+        Mockito.when(kms.describeKey(ArgumentMatchers.anyString(),
+                        ArgumentMatchers.anyString()))
                 .thenThrow(new AwsException("NotFoundException", "Key not found", 404));
 
         AwsException ex = assertThrows(AwsException.class, () ->
@@ -1376,12 +1380,11 @@ class SecretsManagerServiceTest {
 
     @Test
     void aSecretWithoutAKmsKeyNeedsNoLookup() {
-        io.github.hectorvent.floci.services.kms.KmsService kms =
-                org.mockito.Mockito.mock(io.github.hectorvent.floci.services.kms.KmsService.class);
+        KmsService kms = Mockito.mock(KmsService.class);
         serviceWithKms(kms).createSecret("no-key", "v1", null, null, null, null, REGION);
 
-        org.mockito.Mockito.verify(kms, org.mockito.Mockito.never())
-                .describeKey(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyString());
+        Mockito.verify(kms, Mockito.never())
+                .describeKey(ArgumentMatchers.anyString(), ArgumentMatchers.anyString());
     }
 
     // ─── Replication ───────────────────────────────────────────────────────────
@@ -1389,7 +1392,7 @@ class SecretsManagerServiceTest {
     private static final String REPLICA_REGION = "eu-west-1";
 
     private Secret replicate(String name, String... regions) {
-        List<SecretsManagerService.ReplicaRegion> targets = new java.util.ArrayList<>();
+        List<SecretsManagerService.ReplicaRegion> targets = new ArrayList<>();
         for (String r : regions) {
             targets.add(new SecretsManagerService.ReplicaRegion(r, null));
         }

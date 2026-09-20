@@ -1,14 +1,8 @@
 package io.github.hectorvent.floci.services.appsync.graphql;
 
-import graphql.ErrorType;
-import graphql.ExecutionResult;
-import graphql.ExecutionResultImpl;
-import graphql.GraphQLError;
-import graphql.GraphqlErrorBuilder;
-import graphql.language.SourceLocation;
-import io.github.hectorvent.floci.services.appsync.graphql.auth.AppSyncFieldUnauthorizedException;
 import org.junit.jupiter.api.Test;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -17,22 +11,22 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * {@link AppSyncErrorFormatter} now formats the plain {@code Map}/{@code List} JSON the GraphQL
+ * sidecar's {@code /v1/execute} returns (graphql-java's own {@code toSpecification()} shape),
+ * not a live graphql-java {@code ExecutionResult} (issue #2917); these build that shape by hand.
+ */
 class AppSyncErrorFormatterTest {
 
     private final AppSyncErrorFormatter formatter = new AppSyncErrorFormatter();
 
     @Test
     void invalidSyntaxMapsToTopLevelSyntaxError() {
-        GraphQLError syntaxError = GraphqlErrorBuilder.newError()
-                .message("Invalid syntax near '{'")
-                .errorType(ErrorType.InvalidSyntax)
-                .location(new SourceLocation(1, 1))
-                .build();
-        ExecutionResult result = ExecutionResultImpl.newExecutionResult()
-                .addError(syntaxError)
-                .build();
+        Map<String, Object> sidecarResult = Map.of(
+                "errors", List.of(sidecarError("Invalid syntax near '{'", List.of(Map.of("line", 1, "column", 1)),
+                        null, "InvalidSyntax")));
 
-        Map<String, Object> response = formatter.format(result);
+        Map<String, Object> response = formatter.format(sidecarResult);
 
         assertFalse(response.containsKey("data"));
         @SuppressWarnings("unchecked")
@@ -48,18 +42,14 @@ class AppSyncErrorFormatterTest {
 
     @Test
     void validationErrorUsesTopLevelErrorTypeNotExtensionsOnly() {
-        GraphQLError validationError = GraphqlErrorBuilder.newError()
-                .message("Validation error of type FieldUndefined: Field 'nope' is undefined")
-                .errorType(ErrorType.ValidationError)
-                .location(new SourceLocation(1, 3))
-                .path(List.of("nope"))
-                .build();
-        ExecutionResult result = ExecutionResultImpl.newExecutionResult()
-                .data(null)
-                .addError(validationError)
-                .build();
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("nope", null);
+        Map<String, Object> sidecarResult = Map.of(
+                "data", data,
+                "errors", List.of(sidecarError("Validation error of type FieldUndefined: Field 'nope' is undefined",
+                        List.of(Map.of("line", 1, "column", 3)), List.of("nope"), "ValidationError")));
 
-        Map<String, Object> response = formatter.format(result);
+        Map<String, Object> response = formatter.format(sidecarResult);
 
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> errors = (List<Map<String, Object>>) response.get("errors");
@@ -90,26 +80,18 @@ class AppSyncErrorFormatterTest {
         Map<String, Object> forBraces = formatter.transportError(
                 "MalformedHttpRequestException",
                 AppSyncErrorFormatter.MSG_UNABLE_TO_PARSE);
-        Map<String, Object> forArray = formatter.transportError(
-                "MalformedHttpRequestException",
-                AppSyncErrorFormatter.MSG_UNABLE_TO_PARSE);
 
         assertEquals("Unable to parse GraphQL query.",
-                ((List<?>) forBraces.get("errors")).isEmpty() ? null
-                        : ((Map<?, ?>) ((List<?>) forBraces.get("errors")).get(0)).get("message"));
-        assertEquals("Unable to parse GraphQL query.",
-                ((Map<?, ?>) ((List<?>) forArray.get("errors")).get(0)).get("message"));
+                ((Map<?, ?>) ((List<?>) forBraces.get("errors")).get(0)).get("message"));
     }
 
     @Test
     void successfulDataIncludedWithoutErrors() {
-        Map<String, Object> data = new java.util.LinkedHashMap<>();
+        Map<String, Object> data = new LinkedHashMap<>();
         data.put("hello", null);
-        ExecutionResult result = ExecutionResultImpl.newExecutionResult()
-                .data(data)
-                .build();
+        Map<String, Object> sidecarResult = Map.of("data", data);
 
-        Map<String, Object> response = formatter.format(result);
+        Map<String, Object> response = formatter.format(sidecarResult);
 
         @SuppressWarnings("unchecked")
         Map<String, Object> responseData = (Map<String, Object>) response.get("data");
@@ -120,15 +102,14 @@ class AppSyncErrorFormatterTest {
 
     @Test
     void unauthorizedClassificationMapsToUnauthorized() {
-        GraphQLError error = new AppSyncFieldUnauthorizedException(List.of("hello"), "hello", "Query");
-        Map<String, Object> data = new java.util.LinkedHashMap<>();
+        Map<String, Object> data = new LinkedHashMap<>();
         data.put("hello", null);
-        ExecutionResult result = ExecutionResultImpl.newExecutionResult()
-                .data(data)
-                .addError(error)
-                .build();
+        Map<String, Object> sidecarResult = Map.of(
+                "data", data,
+                "errors", List.of(sidecarError("Not Authorized to access hello on type Query",
+                        null, List.of("hello"), "Unauthorized")));
 
-        Map<String, Object> response = formatter.format(result);
+        Map<String, Object> response = formatter.format(sidecarResult);
 
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> errors = (List<Map<String, Object>>) response.get("errors");
@@ -136,5 +117,21 @@ class AppSyncErrorFormatterTest {
         assertEquals("Not Authorized to access hello on type Query", errors.get(0).get("message"));
         assertEquals(List.of("hello"), errors.get(0).get("path"));
         assertNull(errors.get(0).get("errorInfo"));
+    }
+
+    private static Map<String, Object> sidecarError(String message, List<Map<String, Object>> locations,
+                                                     List<String> path, String classification) {
+        Map<String, Object> error = new LinkedHashMap<>();
+        error.put("message", message);
+        if (locations != null) {
+            error.put("locations", locations);
+        }
+        if (path != null) {
+            error.put("path", path);
+        }
+        if (classification != null) {
+            error.put("extensions", Map.of("classification", classification));
+        }
+        return error;
     }
 }

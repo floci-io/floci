@@ -6,12 +6,20 @@ import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.fail;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
 /**
  * Verifies the resource-level {@code DeletionPolicy} attribute (issue #1555): {@code Retain} keeps a
@@ -26,6 +34,50 @@ class CloudFormationDeletionPolicyIntegrationTest {
 
     private static final String CUSTOM_AUTH =
             "AWS4-HMAC-SHA256 Credential=111122223333/20260205/eu-west-1/cloudformation/aws4_request";
+
+    @Test
+    void deletingNestedStacksDoesNotExhaustOperationWorkers() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String childTemplateKey = "child-delete-workers-" + suffix + ".json";
+        given().when().put("/nested-stack-templates").then().statusCode(200);
+        given()
+                .contentType("application/json")
+                .body("{\"Resources\":{}}")
+        .when()
+                .put("/nested-stack-templates/" + childTemplateKey)
+        .then()
+                .statusCode(200);
+
+        List<String> stackIds = new ArrayList<>();
+        List<String> stackNames = new ArrayList<>();
+        String childUrl = "http://localhost/nested-stack-templates/" + childTemplateKey;
+        for (int i = 0; i < 16; i++) {
+            String stackName = "nested-delete-worker-" + suffix + "-" + i;
+            String template = "{\"Resources\":{\"Child\":{\"Type\":\"AWS::CloudFormation::Stack\","
+                    + "\"Properties\":{\"TemplateURL\":\"" + childUrl + "\"}}}}";
+            String stackId = createStack(stackName, template);
+            awaitStackStatus(stackId, "CREATE_COMPLETE");
+            stackNames.add(stackName);
+            stackIds.add(stackId);
+        }
+
+        assertTimeoutPreemptively(Duration.ofSeconds(20), () -> {
+            try (ExecutorService clients = Executors.newFixedThreadPool(16)) {
+                List<CompletableFuture<Void>> deletes = stackNames.stream()
+                        .map(name -> CompletableFuture.runAsync(() -> deleteStack(name), clients))
+                        .toList();
+                CompletableFuture.allOf(deletes.toArray(CompletableFuture[]::new)).join();
+                for (String stackId : stackIds) {
+                    try {
+                        awaitStackStatus(stackId, "DELETE_COMPLETE");
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new AssertionError("Interrupted while waiting for nested stack deletion", e);
+                    }
+                }
+            }
+        });
+    }
 
     @BeforeAll
     static void configureRestAssured() {
@@ -363,6 +415,50 @@ class CloudFormationDeletionPolicyIntegrationTest {
             if (nestedStackId != null) {
                 deleteStack(nestedStackId);
             }
+        }
+    }
+
+    @Test
+    void updateNestedStackReusesChildStackAndUpdatesNamedLambda() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String functionName = "cfn-nested-update-func-" + suffix;
+        String bucketName = "nested-stack-templates-" + suffix;
+        String templateUrl = bucketName + "/child-lambda-update.json";
+        String parentTemplate = """
+            {
+              "Resources": {
+                "ChildStack": {
+                  "Type": "AWS::CloudFormation::Stack",
+                  "Properties": { "TemplateURL": "http://localhost/%s" }
+                }
+              }
+            }
+        """.formatted(templateUrl);
+        String stackName = "parent-nested-lambda-update-" + suffix;
+
+        given().header("Authorization", CUSTOM_AUTH)
+                .when().put("/" + bucketName).then().statusCode(200);
+        given().header("Authorization", CUSTOM_AUTH)
+                .contentType("application/json").body(nestedLambdaTemplate(functionName, 3))
+                .when().put("/" + templateUrl).then().statusCode(200);
+        String parentStackId = createStack(stackName, parentTemplate, CUSTOM_AUTH);
+        try {
+            awaitStackStatus(parentStackId, "CREATE_COMPLETE", CUSTOM_AUTH);
+            String childStackId = getNestedStackId(parentStackId, "ChildStack", CUSTOM_AUTH);
+
+            given().header("Authorization", CUSTOM_AUTH)
+                    .contentType("application/json").body(nestedLambdaTemplate(functionName, 9))
+                    .when().put("/" + templateUrl).then().statusCode(200);
+            updateStack(stackName, parentTemplate, CUSTOM_AUTH);
+            awaitStackStatus(parentStackId, "UPDATE_COMPLETE", CUSTOM_AUTH);
+
+            assertThat(getNestedStackId(parentStackId, "ChildStack", CUSTOM_AUTH), equalTo(childStackId));
+            given().header("Authorization", CUSTOM_AUTH)
+                    .when().get("/2015-03-31/functions/" + functionName)
+                    .then().statusCode(200)
+                    .body("Configuration.Timeout", equalTo(9));
+        } finally {
+            deleteStack(stackName);
         }
     }
 
@@ -965,6 +1061,25 @@ class CloudFormationDeletionPolicyIntegrationTest {
         int physStart = xml.indexOf("<PhysicalResourceId>", logIdx) + "<PhysicalResourceId>".length();
         int physEnd = xml.indexOf("</PhysicalResourceId>", physStart);
         return xml.substring(physStart, physEnd);
+    }
+
+    private static String nestedLambdaTemplate(String functionName, int timeout) {
+        return """
+            {
+              "Resources": {
+                "Function": {
+                  "Type": "AWS::Lambda::Function",
+                  "Properties": {
+                    "FunctionName": "%s",
+                    "Runtime": "nodejs20.x",
+                    "Handler": "index.handler",
+                    "Timeout": %d,
+                    "Role": "arn:aws:iam::000000000000:role/cfn-test-lambda-role"
+                  }
+                }
+              }
+            }
+            """.formatted(functionName, timeout);
     }
 
     private static String createStack(String stackName, String template) {

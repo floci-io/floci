@@ -386,6 +386,32 @@ public class SesContactService {
         return existing;
     }
 
+    /**
+     * Replaces a contact outright, as a contact-list import job's {@code PUT} action does. Probed
+     * against real AWS: an imported record is the whole contact, so preferences, attributes, and
+     * the unsubscribe flag it omits are cleared rather than merged, unlike
+     * {@link #updateContact}, whose topic preferences merge by name.
+     */
+    public Contact replaceContact(String listName, String emailAddress, List<TopicPreference> topicPreferences,
+                                  Boolean unsubscribeAll, String attributesData, String region) {
+        validateContactInput(listName, emailAddress, topicPreferences, region);
+        String key = contactKey(region, listName, emailAddress);
+        Contact existing;
+        // Same lock as create/update: a concurrent deleteContactList must not slip between the
+        // validation and the write.
+        synchronized (contactMutationLock) {
+            getContactList(listName, region);
+            existing = contactStore.get(key).orElseThrow(() -> contactNotFound(emailAddress));
+            existing.setTopicPreferences(topicPreferences);
+            existing.setUnsubscribeAll(unsubscribeAll != null && unsubscribeAll);
+            existing.setAttributesData(attributesData);
+            existing.setLastUpdatedTimestamp(Instant.now(clock));
+            contactStore.put(key, existing);
+        }
+        LOG.infov("Replaced SES contact {0} in list {1}", emailAddress, listName);
+        return existing;
+    }
+
     public void deleteContact(String listName, String emailAddress, String region) {
         validateEmailAddress(emailAddress);
         String key = contactKey(region, listName, emailAddress);

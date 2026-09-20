@@ -32,6 +32,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -292,7 +293,7 @@ public class EcrRegistryManager {
             LOG.infov("Started ECR backing registry {0} on host port {1}", name, String.valueOf(chosenPort));
 
             // Attach log streaming (new feature)
-            attachLogStream();
+            attachLogStream(false);
         } catch (Exception e) {
             // Release the reserved port unless the container actually started, so a
             // failed start (e.g. Docker unreachable) does not permanently exhaust the
@@ -330,15 +331,17 @@ public class EcrRegistryManager {
         specBuilder.withBind(hostDataPath, "/var/lib/registry");
     }
 
-    private void attachLogStream() {
+    // An adopted container carries history from before this process; only its new lines are wanted.
+    private void attachLogStream(boolean adopted) {
         closeLogStream();
         String shortId = containerId.length() >= 8 ? containerId.substring(0, 8) : containerId;
         String logGroup = "/aws/ecr/registry";
         String logStreamName = logStreamer.generateLogStreamName(shortId);
         String region = regionResolver.getDefaultRegion();
 
-        this.logStream = logStreamer.attach(
-                containerId, logGroup, logStreamName, region, "ecr:registry");
+        this.logStream = adopted
+                ? logStreamer.attachFromNow(containerId, logGroup, logStreamName, region, "ecr:registry")
+                : logStreamer.attach(containerId, logGroup, logStreamName, region, "ecr:registry");
     }
 
     private void closeLogStream() {
@@ -354,15 +357,15 @@ public class EcrRegistryManager {
         }
     }
 
-    private java.util.Optional<String> resolveRegistryDockerNetwork() {
-        java.util.Optional<String> configured = config.services().ecr().dockerNetwork();
+    private Optional<String> resolveRegistryDockerNetwork() {
+        Optional<String> configured = config.services().ecr().dockerNetwork();
         if (configured.isPresent() && !configured.get().isBlank()) {
             return configured;
         }
         if (containerDetector.isRunningInContainer()) {
             return currentContainerNetworkResolver.resolveNetworkName();
         }
-        return java.util.Optional.empty();
+        return Optional.empty();
     }
 
     private void runReconcileOnce() {
@@ -575,7 +578,7 @@ public class EcrRegistryManager {
                     containerId, String.valueOf(hostPort));
 
             // Attach log streaming to adopted container
-            attachLogStream();
+            attachLogStream(true);
         } catch (Exception e) {
             LOG.warnv("Failed to adopt existing ECR registry container: {0}", e.getMessage());
             this.containerId = null;

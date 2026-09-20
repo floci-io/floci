@@ -6,9 +6,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.services.appsync.AppSyncService;
+import io.github.hectorvent.floci.services.appsync.GraphqlSidecarClient;
+import io.github.hectorvent.floci.services.appsync.GraphqlSidecarClient.DenyField;
+import io.github.hectorvent.floci.services.appsync.GraphqlSidecarClient.PlanResult;
 import io.github.hectorvent.floci.services.appsync.graphql.auth.AppSyncAuthContext;
 import io.github.hectorvent.floci.services.appsync.graphql.auth.AuthMiddleware;
 import io.github.hectorvent.floci.services.appsync.graphql.auth.AuthRequestInfo;
+import io.github.hectorvent.floci.services.appsync.graphql.auth.SidecarFieldAuthorizationPlanner;
 import io.github.hectorvent.floci.services.appsync.model.GraphqlApi;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.POST;
@@ -26,6 +30,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -41,7 +46,9 @@ public class AppSyncExecutionController {
 
     private final AppSyncService appSyncService;
     private final SchemaRegistry schemaRegistry;
-    private final QueryExecutor queryExecutor;
+    private final SidecarSchemaCompiler schemaCompiler;
+    private final SidecarFieldAuthorizationPlanner fieldAuthorizationPlanner;
+    private final GraphqlSidecarClient sidecarClient;
     private final AppSyncErrorFormatter errorFormatter;
     private final ObjectMapper objectMapper;
     private final AuthMiddleware authMiddleware;
@@ -50,14 +57,18 @@ public class AppSyncExecutionController {
     @Inject
     public AppSyncExecutionController(AppSyncService appSyncService,
                                       SchemaRegistry schemaRegistry,
-                                      QueryExecutor queryExecutor,
+                                      SidecarSchemaCompiler schemaCompiler,
+                                      SidecarFieldAuthorizationPlanner fieldAuthorizationPlanner,
+                                      GraphqlSidecarClient sidecarClient,
                                       AppSyncErrorFormatter errorFormatter,
                                       ObjectMapper objectMapper,
                                       AuthMiddleware authMiddleware,
                                       RequestContext requestContext) {
         this.appSyncService = appSyncService;
         this.schemaRegistry = schemaRegistry;
-        this.queryExecutor = queryExecutor;
+        this.schemaCompiler = schemaCompiler;
+        this.fieldAuthorizationPlanner = fieldAuthorizationPlanner;
+        this.sidecarClient = sidecarClient;
         this.errorFormatter = errorFormatter;
         this.objectMapper = objectMapper;
         this.authMiddleware = authMiddleware;
@@ -102,17 +113,26 @@ public class AppSyncExecutionController {
                 return graphqlError(e.getHttpStatus(), e.getErrorType(), e.getMessage());
             }
 
-            var graphQLOpt = schemaRegistry.getGraphQL(apiId);
-            if (graphQLOpt.isEmpty()) {
+            Optional<String> sdlOpt = schemaRegistry.getSdl(apiId);
+            if (sdlOpt.isEmpty()) {
                 return graphqlError(502, "GraphQLSchemaException",
                         AppSyncErrorFormatter.MSG_NO_SCHEMA);
             }
 
             try {
-                Map<String, Object> result = queryExecutor.execute(
-                        graphQLOpt.get(), parsed.query(), parsed.variables(), parsed.operationName(),
-                        graphQlContext(authContext));
-                return Response.ok(result).type(MediaType.APPLICATION_JSON).build();
+                String preparedSdl = schemaCompiler.withDirectivesAndScalars(sdlOpt.get());
+                Map<String, String> scalars = schemaCompiler.scalarKindMapping();
+                PlanResult plan = sidecarClient.plan(preparedSdl, scalars, parsed.query(), parsed.operationName());
+                if ("SUBSCRIPTION".equals(plan.operationType())) {
+                    // Real AppSync serves subscriptions over its separate realtime endpoint, not
+                    // this plain-HTTP one; graphql-java itself has no opinion on that, so Floci
+                    // rejects it before ever calling /v1/execute.
+                    return Response.ok(errorFormatter.format(operationNotSupported())).type(MediaType.APPLICATION_JSON).build();
+                }
+                List<DenyField> denyFields = fieldAuthorizationPlanner.planDenyFields(plan, authContext);
+                Map<String, Object> rawResult = sidecarClient.execute(
+                        preparedSdl, scalars, parsed.query(), parsed.variables(), parsed.operationName(), denyFields);
+                return Response.ok(errorFormatter.format(rawResult)).type(MediaType.APPLICATION_JSON).build();
             } catch (AppSyncTransportException e) {
                 return graphqlError(e.getHttpStatus(), e.getErrorType(), e.getMessage());
             }
@@ -238,15 +258,11 @@ public class AppSyncExecutionController {
         return ips;
     }
 
-    private static Map<Object, Object> graphQlContext(AppSyncAuthContext authContext) {
-        Map<Object, Object> context = new HashMap<>();
-        context.put(AppSyncAuthContext.KEY, authContext);
-        if (authContext.identity() != null) {
-            context.put("identity", authContext.identity());
-        }
-        context.put("authType", authContext.authType());
-        context.put("deniedFields", authContext.deniedFieldsList());
-        return context;
+    private static Map<String, Object> operationNotSupported() {
+        Map<String, Object> error = new HashMap<>();
+        error.put("message", "Subscriptions are not supported over HTTP");
+        error.put("extensions", Map.of("classification", "OperationNotSupported"));
+        return Map.of("errors", List.of(error));
     }
 
     private Response graphqlError(int status, String errorType, String message) {

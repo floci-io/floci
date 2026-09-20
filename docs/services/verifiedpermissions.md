@@ -69,12 +69,23 @@ to the AVP token type.
 
 ## Cedar evaluation
 
-Cedar parsing, schema validation, and authorization run in a lazily started Cedar 4 sidecar. The
-main Floci JVM and native images do not include Cedar Java or its multi-platform native runtime.
-This follows the same isolation pattern as `floci-duck`: Floci starts the sidecar on the first
-Cedar-dependent AVP operation, probes its health endpoint, and reuses it until shutdown. A
-pre-configured sidecar URL can be supplied when Docker Compose or another supervisor owns the
-sidecar lifecycle.
+Cedar parsing, schema validation, and authorization run in a lazily started sidecar container,
+`floci/floci-sidecar-cedar`, published from
+[floci-io/floci-sidecars](https://github.com/floci-io/floci-sidecars). The main Floci JVM and
+native images do not include Cedar Java or its multi-platform native runtime. Floci starts the
+sidecar on the first Cedar-dependent AVP operation, probes its health endpoint, and reuses it until
+shutdown. The image is pinned to an exact version rather than `latest`: a cached `latest` is never
+re-pulled, so a pin is the only way a Floci upgrade reliably brings the matching sidecar. Pull it
+ahead of time on an air-gapped host with `docker pull floci/floci-sidecar-cedar:1.1.0`.
+
+The sidecar implements the
+[sidecar contract](https://github.com/floci-io/floci-sidecars/blob/main/docs/contract.md); its
+endpoints are documented in the sidecar's
+[API reference](https://github.com/floci-io/floci-sidecars/blob/main/cedar/API.md). Floci checks
+the contract version the sidecar reports on `/health`: a sidecar speaking another contract major is
+refused immediately with an `InternalServerException` naming the image and the variable to change.
+A pre-configured sidecar URL can be supplied when Docker Compose or another supervisor owns the
+sidecar lifecycle; it is checked the same way.
 
 The sidecar is required by operations that parse or validate Cedar, including `PutSchema`,
 identity-source entity-type validation, policy and policy-template create/update paths, and all
@@ -131,7 +142,7 @@ aliases, identity sources, and idempotency records with other resettable service
 | --- | --- | --- |
 | `FLOCI_SERVICES_VERIFIEDPERMISSIONS_ENABLED` | `true` | Enables Amazon Verified Permissions |
 | `FLOCI_SERVICES_VERIFIEDPERMISSIONS_CEDAR_URL` | unset | Uses an externally managed Cedar sidecar URL and skips container management |
-| `FLOCI_SERVICES_VERIFIEDPERMISSIONS_CEDAR_IMAGE` | `floci/floci:latest-cedar` | Image used for the lazily managed Cedar 4 sidecar |
+| `FLOCI_SERVICES_VERIFIEDPERMISSIONS_CEDAR_IMAGE` | `floci/floci-sidecar-cedar:1.1.0` | Image used for the lazily managed Cedar 4 sidecar; pin an exact version |
 
 ## Examples
 

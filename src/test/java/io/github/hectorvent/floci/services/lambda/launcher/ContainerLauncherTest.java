@@ -65,7 +65,6 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
@@ -401,6 +400,55 @@ class ContainerLauncherTest {
     }
 
     @Test
+    void launchFunction_appliesConfiguredDockerFlagsToRealContainer() throws Exception {
+        when(config.services().lambda().dockerFlags()).thenReturn(Optional.of(
+                "--env NODE_EXTRA_CA_CERTS=/opt/certs/root.pem "
+                        + "--volume /tmp/certs:/opt/certs:ro --add-host api.local:host-gateway "
+                        + "--dns 1.1.1.1 --label purpose=debug --network lambda-net "
+                        + "--user 1000:1000 --privileged --publish 127.0.0.1:5050:5050"));
+        Path codePath = Files.createDirectory(tempDir.resolve("flags-code"));
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("flags-fn");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+
+        launcher.launch(fn);
+
+        ContainerSpec spec = captureRealContainerSpec();
+        assertTrue(spec.env().contains("NODE_EXTRA_CA_CERTS=/opt/certs/root.pem"));
+        assertEquals("lambda-net", spec.networkMode());
+        assertEquals("1000:1000", spec.user());
+        assertTrue(spec.privileged());
+        assertEquals(Map.of(5050, 5050), spec.portBindings());
+        assertEquals(List.of(5050), spec.loopbackPortBindings());
+        assertTrue(spec.extraHosts().contains("api.local:host-gateway"));
+        assertTrue(spec.dnsServers().contains("1.1.1.1"));
+        assertEquals("debug", spec.labels().get("purpose"));
+        assertEquals("/opt/certs", spec.binds().getFirst().getVolume().getPath());
+        assertEquals("/tmp/certs", spec.binds().getFirst().getPath());
+    }
+
+    @Test
+    void launchFunction_rejectsPublishedPortBoundToUnsupportedHostAddress() throws Exception {
+        when(config.services().lambda().dockerFlags()).thenReturn(Optional.of(
+                "--publish 192.0.2.10:5050:5050"));
+        Path codePath = Files.createDirectory(tempDir.resolve("unsupported-publish-address-code"));
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("unsupported-publish-address-fn");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+
+        IllegalArgumentException exception = assertThrows(IllegalArgumentException.class,
+                () -> launcher.launch(fn));
+
+        assertTrue(exception.getMessage().contains("127.0.0.1"));
+    }
+
+    @Test
     void launchFunction_mountsConfiguredFileSystemVolume() throws Exception {
         Path codePath = Files.createDirectory(tempDir.resolve("efs-code"));
 
@@ -579,8 +627,9 @@ class ContainerLauncherTest {
         List<String> env = captureRealContainerSpec().env();
         assertTrue(env.contains("AWS_DEFAULT_REGION=eu-west-2"));
         assertTrue(env.contains("AWS_REGION=eu-west-2"));
-        verify(logStreamer).attach(
-                eq("container-123"), any(), any(), eq("eu-west-2"), eq("lambda:region-arn-fn"));
+        verify(logStreamer).attachForAccount(
+                eq("000000000000"), eq("container-123"), any(), any(),
+                eq("eu-west-2"), eq("lambda:region-arn-fn"));
     }
 
     @Test
@@ -1571,16 +1620,17 @@ class ContainerLauncherTest {
         LambdaFunction fn = new LambdaFunction();
         fn.setFunctionName("observability-fn");
         fn.setPackageType("Image");
+        fn.setFunctionArn("arn:aws:lambda:us-east-1:555555555555:function:observability-fn");
         fn.setImageUri("123456789012.dkr.ecr.us-east-1.amazonaws.com/repo:latest");
 
         launcherWithRealStreamer.launch(fn);
 
-        // The frame became a CloudWatch log event in the function's own log group. Forwarding goes
-        // through the account-aware overload with a null account id: exec streams have no owning
-        // account of their own, so they land in the default account's copy of the log group.
+        // The frame became a CloudWatch log event in the function owner's log group even though
+        // the launcher is not running inside an HTTP request scope.
         ArgumentCaptor<List<Map<String, Object>>> events = ArgumentCaptor.forClass(List.class);
         verify(cloudWatchLogs, atLeastOnce()).putLogEventsForAccount(
-                isNull(), eq("/aws/lambda/observability-fn"), anyString(), events.capture(), anyString());
+                eq("555555555555"), eq("/aws/lambda/observability-fn"), anyString(),
+                events.capture(), anyString());
         assertTrue(events.getAllValues().stream()
                         .flatMap(List::stream)
                         .anyMatch(e -> "extension started on :8080".equals(e.get("message"))),
@@ -1604,8 +1654,8 @@ class ContainerLauncherTest {
         launcher.launch(fn);
 
         InOrder inOrder = inOrder(logStreamer, dockerClient);
-        inOrder.verify(logStreamer).ensureLogGroupAndStream(
-                eq("/aws/lambda/ordering-fn"), anyString(), anyString());
+        inOrder.verify(logStreamer).ensureLogGroupAndStreamForAccount(
+                eq("000000000000"), eq("/aws/lambda/ordering-fn"), anyString(), anyString());
         inOrder.verify(dockerClient, atLeastOnce()).execCreateCmd("container-123");
     }
 

@@ -34,6 +34,7 @@ import io.github.hectorvent.floci.services.memorydb.container.MemoryDbContainerM
 import io.github.hectorvent.floci.services.memorydb.proxy.MemoryDbProxyManager;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
+import io.github.hectorvent.floci.services.timestreaminfluxdb.TimestreamInfluxDbService;
 import io.quarkus.runtime.Quarkus;
 import io.quarkus.runtime.ShutdownDelayInitiatedEvent;
 import io.quarkus.runtime.ShutdownEvent;
@@ -42,6 +43,7 @@ import io.quarkus.vertx.http.HttpServerStart;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.enterprise.event.ObservesAsync;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
@@ -84,6 +86,7 @@ public class EmulatorLifecycle {
     private final RabbitMqManager rabbitMqManager;
     private final FlinkContainerManager flinkContainerManager;
     private final RdsService rdsService;
+    private final TimestreamInfluxDbService timestreamInfluxDbService;
     private final ElbV2Service elbV2Service;
     private final ElbClassicService elbClassicService;
     private final InitializationHooksRunner initializationHooksRunner;
@@ -97,7 +100,7 @@ public class EmulatorLifecycle {
     private final InitLifecycleState initLifecycleState;
     private final SchemaCreationWorker schemaCreationWorker;
     private final StepFunctionsService stepFunctionsService;
-    private final jakarta.enterprise.inject.Instance<ContainerTeardown> containerTeardowns;
+    private final Instance<ContainerTeardown> containerTeardowns;
     private final PersistentPathValidator persistentPathValidator;
 
     @Inject
@@ -118,6 +121,7 @@ public class EmulatorLifecycle {
                              RabbitMqManager rabbitMqManager,
                              FlinkContainerManager flinkContainerManager,
                              RdsService rdsService,
+                             TimestreamInfluxDbService timestreamInfluxDbService,
                              ElbV2Service elbV2Service,
                              ElbClassicService elbClassicService,
                              InitializationHooksRunner initializationHooksRunner,
@@ -131,7 +135,7 @@ public class EmulatorLifecycle {
                              InitLifecycleState initLifecycleState,
                              SchemaCreationWorker schemaCreationWorker,
                              StepFunctionsService stepFunctionsService,
-                             jakarta.enterprise.inject.Instance<ContainerTeardown> containerTeardowns,
+                             Instance<ContainerTeardown> containerTeardowns,
                              PersistentPathValidator persistentPathValidator) {
         this.storageFactory = storageFactory;
         this.serviceRegistry = serviceRegistry;
@@ -151,6 +155,7 @@ public class EmulatorLifecycle {
         this.rabbitMqManager = rabbitMqManager;
         this.flinkContainerManager = flinkContainerManager;
         this.rdsService = rdsService;
+        this.timestreamInfluxDbService = timestreamInfluxDbService;
         this.elbV2Service = elbV2Service;
         this.elbClassicService = elbClassicService;
         this.initializationHooksRunner = initializationHooksRunner;
@@ -174,6 +179,11 @@ public class EmulatorLifecycle {
         LOG.infof("Region:    %s  Account: %s", config.defaultRegion(), config.defaultAccountId());
         LOG.infov("Storage:   {0}  Path: {1}", config.storage().mode(), config.storage().persistentPath());
         LOG.infov("TLS:       {0}", config.tls().enabled() ? "enabled (HTTPS + HTTP dual mode)" : "disabled (HTTP only)");
+        // Surfaced in the banner because a mistyped flag name (issue #3931) silently leaves
+        // enforcement off, and nothing else in the logs reveals that policies are not evaluated.
+        LOG.infov("IAM:       {0}", config.services().iam().enforcementEnabled()
+                ? "policy enforcement enabled"
+                : "policy enforcement disabled (set FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true to enforce)");
 
         // BOOT hooks run before service initialization — scripts cannot use AWS APIs yet.
         try {
@@ -207,6 +217,9 @@ public class EmulatorLifecycle {
         dynamodbStreamsPoller.startPersistedPollers();
         pipesService.startPersistedPollers();
         rdsService.restorePersistedRuntime();
+        if (config.services().timestreamInfluxdb().enabled()) {
+            timestreamInfluxDbService.restorePersistedRuntime();
+        }
         if (config.services().elasticache().enabled()) {
             elastiCacheService.restorePersistedRuntime().exceptionally(ex -> {
                 LOG.warnv("ElastiCache cluster-mode restore failed: {0}", ex.getMessage());

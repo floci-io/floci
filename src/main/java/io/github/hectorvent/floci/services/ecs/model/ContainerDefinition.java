@@ -19,7 +19,9 @@ public class ContainerDefinition {
     private List<String> command;
     private List<String> entryPoint;
     private List<MountPoint> mountPoints;
+    private List<VolumeFrom> volumesFrom;
     private LogConfiguration logConfiguration;
+    private FirelensConfiguration firelensConfiguration;
     private HealthCheck healthCheck;
 
     public String getName() { return name; }
@@ -58,9 +60,16 @@ public class ContainerDefinition {
     public List<MountPoint> getMountPoints() { return mountPoints; }
     public void setMountPoints(List<MountPoint> mountPoints) { this.mountPoints = mountPoints; }
 
+    public List<VolumeFrom> getVolumesFrom() { return volumesFrom; }
+    public void setVolumesFrom(List<VolumeFrom> volumesFrom) { this.volumesFrom = volumesFrom; }
+
     public LogConfiguration getLogConfiguration() { return logConfiguration; }
     public void setLogConfiguration(LogConfiguration logConfiguration) { this.logConfiguration = logConfiguration; }
 
+    public FirelensConfiguration getFirelensConfiguration() { return firelensConfiguration; }
+    public void setFirelensConfiguration(FirelensConfiguration firelensConfiguration) {
+        this.firelensConfiguration = firelensConfiguration;
+    }
     public HealthCheck getHealthCheck() { return healthCheck; }
     public void setHealthCheck(HealthCheck healthCheck) { this.healthCheck = healthCheck; }
 }

@@ -11,12 +11,20 @@ import io.github.hectorvent.floci.services.eks.model.ClusterOidcKey;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
+import java.security.KeyFactory;
+import java.security.PrivateKey;
+import java.security.PublicKey;
+import java.security.Signature;
+import java.security.spec.PKCS8EncodedKeySpec;
+import java.security.spec.X509EncodedKeySpec;
 import java.util.Base64;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -161,5 +169,83 @@ class EksOidcServiceTest {
 
         assertFalse(payload.contains("\n"), "raw newline leaked into the JWT payload");
         assertTrue(payload.contains("\\n"));
+    }
+
+    @Test
+    void exportSigningKeyPemProducesValidPkcs8MatchingClusterKey() throws Exception {
+        ClusterOidcKey key = oidcService.ensureKey(CLUSTER, ISSUER);
+        String pem = oidcService.exportSigningKeyPem(key);
+
+        assertTrue(pem.startsWith("-----BEGIN PRIVATE KEY-----\n"));
+        assertTrue(pem.endsWith("-----END PRIVATE KEY-----\n"));
+
+        String base64 = pem.replace("-----BEGIN PRIVATE KEY-----", "")
+                .replace("-----END PRIVATE KEY-----", "")
+                .replaceAll("\\s+", "");
+        assertEquals(key.getPrivateKey(), base64);
+
+        PKCS8EncodedKeySpec spec = new PKCS8EncodedKeySpec(Base64.getDecoder().decode(base64));
+        PrivateKey privateKey = KeyFactory.getInstance("RSA").generatePrivate(spec);
+        assertNotNull(privateKey);
+        assertEquals("PKCS#8", privateKey.getFormat());
+    }
+
+    @Test
+    void exportPublicKeyPemProducesValidX509MatchingClusterKey() throws Exception {
+        ClusterOidcKey key = oidcService.ensureKey(CLUSTER, ISSUER);
+        String pem = oidcService.exportPublicKeyPem(key);
+
+        assertTrue(pem.startsWith("-----BEGIN PUBLIC KEY-----\n"));
+        assertTrue(pem.endsWith("-----END PUBLIC KEY-----\n"));
+
+        String base64 = pem.replace("-----BEGIN PUBLIC KEY-----", "")
+                .replace("-----END PUBLIC KEY-----", "")
+                .replaceAll("\\s+", "");
+        assertEquals(key.getPublicKey(), base64);
+
+        X509EncodedKeySpec spec = new X509EncodedKeySpec(Base64.getDecoder().decode(base64));
+        PublicKey publicKey = KeyFactory.getInstance("RSA").generatePublic(spec);
+        assertNotNull(publicKey);
+        assertEquals("X.509", publicKey.getFormat());
+    }
+
+    @Test
+    void exportedKeyPairSignsAndVerifies() throws Exception {
+        ClusterOidcKey key = oidcService.ensureKey(CLUSTER, ISSUER);
+        String signingPem = oidcService.exportSigningKeyPem(key);
+        String publicPem = oidcService.exportPublicKeyPem(key);
+
+        String privateBase64 = signingPem.replace("-----BEGIN PRIVATE KEY-----", "")
+                .replace("-----END PRIVATE KEY-----", "")
+                .replaceAll("\\s+", "");
+        String publicBase64 = publicPem.replace("-----BEGIN PUBLIC KEY-----", "")
+                .replace("-----END PUBLIC KEY-----", "")
+                .replaceAll("\\s+", "");
+
+        PrivateKey privateKey = KeyFactory.getInstance("RSA").generatePrivate(
+                new PKCS8EncodedKeySpec(Base64.getDecoder().decode(privateBase64)));
+        PublicKey publicKey = KeyFactory.getInstance("RSA").generatePublic(
+                new X509EncodedKeySpec(Base64.getDecoder().decode(publicBase64)));
+
+        byte[] payload = "test-jwt-header.test-jwt-claims".getBytes(StandardCharsets.UTF_8);
+        Signature signer = Signature.getInstance("SHA256withRSA");
+        signer.initSign(privateKey);
+        signer.update(payload);
+        byte[] signature = signer.sign();
+
+        Signature verifier = Signature.getInstance("SHA256withRSA");
+        verifier.initVerify(publicKey);
+        verifier.update(payload);
+        assertTrue(verifier.verify(signature), "signature must verify against exported public key");
+    }
+
+    @Test
+    void exportThrowsOnNullKeyOrField() {
+        assertThrows(IllegalArgumentException.class, () -> oidcService.exportSigningKeyPem(null));
+        assertThrows(IllegalArgumentException.class, () -> oidcService.exportPublicKeyPem(null));
+
+        ClusterOidcKey incomplete = new ClusterOidcKey(ISSUER, "kid", null, null);
+        assertThrows(IllegalArgumentException.class, () -> oidcService.exportSigningKeyPem(incomplete));
+        assertThrows(IllegalArgumentException.class, () -> oidcService.exportPublicKeyPem(incomplete));
     }
 }

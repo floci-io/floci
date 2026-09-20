@@ -402,6 +402,75 @@ class CognitoCfnIntegrationTest {
             .body("__type", equalTo("ResourceNotFoundException"));
     }
 
+    /**
+     * A pool with deletion protection refuses its own delete, and the stack has to say so: on AWS
+     * the resource and the stack report DELETE_FAILED with Cognito's reason, the pool stays, and
+     * the stack can only go once an update has switched the protection off.
+     */
+    @Test
+    void deletingAStackWhosePoolHasDeletionProtectionFailsAndLeavesThePoolUntilItIsDeactivated() throws Exception {
+        String stack = "cognito-cfn-deletion-protection-it";
+        cloudFormation(stack, "CreateStack", deletionProtectionTemplate("ACTIVE"));
+        String stacks = describeStacks(stack, "CREATE_COMPLETE");
+        String poolId = outputValue(stacks, "PoolId");
+        cognitoAction("DescribeUserPool", "{\"UserPoolId\": \"" + poolId + "\"}")
+            .then().statusCode(200)
+            .body("UserPool.DeletionProtection", equalTo("ACTIVE"));
+
+        cloudFormation(stack, "DeleteStack", null);
+        awaitStackStatus(stack, "DELETE_FAILED");
+        String events = describeStackEvents(stack);
+        assertTrue(events.contains("<ResourceStatus>DELETE_FAILED</ResourceStatus>"), events);
+        assertTrue(events.contains("deletion protection is activated"), events);
+        cognitoAction("DescribeUserPool", "{\"UserPoolId\": \"" + poolId + "\"}")
+            .then().statusCode(200)
+            .body("UserPool.Id", equalTo(poolId));
+
+        cloudFormation(stack, "UpdateStack", deletionProtectionTemplate("INACTIVE"));
+        describeStacks(stack, "UPDATE_COMPLETE");
+        cognitoAction("DescribeUserPool", "{\"UserPoolId\": \"" + poolId + "\"}")
+            .then().statusCode(200)
+            .body("UserPool.DeletionProtection", equalTo("INACTIVE"));
+
+        cloudFormation(stack, "DeleteStack", null);
+        awaitStackDeleted(stack);
+        cognitoAction("DescribeUserPool", "{\"UserPoolId\": \"" + poolId + "\"}")
+            .then()
+            .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    private static String deletionProtectionTemplate(String deletionProtection) {
+        return """
+            {
+              "AWSTemplateFormatVersion": "2010-09-09",
+              "Resources": {
+                "Pool": {
+                  "Type": "AWS::Cognito::UserPool",
+                  "Properties": {"UserPoolName": "cognito-cfn-protected-pool", "DeletionProtection": "%s"}
+                }
+              },
+              "Outputs": {"PoolId": {"Value": {"Ref": "Pool"}}}
+            }
+            """.formatted(deletionProtection);
+    }
+
+    private static void awaitStackStatus(String stack, String expectedStatus) throws InterruptedException {
+        String body = null;
+        for (int i = 0; i < 100; i++) {
+            body = given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", CFN_AUTH)
+                .formParam("Action", "DescribeStacks")
+                .formParam("StackName", stack)
+            .when().post("/").then().extract().asString();
+            if (body.contains("<StackStatus>" + expectedStatus + "</StackStatus>")) {
+                return;
+            }
+            Thread.sleep(50);
+        }
+        fail("stack " + stack + " did not reach " + expectedStatus + " within the timeout: " + body);
+    }
+
     private static void cloudFormation(String stack, String action, String templateBody) {
         RequestSpecification request = given()
             .contentType("application/x-www-form-urlencoded")

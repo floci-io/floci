@@ -589,6 +589,16 @@ class AutoScalingServiceTest {
     }
 
     @Test
+    void conditionalSaveDoesNotReinsertDeletedGroup() {
+        AutoScalingGroup group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
+
+        service.deleteAutoScalingGroup(REGION, "test-asg", false);
+
+        assertFalse(service.saveAutoScalingGroupIfPresent(group));
+        assertTrue(service.describeAutoScalingGroups(REGION, List.of("test-asg")).isEmpty());
+    }
+
+    @Test
     void forceDeleteAutoScalingGroupTerminatesActiveEc2Instances() {
         Ec2Service ec2Service = mock(Ec2Service.class);
         service.ec2Service = ec2Service;

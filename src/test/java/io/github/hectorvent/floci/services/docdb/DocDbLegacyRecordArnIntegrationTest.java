@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.docdb;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
@@ -41,7 +42,7 @@ class DocDbLegacyRecordArnIntegrationTest {
     private static final String HOME_ARN = "arn:aws:rds:us-east-1:000000000000:cluster:" + ID;
     private static final String FOREIGN_ARN = "arn:aws:rds:eu-west-1:000000000000:cluster:" + ID;
 
-    private static io.restassured.specification.RequestSpecification docdb(String region, String action) {
+    private static RequestSpecification docdb(String region, String action) {
         return given().header("Authorization",
                         "AWS4-HMAC-SHA256 Credential=test/20260615/" + region + "/docdb/aws4_request, "
                         + "SignedHeaders=content-type;host, Signature=test")

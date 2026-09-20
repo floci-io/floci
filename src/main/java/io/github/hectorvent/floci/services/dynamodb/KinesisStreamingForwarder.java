@@ -17,7 +17,10 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
@@ -141,23 +144,40 @@ public class KinesisStreamingForwarder {
         if (destinations == null || destinations.isEmpty()) {
             return;
         }
+        // Snapshot each active destination's precision once: Enable/Disable mutate these objects in place on
+        // request threads, and the payload chosen for a destination must match the one serialized for it.
+        Map<String, String> precisionByStreamArn = new LinkedHashMap<>();
+        for (KinesisStreamingDestination dest : destinations) {
+            if ("ACTIVE".equals(dest.getDestinationStatus())) {
+                precisionByStreamArn.putIfAbsent(dest.getStreamArn(), dest.getApproximateCreationDateTimePrecision());
+            }
+        }
+        if (precisionByStreamArn.isEmpty()) {
+            return;
+        }
+
         Instant now = Instant.now();
         JsonNode sourceItem = newItem != null ? newItem : oldItem;
         ObjectNode keys = buildKeys(sourceItem, table);
 
-        byte[] data;
+        // One serialized payload per precision in use: every destination sees the same event (same eventID),
+        // stamped at the resolution its ApproximateCreationDateTimePrecision asks for.
+        String eventId = UUID.randomUUID().toString();
+        Map<String, byte[]> dataByPrecision = new HashMap<>(2);
         String partitionKey;
         try {
-            ObjectNode payload = buildPayload(eventName, keys, newItem, oldItem, table.getTableName(), region, now);
-            data = objectMapper.writeValueAsBytes(payload);
+            for (String precision : precisionByStreamArn.values()) {
+                if (!dataByPrecision.containsKey(precision)) {
+                    ObjectNode payload = buildPayload(eventId, eventName, keys, newItem, oldItem,
+                            table.getTableName(), region, now, precision);
+                    dataByPrecision.put(precision, objectMapper.writeValueAsBytes(payload));
+                }
+            }
             partitionKey = extractPartitionKey(keys, table);
         } catch (Exception e) {
             // Serialization is a deterministic terminal failure: nothing can be forwarded for this event.
-            for (KinesisStreamingDestination dest : destinations) {
-                if (!"ACTIVE".equals(dest.getDestinationStatus())) {
-                    continue;
-                }
-                DestinationState st = stateFor(ownerAccountId, region, table.getTableName(), dest.getStreamArn());
+            for (String streamArn : precisionByStreamArn.keySet()) {
+                DestinationState st = stateFor(ownerAccountId, region, table.getTableName(), streamArn);
                 synchronized (st) {
                     st.dropped++;
                     recordError(st, e);
@@ -167,14 +187,12 @@ public class KinesisStreamingForwarder {
             return;
         }
 
-        for (KinesisStreamingDestination dest : destinations) {
-            if (!"ACTIVE".equals(dest.getDestinationStatus())) {
-                continue;
-            }
-            String streamName = extractStreamName(dest.getStreamArn());
-            DestinationState st = stateFor(ownerAccountId, region, table.getTableName(), dest.getStreamArn());
+        for (Map.Entry<String, String> target : precisionByStreamArn.entrySet()) {
+            String streamArn = target.getKey();
+            String streamName = extractStreamName(streamArn);
+            DestinationState st = stateFor(ownerAccountId, region, table.getTableName(), streamArn);
             PendingRecord rec = new PendingRecord(ownerAccountId, region, streamName, table.getTableName(),
-                    data, partitionKey, now);
+                    dataByPrecision.get(target.getValue()), partitionKey, now);
             synchronized (st) {
                 if (st.queue.size() >= MAX_BUFFERED) {
                     st.queue.pollFirst(); // drop OLDEST
@@ -413,14 +431,14 @@ public class KinesisStreamingForwarder {
         return out;
     }
 
-    // ──────────────────────────── Payload construction (unchanged) ────────────────────────────
+    // ──────────────────────────── Payload construction ────────────────────────────
 
-    private ObjectNode buildPayload(String eventName, JsonNode keys,
+    private ObjectNode buildPayload(String eventId, String eventName, JsonNode keys,
                                     JsonNode newImage, JsonNode oldImage,
-                                    String tableName, String region, Instant timestamp) {
+                                    String tableName, String region, Instant timestamp, String precision) {
         ObjectNode payload = objectMapper.createObjectNode();
         payload.put("awsRegion", region);
-        payload.put("eventID", UUID.randomUUID().toString());
+        payload.put("eventID", eventId);
         payload.put("eventName", eventName);
         payload.putNull("userIdentity");
         payload.put("recordFormat", "application/json");
@@ -428,7 +446,7 @@ public class KinesisStreamingForwarder {
         payload.put("eventSource", "aws:dynamodb");
 
         ObjectNode dynamodb = objectMapper.createObjectNode();
-        dynamodb.put("ApproximateCreationDateTime", timestamp.toEpochMilli());
+        dynamodb.put("ApproximateCreationDateTime", approximateCreationDateTime(timestamp, precision));
         if (keys != null) {
             dynamodb.set("Keys", keys);
         }
@@ -439,10 +457,18 @@ public class KinesisStreamingForwarder {
             dynamodb.set("OldImage", oldImage);
         }
         dynamodb.put("SizeBytes", 0);
-        dynamodb.put("ApproximateCreationDateTimePrecision", "MILLISECOND");
+        dynamodb.put("ApproximateCreationDateTimePrecision", precision);
         payload.set("dynamodb", dynamodb);
 
         return payload;
+    }
+
+    static long approximateCreationDateTime(Instant timestamp, String precision) {
+        if (KinesisStreamingDestination.PRECISION_MICROSECOND.equals(precision)) {
+            return Math.addExact(Math.multiplyExact(timestamp.getEpochSecond(), 1_000_000L),
+                    timestamp.getNano() / 1_000L);
+        }
+        return timestamp.toEpochMilli();
     }
 
     private ObjectNode buildKeys(JsonNode item, TableDefinition table) {

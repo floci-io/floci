@@ -43,7 +43,6 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashSet;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -410,7 +409,7 @@ public class Ec2ContainerManager {
                 String flociHost = dockerHostResolver.resolve();
                 int imdsPort = config.services().ec2().imdsPort();
                 StartedContainer started = createAndStartContainer(instance, image, region, flociHost, imdsPort,
-                        leasedPrivateIp, appPorts, groups, prefixLists);
+                        leasedPrivateIp, groups, prefixLists);
                 if (started == null) {
                     return;
                 }
@@ -553,7 +552,6 @@ public class Ec2ContainerManager {
 
     private StartedContainer createAndStartContainer(Instance instance, ResolvedAmiImage image, String region,
                                                      String flociHost, int imdsPort, String leasedPrivateIp,
-                                                     Set<Integer> appPorts,
                                                      List<SecurityGroup> groups,
                                                      Map<String, List<String>> prefixLists) {
         String instanceId = instance.getInstanceId();
@@ -580,21 +578,8 @@ public class Ec2ContainerManager {
                     InstanceNetworkInterface eni = instance.getNetworkInterfaces().getFirst();
                     eniId = eni.getNetworkInterfaceId();
                     instance.setLogicalPrivateIpAddress(eni.getPrivateIpAddress());
-                    Map<Integer, Integer> publishedPorts = new LinkedHashMap<>();
-                    if (appPorts != null) {
-                        for (Integer appPort : appPorts) {
-                            if (appPort > 0 && appPort <= 65535) {
-                                publishedPorts.put(appPort, 0);
-                            }
-                        }
-                    }
-                    // SSH goes in last so its fixed host port always wins over an app mapping.
-                    publishedPorts.put(22, sshHostPort);
                     namespace = firewallManager.createNamespace("ec2", instanceId,
-                            regionResolver.getAccountId(), region, Optional.empty(), publishedPorts);
-                    Map<Integer, Integer> appHostPorts = new LinkedHashMap<>(namespace.publishedHostPorts());
-                    appHostPorts.remove(22);
-                    instance.setPublishedPorts(appHostPorts);
+                            regionResolver.getAccountId(), region, Optional.empty(), Map.of(22, sshHostPort));
                     firewallManager.register(new SecurityGroupNftCompiler.Endpoint(regionResolver.getAccountId(),
                             region, instance.getVpcId(), eniId, eni.getPrivateIpAddress(),
                             eni.getIpv6Addresses().stream().findFirst().orElse(null),

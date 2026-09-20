@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
 import org.mockito.Answers;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
@@ -21,7 +22,7 @@ import java.util.concurrent.TimeUnit;
 @ExtendWith(MockitoExtension.class)
 class HookScriptExecutorTest {
 
-    @org.junit.jupiter.api.io.TempDir
+    @TempDir
     Path tempDirectory;
 
     @Mock(answer = Answers.RETURNS_DEEP_STUBS)

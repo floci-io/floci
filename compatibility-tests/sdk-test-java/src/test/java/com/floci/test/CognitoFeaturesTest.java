@@ -468,6 +468,27 @@ class CognitoFeaturesTest {
         cognito.adminDeleteUser(b -> b.userPoolId(poolId).username(tempUser));
     }
 
+    @Test
+    @Order(61)
+    void deletionProtectionRefusesDeleteUntilDeactivated() {
+        String protectedPoolId = cognito.createUserPool(b -> b
+                .poolName("compat-protected-pool")
+                .deletionProtection(DeletionProtectionType.ACTIVE))
+                .userPool().id();
+        try {
+            assertThatThrownBy(() -> cognito.deleteUserPool(b -> b.userPoolId(protectedPoolId)))
+                    .isInstanceOf(InvalidParameterException.class)
+                    .hasMessageContaining("deletion protection is activated");
+            assertThat(cognito.describeUserPool(b -> b.userPoolId(protectedPoolId)).userPool().deletionProtection())
+                    .isEqualTo(DeletionProtectionType.ACTIVE);
+        } finally {
+            cognito.updateUserPool(b -> b.userPoolId(protectedPoolId).deletionProtection(DeletionProtectionType.INACTIVE));
+            cognito.deleteUserPool(b -> b.userPoolId(protectedPoolId));
+        }
+        assertThatThrownBy(() -> cognito.describeUserPool(b -> b.userPoolId(protectedPoolId)))
+                .isInstanceOf(ResourceNotFoundException.class);
+    }
+
     // ── Issue #234 note ───────────────────────────────────────────────────────
     // GetTokensFromRefreshToken is tested in sdk-test-node/tests/cognito-features.test.ts
     // because GetTokensFromRefreshTokenCommand is not available in Java SDK 2.31.8.

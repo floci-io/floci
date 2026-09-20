@@ -78,7 +78,7 @@ class EcsServiceTeardownTest {
     }
 
     @Test
-    void clearRestartsTheReconcilerThatAResetTeardownStopped() {
+    void afterResetRestartsTheReconcilerThatAResetTeardownStopped() {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().ecs().mock()).thenReturn(false); // docker mode
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
@@ -91,13 +91,15 @@ class EcsServiceTeardownTest {
                 null);
         service.initializeStorage();
 
-        // A reset runs the teardown and then clear(); shutdown runs only the teardown.
+        // A reset runs the teardown, then clear(), and afterReset() last, even when the wipe or
+        // a clear() threw; shutdown runs only the teardown. afterReset() alone must bring the
+        // reconciler back.
         service.stopManagedContainers();
         assertTrue(service.isReconcilerShutdown());
 
-        service.clear();
+        service.afterReset();
         assertFalse(service.isReconcilerShutdown());
-        service.clear();
+        service.afterReset();
         assertFalse(service.isReconcilerShutdown());
 
         service.stopManagedContainers();

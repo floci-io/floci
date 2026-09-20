@@ -14,7 +14,6 @@ import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
-import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
@@ -122,8 +121,7 @@ public class SecurityGroupFirewallManager {
         ContainerSpec spec = builder.build();
         String helperId = null;
         try {
-            ContainerInfo info = lifecycleManager.createAndStart(spec);
-            helperId = info.containerId();
+            helperId = lifecycleManager.createAndStart(spec).containerId();
             InspectContainerResponse inspect = dockerClient.inspectContainerCmd(helperId).exec();
             String ip = firstNetworkAddress(inspect, ContainerNetwork::getIpAddress);
             if (ip == null) {
@@ -131,7 +129,7 @@ public class SecurityGroupFirewallManager {
             }
             String ipv6 = firstNetworkAddress(inspect, ContainerNetwork::getGlobalIPv6Address);
             apply(helperId, SecurityGroupNftCompiler.initialRuleset());
-            return new Namespace(helperId, ip, ipv6, info.publishedHostPorts());
+            return new Namespace(helperId, ip, ipv6);
         } catch (Exception e) {
             if (helperId != null) {
                 lifecycleManager.removeIfExists(helperId);
@@ -368,8 +366,7 @@ public class SecurityGroupFirewallManager {
         }
     }
 
-    public record Namespace(String helperId, String transportAddress, String transportIpv6Address,
-                            Map<Integer, Integer> publishedHostPorts) {}
+    public record Namespace(String helperId, String transportAddress, String transportIpv6Address) {}
 
     private record ProtectedEndpoint(SecurityGroupNftCompiler.Endpoint endpoint, String helperId,
                                      Map<String, List<String>> prefixLists) {}

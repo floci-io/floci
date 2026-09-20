@@ -148,6 +148,8 @@ public class Ec2QueryHandler {
                 case "ReplaceTransitGatewayRoute" -> handleReplaceTransitGatewayRoute(params, region);
                 case "SearchTransitGatewayRoutes" -> handleSearchTransitGatewayRoutes(params, region);
                 case "ExportTransitGatewayRoutes" -> handleExportTransitGatewayRoutes(params, region);
+                case "DescribeEgressOnlyInternetGateways" ->
+                        handleDescribeEgressOnlyInternetGateways(params);
                 case "CreateDefaultVpc" -> handleCreateDefaultVpc(params, region);
                 case "AssociateVpcCidrBlock" -> handleAssociateVpcCidrBlock(params, region);
                 case "DisassociateVpcCidrBlock" -> handleDisassociateVpcCidrBlock(params, region);
@@ -196,7 +198,7 @@ public class Ec2QueryHandler {
                 // VPN Gateways. There is no VPN gateway model; an empty set is
                 // AWS-accurate for an account without VPN gateways and unblocks the
                 // CDK VPC context provider, which always issues this describe.
-                case "DescribeVpnGateways" -> handleDescribeVpnGateways();
+                case "DescribeVpnGateways" -> handleDescribeVpnGateways(params);
 
                 // Route Tables
                 case "CreateRouteTable" -> handleCreateRouteTable(params, region);
@@ -521,7 +523,7 @@ public class Ec2QueryHandler {
                         String key = p.getFirst(prefix + "." + i + ".Tag." + j + ".Key");
                         if (key == null) break;
                         String value = p.getFirst(prefix + "." + i + ".Tag." + j + ".Value");
-                        tags.add(new Tag(key, value));
+                        tags.add(creationTag(key, value));
                     }
                 }
             }
@@ -731,7 +733,7 @@ public class Ec2QueryHandler {
                     String k = p.getFirst("TagSpecification." + i + ".Tag." + j + ".Key");
                     if (k == null) break;
                     String v = p.getFirst("TagSpecification." + i + ".Tag." + j + ".Value");
-                    target.add(new Tag(k, v));
+                    target.add(creationTag(k, v));
                 }
             }
         }
@@ -757,8 +759,9 @@ public class Ec2QueryHandler {
                 userData = launchTemplateData.getUserData();
                 userDataEncoded = launchTemplateData.getEncodedUserData();
             }
-            iamInstanceProfileArn = firstNonBlank(iamInstanceProfileArn,
-                    service.iamInstanceProfileArn(launchTemplateData));
+            if (iamInstanceProfileArn == null) {
+                iamInstanceProfileArn = service.iamInstanceProfileArn(launchTemplateData);
+            }
             if (sgIds.isEmpty()) {
                 sgIds = new ArrayList<>(launchTemplateData.effectiveSecurityGroupIds());
             }
@@ -1467,7 +1470,7 @@ public class Ec2QueryHandler {
                     String k = p.getFirst("TagSpecification." + i + ".Tag." + j + ".Key");
                     if (k == null) break;
                     String v = p.getFirst("TagSpecification." + i + ".Tag." + j + ".Value");
-                    vpcTags.add(new Tag(k, v));
+                    vpcTags.add(creationTag(k, v));
                 }
             }
         }
@@ -2444,7 +2447,8 @@ public class Ec2QueryHandler {
     private Response handleGetTransitGatewayRouteTableAssociations(
             MultivaluedMap<String, String> p, String region) {
         String routeTableId = p.getFirst("TransitGatewayRouteTableId");
-        List<TransitGatewayVpcAttachment> associated = service.associationsOf(region, routeTableId);
+        List<TransitGatewayVpcAttachment> associated =
+                service.associationsOf(region, routeTableId, getFilters(p));
         XmlBuilder xml = new XmlBuilder()
                 .start("GetTransitGatewayRouteTableAssociationsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -2483,7 +2487,7 @@ public class Ec2QueryHandler {
     private Response handleGetTransitGatewayRouteTablePropagations(
             MultivaluedMap<String, String> p, String region) {
         List<TransitGatewayRouteTablePropagation> propagations =
-                service.propagationsOf(region, p.getFirst("TransitGatewayRouteTableId"));
+                service.propagationsOf(region, p.getFirst("TransitGatewayRouteTableId"), getFilters(p));
         XmlBuilder xml = new XmlBuilder()
                 .start("GetTransitGatewayRouteTablePropagationsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -2742,6 +2746,38 @@ public class Ec2QueryHandler {
             throw new AwsException("InvalidParameterValue",
                     "Invalid value '" + value + "' for " + name + ".", 400);
         }
+    }
+
+    private Response handleDescribeEgressOnlyInternetGateways(MultivaluedMap<String, String> p) {
+        validateEmptyDiscoveryPagination(p, 255);
+        service.describeEgressOnlyInternetGatewayIds(getFilters(p));
+        return emptyDescribeResponse(
+                "DescribeEgressOnlyInternetGateways", "egressOnlyInternetGatewaySet");
+    }
+
+    private void validateEmptyDiscoveryPagination(MultivaluedMap<String, String> p, int maximum) {
+        String rawMaxResults = p.getFirst("MaxResults");
+        if (rawMaxResults != null) {
+            int maxResults = parseIntParam(p, "MaxResults", 0);
+            if (maxResults < 5 || maxResults > maximum) {
+                throw new AwsException("InvalidMaxResults",
+                        "The specified value for MaxResults is not valid.", 400);
+            }
+        }
+        if (p.getFirst("NextToken") != null) {
+            throw new AwsException("InvalidParameterValue", "Invalid NextToken", 400);
+        }
+    }
+
+    private Response emptyDescribeResponse(String action, String resultSet) {
+        String response = action + "Response";
+        String xml = new XmlBuilder()
+                .start(response, AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start(resultSet).end(resultSet)
+                .end(response)
+                .build();
+        return xmlResponse(xml);
     }
 
     private Response handleDeleteVpcEndpoints(MultivaluedMap<String, String> p, String region) {
@@ -3173,6 +3209,7 @@ public class Ec2QueryHandler {
                     .elem("imageOwnerAlias", img.getImageOwnerAlias())
                     .elem("creationDate", img.getCreationDate())
                     .raw(blockDeviceMappingXml(img.getBlockDeviceMappings()))
+                    .raw(tagSetXml(img.getTags()))
                     .end("item");
         }
         xml.end("imagesSet").end("DescribeImagesResponse");
@@ -3206,7 +3243,7 @@ public class Ec2QueryHandler {
                 .stream().findFirst()
                 .orElseGet(() -> firstFilterValue(filters, "owner-alias", AMAZON_OWNER_ID));
         return switch (requested) {
-            case "self" -> config.defaultAccountId();
+            case "self" -> service.callerAccountId();
             case "amazon" -> AMAZON_OWNER_ID;
             case "aws-marketplace" -> AWS_MARKETPLACE_OWNER_ID;
             default -> requested;
@@ -3366,6 +3403,12 @@ public class Ec2QueryHandler {
 
     // ─── Tag handlers ─────────────────────────────────────────────────────────
 
+    // AWS stores a tag created without a Value as an empty string. DeleteTags is the exception:
+    // there an omitted value means "any value", so it builds its Tag objects directly.
+    private static Tag creationTag(String key, String value) {
+        return new Tag(key, value == null ? "" : value);
+    }
+
     private Response handleCreateTags(MultivaluedMap<String, String> p, String region) {
         List<String> resourceIds = getList(p, "ResourceId");
         List<Tag> tagList = new ArrayList<>();
@@ -3373,7 +3416,7 @@ public class Ec2QueryHandler {
             String k = p.getFirst("Tag." + i + ".Key");
             if (k == null) break;
             String v = p.getFirst("Tag." + i + ".Value");
-            tagList.add(new Tag(k, v));
+            tagList.add(creationTag(k, v));
         }
         service.createTags(region, resourceIds, tagList);
         return booleanResponse("CreateTags");
@@ -3468,14 +3511,9 @@ public class Ec2QueryHandler {
         return xmlResponse(xml.build());
     }
 
-    private Response handleDescribeVpnGateways() {
-        XmlBuilder xml = new XmlBuilder()
-                .start("DescribeVpnGatewaysResponse", AwsNamespaces.EC2)
-                .elem("requestId", UUID.randomUUID().toString())
-                .start("vpnGatewaySet")
-                .end("vpnGatewaySet")
-                .end("DescribeVpnGatewaysResponse");
-        return xmlResponse(xml.build());
+    private Response handleDescribeVpnGateways(MultivaluedMap<String, String> p) {
+        service.describeVpnGatewayIds(getList(p, "VpnGatewayId"), getFilters(p));
+        return emptyDescribeResponse("DescribeVpnGateways", "vpnGatewaySet");
     }
 
     private Response handleDescribeRouteTables(MultivaluedMap<String, String> p, String region) {
@@ -4333,7 +4371,10 @@ public class Ec2QueryHandler {
 
     private Response handleModifyNetworkInterfaceAttribute(MultivaluedMap<String, String> p, String region) {
         String networkInterfaceId = p.getFirst("NetworkInterfaceId");
-        List<String> groupIds = getList(p, "GroupId");
+        List<String> groupIds = getList(p, "SecurityGroupId");
+        if (groupIds.isEmpty()) {
+            groupIds = getList(p, "GroupId");
+        }
         if (groupIds.isEmpty()) {
             groupIds = getList(p, "GroupSet");
         }
@@ -4550,7 +4591,7 @@ public class Ec2QueryHandler {
         if (name == null || name.isBlank()) {
             return null;
         }
-        return AwsArnUtils.Arn.of("iam", "", config.defaultAccountId(), "instance-profile/" + name).toString();
+        return service.resolveIamInstanceProfileName(name);
     }
 
     private String vpcXml(Vpc vpc) {
@@ -5421,7 +5462,7 @@ public class Ec2QueryHandler {
                 if (key == null) {
                     break;
                 }
-                tagList.add(new Tag(key, p.getFirst(base + ".Tag." + j + ".Value")));
+                tagList.add(creationTag(key, p.getFirst(base + ".Tag." + j + ".Value")));
             }
             specs.add(new LaunchTemplateData.TagSpecification(resourceType, tagList));
         }
@@ -5524,6 +5565,17 @@ public class Ec2QueryHandler {
             xml.start("item").elem("groupId", securityGroupId).end("item");
         }
         xml.end("groupSet");
+        List<VpcEndpointDnsEntry> dnsEntries = service.endpointDnsEntries(endpoint);
+        if (!dnsEntries.isEmpty()) {
+            xml.start("dnsEntrySet");
+            for (VpcEndpointDnsEntry entry : dnsEntries) {
+                xml.start("item")
+                        .elem("dnsName", entry.dnsName())
+                        .elem("hostedZoneId", entry.hostedZoneId())
+                        .end("item");
+            }
+            xml.end("dnsEntrySet");
+        }
         xml.raw(tagSetXml(endpoint.getTags()));
         return xml.build();
     }
@@ -5643,7 +5695,7 @@ public class Ec2QueryHandler {
                     String k = p.getFirst("TagSpecification." + i + ".Tag." + j + ".Key");
                     if (k == null) break;
                     String v = p.getFirst("TagSpecification." + i + ".Tag." + j + ".Value");
-                    volumeTags.add(new Tag(k, v));
+                    volumeTags.add(creationTag(k, v));
                 }
             }
         }
@@ -5822,14 +5874,14 @@ public class Ec2QueryHandler {
                     String k = p.getFirst("TagSpecification." + i + ".Tag." + j + ".Key");
                     if (k == null) break;
                     String v = p.getFirst("TagSpecification." + i + ".Tag." + j + ".Value");
-                    spotRequestTags.add(new Tag(k, v));
+                    spotRequestTags.add(creationTag(k, v));
                 }
             } else if ("instance".equals(resType)) {
                 for (int j = 1; ; j++) {
                     String k = p.getFirst("TagSpecification." + i + ".Tag." + j + ".Key");
                     if (k == null) break;
                     String v = p.getFirst("TagSpecification." + i + ".Tag." + j + ".Value");
-                    instanceTags.add(new Tag(k, v));
+                    instanceTags.add(creationTag(k, v));
                 }
             }
         }

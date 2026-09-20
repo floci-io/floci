@@ -53,13 +53,11 @@ final class DynamoDbAttributeValueValidator {
         }
     }
 
-    // PartiQL reports the limit with this short wording, and a transaction turns it into a
-    // cancellation reason.
     static final String NESTING_EXCEEDED = "Nesting Levels have exceeded supported limits";
 
     static void requireParameterNestingWithinLimit(JsonNode value) {
-        if (!valueNestingWithinLimit(value)) {
-            throw validationEx(NESTING_EXCEEDED);
+        if (depthOf(value) > MAX_NESTING_LEVELS + 1) {
+            throw validationEx(NESTING_EXCEEDED + ": Attributes in the item have nested levels beyond supported limit");
         }
     }
 

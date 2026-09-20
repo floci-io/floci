@@ -131,6 +131,7 @@ floci:
     lambda:
       enabled: true
       ephemeral: false                        # true = remove container after each invocation
+      docker-flags: ""                        # Extra Docker create flags for Lambda containers
       ecr-base-uri: public.ecr.aws            # Registry for Lambda runtime images (legacy: floci.ecr-base-uri / FLOCI_ECR_BASE_URI)
       honour-architectures: false             # true = select the declared Lambda Docker architecture
       default-memory-mb: 128
@@ -186,6 +187,7 @@ floci:
       # default-postgres-image: "registry.example.com/postgres:16-alpine"
       # default-mysql-image: "registry.example.com/mysql:8.0"
       # default-mariadb-image: "registry.example.com/mariadb:11"
+      default-sql-server-image: "mcr.microsoft.com/mssql/server:2022-latest"
 
     rds-data:
       enabled: true

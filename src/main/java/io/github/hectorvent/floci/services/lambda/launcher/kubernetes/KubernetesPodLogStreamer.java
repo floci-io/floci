@@ -39,7 +39,12 @@ public class KubernetesPodLogStreamer {
 
     public Closeable attach(String namespace, String podName, String logGroup,
                             String logStream, String region, String logPrefix) {
-        cloudWatchWriter.ensureLogGroupAndStream(logGroup, logStream, region);
+        return attachForAccount(null, namespace, podName, logGroup, logStream, region, logPrefix);
+    }
+
+    public Closeable attachForAccount(String accountId, String namespace, String podName,
+                                      String logGroup, String logStream, String region, String logPrefix) {
+        cloudWatchWriter.ensureLogGroupAndStreamForAccount(accountId, logGroup, logStream, region);
 
         InputStream logStreamBody = client.openPodLogStream(namespace, podName, "runtime");
 
@@ -55,7 +60,8 @@ public class KubernetesPodLogStreamer {
                         continue;
                     }
                     LOG.infov("[{0}] {1}", logPrefix, trimmed);
-                    cloudWatchWriter.streamToCloudWatchLogs(logGroup, logStream, region, trimmed);
+                    cloudWatchWriter.streamToCloudWatchLogsForAccount(
+                            accountId, logGroup, logStream, region, trimmed);
                 }
             } catch (IOException e) {
                 // Normal on pod deletion: the log stream just ends.

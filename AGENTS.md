@@ -321,6 +321,33 @@ References: `SqsCfnProvisioner` (smallest), `Ec2LaunchTemplateCfnProvisioner`
 
 ---
 
+## Sidecars
+
+A dependency too heavy for the native image (a native runtime, a large engine, another language
+ecosystem) ships as a sidecar: a stateless HTTP service in its own container that Floci starts
+lazily over the Docker socket. Sidecars live in
+[floci-io/floci-sidecars](https://github.com/floci-io/floci-sidecars), one directory per sidecar
+on the shared `sidecar-core`, and are published as `floci/floci-sidecar-<name>:<semver>` on
+Docker Hub. They implement that repository's `docs/contract.md` and carry no AWS vocabulary: the
+sidecar answers a generic question, Floci maps its service semantics onto the answer.
+
+Floci-side rules:
+
+- Never add a `sidecars/` directory to this repository, never publish a `floci/floci:<tag>-<name>`
+  suffix, and never default an image to `:latest` (`ImageCacheService` never re-pulls a cached tag).
+- The consuming service owns two config knobs, `<name>-image` (an exact version) and `<name>-url`
+  (skip container management), and a `<Name>SidecarManager` plus `<Name>SidecarClient` pair.
+  `CedarSidecarManager` is the reference: it reads the contract JSON from `/health` and fails fast
+  on a contract-major mismatch.
+- The sidecar releases before the Floci PR that needs it, as a final or an `X.Y.Z-rc.N` tag; the
+  Floci PR pins that tag. A PR that needs an unreleased sidecar cannot pass CI.
+- Tests: the client's wire contract is covered by a JDK `HttpServer` fake; one Docker-gated
+  `@QuarkusTest` runs the pinned image through the real manager under its own
+  `floci.docker.resource-namespace`. A Floci test imports only Floci classes; the sidecar's own
+  behaviour is tested in its repository.
+- A sidecar that is a stock upstream image plus a script from the classpath needs no repository
+  but still goes through a manager with the same two knobs.
+
 ## Code Style
 
 ### General

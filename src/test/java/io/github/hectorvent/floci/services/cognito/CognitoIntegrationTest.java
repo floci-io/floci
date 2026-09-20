@@ -135,6 +135,77 @@ class CognitoIntegrationTest {
     }
 
     @Test
+    @Order(2)
+    void initiateAuthRejectsUnrecognizedAuthFlow() {
+        cognitoAction("InitiateAuth", """
+                {
+                  "ClientId": "%s",
+                  "AuthFlow": "UNKNOWN_FLOW",
+                  "AuthParameters": {
+                    "USERNAME": "%s"
+                  }
+                }
+                """.formatted(clientId, USERNAME))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterException"))
+                .body("AuthenticationResult", org.hamcrest.Matchers.nullValue());
+    }
+
+    @Test
+    @Order(2)
+    void adminInitiateAuthRejectsUnrecognizedAuthFlow() {
+        cognitoAction("AdminInitiateAuth", """
+                {
+                  "UserPoolId": "%s",
+                  "ClientId": "%s",
+                  "AuthFlow": "UNKNOWN_FLOW",
+                  "AuthParameters": {
+                    "USERNAME": "%s"
+                  }
+                }
+                """.formatted(poolId, clientId, USERNAME))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterException"))
+                .body("AuthenticationResult", org.hamcrest.Matchers.nullValue());
+    }
+
+    @Test
+    @Order(2)
+    void adminInitiateAuthNoSrpFlowRequiresThePassword() {
+        cognitoAction("AdminInitiateAuth", """
+                {
+                  "UserPoolId": "%s",
+                  "ClientId": "%s",
+                  "AuthFlow": "ADMIN_NO_SRP_AUTH",
+                  "AuthParameters": {
+                    "USERNAME": "%s",
+                    "PASSWORD": "wrong-password"
+                  }
+                }
+                """.formatted(poolId, clientId, USERNAME))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("NotAuthorizedException"));
+
+        cognitoAction("AdminInitiateAuth", """
+                {
+                  "UserPoolId": "%s",
+                  "ClientId": "%s",
+                  "AuthFlow": "ADMIN_NO_SRP_AUTH",
+                  "AuthParameters": {
+                    "USERNAME": "%s",
+                    "PASSWORD": "%s"
+                  }
+                }
+                """.formatted(poolId, clientId, USERNAME, PASSWORD))
+                .then()
+                .statusCode(200)
+                .body("AuthenticationResult.AccessToken", org.hamcrest.Matchers.notNullValue());
+    }
+
+    @Test
     @Order(3)
     void authTokensAreSignedWithPublishedRsaJwksKey() throws Exception {
         Response authResponse = cognitoAction("InitiateAuth", """

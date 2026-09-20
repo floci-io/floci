@@ -50,6 +50,10 @@ DynamoDB Streams are supported via a separate target (`DynamoDBStreams_20120810`
 | `GetShardIterator` | Get a shard iterator |
 | `GetRecords` | Read stream records from a shard |
 
+Redshift zero-ETL integrations can consume these stream records directly. See the
+[Redshift DynamoDB zero-ETL](redshift.md#dynamodb-zero-etl) section for the supported target,
+landing table, checkpoint, and retry behavior.
+
 ## Configuration
 
 | Variable | Default | Description |
@@ -208,6 +212,15 @@ When a table has an **ACTIVE** Kinesis streaming destination (see
 `EnableKinesisStreamingDestination`), every item change, `INSERT`, `MODIFY`, and `REMOVE`,
 including TTL expirations, is forwarded to the destination stream as a Kinesis record in the
 AWS CDC envelope (`eventName`, `dynamodb.Keys`, `NewImage`/`OldImage`, `ApproximateCreationDateTime`).
+
+`ApproximateCreationDateTime` follows the destination's
+`EnableKinesisStreamingConfiguration.ApproximateCreationDateTimePrecision`: epoch milliseconds for
+`MILLISECOND` (the default) and epoch microseconds for `MICROSECOND`. The precision is returned by
+`DescribeKinesisStreamingDestination` and stamped on each record as
+`dynamodb.ApproximateCreationDateTimePrecision`.
+
+Enabling a Kinesis streaming destination does not change the table's DynamoDB Streams setting.
+Kinesis forwarding works whether or not `StreamSpecification.StreamEnabled` is set.
 
 ### Delivery contract
 

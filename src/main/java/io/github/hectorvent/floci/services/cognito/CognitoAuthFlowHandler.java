@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cognito;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -87,17 +88,7 @@ final class CognitoAuthFlowHandler {
             case "REFRESH_TOKEN_AUTH", "REFRESH_TOKEN" -> handleRefreshToken(pool, client, authParameters, clientMetadata);
             case "USER_SRP_AUTH" -> handleUserSrpAuth(pool, client, authParameters, clientMetadata);
             case "CUSTOM_AUTH" -> handleCustomAuth(pool, client, authParameters, clientMetadata);
-            default -> {
-                String username = authParameters.get("USERNAME");
-                if (username == null) {
-                    throw new AwsException("InvalidParameterException", "USERNAME is required", 400);
-                }
-                CognitoUser user = service.adminGetUser(pool.getId(), username);
-                Map<String, Object> result = new HashMap<>();
-                result.put("AuthenticationResult",
-                        issueTokens(pool, client, user, "TokenGeneration_Authentication", clientMetadata));
-                yield result;
-            }
+            default -> throw unsupportedAuthFlow(authFlow);
         };
     }
 
@@ -120,19 +111,17 @@ final class CognitoAuthFlowHandler {
         }
 
         return switch (authFlow) {
-            case "ADMIN_USER_PASSWORD_AUTH", "USER_PASSWORD_AUTH" ->
+            case "ADMIN_USER_PASSWORD_AUTH", "ADMIN_NO_SRP_AUTH", "USER_PASSWORD_AUTH" ->
                     authenticateWithPassword(pool, client, authParameters, clientMetadata);
             case "REFRESH_TOKEN_AUTH", "REFRESH_TOKEN" -> handleRefreshToken(pool, client, authParameters, clientMetadata);
             case "ADMIN_USER_SRP_AUTH" -> handleUserSrpAuth(pool, client, authParameters, clientMetadata);
             case "CUSTOM_AUTH" -> handleCustomAuth(pool, client, authParameters, clientMetadata);
-            default -> {
-                CognitoUser user = service.adminGetUser(userPoolId, username);
-                Map<String, Object> result = new HashMap<>();
-                result.put("AuthenticationResult",
-                        issueTokens(pool, client, user, "TokenGeneration_Authentication", clientMetadata));
-                yield result;
-            }
+            default -> throw unsupportedAuthFlow(authFlow);
         };
+    }
+
+    private static AwsException unsupportedAuthFlow(String authFlow) {
+        return new AwsException("InvalidParameterException", "Unsupported AuthFlow: " + authFlow, 400);
     }
 
     Map<String, Object> respondToAuthChallenge(String clientId, String challengeName, String session,
@@ -737,7 +726,14 @@ final class CognitoAuthFlowHandler {
         event.put("triggerSource", triggerSource);
         Map<String, Object> req = new HashMap<>(request);
         if (user != null) {
-            req.put("userAttributes", user.getAttributes() == null ? Map.of() : user.getAttributes());
+            Map<String, String> userAttributes = new LinkedHashMap<>();
+            if (user.getAttributes() != null) {
+                userAttributes.putAll(user.getAttributes());
+            }
+            if ("PreAuthentication".equals(triggerKey)) {
+                userAttributes.put("cognito:user_status", user.getUserStatus());
+            }
+            req.put("userAttributes", userAttributes);
         }
         event.put("request", req);
         event.put("response", new HashMap<>());
@@ -746,10 +742,11 @@ final class CognitoAuthFlowHandler {
             byte[] payload = MAPPER.writeValueAsBytes(event);
             InvokeResult result = lambdaService.invoke(region, functionRef, payload, InvocationType.RequestResponse);
             if (result.getFunctionError() != null) {
+                String errorMessage = lambdaFunctionErrorMessage(result);
                 String msg = String.format("trigger %s (%s) returned error: %s",
-                        triggerKey, functionRef, result.getFunctionError());
+                        triggerKey, functionRef, errorMessage);
                 LOG.warnv("Cognito {0}", msg);
-                return TriggerResult.error(TriggerErrorKind.USER_VALIDATION, result.getFunctionError());
+                return TriggerResult.error(TriggerErrorKind.USER_VALIDATION, errorMessage);
             }
             if (result.getPayload() == null || result.getPayload().length == 0) {
                 return TriggerResult.success(Map.of());
@@ -769,6 +766,22 @@ final class CognitoAuthFlowHandler {
             LOG.warnv(e, "Cognito trigger {0} invocation failed", triggerKey);
             return TriggerResult.error(TriggerErrorKind.INVOCATION_FAILED, e.getMessage());
         }
+    }
+
+    private static String lambdaFunctionErrorMessage(InvokeResult result) {
+        byte[] payload = result.getPayload();
+        if (payload == null || payload.length == 0) {
+            return result.getFunctionError();
+        }
+        try {
+            JsonNode errorMessage = MAPPER.readTree(payload).path("errorMessage");
+            if (errorMessage.isTextual() && !errorMessage.asText().isBlank()) {
+                return errorMessage.asText();
+            }
+        } catch (Exception e) {
+            LOG.debugv(e, "Unable to parse Cognito Lambda function error payload");
+        }
+        return result.getFunctionError();
     }
 
     private Map<String, Object> requireCustomAuthTriggerResponse(TriggerResult result, String triggerName) {
@@ -810,7 +823,7 @@ final class CognitoAuthFlowHandler {
                 "PreAuthentication", "PreAuthentication_Authentication", req);
         if (result.errored()) {
             throw new AwsException("NotAuthorizedException",
-                    "PreAuthentication trigger denied authentication: " + result.errorMessage(), 400);
+                    "PreAuthentication failed with error " + result.errorMessage() + ".", 400);
         }
     }
 

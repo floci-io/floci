@@ -1,9 +1,12 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.core.common.XmlParser;
+import io.github.hectorvent.floci.services.appsync.AppSyncGraphqlSidecarProfile;
 import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;
@@ -29,9 +32,19 @@ import static org.junit.jupiter.api.Assertions.fail;
  * built on, {@code GraphQlApi.ApiId} and {@code FunctionConfiguration.FunctionId}: an unset
  * attribute resolves to the literal string {@code "LogicalId.Attr"} and every dependent resource
  * would then be wired to that text instead of an id.
+ *
+ * <p>Runs against the real GraphQL sidecar image, started by {@code GraphqlSidecarManager}: the
+ * schema deploy above needs it, and the shared profile namespaces the container so a local run
+ * never touches a developer's own running sidecar, and skips (rather than fails) without Docker.
  */
 @QuarkusTest
+@TestProfile(AppSyncGraphqlSidecarProfile.class)
 class AppSyncCfnIntegrationTest {
+
+    @BeforeAll
+    static void requireDockerAndTheSidecarImage() {
+        AppSyncGraphqlSidecarProfile.requireDockerAndTheSidecarImage();
+    }
 
     private static final String CFN_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260905/us-east-1/cloudformation/aws4_request";

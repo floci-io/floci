@@ -12,11 +12,14 @@ public class Cluster {
     private String nodeType;
     private String masterUsername;
     private String masterPassword;
+    private String masterPasswordSecretArn;
+    private String masterPasswordSecretKmsKeyId;
     private String clusterStatus;
     private Endpoint endpoint;
     private String clusterSubnetGroupName;
     private String clusterParameterGroupName;
     private List<String> vpcSecurityGroupIds = new ArrayList<>();
+    private List<String> iamRoleArns = new ArrayList<>();
 
     public String getClusterIdentifier() { return clusterIdentifier; }
     public void setClusterIdentifier(String clusterIdentifier) { this.clusterIdentifier = clusterIdentifier; }
@@ -26,6 +29,10 @@ public class Cluster {
     public void setMasterUsername(String masterUsername) { this.masterUsername = masterUsername; }
     public String getMasterPassword() { return masterPassword; }
     public void setMasterPassword(String masterPassword) { this.masterPassword = masterPassword; }
+    public String getMasterPasswordSecretArn() { return masterPasswordSecretArn; }
+    public void setMasterPasswordSecretArn(String masterPasswordSecretArn) { this.masterPasswordSecretArn = masterPasswordSecretArn; }
+    public String getMasterPasswordSecretKmsKeyId() { return masterPasswordSecretKmsKeyId; }
+    public void setMasterPasswordSecretKmsKeyId(String masterPasswordSecretKmsKeyId) { this.masterPasswordSecretKmsKeyId = masterPasswordSecretKmsKeyId; }
     public String getClusterStatus() { return clusterStatus; }
     public void setClusterStatus(String clusterStatus) { this.clusterStatus = clusterStatus; }
     public Endpoint getEndpoint() { return endpoint; }
@@ -36,6 +43,8 @@ public class Cluster {
     public void setClusterParameterGroupName(String clusterParameterGroupName) { this.clusterParameterGroupName = clusterParameterGroupName; }
     public List<String> getVpcSecurityGroupIds() { return vpcSecurityGroupIds; }
     public void setVpcSecurityGroupIds(List<String> vpcSecurityGroupIds) { this.vpcSecurityGroupIds = vpcSecurityGroupIds; }
+    public List<String> getIamRoleArns() { return iamRoleArns; }
+    public void setIamRoleArns(List<String> iamRoleArns) { this.iamRoleArns = iamRoleArns; }
 
     // Real backend address of this cluster's PostgreSQL container. `endpoint` now points at the
     // auth proxy, not the container, so the container address is kept here for proxy wiring and

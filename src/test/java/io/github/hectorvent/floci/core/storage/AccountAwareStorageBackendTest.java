@@ -18,6 +18,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 
 class AccountAwareStorageBackendTest {
 
@@ -352,5 +358,142 @@ class AccountAwareStorageBackendTest {
                 .filter(k -> raw.get(k).isPresent())
                 .count();
         assertEquals(1, copies, "the entry landed in exactly one account partition, not forked into both");
+    }
+
+    @Test
+    void findAnyAccountEntryUsesTrackedAccountsWithoutScanning() {
+        InMemoryStorage<String, String> raw = spy(new InMemoryStorage<String, String>());
+        AccountAwareStorageBackend<String> storage =
+                new AccountAwareStorageBackend<>(raw, null, "111111111111");
+        storage.findAnyAccountEntry("MISSING");
+        clearInvocations(raw);
+        storage.putForAccount("222222222222", "ASIAKEY", "session");
+
+        for (int i = 0; i < 2; i++) {
+            AccountAwareStorageBackend.OwnedEntry<String> entry = storage.findAnyAccountEntry("ASIAKEY").orElseThrow();
+            assertEquals("222222222222", entry.account());
+            assertEquals("session", entry.value());
+        }
+        assertTrue(storage.findAnyAccountEntry("MISSING").isEmpty());
+
+        verify(raw, never()).keys();
+    }
+
+    @Test
+    void findAnyAccountEntryScansOnceForLoadedData() {
+        InMemoryStorage<String, String> raw = spy(new InMemoryStorage<String, String>());
+        raw.put("222222222222/ASIAKEY", "session");
+        AccountAwareStorageBackend<String> storage =
+                new AccountAwareStorageBackend<>(raw, null, "111111111111");
+
+        assertEquals("222222222222", storage.findAnyAccountEntry("ASIAKEY").orElseThrow().account());
+        assertEquals("222222222222", storage.findAnyAccountEntry("ASIAKEY").orElseThrow().account());
+
+        verify(raw, times(1)).keys();
+    }
+
+    @Test
+    void writesBeforeTheFirstCrossAccountLookupAreFoundByTheInitialScan() {
+        InMemoryStorage<String, String> raw = spy(new InMemoryStorage<String, String>());
+        AccountAwareStorageBackend<String> storage =
+                new AccountAwareStorageBackend<>(raw, null, "111111111111");
+        storage.putForAccount("222222222222", "ASIAKEY", "session");
+
+        assertEquals("222222222222", storage.findAnyAccountEntry("ASIAKEY").orElseThrow().account());
+        assertEquals("222222222222", storage.findAnyAccountEntry("ASIAKEY").orElseThrow().account());
+
+        verify(raw, times(1)).keys();
+    }
+
+    @Test
+    void writeDuringTheInitialScanIsStillTracked() {
+        InMemoryStorage<String, String> raw = spy(new InMemoryStorage<String, String>());
+        AccountAwareStorageBackend<String> storage =
+                new AccountAwareStorageBackend<>(raw, null, "111111111111");
+        doAnswer(invocation -> {
+            Set<?> seenByScan = Set.copyOf((Set<?>) invocation.callRealMethod());
+            storage.putForAccount("333333333333", "LATE", "value");
+            return seenByScan;
+        }).when(raw).keys();
+
+        assertTrue(storage.findAnyAccountEntry("MISSING").isEmpty());
+
+        assertEquals("333333333333", storage.findAnyAccountEntry("LATE").orElseThrow().account());
+    }
+
+    @Test
+    void loadAfterTheFirstCrossAccountLookupTracksLoadedAccounts() {
+        InMemoryStorage<String, String> raw = spy(new InMemoryStorage<String, String>());
+        AccountAwareStorageBackend<String> storage =
+                new AccountAwareStorageBackend<>(raw, null, "111111111111");
+        doAnswer(invocation -> {
+            raw.put("333333333333/LOADED", "value");
+            return null;
+        }).when(raw).load();
+        storage.findAnyAccountEntry("MISSING");
+
+        storage.load();
+
+        assertEquals("333333333333", storage.findAnyAccountEntry("LOADED").orElseThrow().account());
+    }
+
+    @Test
+    void legacyMigrationIntoAnotherAccountIsTracked() {
+        InMemoryStorage<String, String> raw = new InMemoryStorage<>();
+        AccountAwareStorageBackend<String> storage =
+                new AccountAwareStorageBackend<>(raw, null, "111111111111");
+        storage.findAnyAccountEntry("MISSING");
+        raw.put("LEGACY", "value");
+
+        storage.getForAccountMigratingLegacy("222222222222", "LEGACY", value -> true);
+
+        assertEquals("222222222222", storage.findAnyAccountEntry("LEGACY").orElseThrow().account());
+    }
+
+    @Test
+    void deleteAndClearHideEntriesFromCrossAccountLookup() {
+        InMemoryStorage<String, String> raw = new InMemoryStorage<>();
+        AccountAwareStorageBackend<String> storage =
+                new AccountAwareStorageBackend<>(raw, null, "111111111111");
+        storage.findAnyAccountEntry("MISSING");
+        storage.putForAccount("222222222222", "ASIAKEY", "session");
+        storage.deleteForAccount("222222222222", "ASIAKEY");
+        assertTrue(storage.findAnyAccountEntry("ASIAKEY").isEmpty());
+
+        storage.putForAccount("222222222222", "ASIAKEY", "session");
+        storage.clear();
+        assertTrue(storage.findAnyAccountEntry("ASIAKEY").isEmpty());
+        storage.putForAccount("333333333333", "ASIAKEY", "fresh");
+        assertEquals("333333333333", storage.findAnyAccountEntry("ASIAKEY").orElseThrow().account());
+    }
+
+    @Test
+    void findAnyAccountEntryMigratesUnprefixedDataIntoTheCallerAccount() {
+        InMemoryStorage<String, String> raw = new InMemoryStorage<>();
+        raw.put("LEGACY", "value");
+        AccountAwareStorageBackend<String> storage =
+                new AccountAwareStorageBackend<>(raw, null, "111111111111");
+
+        AccountAwareStorageBackend.OwnedEntry<String> entry = storage.findAnyAccountEntry("LEGACY").orElseThrow();
+
+        assertEquals("111111111111", entry.account());
+        assertEquals("value", entry.value());
+        assertEquals(Optional.of("value"), raw.get("111111111111/LEGACY"));
+        assertTrue(raw.get("LEGACY").isEmpty());
+    }
+
+    @Test
+    void crossAccountLookupDoesNotWaitForTheStoreMonitor() throws Exception {
+        AccountAwareStorageBackend<String> storage = AccountAwareStorageBackend.inMemory("111111111111");
+        storage.putForAccount("222222222222", "ASIAKEY", "session");
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        try {
+            synchronized (storage) {
+                Future<Optional<String>> lookup = pool.submit(() -> storage.findAnyAccount("ASIAKEY"));
+                assertEquals(Optional.of("session"), lookup.get(5, TimeUnit.SECONDS));
+            }
+        } finally {
+            pool.shutdownNow();
+        }
     }
 }

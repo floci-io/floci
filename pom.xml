@@ -253,13 +253,6 @@
             <version>2.4.1</version>
         </dependency>
 
-        <!-- GraphQL schema parsing and type system (AppSync execution engine) -->
-        <dependency>
-            <groupId>com.graphql-java</groupId>
-            <artifactId>graphql-java</artifactId>
-            <version>26.1</version>
-        </dependency>
-
         <!-- JSON Schema validation (API Gateway request validation) -->
         <dependency>
             <groupId>com.networknt</groupId>
@@ -329,15 +322,6 @@
                     <artifactId>icu4j</artifactId>
                 </exclusion>
             </exclusions>
-        </dependency>
-
-        <!-- Cedar is test-only in the Floci process. Production evaluation runs in the sidecar. -->
-        <dependency>
-            <groupId>com.cedarpolicy</groupId>
-            <artifactId>cedar-java</artifactId>
-            <version>4.10.0</version>
-            <classifier>uber</classifier>
-            <scope>test</scope>
         </dependency>
 
         <!-- Testing -->
@@ -463,23 +447,6 @@
                         <java.util.logging.manager>org.jboss.logmanager.LogManager</java.util.logging.manager>
                     </systemPropertyVariables>
                 </configuration>
-            </plugin>
-            <plugin>
-                <groupId>org.codehaus.mojo</groupId>
-                <artifactId>build-helper-maven-plugin</artifactId>
-                <version>3.6.1</version>
-                <executions>
-                    <execution>
-                        <id>add-cedar-sidecar-test-source</id>
-                        <phase>generate-test-sources</phase>
-                        <goals><goal>add-test-source</goal></goals>
-                        <configuration>
-                            <sources>
-                                <source>sidecars/cedar/src/main/java</source>
-                            </sources>
-                        </configuration>
-                    </execution>
-                </executions>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>

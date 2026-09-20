@@ -101,9 +101,9 @@ quarkus:
       - --initialize-at-run-time=io.github.hectorvent.floci.services.elasticbeanstalk.ElasticBeanstalkService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.elb.ElbClassicService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.datasync.DataSyncService
-      - --initialize-at-run-time=graphql.util.IdGenerator
       - --initialize-at-run-time=io.github.hectorvent.floci.services.lambda.launcher.LambdaExecutionRoleCredentials
       - --initialize-at-run-time=io.github.hectorvent.floci.services.ssoportal.SsoPortalService
+      - --initialize-at-run-time=io.github.hectorvent.floci.services.redshift.proxy.S3CopySimulator
       # snappy-java (Firehose Snappy/HADOOP_SNAPPY delivery) extracts and loads a
       # bundled JNI library from the static initializers of these two classes.
       - --initialize-at-run-time=org.xerial.snappy.Snappy
@@ -121,7 +121,7 @@ floci:
   base-url: "http://localhost:4566"
   network:
     security-group-enforcement:
-      enabled: true
+      enabled: false
       helper-image: floci/network-helper:local
   # hostname: ""  # When set, overrides the hostname in response URLs (e.g. SQS QueueUrl).
                    # Needed for multi-container Docker setups. Example: FLOCI_HOSTNAME=floci
@@ -301,6 +301,8 @@ floci:
     lambda:
       enabled: true
       ephemeral: false
+      # Extra Docker create flags for Lambda containers, for example: --env KEY=VALUE --volume /host:/container:ro
+      docker-flags: ""
       ecr-base-uri: public.ecr.aws            # FLOCI_SERVICES_LAMBDA_ECR_BASE_URI — registry for Lambda runtime images (legacy: floci.ecr-base-uri / FLOCI_ECR_BASE_URI)
       honour-architectures: false             # Select the Lambda architecture for Docker pull and create
       default-memory-mb: 128
@@ -383,6 +385,7 @@ floci:
       enabled: true
       default-port: 5439
       image-version: postgres:15-alpine
+      poll-interval-ms: 1000
       proxy-base-port: 7100
       proxy-max-port: 7199
       default-credential-duration-seconds: 900   # GetClusterCredentials default lifetime (900-3600)
@@ -401,6 +404,7 @@ floci:
       # default-postgres-image: "registry.example.com/postgres:16-alpine"
       # default-mysql-image: "registry.example.com/mysql:8.0"
       # default-mariadb-image: "registry.example.com/mariadb:11"
+      default-sql-server-image: "mcr.microsoft.com/mssql/server:2022-latest"
       proxy-handshake-timeout-millis: 10000       # Max time a client has to complete the startup/auth handshake
       proxy-backend-connect-timeout-millis: 5000  # Max time to wait for the backend TCP connect
       proxy-max-connections: 100                  # Max concurrent proxy connections before new ones are refused
@@ -530,6 +534,7 @@ floci:
     ecs:
       enabled: true
       mock: false
+      publish-awsvpc-ports-to-host: false
       host-volume-roots: []
       allow-unsafe-host-volumes: false
     appconfig:
@@ -593,6 +598,7 @@ floci:
       ecr-registry-mirror: true    # inject a registries.yaml so pods can pull images pushed to Floci ECR
       disable-cni: false           # start k3s without its bundled flannel/kube-proxy so a real CNI (e.g. Cilium) can take over
       imds: false                  # expose link-local IMDS (169.254.169.254) inside the cluster container
+      irsa-signing-key: true       # sign k3s service account tokens with the cluster OIDC key
     mwaa:
       enabled: true
       mock: false
@@ -662,6 +668,14 @@ floci:
       staging-bucket: floci-cur-staging
     bcm-pricing-calculator:
       enabled: true
+    timestream-influxdb:
+      enabled: true
+      mock: false                                 # FLOCI_SERVICES_TIMESTREAM_INFLUXDB_MOCK: true = metadata only, no Docker
+      default-image: "influxdb:2.7"
+      host-port-base: 8086
+      host-port-max: 8185
+      readiness-timeout-seconds: 120
+      # docker-network: my-network               # Docker network to attach InfluxDB containers to
     bcm-data-exports:
       enabled: true
       emit-mode: synchronous
@@ -685,6 +699,9 @@ floci:
       vtl-max-loops: 10000                 # Maximum #foreach iterations a VTL resolver template may execute (truncates the loop, does not fail the template)
       vtl-max-output-chars: 1048576        # Maximum characters a VTL resolver template may render before it fails
       vtl-timeout-millis: 5000             # Maximum wall-clock time a VTL resolver template may spend evaluating before it fails
+      # graphql-url: http://floci-graphql:8181  # set to skip sidecar container management
+      # Exact version on purpose: a cached :latest is never re-pulled. Published from floci-io/floci-sidecars.
+      graphql-image: "floci/floci-sidecar-graphql:0.2.0"
     s3vectors:
       enabled: true
     s3tables:
@@ -788,7 +805,8 @@ floci:
     verifiedpermissions:
       enabled: true
       # cedar-url: http://floci-cedar:8180  # set to skip sidecar container management
-      cedar-image: "floci/floci:latest-cedar"
+      # Exact version on purpose: a cached :latest is never re-pulled. Published from floci-io/floci-sidecars.
+      cedar-image: "floci/floci-sidecar-cedar:1.1.0"
     ram:
       enabled: true
     codegurureviewer:

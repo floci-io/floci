@@ -7,8 +7,6 @@ name: Release
 # Published tags:
 #   Native:  floci/floci:1.2.3        floci/floci:latest
 #            public.ecr.aws/floci/floci:1.2.3        public.ecr.aws/floci/floci:latest
-#   Cedar:   floci/floci:1.2.3-cedar floci/floci:latest-cedar
-#            public.ecr.aws/floci/floci:1.2.3-cedar public.ecr.aws/floci/floci:latest-cedar
 #   Baseline: floci/floci:1.2.3-baseline floci/floci:latest-baseline
 #             public.ecr.aws/floci/floci:1.2.3-baseline public.ecr.aws/floci/floci:latest-baseline
 #   Compat:  floci/floci:1.2.3-compat floci/floci:latest-compat
@@ -226,8 +224,8 @@ jobs:
       # Ordering matters: this step wipes native/ and replaces it with the arm64-only
       # baseline binary. It is safe only because it runs AFTER the multi-arch image
       # above has been pushed, and nothing that follows reads native/ from the build
-      # context: the Cedar sidecar builds from sidecars/cedar/ only, and the compat
-      # image pulls its base (BASE_IMAGE) from the registry. Moving this step above
+      # context: the compat image pulls its base (BASE_IMAGE) from the registry.
+      # Moving this step above
       # the multi-arch push would silently publish `latest` from the baseline binary.
       - name: Stage ARMv8.0 baseline artifact under the native package path
         run: |
@@ -263,32 +261,6 @@ jobs:
             vcs-ref=${{ github.sha }}
           cache-from: type=gha,scope=floci-arm64-baseline
           cache-to: type=gha,scope=floci-arm64-baseline,mode=max
-
-      - name: Build and push Cedar sidecar multi-arch image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        env:
-          SOURCE_DATE_EPOCH: ${{ steps.source_date.outputs.epoch }}
-        with:
-          context: .
-          file: sidecars/cedar/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          provenance: mode=max
-          sbom: true
-          tags: |
-            floci/floci:${{ steps.version.outputs.version }}-cedar
-            floci/floci:latest-cedar
-            public.ecr.aws/floci/floci:${{ steps.version.outputs.version }}-cedar
-            public.ecr.aws/floci/floci:latest-cedar
-          labels: |
-            org.opencontainers.image.version=${{ steps.version.outputs.version }}
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.created=${{ steps.created.outputs.created }}
-            version=${{ steps.version.outputs.version }}
-            build-date=${{ steps.created.outputs.created }}
-            vcs-ref=${{ github.sha }}
-          cache-from: type=gha,scope=floci-cedar
-          cache-to: type=gha,scope=floci-cedar,mode=max
 
       - name: Build and push compat multi-arch image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0

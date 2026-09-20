@@ -99,7 +99,7 @@ public interface EmulatorConfig {
     }
 
     interface SecurityGroupEnforcementConfig {
-        @WithDefault("true")
+        @WithDefault("false")
         boolean enabled();
 
         @WithDefault("floci/network-helper:local")
@@ -741,6 +741,7 @@ public interface EmulatorConfig {
         BcmDataExportsServiceConfig bcmDataExports();
         OamServiceConfig oam();
         BcmPricingCalculatorServiceConfig bcmPricingCalculator();
+        TimestreamInfluxDbServiceConfig timestreamInfluxdb();
         ConfigServiceConfig configservice();
         CloudTrailServiceConfig cloudtrail();
         CloudControlServiceConfig cloudcontrol();
@@ -998,7 +999,7 @@ public interface EmulatorConfig {
         /** When set, Floci uses this URL and skips Cedar sidecar container management. */
         Optional<String> cedarUrl();
 
-        @WithDefault("floci/floci:latest-cedar")
+        @WithDefault("floci/floci-sidecar-cedar:1.1.0")
         String cedarImage();
     }
 
@@ -1395,6 +1396,9 @@ public interface EmulatorConfig {
         @WithDefault("7199")
         int proxyMaxPort();
 
+        @WithDefault("1000")
+        long pollIntervalMs();
+
         // Hostname clients use to reach a cluster endpoint. Empty -> resolved from
         // DockerHostResolver (falls back to "localhost").
         Optional<String> endpointHost();
@@ -1443,6 +1447,10 @@ public interface EmulatorConfig {
 
         /** Empty when Floci should adapt its built-in image to the requested engine version. */
         Optional<String> defaultMariadbImage();
+
+        /** Docker image used for SQL Server instances when no override is configured. */
+        @WithDefault("mcr.microsoft.com/mssql/server:2022-latest")
+        String defaultSqlServerImage();
 
         /** Hostname advertised for RDS endpoints. Uses published Docker ports when configured. */
         Optional<String> endpointHost();
@@ -1845,6 +1853,14 @@ public interface EmulatorConfig {
         @WithDefault("false")
         boolean mock();
 
+        /**
+         * Publish {@code awsvpc} task ports on the Docker host so local host processes can
+         * reach them. This is an emulator-only escape hatch and can cause port collisions
+         * when more than one task exposes the same port.
+         */
+        @WithDefault("false")
+        boolean publishAwsvpcPortsToHost();
+
         Optional<String> dockerNetwork();
 
         @WithDefault("512")
@@ -2053,6 +2069,12 @@ public interface EmulatorConfig {
          *  Env: FLOCI_SERVICES_APPSYNC_VTL_TIMEOUT_MILLIS */
         @WithDefault("5000")
         long vtlTimeoutMillis();
+
+        /** When set, Floci uses this URL and skips GraphQL sidecar container management. */
+        Optional<String> graphqlUrl();
+
+        @WithDefault("floci/floci-sidecar-graphql:0.2.0")
+        String graphqlImage();
     }
 
     interface OamServiceConfig {
@@ -2063,6 +2085,34 @@ public interface EmulatorConfig {
     interface BcmPricingCalculatorServiceConfig {
         @WithDefault("true")
         boolean enabled();
+    }
+
+    interface TimestreamInfluxDbServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /** When true, DB instances and clusters reach AVAILABLE without a backing InfluxDB container. */
+        @WithDefault("false")
+        boolean mock();
+
+        /** InfluxDB 2.x image backing DB instances. Env: FLOCI_SERVICES_TIMESTREAM_INFLUXDB_DEFAULT_IMAGE */
+        @WithDefault("influxdb:2.7")
+        String defaultImage();
+
+        /** Lowest host port the InfluxDB HTTP listener (container port 8086) is published on. */
+        @WithDefault("8086")
+        int hostPortBase();
+
+        /** Highest host port the InfluxDB HTTP listener is published on. */
+        @WithDefault("8185")
+        int hostPortMax();
+
+        /** Seconds to wait for a started InfluxDB container to answer its health check. */
+        @WithDefault("120")
+        int readinessTimeoutSeconds();
+
+        /** Docker network to attach InfluxDB containers to. Empty uses the default network. */
+        Optional<String> dockerNetwork();
     }
 
     interface BcmDataExportsServiceConfig {
@@ -2310,6 +2360,9 @@ public interface EmulatorConfig {
 
         /** Docker network to attach Lambda containers to. Empty = default bridge. */
         Optional<String> dockerNetwork();
+
+        /** Additional Docker create flags applied to every Lambda execution container. */
+        Optional<String> dockerFlags();
 
         /**
          * Base name prefix for the containers and code volumes Lambda spawns, replacing the
@@ -2758,6 +2811,13 @@ public interface EmulatorConfig {
          */
         @WithDefault("false")
         boolean imds();
+
+        /**
+         * When true, configures k3s with the cluster's per-cluster OIDC signing keypair and
+         * advertises Floci's OIDC issuer URL, enabling in-cluster IAM Roles for Service Accounts (IRSA).
+         */
+        @WithDefault("true")
+        boolean irsaSigningKey();
     }
 
     /**

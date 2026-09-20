@@ -46,6 +46,7 @@ class CloudWatchLogsInsightsQueryTest {
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
                 10000,
                 new RegionResolver(REGION, "000000000000"));
     }
@@ -674,7 +675,7 @@ class CloudWatchLogsInsightsQueryTest {
     private CloudWatchLogsService newAsyncService(AtomicLong clockMs, long delayMs, String group, String stream) {
         CloudWatchLogsService svc = new CloudWatchLogsService(
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                10000, new RegionResolver(REGION, "000000000000"), delayMs, clockMs::get);
+                new InMemoryStorage<>(), 10000, new RegionResolver(REGION, "000000000000"), delayMs, clockMs::get);
         createGroupStream(svc, group, stream);
         putRaw(svc, group, stream, BASE_MS + 2000, jobLog("INFO", "x", "JOB-1"));
         return svc;

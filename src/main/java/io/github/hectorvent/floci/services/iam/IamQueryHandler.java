@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.iam.model.IamPolicy;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.iam.model.IamUser;
 import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
+import io.github.hectorvent.floci.services.iam.model.LoginProfile;
 import io.github.hectorvent.floci.services.iam.model.OpenIDConnectProvider;
 import io.github.hectorvent.floci.services.iam.model.SAMLProvider;
 import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
@@ -65,7 +66,10 @@ public class IamQueryHandler {
             case "UntagUser" -> handleUntagUser(params);
             case "ListUserTags" -> handleListUserTags(params);
             case "ListMFADevices" -> handleListMFADevices(params);
-            case "GetLoginProfile" -> handleGetLoginProfile(params);
+            case "CreateLoginProfile" -> handleCreateLoginProfile(params, authorization);
+            case "GetLoginProfile" -> handleGetLoginProfile(params, authorization);
+            case "UpdateLoginProfile" -> handleUpdateLoginProfile(params);
+            case "DeleteLoginProfile" -> handleDeleteLoginProfile(params, authorization);
 
             // Identity providers & server certificates
             case "ListSAMLProviders" -> handleListSAMLProviders(authorization);
@@ -305,16 +309,48 @@ public class IamQueryHandler {
         return Response.ok(AwsQueryResponse.envelope("ListMFADevices", AwsNamespaces.IAM, result)).build();
     }
 
-    private Response handleGetLoginProfile(MultivaluedMap<String, String> params) {
-        // Login profiles (console passwords) are not modeled. Per the IAM API,
-        // GetLoginProfile returns NoSuchEntity (HTTP 404) when a user has no console
-        // password — a documented, expected result that callers branch on. We must
-        // return that exact error, not an empty 200 or an UnsupportedOperation 400,
-        // which clients would treat as a real failure rather than "no profile".
+    private Response handleCreateLoginProfile(MultivaluedMap<String, String> params, String authorization) {
+        String userName = resolveUserName(params, authorization);
+        String password = getParam(params, "Password");
+        if (password == null) {
+            throw new AwsException("ValidationError", "The request must contain the parameter Password.", 400);
+        }
+        boolean passwordResetRequired = getBooleanParam(params, "PasswordResetRequired", false);
+        LoginProfile profile = iamService.createLoginProfile(userName, password, passwordResetRequired);
+        String result = new XmlBuilder().start("LoginProfile").raw(loginProfileXml(profile)).end("LoginProfile").build();
+        return Response.ok(AwsQueryResponse.envelope("CreateLoginProfile", AwsNamespaces.IAM, result)).build();
+    }
+
+    private Response handleGetLoginProfile(MultivaluedMap<String, String> params, String authorization) {
+        String userName = resolveUserName(params, authorization);
+        LoginProfile profile = iamService.getLoginProfile(userName);
+        String result = new XmlBuilder().start("LoginProfile").raw(loginProfileXml(profile)).end("LoginProfile").build();
+        return Response.ok(AwsQueryResponse.envelope("GetLoginProfile", AwsNamespaces.IAM, result)).build();
+    }
+
+    private Response handleUpdateLoginProfile(MultivaluedMap<String, String> params) {
         String userName = getParam(params, "UserName");
-        return AwsQueryResponse.error("NoSuchEntity",
-                "Login Profile for User " + (userName != null ? userName : "") + " cannot be found.",
-                AwsNamespaces.IAM, 404);
+        if (userName == null) {
+            throw new AwsException("ValidationError", "The request must contain the parameter UserName.", 400);
+        }
+        String password = getParam(params, "Password");
+        Boolean passwordResetRequired = getOptionalBooleanParam(params, "PasswordResetRequired");
+        iamService.updateLoginProfile(userName, password, passwordResetRequired);
+        return Response.ok(AwsQueryResponse.envelopeNoResult("UpdateLoginProfile", AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleDeleteLoginProfile(MultivaluedMap<String, String> params, String authorization) {
+        String userName = resolveUserName(params, authorization);
+        iamService.deleteLoginProfile(userName);
+        return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteLoginProfile", AwsNamespaces.IAM)).build();
+    }
+
+    private String loginProfileXml(LoginProfile profile) {
+        return new XmlBuilder()
+                .elem("PasswordResetRequired", profile.isPasswordResetRequired())
+                .elem("UserName", profile.getUserName())
+                .elem("CreateDate", isoDate(profile.getCreateDate()))
+                .build();
     }
 
     private Response handleListSAMLProviders(String authorization) {
@@ -561,6 +597,15 @@ public class IamQueryHandler {
         String value = params.getFirst(name);
         if (value == null) {
             return defaultValue;
+        }
+        return parseStrictBoolean(name, value);
+    }
+
+    /** Unlike {@link #getBooleanParam}, absence is meaningful here: it must not collapse to a default. */
+    private Boolean getOptionalBooleanParam(MultivaluedMap<String, String> params, String name) {
+        String value = params.getFirst(name);
+        if (value == null) {
+            return null;
         }
         return parseStrictBoolean(name, value);
     }

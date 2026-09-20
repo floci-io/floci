@@ -1,36 +1,30 @@
 package io.github.hectorvent.floci.services.elasticache;
 
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.elasticache.model.AuthMode;
 import io.github.hectorvent.floci.services.elasticache.model.ClusterNode;
 import io.github.hectorvent.floci.services.elasticache.model.Endpoint;
 import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroup;
+import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroupSettings;
 import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroupStatus;
 import io.github.hectorvent.floci.services.elasticache.proxy.SigV4Validator;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
-import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroup;
-import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroupSettings;
-import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroupStatus;
-import io.github.hectorvent.floci.services.elasticache.model.AuthMode;
-import io.github.hectorvent.floci.services.elasticache.model.Endpoint;
-import io.github.hectorvent.floci.core.common.AwsException;
-import java.util.List;
-import java.util.Map;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.mockito.ArgumentMatchers.*;
-import static org.mockito.Mockito.*;
-import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.time.Instant;
+import java.util.Arrays;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
+import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.*;
 
 /**
  * Verifies the empty-list read responses for the subnet/parameter group describes, so
@@ -206,7 +200,7 @@ class ElastiCacheQueryHandlerTest {
 
     private static ReplicationGroup group(String id) {
         ReplicationGroup g = new ReplicationGroup(id, "d", ReplicationGroupStatus.AVAILABLE, AuthMode.NO_AUTH,
-                new Endpoint("localhost", 6379), java.time.Instant.now(), 6379);
+                new Endpoint("localhost", 6379), Instant.now(), 6379);
         g.setArn("arn:aws:elasticache:us-east-1:000000000000:replicationgroup:" + id);
         return g;
     }
@@ -301,7 +295,7 @@ class ElastiCacheQueryHandlerTest {
         verify(service, times(7)).createReplicationGroup(captor.capture());
         List<Boolean> seen = captor.getAllValues().stream()
                 .map(r -> r.settings().atRestEncryptionEnabled()).toList();
-        assertEquals(java.util.Arrays.asList(true, true, true, true, false, false, null), seen);
+        assertEquals(Arrays.asList(true, true, true, true, false, false, null), seen);
     }
 
     @Test
@@ -378,7 +372,7 @@ class ElastiCacheQueryHandlerTest {
     @Test
     void listTagsForResource_readsAReplicationGroupByItsArn() {
         ReplicationGroup g = group("g1");
-        g.setTags(new java.util.LinkedHashMap<>(Map.of("Name", "g1")));
+        g.setTags(new LinkedHashMap<>(Map.of("Name", "g1")));
         when(service.getReplicationGroup("g1")).thenReturn(g);
         when(service.getReplicationGroup("absent")).thenThrow(
                 new AwsException("ReplicationGroupNotFoundFault", "Replication group absent not found.", 404));
@@ -398,13 +392,14 @@ class ElastiCacheQueryHandlerTest {
         // not the one this ARN names
         ReplicationGroup elsewhere = group("g2");
         elsewhere.setArn("arn:aws:elasticache:eu-west-1:000000000000:replicationgroup:g2");
-        elsewhere.setTags(new java.util.LinkedHashMap<>(Map.of("Name", "west")));
+        elsewhere.setTags(new LinkedHashMap<>(Map.of("Name", "west")));
         when(service.getReplicationGroup("g2")).thenReturn(elsewhere);
         p = params();
         p.add("ResourceName", "arn:aws:elasticache:us-east-1:000000000000:replicationgroup:g2");
         response = handler.handle("ListTagsForResource", p, "us-east-1");
-        assertEquals(404, response.getStatus(), (String) response.getEntity());
-        assertFalse(((String) response.getEntity()).contains("west"));
+        String entity = (String) response.getEntity();
+        assertEquals(404, response.getStatus(), entity);
+        assertFalse(entity.contains("west"));
     }
 
     @Test

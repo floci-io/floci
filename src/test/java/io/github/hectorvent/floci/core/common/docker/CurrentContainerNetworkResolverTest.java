@@ -56,6 +56,30 @@ class CurrentContainerNetworkResolverTest {
     }
 
     @Test
+    void resolveContainerIdReturnsCurrentContainerWhenRunningInDocker() {
+        DockerClient dockerClient = mock(DockerClient.class);
+        ContainerDetector containerDetector = mock(ContainerDetector.class);
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+
+        CurrentContainerNetworkResolver resolver =
+                new TestResolver(dockerClient, containerDetector, "floci-container");
+
+        assertEquals(Optional.of("floci-container"), resolver.resolveContainerId());
+    }
+
+    @Test
+    void resolveContainerIdReturnsEmptyOutsideDocker() {
+        DockerClient dockerClient = mock(DockerClient.class);
+        ContainerDetector containerDetector = mock(ContainerDetector.class);
+        when(containerDetector.isRunningInContainer()).thenReturn(false);
+
+        CurrentContainerNetworkResolver resolver =
+                new TestResolver(dockerClient, containerDetector, "floci-container");
+
+        assertTrue(resolver.resolveContainerId().isEmpty());
+    }
+
+    @Test
     void resolvePublishedPort_retriesUntilSuccessfulAndCachesResult() {
         DockerClient dockerClient = mock(DockerClient.class);
         ContainerDetector containerDetector = mock(ContainerDetector.class);

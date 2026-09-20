@@ -27,6 +27,7 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.lenient;
@@ -184,7 +185,7 @@ class KarapaceManagerTest {
                 Map.of(REST_PORT, new EndpointInfo("localhost", 1)));
         when(lifecycleManager.createAndStart(any())).thenReturn(info);
 
-        org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class,
+        assertThrows(IllegalStateException.class,
                 () -> manager.ensureStarted("broker-1:9092"));
 
         verify(lifecycleManager).stopAndRemove("container-1", null);

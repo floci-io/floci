@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.redshift;
 
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
@@ -39,11 +40,19 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @QuarkusTest
 class RedshiftInterceptorIntegrationTest {
 
+    private static final String REDSHIFT_TRUST_POLICY = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Principal":{"Service":"redshift.amazonaws.com"},"Action":"sts:AssumeRole"}]}
+            """;
+
     @Inject
     RedshiftService service;
 
     @Inject
     S3Service s3;
+
+    @Inject
+    IamService iamService;
 
     private String clusterId;
 
@@ -79,6 +88,16 @@ class RedshiftInterceptorIntegrationTest {
 
     private static String namedPreparedJdbcUrl(Cluster cluster) {
         return jdbcUrl(cluster) + "?prepareThreshold=1";
+    }
+
+    /**
+     * Catalog-based column discovery for {@code FORMAT AS JSON 'auto'} without an explicit column
+     * list only runs over the Simple Query protocol (see {@code docs/services/redshift.md}), so
+     * tests exercising that discovery must force it explicitly: pgjdbc's default query mode is
+     * Extended even for a plain {@link java.sql.Statement}.
+     */
+    private static String simpleQueryJdbcUrl(Cluster cluster) {
+        return jdbcUrl(cluster) + "?preferQueryMode=simple";
     }
 
     private static Connection waitForConnection(Cluster cluster, String username, String password) throws SQLException {
@@ -129,6 +148,32 @@ class RedshiftInterceptorIntegrationTest {
         assertEquals(1, objects.size());
         assertEquals("1|alice\n2|bob\n", new String(
                 s3.getObject(bucket, objects.get(0).getKey()).getData(), StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void copyWithIamRoleSucceedsWhenEnforceAuthIsOffEvenWithoutAPolicy() throws Exception {
+        clusterId = "it-copy-iam-role-no-enforce";
+        String bucket = "redshift-iam-role-no-enforce";
+        s3.createBucket(bucket, "us-east-1");
+        s3.putObject(bucket, "people/p1.txt",
+                "1|alice\n".getBytes(StandardCharsets.UTF_8), "text/plain", Map.of());
+        iamService.createRole("CopyRoleNoPolicy", "/", REDSHIFT_TRUST_POLICY, null, 0, null);
+        Cluster cluster = service.createCluster(clusterId, "dc2.large", "admin", "Secret123", null, List.of(),
+                List.of("arn:aws:iam::000000000000:role/CopyRoleNoPolicy"));
+
+        try (Connection connection = waitForConnection(cluster, "admin", "Secret123");
+                Statement ddl = connection.createStatement()) {
+            ddl.execute("CREATE TABLE people (id int, name text)");
+            try (PreparedStatement copy = connection.prepareStatement(
+                    "COPY people FROM 's3://" + bucket + "/people/p1.txt' "
+                            + "IAM_ROLE 'arn:aws:iam::000000000000:role/CopyRoleNoPolicy'")) {
+                copy.execute();
+            }
+            try (ResultSet rows = connection.createStatement().executeQuery("SELECT count(*) FROM people")) {
+                assertTrue(rows.next());
+                assertEquals(1, rows.getInt(1));
+            }
+        }
     }
 
     @Test
@@ -408,4 +453,144 @@ class RedshiftInterceptorIntegrationTest {
                     "UNLOAD ('select id from o_src') TO 's3://redshift-unload-it-ow/o/' ALLOWOVERWRITE");
         }
     }
+
+    @Test
+    void copyFromS3JsonAutoExplicitColumnsLoadsRows() throws Exception {
+        clusterId = "it-copy-json-explicit";
+        Cluster cluster = service.createCluster(clusterId, "dc2.large", "admin", "Secret123");
+
+        String bucket = "redshift-copy-json-explicit";
+        s3.createBucket(bucket, "us-east-1");
+        String ndjson = "{\"id\": 1, \"name\": \"Alice\", \"score\": 95.5}\n"
+                + "{\"id\": 2, \"name\": \"Bob\", \"score\": 82.0}\n";
+        s3.putObject(bucket, "data/users.json", ndjson.getBytes(StandardCharsets.UTF_8), "application/json", Map.of());
+
+        try (Connection c = waitForConnection(cluster, "admin", "Secret123")) {
+            c.createStatement().execute("CREATE TABLE users (id int, name text, score numeric)");
+            c.createStatement().execute("COPY users (id, name, score) FROM 's3://" + bucket + "/data/users.json' FORMAT AS JSON 'auto'");
+            try (ResultSet rs = c.createStatement().executeQuery("SELECT count(*), sum(score) FROM users")) {
+                assertTrue(rs.next());
+                assertEquals(2, rs.getInt(1));
+                assertEquals(177.5, rs.getDouble(2), 0.001);
+            }
+        }
+    }
+
+    @Test
+    void copyFromS3JsonAutoWithoutColumnsDiscoversSchema() throws Exception {
+        clusterId = "it-copy-json-auto-schema";
+        Cluster cluster = service.createCluster(clusterId, "dc2.large", "admin", "Secret123");
+
+        String bucket = "redshift-copy-json-auto-schema";
+        s3.createBucket(bucket, "us-east-1");
+        String ndjson = "{\"id\": 10, \"name\": \"Charlie\", \"note\": \"hello\"}\n"
+                + "{\"id\": 20, \"name\": \"David\", \"note\": \"world\"}\n";
+        s3.putObject(bucket, "data/items.json", ndjson.getBytes(StandardCharsets.UTF_8), "application/json", Map.of());
+
+        // Column discovery only runs over Simple Query; force it explicitly since pgjdbc's
+        // default query mode is Extended even for a plain Statement.
+        try (Connection c = waitForConnection(simpleQueryJdbcUrl(cluster), "admin", "Secret123")) {
+            c.createStatement().execute("CREATE TABLE items (id int, name text, note text)");
+            c.createStatement().execute("COPY items FROM 's3://" + bucket + "/data/items.json' FORMAT AS JSON 'auto'");
+            try (ResultSet rs = c.createStatement().executeQuery("SELECT count(*), max(id) FROM items")) {
+                assertTrue(rs.next());
+                assertEquals(2, rs.getInt(1));
+                assertEquals(20, rs.getInt(2));
+            }
+        }
+    }
+
+    @Test
+    void copyFromS3JsonAutoWithoutColumnsOverExtendedQueryFailsClearly() throws Exception {
+        clusterId = "it-copy-json-auto-extended-rejects";
+        Cluster cluster = service.createCluster(clusterId, "dc2.large", "admin", "Secret123");
+
+        String bucket = "redshift-copy-json-auto-extended";
+        s3.createBucket(bucket, "us-east-1");
+        s3.putObject(bucket, "data/items.json",
+                "{\"id\": 1}\n".getBytes(StandardCharsets.UTF_8), "application/json", Map.of());
+
+        // Default connection: pgjdbc's default query mode is Extended even for a plain Statement,
+        // where the column list is fixed at Parse time and catalog discovery cannot run.
+        try (Connection c = waitForConnection(cluster, "admin", "Secret123")) {
+            c.createStatement().execute("CREATE TABLE ext_items (id int)");
+            SQLException ex = assertThrows(SQLException.class, () -> c.createStatement().execute(
+                    "COPY ext_items FROM 's3://" + bucket + "/data/items.json' FORMAT AS JSON 'auto'"));
+            assertTrue(ex.getMessage().contains("explicit column list"));
+        }
+    }
+
+    @Test
+    void copyFromS3JsonAutoGzipLoadsRows() throws Exception {
+        clusterId = "it-copy-json-gzip";
+        Cluster cluster = service.createCluster(clusterId, "dc2.large", "admin", "Secret123");
+
+        String bucket = "redshift-copy-json-gzip";
+        s3.createBucket(bucket, "us-east-1");
+        ByteArrayOutputStream raw = new ByteArrayOutputStream();
+        try (GZIPOutputStream gz = new GZIPOutputStream(raw)) {
+            gz.write("{\"id\": 100, \"val\": \"zipped\"}\n".getBytes(StandardCharsets.UTF_8));
+        }
+        s3.putObject(bucket, "data/compressed.json.gz", raw.toByteArray(), "application/gzip", Map.of());
+
+        // Column discovery only runs over Simple Query; force it explicitly since pgjdbc's
+        // default query mode is Extended even for a plain Statement.
+        try (Connection c = waitForConnection(simpleQueryJdbcUrl(cluster), "admin", "Secret123")) {
+            c.createStatement().execute("CREATE TABLE gz_items (id int, val text)");
+            c.createStatement().execute("COPY gz_items FROM 's3://" + bucket + "/data/compressed.json.gz' GZIP FORMAT AS JSON 'auto'");
+            try (ResultSet rs = c.createStatement().executeQuery("SELECT count(*), max(val) FROM gz_items")) {
+                assertTrue(rs.next());
+                assertEquals(1, rs.getInt(1));
+                assertEquals("zipped", rs.getString(2));
+            }
+        }
+    }
+
+    @Test
+    void copyFromS3ManifestRoundtrip() throws Exception {
+        clusterId = "it-manifest-roundtrip";
+        Cluster cluster = service.createCluster(clusterId, "dc2.large", "admin", "Secret123");
+
+        String bucket = "redshift-manifest-roundtrip";
+        s3.createBucket(bucket, "us-east-1");
+
+        try (Connection c = waitForConnection(cluster, "admin", "Secret123")) {
+            c.createStatement().execute("CREATE TABLE src (id int, name text)");
+            c.createStatement().execute("INSERT INTO src VALUES (1, 'alpha'), (2, 'beta')");
+
+            // UNLOAD with MANIFEST
+            c.createStatement().execute("UNLOAD ('select id, name from src order by id') "
+                    + "TO 's3://" + bucket + "/export/' MANIFEST ALLOWOVERWRITE");
+
+            // Target table
+            c.createStatement().execute("CREATE TABLE dst (id int, name text)");
+
+            // COPY using the generated manifest
+            c.createStatement().execute("COPY dst (id, name) FROM 's3://" + bucket + "/export/manifest' MANIFEST");
+
+            try (ResultSet rs = c.createStatement().executeQuery("SELECT count(*) FROM dst")) {
+                assertTrue(rs.next());
+                assertEquals(2, rs.getInt(1));
+            }
+        }
+    }
+
+    @Test
+    void copyFromS3ManifestMissingMandatoryFails() throws Exception {
+        clusterId = "it-manifest-missing";
+        Cluster cluster = service.createCluster(clusterId, "dc2.large", "admin", "Secret123");
+
+        String bucket = "redshift-manifest-missing";
+        s3.createBucket(bucket, "us-east-1");
+        String manifestJson = "{\"entries\": [{\"url\": \"s3://" + bucket + "/missing.csv\", \"mandatory\": true}]}";
+        s3.putObject(bucket, "manifest", manifestJson.getBytes(StandardCharsets.UTF_8), "application/json", Map.of());
+
+        try (Connection c = waitForConnection(cluster, "admin", "Secret123")) {
+            c.createStatement().execute("CREATE TABLE t_mand (id int)");
+            SQLException ex = assertThrows(SQLException.class,
+                    () -> c.createStatement().execute("COPY t_mand FROM 's3://" + bucket + "/manifest' MANIFEST"));
+            assertTrue(ex.getMessage().toLowerCase().contains("does not exist") || ex.getMessage().toLowerCase().contains("missing.csv"), ex.getMessage());
+        }
+    }
 }
+

@@ -1,19 +1,22 @@
 package io.github.hectorvent.floci.services.codeartifact;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
-import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.codeartifact.CodeArtifactService.DomainView;
 import io.github.hectorvent.floci.services.codeartifact.CodeArtifactService.ResourcePolicy;
+import io.github.hectorvent.floci.services.codeartifact.CodeArtifactService.PackageVersionAssetResult;
+import io.github.hectorvent.floci.services.codeartifact.CodeArtifactService.PublishPackageVersionResult;
 import io.github.hectorvent.floci.services.codeartifact.model.CodeArtifactDomain;
+import io.github.hectorvent.floci.services.codeartifact.model.CodeArtifactPackageVersion;
 import io.github.hectorvent.floci.services.codeartifact.model.CodeArtifactRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -26,9 +29,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -38,19 +39,16 @@ class CodeArtifactServiceTest {
     private static final String ACCOUNT_ID = "123456789012";
 
     private CodeArtifactService service;
+    private RegionResolver regionResolver;
 
     @BeforeEach
-    @SuppressWarnings({"unchecked", "rawtypes"})
     void setUp() {
-        StorageFactory storageFactory = mock(StorageFactory.class);
         AccountAwareStorageBackend<CodeArtifactDomain> domainStore = AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
         AccountAwareStorageBackend<CodeArtifactRepository> repoStore = AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
-        when(storageFactory.create(eq("codeartifact"), eq("codeartifact-domains.json"), any(TypeReference.class)))
-                .thenReturn((AccountAwareStorageBackend) domainStore);
-        when(storageFactory.create(eq("codeartifact"), eq("codeartifact-repositories.json"), any(TypeReference.class)))
-                .thenReturn((AccountAwareStorageBackend) repoStore);
+        AccountAwareStorageBackend<CodeArtifactPackageVersion> packageVersionStore =
+                AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
 
-        RegionResolver regionResolver = mock(RegionResolver.class);
+        regionResolver = mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn(ACCOUNT_ID);
         when(regionResolver.buildArn(anyString(), anyString(), anyString())).thenAnswer(invocation ->
                 "arn:aws:" + invocation.getArgument(0, String.class) + ":" + invocation.getArgument(1, String.class)
@@ -59,7 +57,8 @@ class CodeArtifactServiceTest {
         EmulatorConfig config = mock(EmulatorConfig.class);
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
 
-        service = new CodeArtifactService(storageFactory, regionResolver, config);
+        service = new CodeArtifactService(domainStore, repoStore, packageVersionStore, regionResolver, config,
+                true, null);
     }
 
     // -------------------------------------------------------------- domains
@@ -93,6 +92,59 @@ class CodeArtifactServiceTest {
         assertTrue(otherRegion.domain().getArn().contains(OTHER_REGION));
         assertEquals(1, service.listDomains(REGION, null, null).items().size());
         assertEquals(1, service.listDomains(OTHER_REGION, null, null).items().size());
+    }
+
+    @Test
+    void createDomainRejectsMoreThanTenDomainsPerAccount() {
+        for (int i = 0; i < 10; i++) {
+            service.createDomain(REGION, "dom-" + i, null, Map.of());
+        }
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.createDomain(REGION, "dom-overflow", null, Map.of()));
+        assertEquals("ServiceQuotaExceededException", e.getErrorCode());
+        assertEquals(402, e.getHttpStatus());
+        assertEquals("dom-overflow", e.getExtendedData().get("resourceId"));
+        assertEquals("domain", e.getExtendedData().get("resourceType"));
+    }
+
+    @Test
+    void createDomainAtCapStillReturnsConflictForDuplicateName() {
+        for (int i = 0; i < 10; i++) {
+            service.createDomain(REGION, "dom-" + i, null, Map.of());
+        }
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.createDomain(REGION, "dom-0", null, Map.of()));
+        assertEquals("ConflictException", e.getErrorCode());
+    }
+
+    @Test
+    void deletingDomainFreesRoomForANewOne() {
+        for (int i = 0; i < 10; i++) {
+            service.createDomain(REGION, "dom-" + i, null, Map.of());
+        }
+        service.deleteDomain(REGION, "dom-0", null);
+        DomainView view = service.createDomain(REGION, "dom-new", null, Map.of());
+        assertEquals("dom-new", view.domain().getName());
+    }
+
+    @Test
+    void domainQuotaIsScopedPerRegion() {
+        for (int i = 0; i < 10; i++) {
+            service.createDomain(REGION, "dom-" + i, null, Map.of());
+        }
+        DomainView otherRegion = service.createDomain(OTHER_REGION, "dom-0", null, Map.of());
+        assertEquals("dom-0", otherRegion.domain().getName());
+    }
+
+    @Test
+    void domainQuotaIsScopedPerAccount() {
+        for (int i = 0; i < 10; i++) {
+            service.createDomain(REGION, "dom-" + i, null, Map.of());
+        }
+        String otherAccount = "999999999999";
+        when(regionResolver.getAccountId()).thenReturn(otherAccount);
+        DomainView view = service.createDomain(REGION, "dom-0", null, Map.of());
+        assertEquals(otherAccount, view.domain().getOwner());
     }
 
     @Test
@@ -210,6 +262,40 @@ class CodeArtifactServiceTest {
         AwsException e = assertThrows(AwsException.class,
                 () -> service.createRepository(REGION, "dom", null, "consumer", null, upstreams, Map.of()));
         assertEquals("ServiceQuotaExceededException", e.getErrorCode());
+    }
+
+    @Test
+    void createRepositoryRejectsMoreThanOneThousandRepositoriesPerDomain() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        for (int i = 0; i < 1000; i++) {
+            service.createRepository(REGION, "dom", null, "repo-" + i, null, null, Map.of());
+        }
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.createRepository(REGION, "dom", null, "overflow", null, null, Map.of()));
+        assertEquals("ServiceQuotaExceededException", e.getErrorCode());
+        assertEquals(402, e.getHttpStatus());
+        assertEquals("overflow", e.getExtendedData().get("resourceId"));
+        assertEquals("repository", e.getExtendedData().get("resourceType"));
+
+        AwsException duplicate = assertThrows(AwsException.class,
+                () -> service.createRepository(REGION, "dom", null, "repo-0", null, null, Map.of()));
+        assertEquals("ConflictException", duplicate.getErrorCode());
+
+        service.deleteRepository(REGION, "dom", null, "repo-0");
+        CodeArtifactRepository freed = service.createRepository(REGION, "dom", null, "repo-new", null, null,
+                Map.of());
+        assertEquals("repo-new", freed.getName());
+    }
+
+    @Test
+    void repositoryQuotaIsScopedPerDomain() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        for (int i = 0; i < 1000; i++) {
+            service.createRepository(REGION, "dom", null, "repo-" + i, null, null, Map.of());
+        }
+        service.createDomain(REGION, "dom-2", null, Map.of());
+        CodeArtifactRepository r = service.createRepository(REGION, "dom-2", null, "repo-0", null, null, Map.of());
+        assertEquals("repo-0", r.getName());
     }
 
     @Test
@@ -351,5 +437,237 @@ class CodeArtifactServiceTest {
         AwsException e = assertThrows(AwsException.class,
                 () -> service.describeRepository(REGION, "dom", null, "repo"));
         assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    // -------------------------------------------------------- package versions
+
+    @Test
+    void publishPackageVersionComputesRealHashesAndPublishesByDefault() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "hello world".getBytes(StandardCharsets.UTF_8);
+        String sha256 = sha256Hex(content);
+
+        PublishPackageVersionResult result = service.publishPackageVersion(REGION, "dom", null, "repo", "generic",
+                "my-ns", "my-pkg", "1.0.0", "asset.txt", sha256, "false", content);
+
+        assertEquals("Published", result.packageVersion().getStatus());
+        assertEquals("asset.txt", result.asset().getName());
+        assertEquals(content.length, result.asset().getSize());
+        assertEquals(sha256, result.asset().getHashes().get("SHA-256"));
+        assertTrue(result.asset().getHashes().containsKey("MD5"));
+        assertTrue(result.asset().getHashes().containsKey("SHA-1"));
+        assertTrue(result.asset().getHashes().containsKey("SHA-512"));
+    }
+
+    @Test
+    void publishPackageVersionRejectsMismatchedSha256() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "hello world".getBytes(StandardCharsets.UTF_8);
+
+        AwsException e = assertThrows(AwsException.class, () -> service.publishPackageVersion(REGION, "dom", null,
+                "repo", "generic", null, "my-pkg", "1.0.0", "asset.txt", "0".repeat(64), "false", content));
+        assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    @Test
+    void publishPackageVersionRequiresAssetSha256() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "hello world".getBytes(StandardCharsets.UTF_8);
+
+        AwsException missing = assertThrows(AwsException.class, () -> service.publishPackageVersion(REGION, "dom",
+                null, "repo", "generic", null, "my-pkg", "1.0.0", "asset.txt", null, "false", content));
+        assertEquals("ValidationException", missing.getErrorCode());
+
+        AwsException malformed = assertThrows(AwsException.class, () -> service.publishPackageVersion(REGION, "dom",
+                null, "repo", "generic", null, "my-pkg", "1.0.0", "asset.txt", "not-hex", "false", content));
+        assertEquals("ValidationException", malformed.getErrorCode());
+    }
+
+    @Test
+    void publishPackageVersionRejectsAssetNameWithControlCharacters() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "hello world".getBytes(StandardCharsets.UTF_8);
+        String sha256 = sha256Hex(content);
+
+        // A newline here would land verbatim in the X-AssetName response header on GetPackageVersionAsset.
+        AwsException e = assertThrows(AwsException.class, () -> service.publishPackageVersion(REGION, "dom", null,
+                "repo", "generic", null, "my-pkg", "1.0.0", "asset.txt\r\nX-Injected: true", sha256, "false",
+                content));
+        assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    @Test
+    void publishPackageVersionRejectsMalformedUnfinishedFlag() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "hello world".getBytes(StandardCharsets.UTF_8);
+
+        AwsException e = assertThrows(AwsException.class, () -> service.publishPackageVersion(REGION, "dom", null,
+                "repo", "generic", null, "my-pkg", "1.0.0", "asset.txt", sha256Hex(content), "yes", content));
+        assertEquals("ValidationException", e.getErrorCode());
+
+        PublishPackageVersionResult omitted = service.publishPackageVersion(REGION, "dom", null, "repo", "generic",
+                null, "my-pkg", "1.0.0", "asset.txt", sha256Hex(content), null, content);
+        assertEquals("Published", omitted.packageVersion().getStatus());
+    }
+
+    @Test
+    void publishPackageVersionRejectsNonGenericFormat() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "x".getBytes(StandardCharsets.UTF_8);
+
+        AwsException e = assertThrows(AwsException.class, () -> service.publishPackageVersion(REGION, "dom", null,
+                "repo", "npm", null, "my-pkg", "1.0.0", "asset.txt", sha256Hex(content), "false", content));
+        assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    @Test
+    void publishPackageVersionRequiresExistingRepository() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        byte[] content = "x".getBytes(StandardCharsets.UTF_8);
+
+        AwsException e = assertThrows(AwsException.class, () -> service.publishPackageVersion(REGION, "dom", null,
+                "no-such-repo", "generic", null, "my-pkg", "1.0.0", "asset.txt", sha256Hex(content), "false", content));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    @Test
+    void unfinishedPublishAllowsMultipleAssetsThenFinalizes() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] first = "first".getBytes(StandardCharsets.UTF_8);
+        byte[] second = "second".getBytes(StandardCharsets.UTF_8);
+
+        PublishPackageVersionResult r1 = service.publishPackageVersion(REGION, "dom", null, "repo", "generic", null,
+                "my-pkg", "1.0.0", "a.txt", sha256Hex(first), "true", first);
+        assertEquals("Unfinished", r1.packageVersion().getStatus());
+
+        PublishPackageVersionResult r2 = service.publishPackageVersion(REGION, "dom", null, "repo", "generic", null,
+                "my-pkg", "1.0.0", "b.txt", sha256Hex(second), "false", second);
+        assertEquals("Published", r2.packageVersion().getStatus());
+        assertEquals(2, r2.packageVersion().getAssets().size());
+        assertTrue(r2.packageVersion().getAssets().containsKey("a.txt"));
+        assertTrue(r2.packageVersion().getAssets().containsKey("b.txt"));
+    }
+
+    @Test
+    void publishingToAnAlreadyPublishedVersionConflicts() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "x".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", null, "my-pkg", "1.0.0", "a.txt",
+                sha256Hex(content), "false", content);
+
+        AwsException e = assertThrows(AwsException.class, () -> service.publishPackageVersion(REGION, "dom", null,
+                "repo", "generic", null, "my-pkg", "1.0.0", "b.txt", sha256Hex(content), "false", content));
+        assertEquals("ConflictException", e.getErrorCode());
+    }
+
+    @Test
+    void publishPackageVersionCapsAssetsPerVersionAtThreeHundredFifty() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        for (int i = 0; i < 350; i++) {
+            byte[] content = ("content-" + i).getBytes(StandardCharsets.UTF_8);
+            service.publishPackageVersion(REGION, "dom", null, "repo", "generic", null, "my-pkg", "1.0.0",
+                    "asset-" + i + ".txt", sha256Hex(content), "true", content);
+        }
+        byte[] oneMore = "one-more".getBytes(StandardCharsets.UTF_8);
+        AwsException e = assertThrows(AwsException.class, () -> service.publishPackageVersion(REGION, "dom", null,
+                "repo", "generic", null, "my-pkg", "1.0.0", "asset-350.txt", sha256Hex(oneMore), "true", oneMore));
+        assertEquals("ServiceQuotaExceededException", e.getErrorCode());
+
+        // Re-publishing an asset name already on the version must not itself trip the cap.
+        byte[] resend = "content-0".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", null, "my-pkg", "1.0.0", "asset-0.txt",
+                sha256Hex(resend), "true", resend);
+    }
+
+    @Test
+    void describePackageVersionRoundTripsAndReportsNotFound() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "x".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "1.0.0", "a.txt",
+                sha256Hex(content), "false", content);
+
+        CodeArtifactPackageVersion pv = service.describePackageVersion(REGION, "dom", null, "repo", "generic", "ns",
+                "my-pkg", "1.0.0");
+        assertEquals("Published", pv.getStatus());
+        assertEquals("ns", pv.getNamespace());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.describePackageVersion(REGION, "dom", null,
+                "repo", "generic", "ns", "my-pkg", "2.0.0"));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    @Test
+    void getPackageVersionAssetReturnsExactBytesAndValidatesRevision() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "hello world".getBytes(StandardCharsets.UTF_8);
+        PublishPackageVersionResult published = service.publishPackageVersion(REGION, "dom", null, "repo", "generic",
+                null, "my-pkg", "1.0.0", "a.txt", sha256Hex(content), "false", content);
+
+        PackageVersionAssetResult result = service.getPackageVersionAsset(REGION, "dom", null, "repo", "generic",
+                null, "my-pkg", "1.0.0", "a.txt", null);
+        assertEquals(content.length, result.asset().getContent().length);
+        assertEquals("hello world", new String(result.asset().getContent(), StandardCharsets.UTF_8));
+        assertEquals(published.packageVersion().getRevision(), result.packageVersionRevision());
+
+        AwsException wrongAsset = assertThrows(AwsException.class, () -> service.getPackageVersionAsset(REGION,
+                "dom", null, "repo", "generic", null, "my-pkg", "1.0.0", "missing.txt", null));
+        assertEquals("ResourceNotFoundException", wrongAsset.getErrorCode());
+
+        AwsException wrongRevision = assertThrows(AwsException.class, () -> service.getPackageVersionAsset(REGION,
+                "dom", null, "repo", "generic", null, "my-pkg", "1.0.0", "a.txt", "not-the-current-revision"));
+        assertEquals("ResourceNotFoundException", wrongRevision.getErrorCode());
+    }
+
+    @Test
+    void concurrentUnfinishedPublishesOfDifferentAssetsBothPersist() throws InterruptedException {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        int assetCount = 8;
+        ExecutorService pool = Executors.newFixedThreadPool(assetCount);
+        CountDownLatch ready = new CountDownLatch(assetCount);
+        CountDownLatch go = new CountDownLatch(1);
+        try {
+            for (int i = 0; i < assetCount; i++) {
+                int index = i;
+                pool.submit(() -> {
+                    ready.countDown();
+                    try {
+                        go.await();
+                        byte[] content = ("content-" + index).getBytes(StandardCharsets.UTF_8);
+                        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", null, "my-pkg",
+                                "1.0.0", "asset-" + index + ".txt", sha256Hex(content), "true", content);
+                    } catch (InterruptedException ignored) {
+                        Thread.currentThread().interrupt();
+                    }
+                });
+            }
+            ready.await(5, TimeUnit.SECONDS);
+            go.countDown();
+        } finally {
+            pool.shutdown();
+            assertTrue(pool.awaitTermination(10, TimeUnit.SECONDS));
+        }
+        CodeArtifactPackageVersion pv = service.describePackageVersion(REGION, "dom", null, "repo", "generic", null,
+                "my-pkg", "1.0.0");
+        assertEquals(assetCount, pv.getAssets().size());
+    }
+
+    private static String sha256Hex(byte[] content) {
+        try {
+            return SigV4RequestValidator.sha256Hex(content);
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
     }
 }
