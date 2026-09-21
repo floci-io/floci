@@ -1008,6 +1008,10 @@ public class EksClusterManager {
      * alone, and {@code failurePolicy: Ignore} so an unreachable or failing Floci never blocks a pod
      * from being created. The {@code caBundle} is Floci's local CA, base64 of the PEM as Kubernetes
      * expects.
+     *
+     * <p>{@code timeoutSeconds} is 3, not the Kubernetes default of 10: Floci is a local process, so
+     * a healthy call takes milliseconds, and the timeout only ever runs down when Floci is
+     * unreachable. Every pod creation in the cluster pays it in that case, so it is kept short.
      */
     static String buildPodIdentityWebhookConfiguration(String url, String caPem) {
         return """
@@ -1021,7 +1025,7 @@ public class EksClusterManager {
                     sideEffects: None
                     failurePolicy: Ignore
                     reinvocationPolicy: Never
-                    timeoutSeconds: 10
+                    timeoutSeconds: 3
                     clientConfig:
                       url: "%s"
                       caBundle: "%s"

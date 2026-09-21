@@ -2890,11 +2890,16 @@ public interface EmulatorConfig {
          * whose service account has an EKS Pod Identity association are mutated at admission with a
          * projected pod identity token and the container credentials environment variables.
          *
+         * <p>Off by default until the credential endpoint on {@code 169.254.170.23} exists. An
+         * injected pod points its SDK at that endpoint, and nothing answers it yet, so turning this
+         * on today takes a workload off whatever credentials it was using and gives it a container
+         * credentials path that fails.
+         *
          * <p>Requires {@link EmulatorConfig#tls()} to be enabled: Kubernetes rejects an admission
          * webhook URL that is not {@code https}. With TLS off the webhook is skipped with a warning
          * and pods start unmutated.
          */
-        @WithDefault("true")
+        @WithDefault("false")
         boolean podIdentityWebhook();
     }
 

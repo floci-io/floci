@@ -604,7 +604,7 @@ floci:
       imds: false                  # expose link-local IMDS (169.254.169.254) inside the cluster container
       imds-pod-network: false      # route link-local IMDS traffic from ordinary pod network namespaces (requires imds: true)
       irsa-signing-key: true       # sign k3s service account tokens with the cluster OIDC key
-      pod-identity-webhook: true   # register a mutating webhook that injects pod identity credentials (needs floci.tls.enabled)
+      pod-identity-webhook: false  # register a mutating webhook that injects pod identity credentials (needs floci.tls.enabled; nothing answers the injected URI yet)
     mwaa:
       enabled: true
       mock: false
