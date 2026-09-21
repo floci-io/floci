@@ -269,6 +269,9 @@ public class SesService {
         if (additionalHeaders != null && !additionalHeaders.isEmpty()) {
             email.setHeaders(additionalHeaders);
         }
+        if (rejected) {
+            email.discardContent(SesRecipientEvents.CONTENT_REJECT_REASON);
+        }
         sentEmailService.record(region, messageId, email);
 
         List<String> relayedTo = filterUnsuppressed(toAddresses, suppressedReasons);

@@ -23,6 +23,10 @@ import java.util.Base64;
 import java.util.List;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasKey;
+import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -1648,9 +1652,9 @@ class SesEventPublishingV2IntegrationTest {
 
     @Test
     @Order(35)
-    void eicarInSimpleBody_isAcceptedThenRejected() throws Exception {
+    void eicarInSimpleBody_isAcceptedThenRejectedAndStoredWithoutItsContent() throws Exception {
         drainQueue();
-        given().contentType("application/json").header("Authorization", SES_AUTH)
+        String messageId = given().contentType("application/json").header("Authorization", SES_AUTH)
                 .body("""
                     {"FromEmailAddress": "%s",
                      "Destination": {"ToAddresses": ["success@simulator.amazonses.com"]},
@@ -1659,19 +1663,29 @@ class SesEventPublishingV2IntegrationTest {
                                             "Body": {"Text": {"Data": "%s"},
                                                      "Html": {"Data": "<p>clean</p>"}}}}}
                     """.formatted(SENDER, CS, SesContentScan.signature().replace("\\", "\\\\")))
-        .when().post("/v2/email/outbound-emails").then().statusCode(200);
+        .when().post("/v2/email/outbound-emails").then().statusCode(200)
+                .extract().jsonPath().getString("MessageId");
 
         List<JsonNode> events = receiveSesEvents(2);
         assertEquals(2, events.size(), "expected Send and Reject, and no Delivery");
         assertTrue(events.stream().anyMatch(e -> "Reject".equals(e.path("eventType").asText())));
         assertTrue(events.stream().noneMatch(e -> "Delivery".equals(e.path("eventType").asText())));
+
+        // The record keeps the reason and the envelope, but none of the scanned content.
+        given().header("Authorization", SES_AUTH)
+        .when().get("/_aws/ses?id=" + messageId).then().statusCode(200)
+                .body("messages[0].RejectReason", equalTo("Bad content"))
+                .body("messages[0].Subject", nullValue())
+                .body("messages[0].Body.text_part", nullValue())
+                .body("messages[0].Body.html_part", nullValue())
+                .body("messages[0]", not(hasKey("Headers")));
     }
 
     @Test
     @Order(36)
     void eicarInSimpleSubjectOrHeader_isRejectedLikeARawSend() throws Exception {
         // The signature can sit in the subject or in a caller-supplied header name or value as
-        // well as in a body, so the simple path scans all of them.
+        // well as in a body, so the simple path scans all of them, and the record keeps none.
         String signature = SesContentScan.signature().replace("\\", "\\\\");
         for (String content : new String[] {
                 "\"Subject\": {\"Data\": \"" + signature + "\"}, \"Body\": {\"Text\": {\"Data\": \"clean\"}}",
@@ -1680,19 +1694,26 @@ class SesEventPublishingV2IntegrationTest {
                 "\"Subject\": {\"Data\": \"clean\"}, \"Body\": {\"Text\": {\"Data\": \"clean\"}}, "
                         + "\"Headers\": [{\"Name\": \"" + signature + "\", \"Value\": \"x\"}]"}) {
             drainQueue();
-            given().contentType("application/json").header("Authorization", SES_AUTH)
+            String messageId = given().contentType("application/json").header("Authorization", SES_AUTH)
                     .body("""
                         {"FromEmailAddress": "%s",
                          "Destination": {"ToAddresses": ["success@simulator.amazonses.com"]},
                          "ConfigurationSetName": "%s",
                          "Content": {"Simple": {%s}}}
                         """.formatted(SENDER, CS, content))
-            .when().post("/v2/email/outbound-emails").then().statusCode(200);
+            .when().post("/v2/email/outbound-emails").then().statusCode(200)
+                    .extract().jsonPath().getString("MessageId");
 
             List<JsonNode> events = receiveSesEvents(2);
             assertTrue(events.stream().anyMatch(e -> "Reject".equals(e.path("eventType").asText())),
                     "expected a Reject for: " + content.substring(0, 30));
             assertTrue(events.stream().noneMatch(e -> "Delivery".equals(e.path("eventType").asText())));
+
+            given().header("Authorization", SES_AUTH)
+            .when().get("/_aws/ses?id=" + messageId).then().statusCode(200)
+                    .body("messages[0].RejectReason", equalTo("Bad content"))
+                    .body("messages[0].Subject", nullValue())
+                    .body("messages[0]", not(hasKey("Headers")));
         }
     }
 
