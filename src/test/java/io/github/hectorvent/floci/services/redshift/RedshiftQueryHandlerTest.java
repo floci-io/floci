@@ -561,6 +561,10 @@ class RedshiftQueryHandlerTest {
     void modifyClusterIamRolesRequiresClusterIdentifier() {
         AwsException ex = assertThrows(AwsException.class,
                 () -> handler.handle("ModifyClusterIamRoles", new MultivaluedHashMap<>()));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+    }
+
+    @Test
     void testDescribeLoggingStatus() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("ClusterIdentifier", "test-cluster");

@@ -826,6 +826,10 @@ class RedshiftServiceTest {
                 updated.getIamRoleArns());
         verify(proxyManager).updateIamRoles("111111111111:c1", updated.getIamRoleArns());
         verify(clusterBackend).put(eq("c1"), any(Cluster.class));
+        verify(clusterBackend).flush();
+    }
+
+    @Test
     void testDescribeLoggingStatusDefaultsToDisabled() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
@@ -894,6 +898,9 @@ class RedshiftServiceTest {
                 service.modifyClusterIamRoles("missing", List.of(), List.of()));
 
         assertEquals("ClusterNotFound", ex.getErrorCode());
+    }
+
+    @Test
     void testEnableLoggingRequiresBucketName() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
