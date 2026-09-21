@@ -66,6 +66,7 @@ public class GlueService {
     private static final Logger LOG = Logger.getLogger(GlueService.class);
     private static final int MAX_FUNCTION_PATTERN_LENGTH = 255;
     private static final int MAX_FUNCTION_RESULTS = 100;
+    private static final int MAX_SECURITY_CONFIGURATION_NAME_LENGTH = 255;
     private static final Set<String> CSV_HEADER_VALUES = Set.of("UNKNOWN", "PRESENT", "ABSENT");
     private static final Set<String> CSV_SERDE_VALUES = Set.of("OpenCSVSerDe", "LazySimpleSerDe", "None");
     private static final Set<String> CSV_CUSTOM_DATATYPES = Set.of(
@@ -287,8 +288,9 @@ public class GlueService {
         if (name == null || name.isBlank()) {
             throw new AwsException("InvalidInputException", "Name is required.", 400);
         }
-        if (name.length() > 255) {
-            throw new AwsException("InvalidInputException", "Name must be between 1 and 255 characters.", 400);
+        if (name.length() > MAX_SECURITY_CONFIGURATION_NAME_LENGTH) {
+            throw new AwsException("InvalidInputException",
+                    "Name must be between 1 and " + MAX_SECURITY_CONFIGURATION_NAME_LENGTH + " characters.", 400);
         }
     }
 
