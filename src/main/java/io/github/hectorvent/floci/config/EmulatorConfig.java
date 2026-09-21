@@ -2579,6 +2579,9 @@ public interface EmulatorConfig {
     }
 
     interface Ec2ServiceConfig {
+        /** Optional full EC2 catalog file for locally built guest images. */
+        Optional<String> imageCatalogPath();
+
         @WithDefault("true")
         boolean enabled();
 

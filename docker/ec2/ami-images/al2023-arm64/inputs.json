@@ -1,0 +1,15 @@
+{
+  "architecture": "arm64",
+  "al2023Release": "2023.12.20260914",
+  "baseImage": "public.ecr.aws/amazonlinux/amazonlinux:2023@sha256:155687eb8e1f156da67beda919f1ca4dab36a9f6fc7576cc514d7773b7d6a311",
+  "goImage": "golang:1.26.2@sha256:b54cbf583d390341599d7bcbc062425c081105cc5ef6d170ced98ef9d047c716",
+  "nodeadmCommit": "be7adc2e0c06b72b14d45390846f5593e85787cd",
+  "pauseImage": "registry.k8s.io/pause:3.10@sha256:e50b7059b633caf3c1449b8da680d11845cda4506b513ee7a2de00725f0a34a7",
+  "binaryBaseUrl": "https://amazon-eks.s3.us-west-2.amazonaws.com/1.34.1/2025-11-05/bin/linux/arm64/",
+  "sha256": {
+    "kubelet": "03209c45efd94dd299436b6f9ba870d89e7d640a8a66f02d6430f57d945a6111",
+    "aws-iam-authenticator": "6d8e1b940d33546133d0cd1a998be6fdb4756db837ab04ef954ae564d18d2027",
+    "ecr-credential-provider": "1625ed5d6cb432b35f966e524bbc7119ebb68da3b2881ee7357b83d5f5eb18be",
+    "cni-plugins-linux-arm64-v1.6.1.tgz": "f0f440b968ab50ad13d9d42d993ba98ec30b2ec666846f4ef1bddc7646a701cc"
+  }
+}

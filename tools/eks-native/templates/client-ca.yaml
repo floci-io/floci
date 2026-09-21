@@ -1,0 +1,8 @@
+apiVersion: node.eks.aws/v1alpha1
+kind: NodeConfig
+spec:
+  kubelet:
+    config:
+      authentication:
+        x509:
+          clientCAFile: /etc/eks/local-client-ca.crt

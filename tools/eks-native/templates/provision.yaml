@@ -1,0 +1,72 @@
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: native-e2e
+spec:
+  amiFamily: AL2023
+  amiSelectorTerms:
+    - id: ami-floci-al2023-eks-arm64
+  instanceProfile: native-e2e-node
+  subnetSelectorTerms:
+    - id: subnet-default-us-east-1-a
+  securityGroupSelectorTerms:
+    - tags:
+        floci.test/native-e2e: "true"
+---
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: native-e2e
+spec:
+  limits:
+    cpu: "2"
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 10m
+  template:
+    metadata:
+      labels:
+        floci.test/native-e2e: "true"
+    spec:
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: native-e2e
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values: [arm64]
+        - key: kubernetes.io/os
+          operator: In
+          values: [linux]
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values: [t4g.medium]
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: [on-demand]
+        - key: topology.kubernetes.io/zone
+          operator: In
+          values: [us-east-1a]
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: native-e2e
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: native-e2e
+  namespace: native-e2e
+spec:
+  nodeSelector:
+    floci.test/native-e2e: "true"
+  containers:
+    - name: test
+      image: public.ecr.aws/docker/library/busybox:1.37
+      command: [sh, -c, "echo native-worker-running; sleep 3600"]
+      resources:
+        requests:
+          cpu: 100m
+          memory: 64Mi

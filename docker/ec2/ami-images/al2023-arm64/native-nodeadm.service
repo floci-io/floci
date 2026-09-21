@@ -1,0 +1,12 @@
+[Unit]
+Description=Native EKS node bootstrap for local Floci guest
+After=network.target
+StartLimitIntervalSec=0
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/nodeadm init --config-source imds://user-data --config-source file:///etc/eks/nodeadm.d/ --config-cache /run/nodeadm.json
+RemainAfterExit=yes
+Restart=on-failure
+RestartSec=5
+[Install]
+WantedBy=multi-user.target

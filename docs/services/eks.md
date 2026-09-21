@@ -641,3 +641,12 @@ The following EKS features are not yet supported:
 - Add-ons (`CreateAddon`, `DescribeAddon`, `ListAddons`)
 - Identity provider configs
 - Access policies
+
+## Native AL2023 worker acceptance
+
+An opt-in ARM64 worker recipe and Karpenter E2E workflow are documented in
+[`tools/eks-native/README.md`](https://github.com/floci-io/floci/blob/main/tools/eks-native/README.md).
+They build a local systemd/nodeadm/kubelet/containerd image, provision a fresh worker,
+and verify Kubernetes Ready and workload networking. The fixture requires privileged
+Docker and explicit local networking/certificate setup; it is not a prebuilt EKS AMI
+or Amazon VPC CNI implementation.

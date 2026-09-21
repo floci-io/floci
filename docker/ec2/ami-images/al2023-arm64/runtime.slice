@@ -1,0 +1,4 @@
+[Unit]
+Description=Kubernetes and container runtime slice
+Documentation=man:systemd.special(7)
+Before=slices.target

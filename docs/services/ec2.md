@@ -885,3 +885,15 @@ aws ec2 associate-address \
 - `DescribeImages` returns AMIs from the EC2 image catalog, including common AMIs and Floci-native AMI IDs.
 - Security group rules are not enforced as a firewall (Docker bridge networking handles routing), but TCP ingress rules opened to a CIDR source are published on the host via socat sidecars so the instance's app is reachable from `localhost` — see [Security Group Port Publishing](#security-group-port-publishing).
 - The IMDS server identifies which instance is calling via IMDSv2 tokens (mapped at token issuance time) or by the container's bridge IP for IMDSv1.
+
+### External image catalog
+
+Set `FLOCI_SERVICES_EC2_IMAGE_CATALOG_PATH` (`floci.services.ec2.image-catalog-path`)
+to a readable YAML file to replace the bundled image catalog for a Floci process.
+The file uses the same schema as `src/main/resources/ec2/image-catalog.yaml` and must
+include every image that process should expose. Missing or invalid files fail on first
+catalog use; leaving the setting unset preserves the bundled catalog. Containerized
+Floci needs the file mounted at the configured container path.
+
+The opt-in [native AL2023 worker workflow](https://github.com/floci-io/floci/blob/main/tools/eks-native/README.md)
+generates a complete catalog with a local worker entry without modifying the packaged JAR.

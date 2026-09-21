@@ -501,6 +501,8 @@ floci:
       proxy-max-port: 9499
       keep-running-on-shutdown: false
     ec2:
+      # Optional complete catalog override for locally built guest images.
+      image-catalog-path: ${FLOCI_SERVICES_EC2_IMAGE_CATALOG_PATH:}
       enabled: true
       imds-port: 9169
       # Sweep EC2 containers left on the daemon by a previous run that died mid-launch or

@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: network-target
+  namespace: native-e2e
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: network-target
+  template:
+    metadata:
+      labels:
+        app: network-target
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      containers:
+        - name: http
+          image: public.ecr.aws/docker/library/busybox:1.37
+          command: [sh, -c, "mkdir -p /www; echo native-e2e-cross-node-ok > /www/index.html; exec httpd -f -p 8080 -h /www"]
+          ports:
+            - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: network-target
+  namespace: native-e2e
+spec:
+  selector:
+    app: network-target
+  ports:
+    - port: 8080
+      targetPort: 8080
