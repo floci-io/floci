@@ -22,6 +22,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 /**
  * WAF v2 management-plane business logic. Resources are stored by the
@@ -31,6 +32,11 @@ import java.util.UUID;
  */
 @ApplicationScoped
 public class WafV2Service {
+
+    private static final int MAX_TAGS = 50;
+    private static final int MAX_TAG_KEY_LENGTH = 128;
+    private static final int MAX_TAG_VALUE_LENGTH = 256;
+    private static final Pattern TAG_PATTERN = Pattern.compile("^[\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]*$");
 
     private final StorageBackend<String, WebAcl> webAclStore;
     private final StorageBackend<String, IpSet> ipSetStore;
@@ -73,6 +79,7 @@ public class WafV2Service {
                     "AWS WAF couldn't perform the operation because some resource "
                             + "in your request is a duplicate of an existing one.", 400);
         }
+        validateTags(acl.getTags());
         acl.setId(UUID.randomUUID().toString());
         acl.setName(name);
         acl.setScope(scope);
@@ -133,6 +140,7 @@ public class WafV2Service {
         if (findByName(ipSetStore, scope, name) != null) {
             throw new AwsException("WAFDuplicateItemException", "Duplicate IPSet name: " + name, 400);
         }
+        validateTags(ipSet.getTags());
         validateAddresses(ipSet.getAddresses(), ipSet.getIpAddressVersion());
         ipSet.setId(UUID.randomUUID().toString());
         ipSet.setName(name);
@@ -177,6 +185,7 @@ public class WafV2Service {
         if (findByName(regexStore, scope, name) != null) {
             throw new AwsException("WAFDuplicateItemException", "Duplicate RegexPatternSet name: " + name, 400);
         }
+        validateTags(set.getTags());
         set.setId(UUID.randomUUID().toString());
         set.setName(name);
         set.setScope(scope);
@@ -219,6 +228,7 @@ public class WafV2Service {
         if (findByName(ruleGroupStore, scope, name) != null) {
             throw new AwsException("WAFDuplicateItemException", "Duplicate RuleGroup name: " + name, 400);
         }
+        validateTags(group.getTags());
         group.setId(UUID.randomUUID().toString());
         group.setName(name);
         group.setScope(scope);
@@ -337,12 +347,18 @@ public class WafV2Service {
     }
 
     public void tagResource(String resourceArn, Map<String, String> tags) {
+        validateTags(tags);
         Object resource = taggable(resourceArn);
-        tagsOf(resource).putAll(tags);
+        Map<String, String> current = tagsOf(resource);
+        Map<String, String> merged = new LinkedHashMap<>(current);
+        merged.putAll(tags);
+        requireTagCount(merged.size());
+        current.putAll(tags);
         persistTagged(resource);
     }
 
     public void untagResource(String resourceArn, List<String> keys) {
+        keys.forEach(key -> requireValidTagKey(key, "TAG_KEYS"));
         Object resource = taggable(resourceArn);
         keys.forEach(tagsOf(resource)::remove);
         persistTagged(resource);
@@ -492,6 +508,41 @@ public class WafV2Service {
     private void requireName(String name) {
         if (name == null || name.isBlank()) {
             throw new AwsException("WAFInvalidParameterException", "Name is required.", 400);
+        }
+    }
+
+    /**
+     * Enforces the WAFv2 tag contract: at most {@value #MAX_TAGS} tags per resource, keys of
+     * 1-{@value #MAX_TAG_KEY_LENGTH} characters, values of up to {@value #MAX_TAG_VALUE_LENGTH}
+     * characters, both restricted to letters, numbers, spaces and {@code _ . : / = + - @}.
+     */
+    private void validateTags(Map<String, String> tags) {
+        if (tags == null) {
+            return;
+        }
+        for (Map.Entry<String, String> tag : tags.entrySet()) {
+            requireValidTagKey(tag.getKey(), "TAGS");
+            String value = tag.getValue();
+            if (value != null
+                    && (value.length() > MAX_TAG_VALUE_LENGTH || !TAG_PATTERN.matcher(value).matches())) {
+                throw invalidParameter("TAGS", tag.getKey(), "ILLEGAL_ARGUMENT");
+            }
+        }
+        requireTagCount(tags.size());
+    }
+
+    private void requireValidTagKey(String key, String field) {
+        if (key == null || key.isEmpty() || key.length() > MAX_TAG_KEY_LENGTH
+                || !TAG_PATTERN.matcher(key).matches()) {
+            throw invalidParameter(field, key == null ? "" : key, "INVALID_TAG_KEY");
+        }
+    }
+
+    private void requireTagCount(int count) {
+        if (count > MAX_TAGS) {
+            throw new AwsException("WAFLimitsExceededException",
+                    "AWS WAF couldn't perform the operation because you exceeded your resource limit. "
+                            + "A resource can have at most " + MAX_TAGS + " tags.", 400);
         }
     }
 
