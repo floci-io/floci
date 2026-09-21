@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.rds.model.DbProxy;
 import io.github.hectorvent.floci.services.rds.model.DbProxyAuth;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTarget;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTargetGroup;
+import io.github.hectorvent.floci.services.rds.model.DbSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
 import io.github.hectorvent.floci.services.rds.model.OptionGroup;
 import io.github.hectorvent.floci.services.rds.model.OptionGroupOption;
@@ -1104,10 +1105,13 @@ class RdsQueryHandlerTest {
 
     @Test
     void describeDbSnapshots_returnsSnapshotListWith200() {
-        io.github.hectorvent.floci.services.rds.model.DbSnapshot snapshot = new io.github.hectorvent.floci.services.rds.model.DbSnapshot();
+        DbSnapshot snapshot = new DbSnapshot();
         snapshot.setDbSnapshotIdentifier("mysnap");
         snapshot.setDbInstanceIdentifier("mydb");
         snapshot.setEngine(io.github.hectorvent.floci.services.rds.model.DatabaseEngine.POSTGRES);
+        snapshot.setSnapshotType("manual");
+        snapshot.setSourceDbSnapshotIdentifier(
+                "arn:aws:rds:us-east-1:123456789012:snapshot:source");
         when(service.describeDbSnapshots(eq("mysnap"), eq("mydb"), isNull())).thenReturn(List.of(snapshot));
 
         MultivaluedMap<String, String> p = params();
@@ -1120,6 +1124,8 @@ class RdsQueryHandlerTest {
         assertTrue(body.contains("<DescribeDBSnapshotsResult>"));
         assertTrue(body.contains("<DBSnapshotIdentifier>mysnap</DBSnapshotIdentifier>"));
         assertTrue(body.contains("<DBInstanceIdentifier>mydb</DBInstanceIdentifier>"));
+        assertTrue(body.contains("<SnapshotType>manual</SnapshotType>"));
+        assertTrue(body.contains("<SourceDBSnapshotIdentifier>arn:aws:rds:us-east-1:123456789012:snapshot:source</SourceDBSnapshotIdentifier>"));
     }
 
     @Test
@@ -1833,6 +1839,78 @@ class RdsQueryHandlerTest {
         assertTrue(body.contains("<Engine>postgres</Engine>"));
         assertTrue(body.contains("<Key>owner</Key>"));
         assertTrue(body.contains("<Value>platform</Value>"));
+    }
+
+    @Test
+    void deleteDbSnapshot_success() {
+        DbSnapshot snapshot = new DbSnapshot();
+        snapshot.setDbSnapshotIdentifier("mysnap");
+        snapshot.setStatus("deleted");
+        when(service.deleteDbSnapshot(eq("mysnap"), isNull())).thenReturn(snapshot);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBSnapshotIdentifier", "mysnap");
+        Response response = handler.handle("DeleteDBSnapshot", p);
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<DeleteDBSnapshotResult>"));
+        assertTrue(body.contains("<DBSnapshotIdentifier>mysnap</DBSnapshotIdentifier>"));
+        assertTrue(body.contains("<Status>deleted</Status>"));
+        verify(service).deleteDbSnapshot("mysnap", null);
+    }
+
+    @Test
+    void copyDbSnapshot_forwardsSourceTagsAndOverrides() {
+        DbSnapshot snapshot = new DbSnapshot();
+        snapshot.setDbSnapshotIdentifier("copy");
+        snapshot.setSnapshotType("manual");
+        snapshot.setSourceDbSnapshotIdentifier(
+                "arn:aws:rds:us-east-1:123456789012:snapshot:source");
+        when(service.copyDbSnapshot(eq("source"), eq("copy"), eq(true),
+                eq(Map.of("owner", "platform")), eq("custom-options"), eq("kms-key"), isNull()))
+                .thenReturn(snapshot);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("SourceDBSnapshotIdentifier", "source");
+        p.add("TargetDBSnapshotIdentifier", "copy");
+        p.add("CopyTags", "true");
+        p.add("OptionGroupName", "custom-options");
+        p.add("KmsKeyId", "kms-key");
+        p.add("Tags.Tag.1.Key", "owner");
+        p.add("Tags.Tag.1.Value", "platform");
+        Response response = handler.handle("CopyDBSnapshot", p);
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<CopyDBSnapshotResult>"));
+        assertTrue(body.contains("<SnapshotType>manual</SnapshotType>"));
+        assertTrue(body.contains("<SourceDBSnapshotIdentifier>arn:aws:rds:us-east-1:123456789012:snapshot:source</SourceDBSnapshotIdentifier>"));
+        verify(service).copyDbSnapshot("source", "copy", true,
+                Map.of("owner", "platform"), "custom-options", "kms-key", null);
+    }
+
+    @Test
+    void modifyDbSnapshot_forwardsMutableFields() {
+        DbSnapshot snapshot = new DbSnapshot();
+        snapshot.setDbSnapshotIdentifier("mysnap");
+        snapshot.setEngineVersion("14");
+        snapshot.setOptionGroupName("new-options");
+        when(service.modifyDbSnapshot(eq("mysnap"), eq("14"), eq("new-options"), isNull()))
+                .thenReturn(snapshot);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBSnapshotIdentifier", "mysnap");
+        p.add("EngineVersion", "14");
+        p.add("OptionGroupName", "new-options");
+        Response response = handler.handle("ModifyDBSnapshot", p);
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<ModifyDBSnapshotResult>"));
+        assertTrue(body.contains("<EngineVersion>14</EngineVersion>"));
+        assertTrue(body.contains("<OptionGroupName>new-options</OptionGroupName>"));
+        verify(service).modifyDbSnapshot("mysnap", "14", "new-options", null);
     }
 
     @Test

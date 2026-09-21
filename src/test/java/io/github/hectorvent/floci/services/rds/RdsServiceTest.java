@@ -28,6 +28,7 @@ import io.github.hectorvent.floci.services.rds.model.DbProxy;
 import io.github.hectorvent.floci.services.rds.model.DbProxyAuth;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTarget;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTargetGroup;
+import io.github.hectorvent.floci.services.rds.model.DbSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
 import io.github.hectorvent.floci.services.rds.model.GlobalCluster;
 import io.github.hectorvent.floci.services.rds.model.GlobalClusterMember;
@@ -2856,6 +2857,92 @@ class RdsServiceTest {
         assertEquals("available", snapshot.getStatus());
         assertEquals("arn:aws:rds:us-east-1:123456789012:snapshot:mysnap", snapshot.getDbSnapshotArn());
         verify(containerManager).createPostgresSnapshot(any(), eq("admin"));
+    }
+
+    @Test
+    void deleteDbSnapshotReturnsDeletedSnapshotAndRemovesItsData() {
+        rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
+        rdsService.createDbSnapshot("mysnap", "mydb");
+
+        DbSnapshot deleted = rdsService.deleteDbSnapshot("mysnap", "us-east-1");
+
+        assertEquals("deleted", deleted.getStatus());
+        assertThrows(AwsException.class,
+                () -> rdsService.describeDbSnapshots("mysnap", null, "us-east-1"));
+        assertThrows(AwsException.class,
+                () -> rdsService.restoreDbInstanceFromDbSnapshot(
+                        "restored", "mysnap", "db.t3.micro", null, false,
+                        null, null, Map.of(), "us-east-1"));
+    }
+
+    @Test
+    void copyDbSnapshotCopiesDataTagsAndSourceArn() {
+        rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
+        DbSnapshot source = rdsService.createDbSnapshot("source", "mydb", Map.of("owner", "platform"));
+        rdsService.modifyDbSnapshotAttribute(
+                "source", "restore", List.of("123456789012"), List.of(), "us-east-1");
+
+        DbSnapshot copy = rdsService.copyDbSnapshot(
+                source.getDbSnapshotArn(), "copy", true,
+                Map.of("Name", "copy"), "custom-options", "kms-key", "us-east-1");
+
+        assertEquals("copy", copy.getDbSnapshotIdentifier());
+        assertEquals("manual", copy.getSnapshotType());
+        assertEquals(source.getDbSnapshotArn(), copy.getSourceDbSnapshotIdentifier());
+        assertEquals(Map.of("owner", "platform", "Name", "copy"), copy.getTags());
+        assertEquals("custom-options", copy.getOptionGroupName());
+        assertEquals("kms-key", copy.getKmsKeyId());
+        assertTrue(copy.getRestoreAccountIds().isEmpty());
+
+        rdsService.restoreDbInstanceFromDbSnapshot(
+                "restored", "copy", "db.t3.micro", null, false,
+                null, null, Map.of(), "us-east-1");
+        verify(containerManager).restorePostgresSnapshot(any(), eq("admin"), eq("MOCK_DUMP_DATA"));
+    }
+
+    @Test
+    void copyDbSnapshotRejectsDuplicateTargetsAndUnavailableSources() {
+        rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
+        DbSnapshot source = rdsService.createDbSnapshot("source", "mydb");
+        rdsService.copyDbSnapshot("source", "copy", false, Map.of(), null, null, "us-east-1");
+
+        AwsException duplicate = assertThrows(AwsException.class, () ->
+                rdsService.copyDbSnapshot(source.getDbSnapshotArn(), "copy", false,
+                        Map.of(), null, null, "us-east-1"));
+        assertEquals("DBSnapshotAlreadyExists", duplicate.getErrorCode());
+
+        source.setStatus("creating");
+        AwsException unavailable = assertThrows(AwsException.class, () ->
+                rdsService.copyDbSnapshot("source", "other", false,
+                        Map.of(), null, null, "us-east-1"));
+        assertEquals("InvalidDBSnapshotState", unavailable.getErrorCode());
+    }
+
+    @Test
+    void modifyDbSnapshotUpdatesEngineVersionAndOptionGroup() {
+        rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
+        rdsService.createDbSnapshot("mysnap", "mydb");
+
+        DbSnapshot modified = rdsService.modifyDbSnapshot(
+                "mysnap", "14", "new-options", "us-east-1");
+
+        assertEquals("14", modified.getEngineVersion());
+        assertEquals("new-options", modified.getOptionGroupName());
+        AwsException missingChange = assertThrows(AwsException.class, () ->
+                rdsService.modifyDbSnapshot("mysnap", null, null, "us-east-1"));
+        assertEquals("InvalidParameterCombination", missingChange.getErrorCode());
     }
 
     @Test

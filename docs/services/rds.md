@@ -52,6 +52,9 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `ModifyOptionGroup` | Add, update, or remove options in an option group |
 | `DeleteOptionGroup` | Delete an option group |
 | `CreateDBSnapshot` | Create a snapshot of a DB instance |
+| `DeleteDBSnapshot` | Delete an available manual DB snapshot and its saved data |
+| `CopyDBSnapshot` | Copy an available DB snapshot, optionally copying tags or overriding the option group and KMS key |
+| `ModifyDBSnapshot` | Change the engine version or option group of an available manual DB snapshot |
 | `RestoreDBInstanceFromDBSnapshot` | Create a new DB instance from a snapshot |
 | `DescribeDBSnapshots` | List DB instance snapshots |
 | `DescribeDBSnapshotAttributes` | Return a snapshot's `restore` attribute (accounts authorized to copy/restore it) |
@@ -97,9 +100,9 @@ checked against the instance's other window. Modifications apply immediately —
     `CreateDBSnapshot` accepts `Tags`, and `TagResource`/`UntagResource`/`ListTagsForResource`
     work against a snapshot's ARN like they do for other tagged resource types.
     `DescribeDBSnapshotAttributes`/`ModifyDBSnapshotAttribute` are modeled as plain in-memory
-    state (no real cross-account sharing). `DeleteDBSnapshot` is not implemented, so a snapshot
-    persists for the life of the account; Terraform's `aws_db_snapshot` can be created but not
-    destroyed. Snapshots are region-scoped like DB instances and clusters: `DBSnapshotArn` reflects
+    state (no real cross-account sharing). Available manual snapshots can be deleted, copied by
+    identifier or ARN, and modified. Copies retain the source data and can copy source tags or add
+    request tags. Snapshots are region-scoped like DB instances and clusters: `DBSnapshotArn` reflects
     the request's signed region, and a snapshot is only visible to `Describe`/`Tag` calls signed
     for that same region. Aurora cluster snapshots and RDS reserved instances aren't modeled at
     all (`DescribeDBClusterSnapshots` always returns an empty list, and there's no

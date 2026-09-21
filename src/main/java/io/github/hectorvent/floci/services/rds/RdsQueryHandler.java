@@ -21,6 +21,7 @@ import io.github.hectorvent.floci.services.rds.model.DbProxy;
 import io.github.hectorvent.floci.services.rds.model.DbProxyAuth;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTarget;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTargetGroup;
+import io.github.hectorvent.floci.services.rds.model.DbSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
 import io.github.hectorvent.floci.services.rds.model.GlobalCluster;
 import io.github.hectorvent.floci.services.rds.model.GlobalClusterMember;
@@ -109,6 +110,9 @@ public class RdsQueryHandler {
                 case "ModifyOptionGroup" -> handleModifyOptionGroup(params, region);
                 case "DeleteOptionGroup" -> handleDeleteOptionGroup(params, region);
                 case "CreateDBSnapshot" -> handleCreateDbSnapshot(params, region);
+                case "DeleteDBSnapshot" -> handleDeleteDbSnapshot(params, region);
+                case "CopyDBSnapshot" -> handleCopyDbSnapshot(params, region);
+                case "ModifyDBSnapshot" -> handleModifyDbSnapshot(params, region);
                 case "RestoreDBInstanceFromDBSnapshot" -> handleRestoreDbInstanceFromDbSnapshot(params, region);
                 case "DescribeDBSnapshots" -> handleDescribeDbSnapshots(params, region);
                 case "DescribeDBSnapshotAttributes" -> handleDescribeDbSnapshotAttributes(params, region);
@@ -1344,6 +1348,47 @@ public class RdsQueryHandler {
         }
     }
 
+    private Response handleDeleteDbSnapshot(MultivaluedMap<String, String> params, String region) {
+        String snapshotId = params.getFirst("DBSnapshotIdentifier");
+        Response missing = firstMissingParam("DBSnapshotIdentifier", snapshotId);
+        if (missing != null) {
+            return missing;
+        }
+        DbSnapshot snapshot = service.deleteDbSnapshot(snapshotId, region);
+        return Response.ok(AwsQueryResponse.envelope(
+                "DeleteDBSnapshot", AwsNamespaces.RDS, dbSnapshotXml(snapshot))).build();
+    }
+
+    private Response handleCopyDbSnapshot(MultivaluedMap<String, String> params, String region) {
+        String sourceId = params.getFirst("SourceDBSnapshotIdentifier");
+        String targetId = params.getFirst("TargetDBSnapshotIdentifier");
+        Response missing = firstMissingParam(
+                "SourceDBSnapshotIdentifier", sourceId,
+                "TargetDBSnapshotIdentifier", targetId);
+        if (missing != null) {
+            return missing;
+        }
+        Boolean copyTags = parseOptionalBoolean(params, "CopyTags");
+        DbSnapshot snapshot = service.copyDbSnapshot(
+                sourceId, targetId, Boolean.TRUE.equals(copyTags), parseTags(params),
+                params.getFirst("OptionGroupName"), params.getFirst("KmsKeyId"), region);
+        return Response.ok(AwsQueryResponse.envelope(
+                "CopyDBSnapshot", AwsNamespaces.RDS, dbSnapshotXml(snapshot))).build();
+    }
+
+    private Response handleModifyDbSnapshot(MultivaluedMap<String, String> params, String region) {
+        String snapshotId = params.getFirst("DBSnapshotIdentifier");
+        Response missing = firstMissingParam("DBSnapshotIdentifier", snapshotId);
+        if (missing != null) {
+            return missing;
+        }
+        DbSnapshot snapshot = service.modifyDbSnapshot(
+                snapshotId, params.getFirst("EngineVersion"),
+                params.getFirst("OptionGroupName"), region);
+        return Response.ok(AwsQueryResponse.envelope(
+                "ModifyDBSnapshot", AwsNamespaces.RDS, dbSnapshotXml(snapshot))).build();
+    }
+
     private Response handleRestoreDbInstanceFromDbSnapshot(MultivaluedMap<String, String> params, String region) {
         String instanceId = params.getFirst("DBInstanceIdentifier");
         String snapshotId = params.getFirst("DBSnapshotIdentifier");
@@ -1920,7 +1965,7 @@ public class RdsQueryHandler {
         return new XmlBuilder().start("DBInstance").raw(dbInstanceInnerXml(i)).end("DBInstance").build();
     }
 
-    private String dbSnapshotXml(io.github.hectorvent.floci.services.rds.model.DbSnapshot s) {
+    private String dbSnapshotXml(DbSnapshot s) {
         String engineStr = s.getEngine() != null ? s.getEngine().name().toLowerCase() : "";
         XmlBuilder xml = new XmlBuilder().start("DBSnapshot")
                 .elem("DBSnapshotIdentifier", s.getDbSnapshotIdentifier())
@@ -1930,7 +1975,19 @@ public class RdsQueryHandler {
                 .elem("EngineVersion", s.getEngineVersion())
                 .elem("AllocatedStorage", s.getAllocatedStorage())
                 .elem("Status", s.getStatus())
-                .elem("MasterUsername", s.getMasterUsername());
+                .elem("MasterUsername", s.getMasterUsername())
+                .elem("SnapshotType", s.getSnapshotType() != null
+                        && !s.getSnapshotType().isBlank() ? s.getSnapshotType() : "manual");
+        if (s.getSourceDbSnapshotIdentifier() != null
+                && !s.getSourceDbSnapshotIdentifier().isBlank()) {
+            xml.elem("SourceDBSnapshotIdentifier", s.getSourceDbSnapshotIdentifier());
+        }
+        if (s.getOptionGroupName() != null && !s.getOptionGroupName().isBlank()) {
+            xml.elem("OptionGroupName", s.getOptionGroupName());
+        }
+        if (s.getKmsKeyId() != null && !s.getKmsKeyId().isBlank()) {
+            xml.elem("KmsKeyId", s.getKmsKeyId());
+        }
         if (s.getAvailabilityZone() != null) xml.elem("AvailabilityZone", s.getAvailabilityZone());
         if (s.getVpcId() != null) xml.elem("VpcId", s.getVpcId());
         xml.elem("InstanceCreateTime", s.getInstanceCreateTime() != null ? s.getInstanceCreateTime().toString() : "")

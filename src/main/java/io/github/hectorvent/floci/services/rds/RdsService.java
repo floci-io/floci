@@ -803,6 +803,9 @@ public class RdsService implements Resettable, ResourceProvider {
                 instance.getCreatedAt(), instance.getEndpoint() != null ? instance.getEndpoint().port() : instance.getProxyPort(),
                 instance.isIamDatabaseAuthenticationEnabled(), instance.getDbiResourceId(), instance.getDbInstanceClass());
         snapshot.setDbName(instance.getDbName());
+        snapshot.setSnapshotType("manual");
+        snapshot.setOptionGroupName(instance.getOptionGroupName());
+        snapshot.setKmsKeyId(instance.getKmsKeyId());
         snapshot.setTags(tags != null ? new java.util.LinkedHashMap<>(tags) : new java.util.LinkedHashMap<>());
         snapshot.setDbSnapshotArn(regionResolver.buildArn("rds", effectiveRegion, "snapshot:" + snapshotId));
 
@@ -820,6 +823,199 @@ public class RdsService implements Resettable, ResourceProvider {
 
         return snapshot;
     }
+
+    public DbSnapshot deleteDbSnapshot(String snapshotId) {
+        return deleteDbSnapshot(snapshotId, regionResolver.getDefaultRegion());
+    }
+
+    public synchronized DbSnapshot deleteDbSnapshot(String snapshotId, String region) {
+        String effectiveRegion = effectiveRegion(region);
+        String accountId = currentAccountId();
+        DbSnapshot snapshot = Optional.ofNullable(findSnapshotForScope(accountId, effectiveRegion, snapshotId))
+                .orElseThrow(() -> new AwsException("DBSnapshotNotFound",
+                        "DBSnapshot " + snapshotId + " not found.", 404));
+        if (!"available".equalsIgnoreCase(snapshot.getStatus())) {
+            throw new AwsException("InvalidDBSnapshotState",
+                    "DBSnapshot " + snapshotId + " is not in an available state.", 400);
+        }
+
+        DbSnapshot deleted = copySnapshot(snapshot);
+        deleted.setStatus("deleted");
+        deleteSnapshotForScope(accountId, effectiveRegion, snapshotId);
+        deleteSnapshotDataForScope(accountId, effectiveRegion, snapshotId);
+        return deleted;
+    }
+
+    public DbSnapshot copyDbSnapshot(
+            String sourceIdentifier, String targetIdentifier, boolean copyTags,
+            Map<String, String> tags, String optionGroupName, String kmsKeyId) {
+        return copyDbSnapshot(sourceIdentifier, targetIdentifier, copyTags, tags,
+                optionGroupName, kmsKeyId, regionResolver.getDefaultRegion());
+    }
+
+    public synchronized DbSnapshot copyDbSnapshot(
+            String sourceIdentifier, String targetIdentifier, boolean copyTags,
+            Map<String, String> tags, String optionGroupName, String kmsKeyId, String region) {
+        String targetRegion = effectiveRegion(region);
+        String accountId = currentAccountId();
+        SnapshotReference sourceReference = resolveSnapshotReference(sourceIdentifier, targetRegion);
+        DbSnapshot source = sourceReference.snapshot();
+        if (!"available".equalsIgnoreCase(source.getStatus())) {
+            throw new AwsException("InvalidDBSnapshotState",
+                    "DBSnapshot " + source.getDbSnapshotIdentifier() + " is not in an available state.", 400);
+        }
+        if (findSnapshotForScope(accountId, targetRegion, targetIdentifier) != null) {
+            throw new AwsException("DBSnapshotAlreadyExists",
+                    "DBSnapshot " + targetIdentifier + " already exists.", 400);
+        }
+        String sourceData = getSnapshotDataForScope(
+                sourceReference.accountId(), sourceReference.region(), source.getDbSnapshotIdentifier())
+                .orElseThrow(() -> new AwsException("DBSnapshotNotFound",
+                        "DBSnapshot data for " + source.getDbSnapshotIdentifier() + " not found.", 404));
+
+        DbSnapshot copy = copySnapshot(source);
+        copy.setDbSnapshotIdentifier(targetIdentifier);
+        copy.setDbSnapshotArn(regionResolver.buildArn("rds", targetRegion, "snapshot:" + targetIdentifier));
+        copy.setSnapshotCreateTime(Instant.now());
+        copy.setStatus("available");
+        copy.setSnapshotType("manual");
+        copy.setSourceDbSnapshotIdentifier(source.getDbSnapshotArn());
+        copy.setOptionGroupName(optionGroupName != null && !optionGroupName.isBlank()
+                ? optionGroupName : source.getOptionGroupName());
+        copy.setKmsKeyId(kmsKeyId != null && !kmsKeyId.isBlank() ? kmsKeyId : source.getKmsKeyId());
+        copy.setRestoreAccountIds(new ArrayList<>());
+        Map<String, String> copiedTags = new LinkedHashMap<>();
+        if (copyTags) {
+            copiedTags.putAll(source.getTags());
+        }
+        if (tags != null) {
+            copiedTags.putAll(tags);
+        }
+        copy.setTags(copiedTags);
+        putSnapshotDataForScope(accountId, targetRegion, targetIdentifier, sourceData);
+        putSnapshotForScope(accountId, targetRegion, targetIdentifier, copy);
+        return copy;
+    }
+
+    public DbSnapshot modifyDbSnapshot(
+            String snapshotId, String engineVersion, String optionGroupName) {
+        return modifyDbSnapshot(snapshotId, engineVersion, optionGroupName,
+                regionResolver.getDefaultRegion());
+    }
+
+    public synchronized DbSnapshot modifyDbSnapshot(
+            String snapshotId, String engineVersion, String optionGroupName, String region) {
+        String effectiveRegion = effectiveRegion(region);
+        String accountId = currentAccountId();
+        DbSnapshot snapshot = Optional.ofNullable(findSnapshotForScope(accountId, effectiveRegion, snapshotId))
+                .orElseThrow(() -> new AwsException("DBSnapshotNotFound",
+                        "DBSnapshot " + snapshotId + " not found.", 404));
+        if (!"available".equalsIgnoreCase(snapshot.getStatus())) {
+            throw new AwsException("InvalidDBSnapshotState",
+                    "DBSnapshot " + snapshotId + " is not in an available state.", 400);
+        }
+        if ((engineVersion == null || engineVersion.isBlank())
+                && (optionGroupName == null || optionGroupName.isBlank())) {
+            throw new AwsException("InvalidParameterCombination",
+                    "At least one snapshot attribute must be specified.", 400);
+        }
+        if (engineVersion != null && !engineVersion.isBlank()) {
+            snapshot.setEngineVersion(engineVersion);
+        }
+        if (optionGroupName != null && !optionGroupName.isBlank()) {
+            snapshot.setOptionGroupName(optionGroupName);
+        }
+        putSnapshotForScope(accountId, effectiveRegion, snapshotId, snapshot);
+        return snapshot;
+    }
+
+    private DbSnapshot copySnapshot(DbSnapshot source) {
+        DbSnapshot copy = new DbSnapshot();
+        copy.setDbSnapshotIdentifier(source.getDbSnapshotIdentifier());
+        copy.setDbSnapshotArn(source.getDbSnapshotArn());
+        copy.setSnapshotType(source.getSnapshotType());
+        copy.setSourceDbSnapshotIdentifier(source.getSourceDbSnapshotIdentifier());
+        copy.setDbInstanceIdentifier(source.getDbInstanceIdentifier());
+        copy.setSnapshotCreateTime(source.getSnapshotCreateTime());
+        copy.setEngine(source.getEngine());
+        copy.setEngineVersion(source.getEngineVersion());
+        copy.setAllocatedStorage(source.getAllocatedStorage());
+        copy.setStatus(source.getStatus());
+        copy.setMasterUsername(source.getMasterUsername());
+        copy.setMasterPassword(source.getMasterPassword());
+        copy.setAvailabilityZone(source.getAvailabilityZone());
+        copy.setVpcId(source.getVpcId());
+        copy.setInstanceCreateTime(source.getInstanceCreateTime());
+        copy.setPort(source.getPort());
+        copy.setIamDatabaseAuthenticationEnabled(source.isIamDatabaseAuthenticationEnabled());
+        copy.setDbiResourceId(source.getDbiResourceId());
+        copy.setDbName(source.getDbName());
+        copy.setDbInstanceClass(source.getDbInstanceClass());
+        copy.setOptionGroupName(source.getOptionGroupName());
+        copy.setKmsKeyId(source.getKmsKeyId());
+        copy.setTags(new LinkedHashMap<>(source.getTags()));
+        copy.setRestoreAccountIds(new ArrayList<>(source.getRestoreAccountIds()));
+        return copy;
+    }
+
+    private SnapshotReference resolveSnapshotReference(String sourceIdentifier, String targetRegion) {
+        String sourceId = sourceIdentifier;
+        String sourceRegion = targetRegion;
+        String sourceAccount = currentAccountId();
+        if (sourceIdentifier != null && sourceIdentifier.startsWith("arn:")) {
+            try {
+                AwsArnUtils.Arn parsed = AwsArnUtils.parse(sourceIdentifier);
+                if (!"aws".equals(parsed.partition()) || !"rds".equals(parsed.service())
+                        || !parsed.resource().startsWith("snapshot:")) {
+                    throw new IllegalArgumentException("not an RDS snapshot ARN");
+                }
+                sourceId = parsed.resource().substring("snapshot:".length());
+                sourceRegion = parsed.region();
+                sourceAccount = parsed.accountId();
+            } catch (IllegalArgumentException e) {
+                throw new AwsException("InvalidParameterValue",
+                        "SourceDBSnapshotIdentifier must be a snapshot identifier or ARN.", 400);
+            }
+        }
+        if (!Objects.equals(sourceAccount, currentAccountId())) {
+            throw new AwsException("DBSnapshotNotFound",
+                    "DBSnapshot " + sourceIdentifier + " not found.", 404);
+        }
+        DbSnapshot source = findSnapshotForScope(sourceAccount, sourceRegion, sourceId);
+        if (source == null) {
+            throw new AwsException("DBSnapshotNotFound",
+                    "DBSnapshot " + sourceIdentifier + " not found.", 404);
+        }
+        return new SnapshotReference(sourceAccount, sourceRegion, source);
+    }
+
+    private Optional<String> getSnapshotDataForScope(String accountId, String region, String snapshotId) {
+        String key = dbResourceKey(region, snapshotId);
+        if (snapshotData instanceof AccountAwareStorageBackend<String> aware) {
+            return aware.getForAccount(accountId, key);
+        }
+        return snapshotData.get(key);
+    }
+
+    private void putSnapshotDataForScope(String accountId, String region, String snapshotId, String data) {
+        String key = dbResourceKey(region, snapshotId);
+        if (snapshotData instanceof AccountAwareStorageBackend<String> aware) {
+            aware.putForAccount(accountId, key, data);
+        } else {
+            snapshotData.put(key, data);
+        }
+    }
+
+    private void deleteSnapshotDataForScope(String accountId, String region, String snapshotId) {
+        String key = dbResourceKey(region, snapshotId);
+        if (snapshotData instanceof AccountAwareStorageBackend<String> aware) {
+            aware.deleteForAccount(accountId, key);
+        } else {
+            snapshotData.delete(key);
+        }
+    }
+
+    private record SnapshotReference(String accountId, String region, DbSnapshot snapshot) {}
 
     public DbInstance restoreDbInstanceFromDbSnapshot(String instanceId, String snapshotId, String dbInstanceClass, String availabilityZone, boolean multiAz, String dbSubnetGroupName, java.util.List<String> vpcSecurityGroupIds, java.util.Map<String, String> tags) {
         return restoreDbInstanceFromDbSnapshot(instanceId, snapshotId, dbInstanceClass, availabilityZone,
@@ -6491,6 +6687,15 @@ public class RdsService implements Resettable, ResourceProvider {
             aware.putForAccount(accountId, key, snapshot);
         } else {
             snapshots.put(key, snapshot);
+        }
+    }
+
+    private void deleteSnapshotForScope(String accountId, String region, String snapshotId) {
+        String key = dbResourceKey(region, snapshotId);
+        if (snapshots instanceof AccountAwareStorageBackend<DbSnapshot> aware) {
+            aware.deleteForAccount(accountId, key);
+        } else {
+            snapshots.delete(key);
         }
     }
 
