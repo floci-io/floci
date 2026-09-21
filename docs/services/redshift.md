@@ -23,7 +23,7 @@ For running SQL without a PostgreSQL wire connection (the way Lambda and Step Fu
 | `CreateClusterSnapshot` | Back up a cluster to a SQL dump via `pg_dump` |
 | `DescribeClusterSnapshots` | List snapshots, optionally filtered by snapshot or cluster identifier |
 | `DeleteClusterSnapshot` | Remove a snapshot and its stored dump |
-| `RestoreFromClusterSnapshot` | Create a new cluster and load a snapshot's dump into it via `psql` |
+| `RestoreFromClusterSnapshot` | Create a new cluster and load a snapshot's dump into it via `psql`; accepts `SnapshotIdentifier` or a same-account, same-region `SnapshotArn` |
 | `CreateClusterParameterGroup` | Register a parameter group (metadata only) |
 | `DescribeClusterParameterGroups` | List parameter groups, optionally filtered by name |
 | `DescribeClusterParameters` | Return the parameters of a group, with any values set by `ModifyClusterParameterGroup` |
@@ -39,10 +39,13 @@ For running SQL without a PostgreSQL wire connection (the way Lambda and Step Fu
 | `DescribeClusterSubnetGroups` | List subnet groups, optionally filtered by name |
 | `ModifyClusterSubnetGroup` | Update a subnet group's description or subnet list |
 | `DeleteClusterSubnetGroup` | Remove a subnet group |
-| `ModifyCluster` | Update node type, parameter group, security groups, or the master password |
+| `ModifyCluster` | Update node type, parameter group, security groups, Multi-AZ flag, or the master password |
 | `DescribeClusterVersions` | Return the single emulated engine version and its parameter group family |
 | `DescribeOrderableClusterOptions` | Return the static node types and cluster types, optionally filtered by `NodeType` or `ClusterVersion` |
 | `ModifyClusterIamRoles` | Add or remove the IAM roles associated with a cluster; COPY and UNLOAD see the change on new connections. `DefaultIamRoleArn` is ignored |
+| `DescribeLoggingStatus` | Return a cluster's stored audit-logging configuration |
+| `EnableLogging` | Store audit-logging configuration (S3 bucket, or CloudWatch via `LogDestinationType`); no logs are delivered |
+| `DisableLogging` | Clear a cluster's audit-logging configuration |
 | `RebootCluster` | Restart a cluster's container |
 | `GetClusterCredentials` | Issue a short-lived DbUser / DbPassword pair the auth proxy and Data API accept for a non-master user |
 | `GetClusterCredentialsWithIAM` | Issue short-lived credentials with the DbUser derived from the caller's IAM identity |

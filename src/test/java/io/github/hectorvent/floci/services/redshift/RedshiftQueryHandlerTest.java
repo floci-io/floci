@@ -15,6 +15,7 @@ import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 
@@ -228,6 +229,10 @@ class RedshiftQueryHandlerTest {
         assertTrue(xml.contains("<Port>5439</Port>"));
         assertTrue(xml.contains("<MasterUsername>admin</MasterUsername>"));
         assertTrue(xml.contains("<RequestId>test-req-id</RequestId>"));
+        // A Snapshot built via this constructor carries no ARN/CreateTime; the elements
+        // must be omitted rather than serialized as empty or "null".
+        assertFalse(xml.contains("<SnapshotArn>"));
+        assertFalse(xml.contains("<SnapshotCreateTime>"));
     }
 
     @Test
@@ -237,6 +242,8 @@ class RedshiftQueryHandlerTest {
         params.putSingle("ClusterIdentifier", "test-cluster");
 
         Snapshot snapshot = new Snapshot("test-snapshot", "test-cluster", "available", 5439, "admin");
+        snapshot.setSnapshotArn("arn:aws:redshift:us-east-1:111111111111:snapshot:test-cluster/test-snapshot");
+        snapshot.setSnapshotCreateTime(Instant.parse("2026-09-16T04:00:00Z"));
         when(service.describeSnapshots("test-snapshot", "test-cluster")).thenReturn(List.of(snapshot));
 
         Response response = handler.handle("DescribeClusterSnapshots", params);
@@ -244,6 +251,9 @@ class RedshiftQueryHandlerTest {
         String xml = (String) response.getEntity();
         assertTrue(xml.contains("<Snapshots>"));
         assertTrue(xml.contains("<SnapshotIdentifier>test-snapshot</SnapshotIdentifier>"));
+        assertTrue(xml.contains(
+                "<SnapshotArn>arn:aws:redshift:us-east-1:111111111111:snapshot:test-cluster/test-snapshot</SnapshotArn>"));
+        assertTrue(xml.contains("<SnapshotCreateTime>2026-09-16T04:00:00Z</SnapshotCreateTime>"));
         assertTrue(xml.contains("</Snapshots>"));
     }
 
@@ -284,6 +294,64 @@ class RedshiftQueryHandlerTest {
         assertTrue(xml.contains("<ClusterStatus>available</ClusterStatus>"));
         assertTrue(xml.contains("<Address>localhost</Address>"));
         assertTrue(xml.contains("<Port>5439</Port>"));
+    }
+
+    @Test
+    void testRestoreFromClusterSnapshotBySnapshotArn() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "restored-cluster");
+        params.putSingle("SnapshotArn", "arn:aws:redshift:us-east-1:acc:snapshot:src/my-snap");
+        Cluster cluster = availableCluster("restored-cluster");
+        when(service.restoreFromClusterSnapshot("restored-cluster", "my-snap", null)).thenReturn(cluster);
+
+        Response response = handler.handle("RestoreFromClusterSnapshot", params, "auth");
+        assertEquals(200, response.getStatus());
+        verify(service).restoreFromClusterSnapshot("restored-cluster", "my-snap", null);
+    }
+
+    @Test
+    void testRestoreFromClusterSnapshotMalformedArnIs400() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "restored-cluster");
+        params.putSingle("SnapshotArn", "not-an-arn");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("RestoreFromClusterSnapshot", params, "auth"));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void testRestoreFromClusterSnapshotWithoutSnapshotIs400() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "restored-cluster");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("RestoreFromClusterSnapshot", params, "auth"));
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void testRestoreFromClusterSnapshotForeignAccountArnNotFound() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "restored-cluster");
+        params.putSingle("SnapshotArn", "arn:aws:redshift:us-east-1:999999999999:snapshot:src/my-snap");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("RestoreFromClusterSnapshot", params, "auth"));
+        assertEquals("ClusterSnapshotNotFound", ex.getErrorCode());
+        verify(service, never()).restoreFromClusterSnapshot(any(), any(), any());
+    }
+
+    @Test
+    void testClusterXmlCarriesDefaultParameterGroupAndMultiAZ() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "c1");
+        when(service.describeClusters("c1")).thenReturn(List.of(availableCluster("c1")));
+
+        String xml = (String) handler.handle("DescribeClusters", params).getEntity();
+        assertTrue(xml.contains("<ParameterGroupName>default.redshift-1.0</ParameterGroupName>"));
+        assertTrue(xml.contains("<MultiAZ>disabled</MultiAZ>"));
     }
 
     @Test
@@ -494,6 +562,79 @@ class RedshiftQueryHandlerTest {
         AwsException ex = assertThrows(AwsException.class,
                 () -> handler.handle("ModifyClusterIamRoles", new MultivaluedHashMap<>()));
         assertEquals("InvalidParameterValue", ex.getErrorCode());
+    }
+
+    @Test
+    void testDescribeLoggingStatus() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "test-cluster");
+
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("test-cluster");
+        cluster.setLoggingEnabled(true);
+        cluster.setLoggingBucketName("my-bucket");
+        cluster.setLoggingS3KeyPrefix("logs/");
+        when(service.describeLoggingStatus("test-cluster")).thenReturn(cluster);
+
+        Response response = handler.handle("DescribeLoggingStatus", params);
+        assertEquals(200, response.getStatus());
+        String xml = (String) response.getEntity();
+        // The real AWS wire format wraps the fields in a *Result element matching the
+        // operation name — verified against the SDK's own deserializer, not guessed.
+        assertTrue(xml.contains("<DescribeLoggingStatusResult>"));
+        assertTrue(xml.contains("<LoggingEnabled>true</LoggingEnabled>"));
+        assertTrue(xml.contains("<BucketName>my-bucket</BucketName>"));
+        assertTrue(xml.contains("<S3KeyPrefix>logs/</S3KeyPrefix>"));
+    }
+
+    @Test
+    void testDescribeLoggingStatusRequiresClusterIdentifier() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+
+        AwsException ex = assertThrows(
+                AwsException.class,
+                () -> handler.handle("DescribeLoggingStatus", params));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+    }
+
+    @Test
+    void testEnableLogging() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "test-cluster");
+        params.putSingle("BucketName", "my-bucket");
+        params.putSingle("S3KeyPrefix", "logs/");
+
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("test-cluster");
+        cluster.setLoggingEnabled(true);
+        cluster.setLoggingBucketName("my-bucket");
+        cluster.setLoggingS3KeyPrefix("logs/");
+        when(service.enableLogging("test-cluster", "my-bucket", "logs/", null, List.of())).thenReturn(cluster);
+
+        Response response = handler.handle("EnableLogging", params);
+        assertEquals(200, response.getStatus());
+        String xml = (String) response.getEntity();
+        assertTrue(xml.contains("<EnableLoggingResult>"));
+        assertTrue(xml.contains("<LoggingEnabled>true</LoggingEnabled>"));
+    }
+
+    @Test
+    void testDisableLogging() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "test-cluster");
+
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("test-cluster");
+        cluster.setLoggingEnabled(false);
+        when(service.disableLogging("test-cluster")).thenReturn(cluster);
+
+        Response response = handler.handle("DisableLogging", params);
+        assertEquals(200, response.getStatus());
+        String xml = (String) response.getEntity();
+        assertTrue(xml.contains("<DisableLoggingResult>"));
+        assertTrue(xml.contains("<LoggingEnabled>false</LoggingEnabled>"));
+        // No bucket was ever configured; the element must be omitted, not emitted empty/"null".
+        assertFalse(xml.contains("<BucketName>"));
     }
 
     @Test

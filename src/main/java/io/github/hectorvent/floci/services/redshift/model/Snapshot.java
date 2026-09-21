@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.redshift.model;
 
 import io.quarkus.runtime.annotations.RegisterForReflection;
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -13,6 +14,8 @@ public class Snapshot {
     private String masterUsername;
     private String masterPassword;
     private String sqlDump;
+    private String snapshotArn;
+    private Instant snapshotCreateTime;
 
     public Snapshot() {}
 
@@ -87,6 +90,22 @@ public class Snapshot {
 
     public void setSqlDump(String sqlDump) {
         this.sqlDump = sqlDump;
+    }
+
+    public String getSnapshotArn() {
+        return snapshotArn;
+    }
+
+    public void setSnapshotArn(String snapshotArn) {
+        this.snapshotArn = snapshotArn;
+    }
+
+    public Instant getSnapshotCreateTime() {
+        return snapshotCreateTime;
+    }
+
+    public void setSnapshotCreateTime(Instant snapshotCreateTime) {
+        this.snapshotCreateTime = snapshotCreateTime;
     }
 
     private Map<String, String> tags = new LinkedHashMap<>();

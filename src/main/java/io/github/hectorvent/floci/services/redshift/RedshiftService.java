@@ -54,6 +54,9 @@ import java.util.function.Consumer;
 public class RedshiftService {
     private static final Logger LOG = Logger.getLogger(RedshiftService.class);
 
+    // The group every cluster starts on until one is named.
+    static final String DEFAULT_PARAMETER_GROUP_NAME = "default.redshift-1.0";
+
     private final AccountAwareStorageBackend<Cluster> clusters;
     private final AccountAwareStorageBackend<Snapshot> snapshots;
     private final AccountAwareStorageBackend<ClusterParameterGroup> parameterGroups;
@@ -195,6 +198,8 @@ public class RedshiftService {
         cluster.setClusterSubnetGroupName(clusterSubnetGroupName);
         cluster.setVpcSecurityGroupIds(vpcSecurityGroupIds != null ? vpcSecurityGroupIds : List.of());
         cluster.setIamRoleArns(iamRoleArns != null ? List.copyOf(iamRoleArns) : List.of());
+        // A group named at create time is applied afterwards via modifyCluster.
+        cluster.setClusterParameterGroupName(DEFAULT_PARAMETER_GROUP_NAME);
         cluster.setClusterStatus("creating");
         clusters.put(identifier, cluster);
         clusters.flush();
@@ -613,9 +618,16 @@ public class RedshiftService {
         return cluster;
     }
 
+    public Cluster modifyCluster(String clusterIdentifier, String nodeType, Integer numberOfNodes,
+                                 String masterUserPassword, String clusterParameterGroupName,
+                                 List<String> vpcSecurityGroupIds) {
+        return modifyCluster(clusterIdentifier, nodeType, numberOfNodes, masterUserPassword,
+                clusterParameterGroupName, vpcSecurityGroupIds, null);
+    }
+
     public synchronized Cluster modifyCluster(String clusterIdentifier, String nodeType, Integer numberOfNodes,
                                                String masterUserPassword, String clusterParameterGroupName,
-                                               List<String> vpcSecurityGroupIds) {
+                                               List<String> vpcSecurityGroupIds, Boolean multiAZ) {
         Cluster cluster = clusters.get(clusterIdentifier)
                 .orElseThrow(() -> new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404));
 
@@ -642,6 +654,9 @@ public class RedshiftService {
         }
         if (vpcSecurityGroupIds != null && !vpcSecurityGroupIds.isEmpty()) {
             cluster.setVpcSecurityGroupIds(vpcSecurityGroupIds);
+        }
+        if (multiAZ != null) {
+            cluster.setMultiAZ(multiAZ);
         }
 
         clusters.put(clusterIdentifier, cluster);
@@ -703,6 +718,42 @@ public class RedshiftService {
         } catch (RuntimeException e) {
             throw new AwsException("InternalFailure", "Failed to encode managed master secret", 500);
         }
+    }
+
+    public Cluster describeLoggingStatus(String clusterIdentifier) {
+        return clusters.get(clusterIdentifier)
+                .orElseThrow(() -> new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404));
+    }
+
+    public synchronized Cluster enableLogging(String clusterIdentifier, String bucketName, String s3KeyPrefix,
+                                              String logDestinationType, List<String> logExports) {
+        Cluster cluster = clusters.get(clusterIdentifier)
+                .orElseThrow(() -> new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404));
+        boolean cloudWatch = "cloudwatch".equalsIgnoreCase(logDestinationType);
+        if (!cloudWatch && (bucketName == null || bucketName.isBlank())) {
+            throw new AwsException("InvalidParameterValue", "BucketName is required for an S3 log destination", 400);
+        }
+        cluster.setLoggingEnabled(true);
+        cluster.setLoggingBucketName(bucketName);
+        cluster.setLoggingDestinationType(logDestinationType);
+        cluster.setLoggingExports(logExports == null || logExports.isEmpty() ? null : List.copyOf(logExports));
+        cluster.setLoggingS3KeyPrefix(s3KeyPrefix);
+        clusters.put(clusterIdentifier, cluster);
+        clusters.flush();
+        return cluster;
+    }
+
+    public synchronized Cluster disableLogging(String clusterIdentifier) {
+        Cluster cluster = clusters.get(clusterIdentifier)
+                .orElseThrow(() -> new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404));
+        cluster.setLoggingEnabled(false);
+        cluster.setLoggingBucketName(null);
+        cluster.setLoggingS3KeyPrefix(null);
+        cluster.setLoggingDestinationType(null);
+        cluster.setLoggingExports(null);
+        clusters.put(clusterIdentifier, cluster);
+        clusters.flush();
+        return cluster;
     }
 
     public synchronized Cluster rebootCluster(String clusterIdentifier) {
@@ -850,6 +901,8 @@ public class RedshiftService {
         snapshot.setStatus("available");
         snapshot.setMasterUsername(cluster.getMasterUsername());
         snapshot.setMasterPassword(cluster.getMasterPassword());
+        snapshot.setSnapshotArn(snapshotArn(clusterIdentifier, snapshotIdentifier));
+        snapshot.setSnapshotCreateTime(Instant.now());
         if (cluster.getEndpoint() != null) {
             snapshot.setPort(cluster.getEndpoint().getPort());
         } else {
@@ -962,6 +1015,7 @@ public class RedshiftService {
         cluster.setNodeType(effectiveNodeType);
         cluster.setMasterUsername(username);
         cluster.setMasterPassword(password);
+        cluster.setClusterParameterGroupName(DEFAULT_PARAMETER_GROUP_NAME);
         cluster.setClusterStatus("creating");
         clusters.put(clusterIdentifier, cluster);
         clusters.flush();
@@ -1032,12 +1086,25 @@ public class RedshiftService {
     public List<ClusterParameterGroup> describeClusterParameterGroups(String parameterGroupName) {
         if (parameterGroupName != null && !parameterGroupName.isBlank()) {
             Optional<ClusterParameterGroup> group = parameterGroups.get(parameterGroupName);
+            if (group.isEmpty() && DEFAULT_PARAMETER_GROUP_NAME.equals(parameterGroupName)) {
+                return List.of(defaultParameterGroup());
+            }
             if (group.isEmpty()) {
                 throw new AwsException("ClusterParameterGroupNotFound", "Cluster parameter group " + parameterGroupName + " not found", 404);
             }
             return List.of(group.get());
         }
-        return parameterGroups.scan(k -> true);
+        List<ClusterParameterGroup> all = new ArrayList<>(parameterGroups.scan(k -> true));
+        if (all.stream().noneMatch(g -> DEFAULT_PARAMETER_GROUP_NAME.equals(g.getParameterGroupName()))) {
+            all.add(0, defaultParameterGroup());
+        }
+        return all;
+    }
+
+    // The implicit group every cluster references; not persisted, so it can't be deleted or drift.
+    private static ClusterParameterGroup defaultParameterGroup() {
+        return new ClusterParameterGroup(DEFAULT_PARAMETER_GROUP_NAME, "redshift-1.0",
+                "Default parameter group for redshift-1.0");
     }
 
     public Optional<ClusterParameterGroup> getClusterParameterGroup(String parameterGroupName) {
@@ -1110,8 +1177,9 @@ public class RedshiftService {
 
     public List<ClusterSubnetGroup> describeClusterSubnetGroups(String name) {
         if (name != null && !name.isBlank()) {
+            // The Terraform AWS provider matches this exact "...Fault" code to detect a missing group.
             ClusterSubnetGroup group = subnetGroups.get(name)
-                    .orElseThrow(() -> new AwsException("ClusterSubnetGroupNotFound", "Cluster subnet group " + name + " not found", 404));
+                    .orElseThrow(() -> new AwsException("ClusterSubnetGroupNotFoundFault", "Cluster subnet group " + name + " not found", 400));
             return List.of(group);
         }
         return subnetGroups.scan(k -> true);
@@ -1119,7 +1187,7 @@ public class RedshiftService {
 
     public synchronized ClusterSubnetGroup modifyClusterSubnetGroup(String name, String description, List<String> subnetIds) {
         ClusterSubnetGroup group = subnetGroups.get(name)
-                .orElseThrow(() -> new AwsException("ClusterSubnetGroupNotFound", "Cluster subnet group " + name + " not found", 404));
+                .orElseThrow(() -> new AwsException("ClusterSubnetGroupNotFoundFault", "Cluster subnet group " + name + " not found", 400));
         if (description != null) {
             group.setDescription(description);
         }
@@ -1133,7 +1201,7 @@ public class RedshiftService {
 
     public ClusterSubnetGroup deleteClusterSubnetGroup(String name) {
         ClusterSubnetGroup group = subnetGroups.get(name)
-                .orElseThrow(() -> new AwsException("ClusterSubnetGroupNotFound", "Cluster subnet group " + name + " not found", 404));
+                .orElseThrow(() -> new AwsException("ClusterSubnetGroupNotFoundFault", "Cluster subnet group " + name + " not found", 400));
         subnetGroups.delete(name);
         subnetGroups.flush();
         return group;
@@ -1296,7 +1364,7 @@ public class RedshiftService {
             }
             case "subnetgroup" -> {
                 ClusterSubnetGroup group = subnetGroups.get(id)
-                        .orElseThrow(() -> new AwsException("ClusterSubnetGroupNotFound", "Cluster subnet group " + id + " not found", 404));
+                        .orElseThrow(() -> new AwsException("ClusterSubnetGroupNotFoundFault", "Cluster subnet group " + id + " not found", 400));
                 yield new TagHandle(group.getTags(), updated -> {
                     group.setTags(updated);
                     subnetGroups.put(id, group);
