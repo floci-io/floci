@@ -50,8 +50,10 @@ trigger Scheduler retries.
 
 `CreateSchedule` and `UpdateSchedule` reject a non-JSON `Input` for Lambda,
 Step Functions, and EventBridge targets with a `ValidationException`, as AWS
-does. SQS and SNS targets accept any text, and the `Input` of a universal
-(`aws-sdk`) target is only checked when the schedule is invoked.
+does. A blank `Input`, or one with text after the JSON value such as
+`{} garbage`, is rejected the same way. SQS and SNS targets accept any text,
+and the `Input` of a universal (`aws-sdk`) target is only checked when the
+schedule is invoked.
 
 ### Retries and dead-letter queues
 

@@ -11,7 +11,10 @@ import io.github.hectorvent.floci.services.scheduler.model.ScheduleGroup;
 import io.github.hectorvent.floci.services.scheduler.model.ScheduleRequest;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -29,7 +32,11 @@ public class SchedulerService {
     // AWS EventBridge Scheduler name constraints: [0-9a-zA-Z-_.]+, 1-64 chars.
     private static final Pattern NAME_PATTERN = Pattern.compile("[0-9a-zA-Z\\-_.]{1,64}");
     private static final String DEFAULT_GROUP = "default";
-    private static final ObjectMapper JSON = new ObjectMapper();
+    // FAIL_ON_TRAILING_TOKENS matters here: without it an Input of "{} garbage" parses as the
+    // leading object and the rest is silently dropped, so a value AWS rejects would be stored.
+    private static final ObjectReader JSON = new ObjectMapper()
+            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+            .readerFor(JsonNode.class);
 
     private final StorageBackend<String, ScheduleGroup> groupStore;
     private final StorageBackend<String, Schedule> scheduleStore;
@@ -396,7 +403,14 @@ public class SchedulerService {
                 || AwsArnUtils.isArnFor(targetArn, "events");
     }
 
+    /**
+     * A blank value is rejected up front: {@code Input} has a minimum length of 1, and
+     * {@code readTree} returns a missing node for it instead of failing.
+     */
     private static boolean isWellFormedJson(String value) {
+        if (value.isBlank()) {
+            return false;
+        }
         try {
             JSON.readTree(value);
             return true;

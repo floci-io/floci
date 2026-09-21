@@ -378,6 +378,36 @@ class SchedulerServiceTest {
     }
 
     @Test
+    void createScheduleRejectsInputWithTrailingTokensForLambdaTarget() {
+        // Without FAIL_ON_TRAILING_TOKENS, "{} garbage" parses as the leading object and the
+        // rest is silently dropped.
+        AwsException e = assertThrows(AwsException.class, () ->
+                service.createSchedule(
+                        newRequest("s", null, "rate(1 hour)",
+                                new FlexibleTimeWindow("OFF", null),
+                                new Target("arn:aws:lambda:us-east-1:000000000000:function:my-func",
+                                        "arn:aws:iam::000000000000:role/my-role", "{} garbage", null)),
+                        REGION));
+        assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    @Test
+    void createScheduleRejectsBlankInputForStepFunctionsTarget() {
+        // Target.Input has a minimum length of 1, and readTree returns a missing node for a
+        // blank value rather than failing.
+        for (String blank : List.of("", " ")) {
+            AwsException e = assertThrows(AwsException.class, () ->
+                    service.createSchedule(
+                            newRequest("s", null, "rate(1 hour)",
+                                    new FlexibleTimeWindow("OFF", null),
+                                    new Target("arn:aws:states:us-east-1:000000000000:stateMachine:my-workflow",
+                                            "arn:aws:iam::000000000000:role/my-role", blank, null)),
+                            REGION));
+            assertEquals("ValidationException", e.getErrorCode());
+        }
+    }
+
+    @Test
     void createScheduleAcceptsTextInputForSqsTarget() {
         Schedule s = service.createSchedule(
                 newRequest("sqs-text", null, "rate(1 hour)",

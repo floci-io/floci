@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
+import io.github.hectorvent.floci.services.scheduler.model.AwsVpcConfiguration;
 import io.github.hectorvent.floci.services.scheduler.model.EventBridgeParameters;
 import io.github.hectorvent.floci.services.scheduler.model.EcsParameters;
 import io.github.hectorvent.floci.services.scheduler.model.Schedule;
@@ -233,8 +234,7 @@ public class ScheduleInvoker {
         putIfPresent(request, "launchType", ecs.getLaunchType());
         putIfPresent(request, "group", ecs.getGroup());
         if (ecs.getNetworkConfiguration() != null && ecs.getNetworkConfiguration().getAwsvpcConfiguration() != null) {
-            io.github.hectorvent.floci.services.scheduler.model.AwsVpcConfiguration vpc =
-                    ecs.getNetworkConfiguration().getAwsvpcConfiguration();
+            AwsVpcConfiguration vpc = ecs.getNetworkConfiguration().getAwsvpcConfiguration();
             Map<String, Object> awsvpc = new LinkedHashMap<>();
             putIfPresent(awsvpc, "subnets", vpc.getSubnets());
             putIfPresent(awsvpc, "securityGroups", vpc.getSecurityGroups());
@@ -328,7 +328,8 @@ public class ScheduleInvoker {
         if (source == null || source.getAwsvpcConfiguration() == null) {
             return null;
         }
-        io.github.hectorvent.floci.services.scheduler.model.AwsVpcConfiguration sourceVpc = source.getAwsvpcConfiguration();
+        AwsVpcConfiguration sourceVpc = source.getAwsvpcConfiguration();
+        // The ECS model's AwsVpcConfiguration clashes with the scheduler model's, which is imported.
         io.github.hectorvent.floci.services.ecs.model.AwsVpcConfiguration targetVpc =
                 new io.github.hectorvent.floci.services.ecs.model.AwsVpcConfiguration();
         targetVpc.setSubnets(sourceVpc.getSubnets());
