@@ -27,6 +27,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -84,6 +85,7 @@ class EksPodIdentityDockerIntegrationTest {
     private String containerId;
     private Cluster cluster;
     private String clusterName;
+    private String roleName;
 
     @BeforeEach
     void requireDocker() {
@@ -104,6 +106,12 @@ class EksPodIdentityDockerIntegrationTest {
             } catch (Exception ignored) {
             }
         }
+        if (roleName != null) {
+            try {
+                iamService.deleteRole(roleName);
+            } catch (Exception ignored) {
+            }
+        }
         if (containerId != null) {
             try {
                 lifecycleManager.stopAndRemove(containerId, null);
@@ -115,19 +123,21 @@ class EksPodIdentityDockerIntegrationTest {
     @Test
     void linkLocalPodIdentityEndpointAnswersInsideClusterContainer() throws Exception {
         clusterName = "pi-it-" + UUID.randomUUID().toString().substring(0, 8);
-        String roleName = "pi-it-role-" + UUID.randomUUID().toString().substring(0, 8);
+        roleName = "pi-it-role-" + UUID.randomUUID().toString().substring(0, 8);
         String roleArn = "arn:aws:iam::000000000000:role/" + roleName;
         iamService.createRole(roleName, "/", "{\"Version\":\"2012-10-17\",\"Statement\":[]}", null, 3600, null);
 
         cluster = new Cluster();
         cluster.setName(clusterName);
         cluster.setAccountId("000000000000");
+        cluster.setArn("arn:aws:eks:us-east-1:000000000000:cluster/" + clusterName);
+        cluster.setCreatedAt(Instant.now());
         cluster.setStatus(ClusterStatus.ACTIVE);
         String issuer = "https://oidc.eks.us-east-1.amazonaws.com/id/" + UUID.randomUUID().toString().replace("-", "").toUpperCase();
         cluster.setIdentity(new ClusterIdentity(new OidcIdentity(issuer)));
         eksService.putClusterForAccount("000000000000", cluster);
 
-        ClusterOidcKey key = oidcService.ensureKeyForAccount(clusterName, issuer, "000000000000");
+        ClusterOidcKey key = oidcService.ensureKeyForAccount("000000000000", clusterName, issuer);
         assertNotNull(key);
 
         associationService.create(cluster, new CreatePodIdentityAssociationRequest(
