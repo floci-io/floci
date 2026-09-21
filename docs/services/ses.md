@@ -225,7 +225,9 @@ Messages are stored locally by Floci and can be persisted when SES storage is ba
 
 Alongside the LocalStack fields, each captured message carries a
 `ReturnPath` holding the resolved envelope sender described under
-[SMTP Relay](#smtp-relay).
+[SMTP Relay](#smtp-relay). A message the content scan rejected carries
+`RejectReason` and none of its content: no `Subject`, `Body`, `Headers`,
+`ReplyToAddresses` or `RawData`, in neither the Simple nor the raw shape.
 
 ## Examples
 
@@ -396,7 +398,7 @@ A successful send without a simulator-address recipient emits only the `Send` ev
 
 A recipient on the [account-level suppression list](https://docs.aws.amazon.com/ses/latest/dg/sending-email-suppression-list.html) produces a `Bounce` with `bounceSubType: OnAccountSuppressionList` or a `Complaint` with `complaintSubType: OnAccountSuppressionList`, following the stored reason, and never a `Delivery`. Events are split by cause: a message that reaches both `bounce@simulator` and a suppressed address publishes two `Bounce` events, each listing only its own recipients, with `mail.destination` carrying the full envelope on both. These shapes were verified against real SES on 2026-09-21.
 
-`Reject` is emitted the way AWS documents it: a message carrying the [EICAR test file](https://www.eicar.org/download-anti-malware-testfile/) in its subject, a header or a body is accepted (the send returns a `MessageId`) and then rejected with a `Reject` event whose `reason` is `Bad content`. The message is not relayed, the stored record keeps only its source, its envelope and `RejectReason`, and its `Send` and `Reject` events carry the envelope but no subject or headers in `mail`, where SES would include them, so the signature reaches neither the mailbox store nor an event destination. The test string itself is deliberately not reproduced here.
+`Reject` is emitted the way AWS documents it: a message carrying the [EICAR test file](https://www.eicar.org/download-anti-malware-testfile/) in its subject, a header, any text body or MIME part, including a base64 attachment or a forwarded message, is accepted (the send returns a `MessageId`) and then rejected with a `Reject` event whose `reason` is `Bad content`. The message is not relayed, the stored record keeps only its source, its envelope and `RejectReason`, and its `Send` and `Reject` events carry the envelope but no subject or headers in `mail`, where SES would include them, so the scanned content reaches neither the mailbox store nor an event destination. What the request itself supplied, its envelope and its tags, is kept. The test string itself is deliberately not reproduced here.
 
 Account-level VDM (Virtual Deliverability Manager) attributes are stored per region. `PutAccountVdmAttributes` sets `VdmEnabled` (opt-in, defaults `DISABLED`) plus the optional `DashboardAttributes.EngagementMetrics` and `GuardianAttributes.OptimizedSharedDelivery`. `GetAccount` omits `VdmAttributes` until VDM has been configured for the region, then returns `VdmEnabled`, adding the `DashboardAttributes`/`GuardianAttributes` sub-objects only while `VdmEnabled` is `ENABLED`. Floci stores the settings but does not run VDM analytics.
 

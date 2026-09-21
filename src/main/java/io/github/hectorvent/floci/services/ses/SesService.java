@@ -316,7 +316,8 @@ public class SesService {
         // The MIME headers are always parsed: X-SES-CONFIGURATION-SET can name the configuration
         // set that decides whether events are published at all, so the configuration set cannot be
         // resolved before the message has been read.
-        SmtpRelay.RawMessageHeaders headers = SmtpRelay.parseRawHeaders(rawMessage);
+        SmtpRelay.ParsedRawMessage parsed = SmtpRelay.parseRawMessage(rawMessage);
+        SmtpRelay.RawMessageHeaders headers = parsed.headers();
         // AWS accepts the configuration set either as a request field or as the
         // X-SES-CONFIGURATION-SET header on the message itself; the request field wins.
         String requestedConfigSet = firstNonBlank(configurationSetName, headers.configurationSet());
@@ -364,27 +365,48 @@ public class SesService {
                 .forEach(suppressedReasons::putIfAbsent);
 
         String messageId = UUID.randomUUID().toString();
+        // The scan walks the decoded MIME, so a base64 attachment does not hide the content, and a
+        // message the parser cannot read is refused outright rather than stored and relayed unseen.
+        SesContentScan.Result scan = SesContentScan.scan(parsed.bytes(), parsed.message());
+        if (scan == SesContentScan.Result.UNREADABLE) {
+            throw new AwsException("InvalidParameterValue", "Raw message could not be parsed.", 400);
+        }
+        boolean rejected = scan == SesContentScan.Result.REJECTED;
         // AWS routes bounces to the Return-Path carried by the message, falling back to the
-        // request's return path and then the sender.
-        String effectiveReturnPath = firstNonBlank(headers.returnPath(), returnPath, effectiveSource);
+        // request's return path and then the sender. A rejected message keeps nothing read off its
+        // own headers, and that header's value reaches here unparsed, so it is dropped; an envelope
+        // read off the headers is a list of parsed addresses and carries no message text.
+        String effectiveReturnPath = rejected
+                ? firstNonBlank(returnPath, effectiveSource)
+                : firstNonBlank(headers.returnPath(), returnPath, effectiveSource);
         SentEmail email = new SentEmail(messageId, region, effectiveSource, effectiveDestinations, rawMessage);
         email.setReturnPath(effectiveReturnPath);
+        if (rejected) {
+            email.discardContent(SesRecipientEvents.CONTENT_REJECT_REASON);
+        }
         sentEmailService.record(region, messageId, email);
 
         List<String> relayedDestinations = filterUnsuppressed(effectiveDestinations, suppressedReasons);
-        if (!relayedDestinations.isEmpty()) {
+        if (!rejected && !relayedDestinations.isEmpty()) {
             smtpRelay.relayRaw(new SmtpRelay.RawRelayMessage(effectiveSource, effectiveReturnPath,
                     relayedDestinations, rawMessage, messageId));
         } else {
-            LOG.infov("SES raw email accepted but not relayed (all recipients suppressed): messageId={0}",
-                    messageId);
+            LOG.infov("SES raw email accepted but not relayed ({0}): messageId={1}",
+                    rejected ? "content rejected" : "all recipients suppressed", messageId);
         }
 
-        LOG.infov("SES raw email sent: from={0}, messageId={1}", effectiveSource, messageId);
+        if (!rejected) {
+            LOG.infov("SES raw email sent: from={0}, messageId={1}", effectiveSource, messageId);
+        }
+        // The recipient lists are read off the message, so a rejected one publishes none of them
+        // either; mail.destination still carries the envelope.
+        List<String> publishedTo = rejected ? List.of() : headers.to();
+        List<String> publishedCc = rejected ? List.of() : headers.cc();
+        List<String> publishedBcc = rejected ? List.of() : headers.bcc();
         publishSendEvents(effectiveConfigSet, messageId, effectiveSource,
-                headers.subject(), headers.to(), headers.cc(), headers.bcc(),
+                headers.subject(), publishedTo, publishedCc, publishedBcc,
                 effectiveDestinations,
-                suppressedReasons, false, effectiveTags, List.of(), region);
+                suppressedReasons, rejected, rejected ? requestTags(emailTags) : effectiveTags, List.of(), region);
         return messageId;
     }
 
@@ -1481,6 +1503,12 @@ public class SesService {
             texts.add(header.value());
         }
         return texts;
+    }
+
+    // Tags read off the raw message's own header are scanned content; only the request's tags,
+    // which the controller validated, are published for a rejected message.
+    private static List<MessageTag> requestTags(List<MessageTag> emailTags) {
+        return emailTags == null ? List.of() : emailTags;
     }
 
     private static int sizeOf(List<?> list) {

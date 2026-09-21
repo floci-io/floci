@@ -1651,8 +1651,87 @@ class SesEventPublishingV2IntegrationTest {
     }
 
     @Test
+    @Order(34)
+    void eicarAttachment_isAcceptedThenRejected() throws Exception {
+        // The signature comes from the scanner itself so it never appears in test source.
+        String encoded = Base64.getEncoder().encodeToString(
+                SesContentScan.signature().getBytes(StandardCharsets.US_ASCII));
+        String mime = "From: " + SENDER + "\r\nTo: success@simulator.amazonses.com\r\nSubject: scan\r\n"
+                + "X-SES-MESSAGE-TAGS: probe=leak\r\n"
+                + "MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"b\"\r\n\r\n"
+                + "--b\r\nContent-Type: text/plain\r\n\r\nsee attachment\r\n"
+                + "--b\r\nContent-Type: application/octet-stream\r\nContent-Transfer-Encoding: base64\r\n\r\n"
+                + encoded + "\r\n--b--\r\n";
+        String rawB64 = Base64.getEncoder().encodeToString(
+                mime.getBytes(StandardCharsets.UTF_8));
+        drainQueue();
+        String messageId = given().contentType("application/json").header("Authorization", SES_AUTH)
+                .body("""
+                    {"FromEmailAddress": "%s",
+                     "Destination": {"ToAddresses": ["success@simulator.amazonses.com"]},
+                     "ConfigurationSetName": "%s",
+                     "Content": {"Raw": {"Data": "%s"}}}
+                    """.formatted(SENDER, CS, rawB64))
+        .when().post("/v2/email/outbound-emails").then().statusCode(200)
+                .extract().jsonPath().getString("MessageId");
+
+        List<JsonNode> events = receiveSesEvents(2);
+        assertEquals(2, events.size(), "expected Send and Reject, and no Delivery");
+        assertTrue(events.stream().anyMatch(e -> "Send".equals(e.path("eventType").asText())));
+        JsonNode reject = events.stream()
+                .filter(e -> "Reject".equals(e.path("eventType").asText()))
+                .findFirst().orElseThrow();
+        assertEquals("Bad content", reject.path("reject").path("reason").asText());
+        // Nothing read off the message is published: neither the tags from its X-SES-MESSAGE-TAGS
+        // header nor the recipient lists from its To and Cc headers. Only the From the request
+        // supplied stays, and mail.destination still carries the envelope.
+        for (JsonNode event : events) {
+            JsonNode mail = event.path("mail");
+            String type = event.path("eventType").asText();
+            assertTrue(mail.path("tags").path("probe").isMissingNode(),
+                    type + " must not carry the raw header tag");
+            assertEquals(0, mail.path("commonHeaders").path("to").size(),
+                    type + " must not carry the recipients read off the message");
+            for (JsonNode header : mail.path("headers")) {
+                assertEquals("From", header.path("name").asText(),
+                        type + " must not carry header " + header.path("name").asText());
+            }
+            assertEquals("success@simulator.amazonses.com", mail.path("destination").path(0).asText());
+        }
+
+        // The request's own tags, validated by the controller, stay on both events.
+        drainQueue();
+        given().contentType("application/json").header("Authorization", SES_AUTH)
+                .body("""
+                    {"FromEmailAddress": "%s",
+                     "Destination": {"ToAddresses": ["success@simulator.amazonses.com"]},
+                     "ConfigurationSetName": "%s",
+                     "EmailTags": [{"Name": "kept", "Value": "yes"}],
+                     "Content": {"Raw": {"Data": "%s"}}}
+                    """.formatted(SENDER, CS, rawB64))
+        .when().post("/v2/email/outbound-emails").then().statusCode(200);
+        List<JsonNode> tagged = receiveSesEvents(2);
+        assertEquals(2, tagged.size(), "expected Send and Reject");
+        for (JsonNode event : tagged) {
+            assertEquals("yes", event.path("mail").path("tags").path("kept").path(0).asText(),
+                    event.path("eventType").asText() + " must keep the request tag");
+            assertTrue(event.path("mail").path("tags").path("probe").isMissingNode());
+        }
+
+        // The stored record keeps the marker and its envelope but no copy of the content, so it
+        // is listed in neither the raw shape (no RawData) nor the Simple one (no Subject or Body).
+        given().header("Authorization", SES_AUTH)
+        .when().get("/_aws/ses?id=" + messageId).then().statusCode(200)
+                .body("messages[0].RejectReason", equalTo("Bad content"))
+                .body("messages[0]", hasKey("Destination"))
+                .body("messages[0]", not(hasKey("RawData")))
+                .body("messages[0]", not(hasKey("Subject")))
+                .body("messages[0]", not(hasKey("Body")));
+    }
+
+    @Test
     @Order(35)
-    void eicarInSimpleBody_isAcceptedThenRejectedAndStoredWithoutItsContent() throws Exception {
+    void eicarInSimpleBody_isAcceptedThenRejectedAndStoredWithoutTheBody() throws Exception {
         drainQueue();
         String messageId = given().contentType("application/json").header("Authorization", SES_AUTH)
                 .body("""
@@ -1671,21 +1750,20 @@ class SesEventPublishingV2IntegrationTest {
         assertTrue(events.stream().anyMatch(e -> "Reject".equals(e.path("eventType").asText())));
         assertTrue(events.stream().noneMatch(e -> "Delivery".equals(e.path("eventType").asText())));
 
-        // The record keeps the reason and the envelope, but none of the scanned content.
         given().header("Authorization", SES_AUTH)
         .when().get("/_aws/ses?id=" + messageId).then().statusCode(200)
                 .body("messages[0].RejectReason", equalTo("Bad content"))
-                .body("messages[0].Subject", nullValue())
-                .body("messages[0].Body.text_part", nullValue())
-                .body("messages[0].Body.html_part", nullValue())
-                .body("messages[0]", not(hasKey("Headers")));
+                .body("messages[0]", hasKey("Destination"))
+                .body("messages[0]", not(hasKey("Subject")))
+                .body("messages[0]", not(hasKey("Body")));
     }
 
     @Test
     @Order(36)
     void eicarInSimpleSubjectOrHeader_isRejectedLikeARawSend() throws Exception {
-        // The signature can sit in the subject or in a caller-supplied header name or value as
-        // well as in a body, so the simple path scans all of them, and the record keeps none.
+        // A raw send is scanned as a whole, header block included, so the simple path has to
+        // cover the subject and the caller's header names and values as well or the two paths
+        // disagree; and the stored record keeps none of them.
         String signature = SesContentScan.signature().replace("\\", "\\\\");
         for (String content : new String[] {
                 "\"Subject\": {\"Data\": \"" + signature + "\"}, \"Body\": {\"Text\": {\"Data\": \"clean\"}}",
@@ -1723,7 +1801,8 @@ class SesEventPublishingV2IntegrationTest {
             given().header("Authorization", SES_AUTH)
             .when().get("/_aws/ses?id=" + messageId).then().statusCode(200)
                     .body("messages[0].RejectReason", equalTo("Bad content"))
-                    .body("messages[0].Subject", nullValue())
+                    .body("messages[0]", not(hasKey("Subject")))
+                    .body("messages[0]", not(hasKey("Body")))
                     .body("messages[0]", not(hasKey("Headers")));
         }
     }
