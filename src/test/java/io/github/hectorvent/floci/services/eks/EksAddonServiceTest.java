@@ -26,7 +26,8 @@ import static org.mockito.Mockito.*;
 
 class EksAddonServiceTest {
 
-    private static final String ROLE = "arn:aws:iam::123456789012:role/addon-role";
+    private static final String ACCOUNT = "123456789012";
+    private static final String ROLE = "arn:aws:iam::" + ACCOUNT + ":role/addon-role";
 
     @Test
     void createAndDescribeAddon() throws Exception {
@@ -375,10 +376,30 @@ class EksAddonServiceTest {
         Update update = fixture.service.update(fixture.cluster, "vpc-cni",
                 new UpdateAddonRequest(null, null, null, null, null, List.of(assoc1)));
         assertNotNull(update.id());
+        // Verify UpdateParam for PodIdentityAssociations is JSON string, not Java toString()
+        assertTrue(update.params().stream().anyMatch(p ->
+                "PodIdentityAssociations".equals(p.type())
+                && p.value().contains("\"roleArn\"")
+                && !p.value().startsWith("AddonPodIdentityAssociation[")
+        ));
 
         // Re-read addon and verify association still present in kube-system
         Addon updated = fixture.service.describe(fixture.cluster, "vpc-cni");
         assertEquals(1, updated.podIdentityAssociations().size());
+
+        // Update with invalid association fails validation BEFORE deleting existing associations
+        AddonPodIdentityAssociation invalidAssoc = new AddonPodIdentityAssociation(
+                "arn:aws:iam::" + ACCOUNT + ":role/non-existent-role", "aws-node");
+        AwsException exInvalidUpdate = assertThrows(AwsException.class, () ->
+                fixture.service.update(fixture.cluster, "vpc-cni",
+                        new UpdateAddonRequest(null, null, null, null, null, List.of(invalidAssoc))));
+        assertEquals("InvalidParameterException", exInvalidUpdate.getErrorCode());
+        // Verify existing association was NOT deleted
+        Addon afterFailedUpdate = fixture.service.describe(fixture.cluster, "vpc-cni");
+        assertEquals(1, afterFailedUpdate.podIdentityAssociations().size());
+        EksPodIdentityAssociationService.Page stillThere = fixture.podIdentityAssociations.list(
+                fixture.cluster, "kube-system", "aws-node", null, null);
+        assertEquals(1, stillThere.associations().size());
 
         // Delete with preserve=false removes association from cluster
         fixture.service.delete(fixture.cluster, "vpc-cni", false);
@@ -423,6 +444,53 @@ class EksAddonServiceTest {
                 fixture.service.update(fixture.cluster, "vpc-cni", updateIncompatible));
         assertEquals("InvalidParameterException", exUpdate.getErrorCode());
         assertEquals(400, exUpdate.getHttpStatus());
+    }
+
+    @Test
+    void clusterVersionOutsideCatalogRangeAllowsCatalogVersionsAndResolvesDefault() {
+        Fixture fixture = fixture();
+        fixture.cluster.setVersion("1.35");
+
+        // Create with no version resolves a default version from the catalog without error
+        CreateAddonRequest reqDefault = new CreateAddonRequest(
+                "vpc-cni", null, null, null, null, null, null, null);
+        Addon created = fixture.service.create(fixture.cluster, reqDefault);
+        assertNotNull(created.addonVersion());
+        assertEquals("ACTIVE", created.status());
+
+        // Update with another valid catalog version succeeds
+        Update update = fixture.service.update(fixture.cluster, "vpc-cni",
+                new UpdateAddonRequest("v1.18.1-eksbuild.1", null, null, null, null, null));
+        assertNotNull(update.id());
+        Addon updated = fixture.service.describe(fixture.cluster, "vpc-cni");
+        assertEquals("v1.18.1-eksbuild.1", updated.addonVersion());
+
+        // Updating with a version NOT in catalog at all still fails
+        UpdateAddonRequest updateBad = new UpdateAddonRequest(
+                "v99.0.0", null, null, null, null, null);
+        AwsException ex = assertThrows(AwsException.class, () ->
+                fixture.service.update(fixture.cluster, "vpc-cni", updateBad));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void clusterVersion132SupportedInCatalog() {
+        Fixture fixture = fixture();
+        fixture.cluster.setVersion("1.32");
+
+        CreateAddonRequest reqKubeProxy = new CreateAddonRequest(
+                "kube-proxy", null, null, null, null, null, null, null);
+        Addon created = fixture.service.create(fixture.cluster, reqKubeProxy);
+        assertEquals("v1.32.0-eksbuild.1", created.addonVersion());
+
+        // Incompatible version (v1.16.0 only compatible with 1.28) is rejected
+        CreateAddonRequest reqIncompatible = new CreateAddonRequest(
+                "vpc-cni", "v1.16.0-eksbuild.1", null, null, null, null, null, null);
+        AwsException ex = assertThrows(AwsException.class, () ->
+                fixture.service.create(fixture.cluster, reqIncompatible));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
     }
 
     @Test

@@ -11,6 +11,11 @@
           "architecture": ["amd64", "arm64"],
           "compatibilities": [
             {
+              "clusterVersion": "1.32",
+              "platformVersions": ["*"],
+              "defaultVersion": true
+            },
+            {
               "clusterVersion": "1.31",
               "platformVersions": ["*"],
               "defaultVersion": true
@@ -68,6 +73,11 @@
           "architecture": ["amd64", "arm64"],
           "compatibilities": [
             {
+              "clusterVersion": "1.32",
+              "platformVersions": ["*"],
+              "defaultVersion": true
+            },
+            {
               "clusterVersion": "1.31",
               "platformVersions": ["*"],
               "defaultVersion": true
@@ -115,6 +125,19 @@
       "owner": "aws",
       "publisher": "eks",
       "addonVersions": [
+        {
+          "addonVersion": "v1.32.0-eksbuild.1",
+          "architecture": ["amd64", "arm64"],
+          "compatibilities": [
+            {
+              "clusterVersion": "1.32",
+              "platformVersions": ["*"],
+              "defaultVersion": true
+            }
+          ],
+          "requiresConfiguration": false,
+          "requiresIamPermissions": false
+        },
         {
           "addonVersion": "v1.31.0-eksbuild.1",
           "architecture": ["amd64", "arm64"],
@@ -179,6 +202,11 @@
           "addonVersion": "v1.3.0-eksbuild.1",
           "architecture": ["amd64", "arm64"],
           "compatibilities": [
+            {
+              "clusterVersion": "1.32",
+              "platformVersions": ["*"],
+              "defaultVersion": true
+            },
             {
               "clusterVersion": "1.31",
               "platformVersions": ["*"],

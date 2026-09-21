@@ -283,6 +283,47 @@ class EksAddonIntegrationTest {
     }
 
     @Test
+    void addonOnClusterVersionOutsideCatalogRangeIntegration() {
+        String account = "123456789012";
+        String name = "addon-k8s-" + UUID.randomUUID().toString().substring(0, 8);
+        String basePath = "/clusters/" + name + "/addons";
+
+        createCluster(account, name, "1.35");
+        try {
+            // Create with no version resolves default version on cluster outside catalog range
+            given().header("Authorization", auth(account, "eks"))
+                    .contentType("application/json")
+                    .body(Map.of("addonName", "vpc-cni"))
+                    .post(basePath)
+                    .then()
+                    .statusCode(200)
+                    .body("addon.addonName", equalTo("vpc-cni"))
+                    .body("addon.status", equalTo("ACTIVE"))
+                    .body("addon.addonVersion", notNullValue());
+
+            // In-place update with catalog version succeeds
+            given().header("Authorization", auth(account, "eks"))
+                    .contentType("application/json")
+                    .body(Map.of("addonVersion", "v1.18.1-eksbuild.1"))
+                    .post(basePath + "/vpc-cni/update")
+                    .then()
+                    .statusCode(200)
+                    .body("update.status", equalTo("Successful"));
+
+            // In-place update with unknown version fails
+            given().header("Authorization", auth(account, "eks"))
+                    .contentType("application/json")
+                    .body(Map.of("addonVersion", "v99.0.0"))
+                    .post(basePath + "/vpc-cni/update")
+                    .then()
+                    .statusCode(400)
+                    .body("__type", equalTo("InvalidParameterException"));
+        } finally {
+            deleteCluster(account, name);
+        }
+    }
+
+    @Test
     void clusterDeletionCleansAddons() {
         String account = "123456789012";
         String name = "addon-clean-" + UUID.randomUUID().toString().substring(0, 8);

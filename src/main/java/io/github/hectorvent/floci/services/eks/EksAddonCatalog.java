@@ -79,6 +79,18 @@ public class EksAddonCatalog {
         return findAddon(addonName).isPresent();
     }
 
+    public boolean isClusterVersionInCatalog(String kubernetesVersion) {
+        if (kubernetesVersion == null || kubernetesVersion.isBlank()) {
+            return false;
+        }
+        String k8s = normalizeK8sVersion(kubernetesVersion);
+        return getAddons().stream()
+                .flatMap(a -> a.addonVersions().stream())
+                .filter(v -> v.compatibilities() != null)
+                .flatMap(v -> v.compatibilities().stream())
+                .anyMatch(c -> k8s.equals(c.clusterVersion()));
+    }
+
     public boolean isVersionSupported(String addonName, String addonVersion) {
         return isVersionSupported(addonName, addonVersion, null);
     }
@@ -87,7 +99,7 @@ public class EksAddonCatalog {
         if (addonName == null || addonName.isBlank() || addonVersion == null || addonVersion.isBlank()) {
             return false;
         }
-        String k8s = kubernetesVersion != null && !kubernetesVersion.isBlank()
+        String k8s = kubernetesVersion != null && isClusterVersionInCatalog(kubernetesVersion)
                 ? normalizeK8sVersion(kubernetesVersion) : null;
         return findAddon(addonName)
                 .map(AddonInfo::addonVersions)

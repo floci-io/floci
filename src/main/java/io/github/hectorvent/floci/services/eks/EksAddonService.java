@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.eks;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
@@ -38,6 +40,7 @@ import java.util.function.Function;
 public class EksAddonService {
 
     private static final Logger LOG = Logger.getLogger(EksAddonService.class);
+    private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int DEFAULT_PAGE_SIZE = 100;
     private static final int MAX_PAGE_SIZE = 100;
 
@@ -242,13 +245,14 @@ public class EksAddonService {
 
         List<String> updatedAssociations = current.podIdentityAssociations();
         if (request != null && request.podIdentityAssociations() != null) {
+            validatePodIdentityAssociations(cluster, request.podIdentityAssociations());
             if (podIdentityAssociations != null && current.podIdentityAssociations() != null) {
                 for (String arn : current.podIdentityAssociations()) {
                     deleteAssociationSilently(cluster, arn);
                 }
             }
             updatedAssociations = createOrLinkPodIdentityAssociations(cluster, addonName, request.podIdentityAssociations());
-            params.add(new UpdateParam("PodIdentityAssociations", request.podIdentityAssociations().toString()));
+            params.add(new UpdateParam("PodIdentityAssociations", serializeAssociations(request.podIdentityAssociations())));
         }
 
         double now = Instant.now().toEpochMilli() / 1000.0;
@@ -369,14 +373,10 @@ public class EksAddonService {
         return new AddonVersionsPage(result.items(), result.nextToken());
     }
 
-    private List<String> createOrLinkPodIdentityAssociations(Cluster cluster,
-                                                             String addonName,
-                                                             List<AddonPodIdentityAssociation> associations) {
+    private void validatePodIdentityAssociations(Cluster cluster, List<AddonPodIdentityAssociation> associations) {
         if (associations == null || associations.isEmpty()) {
-            return List.of();
+            return;
         }
-        List<String> arns = new ArrayList<>();
-        String namespace = resolveAddonNamespace(addonName);
         for (AddonPodIdentityAssociation assoc : associations) {
             if (assoc.roleArn() == null || assoc.roleArn().isBlank()
                     || assoc.serviceAccount() == null || assoc.serviceAccount().isBlank()) {
@@ -384,7 +384,30 @@ public class EksAddonService {
                         "roleArn and serviceAccount are required for podIdentityAssociations", 400);
             }
             validateRoleArn(cluster, assoc.roleArn(), "roleArn");
+        }
+    }
 
+    private static String serializeAssociations(List<AddonPodIdentityAssociation> associations) {
+        if (associations == null) {
+            return "[]";
+        }
+        try {
+            return MAPPER.writeValueAsString(associations);
+        } catch (JsonProcessingException e) {
+            return "[]";
+        }
+    }
+
+    private List<String> createOrLinkPodIdentityAssociations(Cluster cluster,
+                                                             String addonName,
+                                                             List<AddonPodIdentityAssociation> associations) {
+        if (associations == null || associations.isEmpty()) {
+            return List.of();
+        }
+        validatePodIdentityAssociations(cluster, associations);
+        List<String> arns = new ArrayList<>();
+        String namespace = resolveAddonNamespace(addonName);
+        for (AddonPodIdentityAssociation assoc : associations) {
             if (podIdentityAssociations != null) {
                 CreatePodIdentityAssociationRequest req = new CreatePodIdentityAssociationRequest(
                         cluster.getName(),
