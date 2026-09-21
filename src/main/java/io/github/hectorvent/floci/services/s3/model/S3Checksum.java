@@ -16,7 +16,8 @@ public class S3Checksum {
     private static final Pattern PART_COUNT_SUFFIX = Pattern.compile("-\\d+$");
 
     private static final long CRC64_NVME_POLY = 0x9a6c9329ac4bc9b5L;
-    private static final long[] CRC64_TABLE = buildCrc64Table();
+    // Slicing-by-8: row n holds the CRC of each byte value followed by n zero bytes.
+    private static final long[][] CRC64_TABLES = buildCrc64Tables();
 
     private String checksumCRC32;
     private String checksumCRC32C;
@@ -146,9 +147,31 @@ public class S3Checksum {
 
     public static String crc64NvmeBase64(byte[] data) {
         long crc = 0xFFFFFFFFFFFFFFFFL;
-        for (byte b : data) {
-            int idx = (int)((crc ^ b) & 0xFF);
-            crc = CRC64_TABLE[idx] ^ (crc >>> 8);
+        int offset = 0;
+        int blocksEnd = data.length - data.length % Long.BYTES;
+        while (offset < blocksEnd) {
+            crc ^= (data[offset] & 0xFFL)
+                    | (data[offset + 1] & 0xFFL) << 8
+                    | (data[offset + 2] & 0xFFL) << 16
+                    | (data[offset + 3] & 0xFFL) << 24
+                    | (data[offset + 4] & 0xFFL) << 32
+                    | (data[offset + 5] & 0xFFL) << 40
+                    | (data[offset + 6] & 0xFFL) << 48
+                    | (data[offset + 7] & 0xFFL) << 56;
+            crc = CRC64_TABLES[7][(int)(crc & 0xFF)]
+                    ^ CRC64_TABLES[6][(int)((crc >>> 8) & 0xFF)]
+                    ^ CRC64_TABLES[5][(int)((crc >>> 16) & 0xFF)]
+                    ^ CRC64_TABLES[4][(int)((crc >>> 24) & 0xFF)]
+                    ^ CRC64_TABLES[3][(int)((crc >>> 32) & 0xFF)]
+                    ^ CRC64_TABLES[2][(int)((crc >>> 40) & 0xFF)]
+                    ^ CRC64_TABLES[1][(int)((crc >>> 48) & 0xFF)]
+                    ^ CRC64_TABLES[0][(int)(crc >>> 56)];
+            offset += Long.BYTES;
+        }
+        while (offset < data.length) {
+            int idx = (int)((crc ^ data[offset]) & 0xFF);
+            crc = CRC64_TABLES[0][idx] ^ (crc >>> 8);
+            offset++;
         }
         crc ^= 0xFFFFFFFFFFFFFFFFL;
         byte[] bytes = new byte[]{
@@ -175,8 +198,8 @@ public class S3Checksum {
         }
     }
 
-    private static long[] buildCrc64Table() {
-        long[] table = new long[256];
+    private static long[][] buildCrc64Tables() {
+        long[][] tables = new long[Long.BYTES][256];
         for (int i = 0; i < 256; i++) {
             long crc = i;
             for (int j = 0; j < 8; j++) {
@@ -186,8 +209,15 @@ public class S3Checksum {
                     crc >>>= 1;
                 }
             }
-            table[i] = crc;
+            tables[0][i] = crc;
         }
-        return table;
+        for (int i = 0; i < 256; i++) {
+            long crc = tables[0][i];
+            for (int n = 1; n < Long.BYTES; n++) {
+                crc = tables[0][(int)(crc & 0xFF)] ^ (crc >>> 8);
+                tables[n][i] = crc;
+            }
+        }
+        return tables;
     }
 }

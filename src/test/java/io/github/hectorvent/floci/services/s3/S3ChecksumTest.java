@@ -6,8 +6,12 @@ import io.github.hectorvent.floci.services.s3.model.ChecksumType;
 import io.github.hectorvent.floci.services.s3.model.S3Checksum;
 import org.junit.jupiter.api.Test;
 
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
+import java.util.Random;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -63,6 +67,37 @@ class S3ChecksumTest {
         assertEquals(S3Checksum.crc32Base64(data), ChecksumAlgorithm.CRC32.compute(data));
         assertEquals(S3Checksum.crc32cBase64(data), ChecksumAlgorithm.CRC32C.compute(data));
         assertEquals(S3Checksum.crc64NvmeBase64(data), ChecksumAlgorithm.CRC64NVME.compute(data));
+    }
+
+    @Test
+    void crc64NvmeMatchesTheCatalogueCheckValue() {
+        assertEquals("rosUhgp5mIg=", S3Checksum.crc64NvmeBase64("123456789".getBytes(StandardCharsets.UTF_8)));
+    }
+
+    @Test
+    void crc64NvmeMatchesABitwiseReferenceAtEveryLength() {
+        Random random = new Random(64);
+        List<Integer> lengths = new ArrayList<>();
+        for (int length = 0; length <= 64; length++) {
+            lengths.add(length);
+        }
+        lengths.addAll(List.of(1023, 1024, 1025, 65537, 1048579));
+        for (int length : lengths) {
+            byte[] data = new byte[length];
+            random.nextBytes(data);
+            assertEquals(bitwiseCrc64Nvme(data), S3Checksum.crc64NvmeBase64(data), "length " + length);
+        }
+    }
+
+    private static String bitwiseCrc64Nvme(byte[] data) {
+        long crc = ~0L;
+        for (byte b : data) {
+            crc ^= b & 0xFFL;
+            for (int bit = 0; bit < 8; bit++) {
+                crc = (crc & 1) != 0 ? (crc >>> 1) ^ 0x9a6c9329ac4bc9b5L : crc >>> 1;
+            }
+        }
+        return Base64.getEncoder().encodeToString(ByteBuffer.allocate(Long.BYTES).putLong(~crc).array());
     }
 
     @Test
