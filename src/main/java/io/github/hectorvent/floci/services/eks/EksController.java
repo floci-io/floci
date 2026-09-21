@@ -222,12 +222,15 @@ public class EksController {
         return Response.ok(Map.of("update", update)).build();
     }
 
-    @POST
-    @Path("/clusters/{name}/addons/{addonName}")
-    public Response updateAddonDirect(@PathParam("name") String name,
-                                      @PathParam("addonName") String addonName,
-                                      UpdateAddonRequest request) {
-        return updateAddon(name, addonName, request);
+    @GET
+    @Path("/clusters/{name}/updates/{updateId}")
+    public Response describeUpdate(@PathParam("name") String name,
+                                   @PathParam("updateId") String updateId,
+                                   @QueryParam("addonName") String addonName,
+                                   @QueryParam("nodegroupName") String nodegroupName) {
+        Cluster cluster = eksService.describeCluster(name);
+        Update update = addons.describeUpdate(cluster, updateId, addonName);
+        return Response.ok(Map.of("update", update)).build();
     }
 
     @DELETE
@@ -261,18 +264,6 @@ public class EksController {
         return Response.ok(page.nextToken() == null
                 ? Map.of("addons", page.addons())
                 : Map.of("addons", page.addons(), "nextToken", page.nextToken())).build();
-    }
-
-    @GET
-    @Path("/addons/addon-versions")
-    public Response describeAddonVersionsAlias(@QueryParam("addonName") String addonName,
-                                               @QueryParam("kubernetesVersion") String kubernetesVersion,
-                                               @QueryParam("maxResults") String maxResults,
-                                               @QueryParam("nextToken") String nextToken,
-                                               @QueryParam("publishers") List<String> publishers,
-                                               @QueryParam("types") List<String> types,
-                                               @QueryParam("owners") List<String> owners) {
-        return describeAddonVersions(addonName, kubernetesVersion, maxResults, nextToken, publishers, types, owners);
     }
 
     @GET

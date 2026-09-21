@@ -42,6 +42,7 @@ public class EksAddonService {
     private static final int MAX_PAGE_SIZE = 100;
 
     private final StorageBackend<String, StoredAddon> storage;
+    private final StorageBackend<String, StoredUpdate> updatesStorage;
     private final EksAddonCatalog catalog;
     private final IamService iam;
     private final EksPodIdentityAssociationService podIdentityAssociations;
@@ -51,12 +52,18 @@ public class EksAddonService {
                            IamService iam, EksPodIdentityAssociationService podIdentityAssociations) {
         this(storageFactory.create("eks", "eks-addons.json",
                 new TypeReference<Map<String, StoredAddon>>() {}),
+                storageFactory.create("eks", "eks-updates.json",
+                new TypeReference<Map<String, StoredUpdate>>() {}),
                 catalog, iam, podIdentityAssociations);
     }
 
-    EksAddonService(StorageBackend<String, StoredAddon> storage, EksAddonCatalog catalog,
-                    IamService iam, EksPodIdentityAssociationService podIdentityAssociations) {
+    EksAddonService(StorageBackend<String, StoredAddon> storage,
+                    StorageBackend<String, StoredUpdate> updatesStorage,
+                    EksAddonCatalog catalog,
+                    IamService iam,
+                    EksPodIdentityAssociationService podIdentityAssociations) {
         this.storage = storage;
+        this.updatesStorage = updatesStorage;
         this.catalog = catalog;
         this.iam = iam;
         this.podIdentityAssociations = podIdentityAssociations;
@@ -64,6 +71,9 @@ public class EksAddonService {
 
     @RegisterForReflection
     public record StoredAddon(Addon addon, String clientRequestToken) {}
+
+    @RegisterForReflection
+    public record StoredUpdate(Update update, String addonName) {}
 
     @RegisterForReflection
     public record AddonNamesPage(List<String> addons, String nextToken) {}
@@ -101,7 +111,7 @@ public class EksAddonService {
         String version = (request.addonVersion() != null && !request.addonVersion().isBlank())
                 ? request.addonVersion().trim()
                 : catalog.resolveDefaultVersion(addonName, cluster.getVersion()).orElse(null);
-        if (version == null || !catalog.isVersionSupported(addonName, version)) {
+        if (version == null || !catalog.isVersionSupported(addonName, version, cluster.getVersion())) {
             throw new AwsException("InvalidParameterException",
                     "Addon version specified is not supported", 400);
         }
@@ -117,7 +127,7 @@ public class EksAddonService {
         Map<String, String> tags = request.tags() != null ? request.tags() : Map.of();
         validateTags(tags);
 
-        List<String> associationArns = createOrLinkPodIdentityAssociations(cluster, request.podIdentityAssociations());
+        List<String> associationArns = createOrLinkPodIdentityAssociations(cluster, addonName, request.podIdentityAssociations());
 
         double now = Instant.now().toEpochMilli() / 1000.0;
         String addonArn = generateAddonArn(cluster, addonName);
@@ -198,7 +208,7 @@ public class EksAddonService {
         if (request != null) {
             if (request.addonVersion() != null && !request.addonVersion().isBlank()) {
                 String requestedVersion = request.addonVersion().trim();
-                if (!catalog.isVersionSupported(addonName, requestedVersion)) {
+                if (!catalog.isVersionSupported(addonName, requestedVersion, cluster.getVersion())) {
                     throw new AwsException("InvalidParameterException",
                             "Addon version specified is not supported", 400);
                 }
@@ -232,7 +242,13 @@ public class EksAddonService {
 
         List<String> updatedAssociations = current.podIdentityAssociations();
         if (request != null && request.podIdentityAssociations() != null) {
-            updatedAssociations = createOrLinkPodIdentityAssociations(cluster, request.podIdentityAssociations());
+            if (podIdentityAssociations != null && current.podIdentityAssociations() != null) {
+                for (String arn : current.podIdentityAssociations()) {
+                    deleteAssociationSilently(cluster, arn);
+                }
+            }
+            updatedAssociations = createOrLinkPodIdentityAssociations(cluster, addonName, request.podIdentityAssociations());
+            params.add(new UpdateParam("PodIdentityAssociations", request.podIdentityAssociations().toString()));
         }
 
         double now = Instant.now().toEpochMilli() / 1000.0;
@@ -258,7 +274,7 @@ public class EksAddonService {
         storage.put(storageKey, new StoredAddon(updatedAddon, token));
         LOG.infov("Updated EKS addon {0} on cluster {1}", addonName, cluster.getName());
 
-        return new Update(
+        Update update = new Update(
                 UUID.randomUUID().toString(),
                 "Successful",
                 "AddonUpdate",
@@ -266,6 +282,8 @@ public class EksAddonService {
                 now,
                 List.of()
         );
+        updatesStorage.put(prefix(cluster) + update.id(), new StoredUpdate(update, addonName));
+        return update;
     }
 
     public synchronized Addon delete(Cluster cluster, String addonName, boolean preserve) {
@@ -280,7 +298,16 @@ public class EksAddonService {
                         "No addon: " + addonName + " found for cluster: " + cluster.getName(), 404));
 
         storage.delete(storageKey);
-        LOG.infov("Deleted EKS addon {0} on cluster {1} (preserve={2})", addonName, cluster.getName(), preserve);
+        if (preserve) {
+            LOG.infov("Deleted EKS addon {0} on cluster {1} (preserve=true)", addonName, cluster.getName());
+        } else {
+            if (podIdentityAssociations != null && stored.addon().podIdentityAssociations() != null) {
+                for (String arn : stored.addon().podIdentityAssociations()) {
+                    deleteAssociationSilently(cluster, arn);
+                }
+            }
+            LOG.infov("Deleted EKS addon {0} on cluster {1} (preserve=false)", addonName, cluster.getName());
+        }
 
         Addon current = stored.addon();
         return new Addon(
@@ -305,29 +332,25 @@ public class EksAddonService {
         if (cluster != null) {
             String p = prefix(cluster);
             storage.keys().stream().filter(k -> k.startsWith(p)).toList().forEach(storage::delete);
-            LOG.infov("Purged all addons for cluster {0}", cluster.getName());
+            updatesStorage.keys().stream().filter(k -> k.startsWith(p)).toList().forEach(updatesStorage::delete);
+            LOG.infov("Purged all addons and updates for cluster {0}", cluster.getName());
         }
     }
 
-    public boolean isAddonInstalled(Cluster cluster, String addonName) {
-        if (cluster == null || addonName == null || addonName.isBlank()) {
-            return false;
+    public Update describeUpdate(Cluster cluster, String updateId, String addonName) {
+        requireActiveCluster(cluster);
+        if (updateId == null || updateId.isBlank()) {
+            throw new AwsException("InvalidParameterException", "updateId is required", 400);
         }
-        String storageKey = prefix(cluster) + addonName.trim().toLowerCase(Locale.ROOT);
-        return storage.get(storageKey)
-                .filter(s -> "ACTIVE".equalsIgnoreCase(s.addon().status()))
-                .isPresent();
-    }
-
-    public boolean isAddonInstalled(String clusterName, String addonName) {
-        if (clusterName == null || addonName == null || addonName.isBlank()) {
-            return false;
+        StoredUpdate stored = updatesStorage.get(prefix(cluster) + updateId)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "No update: " + updateId + " found for cluster: " + cluster.getName(), 404));
+        if (addonName != null && !addonName.isBlank()
+                && stored.addonName() != null && !stored.addonName().equalsIgnoreCase(addonName.trim())) {
+            throw new AwsException("ResourceNotFoundException",
+                    "No update: " + updateId + " found for addon: " + addonName, 404);
         }
-        String normalizedAddon = addonName.trim();
-        return storage.scan(k -> true).stream()
-                .anyMatch(stored -> clusterName.equals(stored.addon().clusterName())
-                        && normalizedAddon.equalsIgnoreCase(stored.addon().addonName())
-                        && "ACTIVE".equalsIgnoreCase(stored.addon().status()));
+        return stored.update();
     }
 
     public AddonVersionsPage describeAddonVersions(String addonName, String kubernetesVersion,
@@ -347,11 +370,13 @@ public class EksAddonService {
     }
 
     private List<String> createOrLinkPodIdentityAssociations(Cluster cluster,
+                                                             String addonName,
                                                              List<AddonPodIdentityAssociation> associations) {
         if (associations == null || associations.isEmpty()) {
             return List.of();
         }
         List<String> arns = new ArrayList<>();
+        String namespace = resolveAddonNamespace(addonName);
         for (AddonPodIdentityAssociation assoc : associations) {
             if (assoc.roleArn() == null || assoc.roleArn().isBlank()
                     || assoc.serviceAccount() == null || assoc.serviceAccount().isBlank()) {
@@ -363,7 +388,7 @@ public class EksAddonService {
             if (podIdentityAssociations != null) {
                 CreatePodIdentityAssociationRequest req = new CreatePodIdentityAssociationRequest(
                         cluster.getName(),
-                        "default",
+                        namespace,
                         assoc.serviceAccount(),
                         assoc.roleArn(),
                         null,
@@ -383,6 +408,22 @@ public class EksAddonService {
             }
         }
         return arns;
+    }
+
+    private void deleteAssociationSilently(Cluster cluster, String associationArn) {
+        if (associationArn == null || associationArn.isBlank() || podIdentityAssociations == null) {
+            return;
+        }
+        String associationId = associationArn.substring(associationArn.lastIndexOf('/') + 1);
+        try {
+            podIdentityAssociations.delete(cluster, associationId);
+        } catch (AwsException e) {
+            LOG.debugf("Ignored error deleting pod identity association %s: %s", associationId, e.getMessage());
+        }
+    }
+
+    private static String resolveAddonNamespace(String addonName) {
+        return "kube-system";
     }
 
     private static String prefix(Cluster cluster) {

@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.eks.model.Addon;
 import io.github.hectorvent.floci.services.eks.model.AddonInfo;
+import io.github.hectorvent.floci.services.eks.model.AddonPodIdentityAssociation;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
 import io.github.hectorvent.floci.services.eks.model.ClusterStatus;
 import io.github.hectorvent.floci.services.eks.model.CreateAddonRequest;
@@ -318,22 +319,110 @@ class EksAddonServiceTest {
     }
 
     @Test
-    void isAddonInstalledQuery() {
+    void describeUpdateAndNotFound() {
+        Fixture fixture = fixture();
+        fixture.cluster.setVersion("1.29");
+        fixture.service.create(fixture.cluster, new CreateAddonRequest("vpc-cni", null, null, null, null, null, null, null));
+
+        Update update = fixture.service.update(fixture.cluster, "vpc-cni",
+                new UpdateAddonRequest("v1.18.1-eksbuild.1", null, null, null, null, null));
+        assertNotNull(update.id());
+        assertEquals("Successful", update.status());
+        assertEquals("AddonUpdate", update.type());
+
+        // Describe without addonName filter
+        Update fetched = fixture.service.describeUpdate(fixture.cluster, update.id(), null);
+        assertEquals(update.id(), fetched.id());
+        assertEquals("Successful", fetched.status());
+
+        // Describe with matching addonName filter
+        Update fetchedFiltered = fixture.service.describeUpdate(fixture.cluster, update.id(), "vpc-cni");
+        assertEquals(update.id(), fetchedFiltered.id());
+
+        // Describe with mismatched addonName filter
+        AwsException exMismatch = assertThrows(AwsException.class, () ->
+                fixture.service.describeUpdate(fixture.cluster, update.id(), "coredns"));
+        assertEquals("ResourceNotFoundException", exMismatch.getErrorCode());
+        assertEquals(404, exMismatch.getHttpStatus());
+
+        // Describe nonexistent updateId
+        AwsException exNotFound = assertThrows(AwsException.class, () ->
+                fixture.service.describeUpdate(fixture.cluster, "missing-update-id", null));
+        assertEquals("ResourceNotFoundException", exNotFound.getErrorCode());
+        assertEquals(404, exNotFound.getHttpStatus());
+    }
+
+    @Test
+    void podIdentityAssociationsLifecycle() {
         Fixture fixture = fixture();
         fixture.cluster.setVersion("1.29");
 
-        assertFalse(fixture.service.isAddonInstalled(fixture.cluster, "vpc-cni"));
-        assertFalse(fixture.service.isAddonInstalled("test-cluster", "vpc-cni"));
+        AddonPodIdentityAssociation assoc1 = new AddonPodIdentityAssociation(ROLE, "aws-node");
+        CreateAddonRequest request = new CreateAddonRequest(
+                "vpc-cni", null, null, null, null, null, null, List.of(assoc1));
 
-        fixture.service.create(fixture.cluster, new CreateAddonRequest("vpc-cni", null, null, null, null, null, null, null));
+        Addon created = fixture.service.create(fixture.cluster, request);
+        assertEquals(1, created.podIdentityAssociations().size());
+        String assocArn = created.podIdentityAssociations().getFirst();
 
-        assertTrue(fixture.service.isAddonInstalled(fixture.cluster, "vpc-cni"));
-        assertTrue(fixture.service.isAddonInstalled("test-cluster", "vpc-cni"));
-        assertFalse(fixture.service.isAddonInstalled(fixture.cluster, "coredns"));
+        // Verify association was created in kube-system namespace
+        EksPodIdentityAssociationService.Page page = fixture.podIdentityAssociations.list(
+                fixture.cluster, "kube-system", "aws-node", null, null);
+        assertEquals(1, page.associations().size());
+        assertEquals(assocArn, page.associations().getFirst().associationArn());
 
+        // Update with same or new association succeeds without duplicate error
+        Update update = fixture.service.update(fixture.cluster, "vpc-cni",
+                new UpdateAddonRequest(null, null, null, null, null, List.of(assoc1)));
+        assertNotNull(update.id());
+
+        // Re-read addon and verify association still present in kube-system
+        Addon updated = fixture.service.describe(fixture.cluster, "vpc-cni");
+        assertEquals(1, updated.podIdentityAssociations().size());
+
+        // Delete with preserve=false removes association from cluster
         fixture.service.delete(fixture.cluster, "vpc-cni", false);
-        assertFalse(fixture.service.isAddonInstalled(fixture.cluster, "vpc-cni"));
-        assertFalse(fixture.service.isAddonInstalled("test-cluster", "vpc-cni"));
+        EksPodIdentityAssociationService.Page afterDelete = fixture.podIdentityAssociations.list(
+                fixture.cluster, "kube-system", "aws-node", null, null);
+        assertTrue(afterDelete.associations().isEmpty());
+
+        // Re-creating addon with the same association now succeeds because old one was deleted
+        Addon recreated = fixture.service.create(fixture.cluster, request);
+        assertEquals(1, recreated.podIdentityAssociations().size());
+
+        // Delete with preserve=true keeps the association in cluster
+        fixture.service.delete(fixture.cluster, "vpc-cni", true);
+        EksPodIdentityAssociationService.Page afterPreserveDelete = fixture.podIdentityAssociations.list(
+                fixture.cluster, "kube-system", "aws-node", null, null);
+        assertEquals(1, afterPreserveDelete.associations().size());
+    }
+
+    @Test
+    void explicitVersionMustBeCompatibleWithClusterKubernetesVersion() {
+        Fixture fixture = fixture();
+        fixture.cluster.setVersion("1.29");
+
+        // v1.16.0-eksbuild.1 is only compatible with k8s 1.28
+        CreateAddonRequest reqIncompatible = new CreateAddonRequest(
+                "vpc-cni", "v1.16.0-eksbuild.1", null, null, null, null, null, null);
+        AwsException exCreate = assertThrows(AwsException.class, () ->
+                fixture.service.create(fixture.cluster, reqIncompatible));
+        assertEquals("InvalidParameterException", exCreate.getErrorCode());
+        assertEquals(400, exCreate.getHttpStatus());
+
+        // Compatible version works
+        CreateAddonRequest reqCompatible = new CreateAddonRequest(
+                "vpc-cni", "v1.18.1-eksbuild.1", null, null, null, null, null, null);
+        Addon created = fixture.service.create(fixture.cluster, reqCompatible);
+        assertEquals("v1.18.1-eksbuild.1", created.addonVersion());
+
+        // Updating to incompatible version fails
+        UpdateAddonRequest updateIncompatible = new UpdateAddonRequest(
+                "v1.16.0-eksbuild.1", null, null, null, null, null);
+        AwsException exUpdate = assertThrows(AwsException.class, () ->
+                fixture.service.update(fixture.cluster, "vpc-cni", updateIncompatible));
+        assertEquals("InvalidParameterException", exUpdate.getErrorCode());
+        assertEquals(400, exUpdate.getHttpStatus());
     }
 
     @Test
@@ -422,12 +511,18 @@ class EksAddonServiceTest {
 
         EksAddonCatalog catalog = new EksAddonCatalog();
         InMemoryStorage<String, EksAddonService.StoredAddon> storage = new InMemoryStorage<>();
-        EksAddonService service = new EksAddonService(storage, catalog, iam, null);
+        InMemoryStorage<String, EksAddonService.StoredUpdate> updatesStorage = new InMemoryStorage<>();
+        InMemoryStorage<String, EksPodIdentityAssociationService.StoredAssociation> assocStorage = new InMemoryStorage<>();
+        EksPodIdentityAssociationService podIdentityAssociations = new EksPodIdentityAssociationService(assocStorage, iam);
+        EksAddonService service = new EksAddonService(storage, updatesStorage, catalog, iam, podIdentityAssociations);
 
-        return new Fixture(cluster, iam, role, storage, catalog, service);
+        return new Fixture(cluster, iam, role, storage, updatesStorage, catalog, podIdentityAssociations, service);
     }
 
     private record Fixture(Cluster cluster, IamService iam, IamRole role,
                            InMemoryStorage<String, EksAddonService.StoredAddon> storage,
-                           EksAddonCatalog catalog, EksAddonService service) {}
+                           InMemoryStorage<String, EksAddonService.StoredUpdate> updatesStorage,
+                           EksAddonCatalog catalog,
+                           EksPodIdentityAssociationService podIdentityAssociations,
+                           EksAddonService service) {}
 }

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.eks;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -21,7 +22,7 @@ class EksAddonIntegrationTest {
         String basePath = "/clusters/" + name + "/addons";
 
         createRole(account, roleName);
-        createCluster(account, name, "1.29");
+        createCluster(account, name, "1.30");
 
         try {
             // 1. Create addon
@@ -115,7 +116,7 @@ class EksAddonIntegrationTest {
                     "serviceAccountRoleArn", updatedRoleArn,
                     "configurationValues", "{\"env\":{\"ENABLE_PREFIX_DELEGATION\":\"false\"}}"
             );
-            given().header("Authorization", auth(account, "eks"))
+            String updateId = given().header("Authorization", auth(account, "eks"))
                     .contentType("application/json")
                     .body(updateReq)
                     .post(basePath + "/vpc-cni/update")
@@ -124,7 +125,19 @@ class EksAddonIntegrationTest {
                     .contentType(containsString("application/json"))
                     .body("update.status", equalTo("Successful"))
                     .body("update.type", equalTo("AddonUpdate"))
-                    .body("update.id", notNullValue());
+                    .body("update.id", notNullValue())
+                    .extract().path("update.id");
+
+            // Verify DescribeUpdate (called by Terraform aws_eks_addon waiter)
+            given().header("Authorization", auth(account, "eks"))
+                    .queryParam("addonName", "vpc-cni")
+                    .get("/clusters/" + name + "/updates/" + updateId)
+                    .then()
+                    .statusCode(200)
+                    .contentType(containsString("application/json"))
+                    .body("update.id", equalTo(updateId))
+                    .body("update.status", equalTo("Successful"))
+                    .body("update.type", equalTo("AddonUpdate"));
 
             // Verify describe shows updated values
             given().header("Authorization", auth(account, "eks"))
@@ -198,15 +211,6 @@ class EksAddonIntegrationTest {
                 .body("addons[0].addonName", equalTo("vpc-cni"))
                 .body("addons[0].addonVersions.addonVersion", hasItem("v1.18.1-eksbuild.1"));
 
-        // Query alias path
-        given().header("Authorization", auth(account, "eks"))
-                .queryParam("addonName", "coredns")
-                .get("/addons/addon-versions")
-                .then()
-                .statusCode(200)
-                .body("addons", hasSize(1))
-                .body("addons[0].addonName", equalTo("coredns"));
-
         // Unknown addon name returns empty list 200
         given().header("Authorization", auth(account, "eks"))
                 .queryParam("addonName", "non-existent-addon")
@@ -214,6 +218,68 @@ class EksAddonIntegrationTest {
                 .then()
                 .statusCode(200)
                 .body("addons", empty());
+    }
+
+    @Test
+    void addonPodIdentityAssociationLifecycleIntegration() {
+        String account = "123456789012";
+        String name = "addon-pia-" + UUID.randomUUID().toString().substring(0, 8);
+        String roleName = "role-" + name;
+        String roleArn = "arn:aws:iam::" + account + ":role/" + roleName;
+        String basePath = "/clusters/" + name + "/addons";
+
+        createRole(account, roleName);
+        createCluster(account, name, "1.29");
+
+        try {
+            // Create addon with pod identity association
+            Map<String, Object> createReq = Map.of(
+                    "addonName", "vpc-cni",
+                    "podIdentityAssociations", List.of(
+                            Map.of("serviceAccount", "aws-node", "roleArn", roleArn)
+                    )
+            );
+
+            given().header("Authorization", auth(account, "eks"))
+                    .contentType("application/json")
+                    .body(createReq)
+                    .post(basePath)
+                    .then()
+                    .statusCode(200)
+                    .body("addon.podIdentityAssociations", hasSize(1));
+
+            // Verify the association was created under kube-system namespace
+            given().header("Authorization", auth(account, "eks"))
+                    .get("/clusters/" + name + "/pod-identity-associations")
+                    .then()
+                    .statusCode(200)
+                    .body("associations", hasSize(1))
+                    .body("associations[0].namespace", equalTo("kube-system"))
+                    .body("associations[0].serviceAccount", equalTo("aws-node"));
+
+            // Delete addon with preserve=false (default) -> deletes association
+            given().header("Authorization", auth(account, "eks"))
+                    .delete(basePath + "/vpc-cni")
+                    .then()
+                    .statusCode(200);
+
+            given().header("Authorization", auth(account, "eks"))
+                    .get("/clusters/" + name + "/pod-identity-associations")
+                    .then()
+                    .statusCode(200)
+                    .body("associations", empty());
+
+            // Re-creating addon with same association succeeds (no ResourceInUseException)
+            given().header("Authorization", auth(account, "eks"))
+                    .contentType("application/json")
+                    .body(createReq)
+                    .post(basePath)
+                    .then()
+                    .statusCode(200)
+                    .body("addon.addonName", equalTo("vpc-cni"));
+        } finally {
+            deleteCluster(account, name);
+        }
     }
 
     @Test

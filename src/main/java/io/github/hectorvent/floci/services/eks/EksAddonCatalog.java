@@ -80,14 +80,21 @@ public class EksAddonCatalog {
     }
 
     public boolean isVersionSupported(String addonName, String addonVersion) {
-        if (addonVersion == null || addonVersion.isBlank()) {
+        return isVersionSupported(addonName, addonVersion, null);
+    }
+
+    public boolean isVersionSupported(String addonName, String addonVersion, String kubernetesVersion) {
+        if (addonName == null || addonName.isBlank() || addonVersion == null || addonVersion.isBlank()) {
             return false;
         }
+        String k8s = kubernetesVersion != null && !kubernetesVersion.isBlank()
+                ? normalizeK8sVersion(kubernetesVersion) : null;
         return findAddon(addonName)
                 .map(AddonInfo::addonVersions)
                 .orElse(List.of())
                 .stream()
-                .anyMatch(v -> v.addonVersion().equalsIgnoreCase(addonVersion.trim()));
+                .filter(v -> v.addonVersion().equalsIgnoreCase(addonVersion.trim()))
+                .anyMatch(v -> k8s == null || isCompatible(v, k8s, false));
     }
 
     public Optional<String> resolveDefaultVersion(String addonName, String kubernetesVersion) {
