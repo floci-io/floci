@@ -14,6 +14,72 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RdsSigV4ValidatorTest {
 
+    private static final String S3_ONLY_POLICY = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+            + "\"Action\":[\"s3:GetObject\"],\"Resource\":[\"*\"]}]}";
+
+    private static RdsMysqlBinding exampleBinding() {
+        return new RdsMysqlBinding("db.example.local", 3307, "us-east-1", "123456789012", "db-ABCDEFGHIJKL01234");
+    }
+
+    @Test
+    void validateRejectsCallerWithoutRdsDbConnectWhenEnforcementIsOn() throws Exception {
+        IamService iamService = IamServiceTestHelper.iamServiceWithUserPolicy(
+                "AKIDRDS", "secret-rds", "jane", S3_ONLY_POLICY);
+        RdsSigV4Validator validator = new RdsSigV4Validator(iamService, () -> true);
+        String token = SigV4TokenTestHelper.createRdsToken(
+                "db.example.local", 3307, "jane_doe", "AKIDRDS", "secret-rds",
+                Instant.now().minusSeconds(60), 900);
+
+        assertFalse(validator.validate(token, "jane_doe", exampleBinding()),
+                "a valid token from a principal that is not allowed rds-db:connect must be rejected");
+    }
+
+    @Test
+    void validateAcceptsCallerAllowedRdsDbConnectOnTheBoundDbUser() throws Exception {
+        // The example policy from the AWS "IAM database authentication" guide.
+        IamService iamService = IamServiceTestHelper.iamServiceWithUserPolicy(
+                "AKIDRDS", "secret-rds", "jane", connectPolicyFor(
+                        "arn:aws:rds-db:us-east-1:123456789012:dbuser:db-ABCDEFGHIJKL01234/jane_doe"));
+        RdsSigV4Validator validator = new RdsSigV4Validator(iamService, () -> true);
+        String token = SigV4TokenTestHelper.createRdsToken(
+                "db.example.local", 3307, "jane_doe", "AKIDRDS", "secret-rds",
+                Instant.now().minusSeconds(60), 900);
+
+        assertTrue(validator.validate(token, "jane_doe", exampleBinding()));
+    }
+
+    @Test
+    void validateRejectsCallerWhoseConnectGrantIsForAnotherDbUser() throws Exception {
+        IamService iamService = IamServiceTestHelper.iamServiceWithUserPolicy(
+                "AKIDRDS", "secret-rds", "jane", connectPolicyFor(
+                        "arn:aws:rds-db:us-east-1:123456789012:dbuser:db-ABCDEFGHIJKL01234/someone_else"));
+        RdsSigV4Validator validator = new RdsSigV4Validator(iamService, () -> true);
+        String token = SigV4TokenTestHelper.createRdsToken(
+                "db.example.local", 3307, "jane_doe", "AKIDRDS", "secret-rds",
+                Instant.now().minusSeconds(60), 900);
+
+        assertFalse(validator.validate(token, "jane_doe", exampleBinding()),
+                "rds-db:connect is granted per database user, not per database");
+    }
+
+    @Test
+    void validateSkipsTheConnectCheckWhenEnforcementIsOff() throws Exception {
+        IamService iamService = IamServiceTestHelper.iamServiceWithUserPolicy(
+                "AKIDRDS", "secret-rds", "jane", S3_ONLY_POLICY);
+        RdsSigV4Validator validator = new RdsSigV4Validator(iamService);
+        String token = SigV4TokenTestHelper.createRdsToken(
+                "db.example.local", 3307, "jane_doe", "AKIDRDS", "secret-rds",
+                Instant.now().minusSeconds(60), 900);
+
+        assertTrue(validator.validate(token, "jane_doe", exampleBinding()),
+                "without IAM enforcement a well-formed token is enough, as before");
+    }
+
+    private static String connectPolicyFor(String resourceArn) {
+        return "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Action\":[\"rds-db:connect\"],\"Resource\":[\"" + resourceArn + "\"]}]}";
+    }
+
     @Test
     void validateAcceptsTokenSignedByStandardSigV4() throws Exception {
         String accessKeyId = "AKIAORACLETEST";
