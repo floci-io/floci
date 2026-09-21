@@ -162,6 +162,10 @@ public class CodeArtifactService implements Resettable {
         return new DomainView(d, 0);
     }
 
+    /**
+     * A missing domain fails with {@code ResourceNotFoundException} (404), which is what AWS
+     * returns even though the API reference leaves it out of DeleteDomain's error list.
+     */
     public synchronized DomainView deleteDomain(String region, String domain, String domainOwner) {
         String owner = effectiveOwner(domainOwner);
         String key = domainKey(region, domain);
@@ -687,6 +691,8 @@ public class CodeArtifactService implements Resettable {
         }
     }
 
+    // Used by DeleteDomain too: AWS returns ResourceNotFoundException for a missing domain there,
+    // although the API reference does not declare it on that operation.
     private CodeArtifactDomain requireDomain(String owner, String key, String domainName) {
         if (domainName == null || domainName.isBlank()) {
             throw validation("domain is required.");
