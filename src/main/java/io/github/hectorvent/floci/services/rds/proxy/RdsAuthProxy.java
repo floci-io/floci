@@ -177,7 +177,7 @@ public class RdsAuthProxy {
                 case POSTGRES -> {
                     session = PostgresProtocolHandler.authenticate(
                                     client, connector, masterUsername, masterPassword, dbName,
-                                    iamEnabled, sigV4, tlsCertificates, authAdapter,
+                                    iamEnabled, sigV4, mysqlBinding, tlsCertificates, authAdapter,
                                     handshakeTimeoutMillis);
                     if (session != null) {
                         PostgresProtocolHandler.bridge(session);
