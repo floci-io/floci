@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.iam;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.Test;
@@ -14,10 +15,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * {@code s3:ExistingObjectTag/<key>} and {@code s3:RequestObjectTag/<key>} under IAM enforcement.
  *
  * <p>Every expectation here is a row measured against real AWS (us-east-2, 2026-09-18, an IAM user
- * whose only policy was the statement under test, each policy proven live before it was tested),
- * for choudoufu's record-store isolation model (INTENTIUS/choudoufu#1342). Two of the rows are not
- * what the documentation alone would lead you to write, and they are the reason this test states
- * its provenance:
+ * whose only policy was the statement under test, each policy proven live before it was tested).
+ * Two of the rows are not what the documentation alone would lead you to write, and they are the
+ * reason this test states its provenance:
  *
  * <ul>
  *   <li>{@code s3:DeleteObject} is NOT given {@code s3:ExistingObjectTag}. An allow conditioned on it
@@ -37,8 +37,8 @@ class S3ObjectTagConditionEnforcementIntegrationTest {
     private static final String ADMIN = "test";
     private static final String REGION = "us-east-1";
 
-    private static final String EXISTING_A = "\"Condition\":{\"StringEquals\":{\"s3:ExistingObjectTag/tofu-estate\":\"a\"}}";
-    private static final String REQUEST_A = "\"Condition\":{\"StringEquals\":{\"s3:RequestObjectTag/tofu-estate\":\"a\"}}";
+    private static final String EXISTING_A = "\"Condition\":{\"StringEquals\":{\"s3:ExistingObjectTag/env\":\"a\"}}";
+    private static final String REQUEST_A = "\"Condition\":{\"StringEquals\":{\"s3:RequestObjectTag/env\":\"a\"}}";
 
     @Test
     void existingObjectTagGatesReads() {
@@ -56,15 +56,15 @@ class S3ObjectTagConditionEnforcementIntegrationTest {
     void requestObjectTagGatesWritesAndExistingObjectTagCannot() {
         Fixture f = new Fixture("write");
         f.policy(allow("\"s3:PutObject\",\"s3:PutObjectTagging\"", f.objects(), REQUEST_A));
-        assertEquals(200, f.put("a/new-1", "tofu-estate=a", null), "first create, tagged for this estate");
-        assertEquals(200, f.put("a/new-2", "tofu-estate=a&tofu-address=aws_thing.x", null), "extra tags beside it");
+        assertEquals(200, f.put("a/new-1", "env=a", null), "first create, tagged for this environment");
+        assertEquals(200, f.put("a/new-2", "env=a&owner=aws_thing.x", null), "extra tags beside it");
         assertEquals(403, f.put("a/new-3", null, null), "untagged");
-        assertEquals(403, f.put("a/new-4", "tofu-estate=b", null), "tagged for another estate");
+        assertEquals(403, f.put("a/new-4", "env=b", null), "tagged for another environment");
 
-        // The policy that reviews correctly and bricks a new estate: a create cannot be gated on
+        // The policy that reviews correctly and bricks a new environment: a create cannot be gated on
         // the tags of an object that does not exist yet.
         f.policy(allow("\"s3:PutObject\",\"s3:PutObjectTagging\"", f.objects(), EXISTING_A));
-        assertEquals(403, f.put("a/brand-new", "tofu-estate=a", null), "ExistingObjectTag alone locks out the first write");
+        assertEquals(403, f.put("a/brand-new", "env=a", null), "ExistingObjectTag alone locks out the first write");
     }
 
     @Test
@@ -84,33 +84,58 @@ class S3ObjectTagConditionEnforcementIntegrationTest {
 
         f.policy(write + "," + allow("s3:GetObject", f.objects(), EXISTING_A));
         String etag = f.etag("a/tagged-a");
-        assertEquals(200, f.put("a/tagged-a", "tofu-estate=a", null), "an overwrite with no precondition");
+        assertEquals(200, f.put("a/tagged-a", "env=a", null), "an overwrite with no precondition");
         etag = f.etag("a/tagged-a");
-        assertEquals(403, f.put("a/tagged-a", "tofu-estate=a", etag), "If-Match under a tag-conditioned GetObject");
+        assertEquals(403, f.put("a/tagged-a", "env=a", etag), "If-Match under a tag-conditioned GetObject");
 
         f.policy(write + "," + allow("s3:GetObject", f.objects(), null));
-        assertEquals(200, f.put("a/tagged-a", "tofu-estate=a", etag), "If-Match under a prefix-scoped GetObject");
+        assertEquals(200, f.put("a/tagged-a", "env=a", etag), "If-Match under a prefix-scoped GetObject");
 
         f.policy(write);
         etag = f.etag("a/tagged-a");
-        assertEquals(403, f.put("a/tagged-a", "tofu-estate=a", etag), "If-Match with no GetObject at all");
-        assertEquals(200, f.put("a/created", "tofu-estate=a", "*none*"), "If-None-Match needs no GetObject");
+        assertEquals(403, f.put("a/tagged-a", "env=a", etag), "If-Match with no GetObject at all");
+        assertEquals(200, f.put("a/created", "env=a", "*none*"), "If-None-Match needs no GetObject");
     }
 
     @Test
     void aDenyOnAForeignTagCatchesAMisScopedPrefixForReadsOnly() {
         Fixture f = new Fixture("deny");
-        // The allow is deliberately too wide: both estates' prefixes.
+        // The allow is deliberately too wide: both environments' prefixes.
         f.policy(allow("\"s3:GetObject\",\"s3:DeleteObject\"", f.objects(), null) + ","
                 + allow("\"s3:PutObject\",\"s3:PutObjectTagging\"", f.objects(), REQUEST_A) + ","
                 + "{\"Effect\":\"Deny\",\"Action\":[\"s3:GetObject\",\"s3:DeleteObject\",\"s3:PutObject\"],\"Resource\":\"" + f.objects() + "\","
-                + "\"Condition\":{\"StringNotEquals\":{\"s3:ExistingObjectTag/tofu-estate\":\"a\"},\"Null\":{\"s3:ExistingObjectTag/tofu-estate\":\"false\"}}}");
+                + "\"Condition\":{\"StringNotEquals\":{\"s3:ExistingObjectTag/env\":\"a\"},\"Null\":{\"s3:ExistingObjectTag/env\":\"false\"}}}");
         assertEquals(200, f.get("a/tagged-a"), "own object");
         assertEquals(403, f.get("b/theirs"), "the neighbour's object: the tag still denies the read");
         assertEquals(200, f.get("a/untagged"), "an untagged object is readable under this shape");
-        assertEquals(200, f.put("a/tagged-a", "tofu-estate=a", f.etag("a/tagged-a")), "the CAS write works");
-        assertEquals(200, f.put("b/theirs", "tofu-estate=a", null), "measured on AWS: overwriting the neighbour is NOT caught by its tag");
+        assertEquals(200, f.put("a/tagged-a", "env=a", f.etag("a/tagged-a")), "the CAS write works");
+        assertEquals(200, f.put("b/theirs", "env=a", null), "measured on AWS: overwriting the neighbour is NOT caught by its tag");
         assertEquals(204, f.delete("b/theirs-2"), "measured on AWS: deleting the neighbour is NOT caught by its tag");
+    }
+
+    @Test
+    void anOlderVersionIsAuthorizedAgainstItsOwnTags() {
+        Fixture f = new Fixture("version");
+        f.versioning();
+        // Two versions of one key with different tags. The current version carries the tag the
+        // policy allows; the one under it does not.
+        String denied = f.seedVersion("a/rolled", "env=b");
+        f.seedVersion("a/rolled", "env=a");
+
+        f.policy(allow("s3:GetObject", f.objects(), EXISTING_A));
+        assertEquals(200, f.get("a/rolled"), "the current version carries the allowed tag");
+        assertEquals(403, f.getVersion("a/rolled", denied),
+                "the older version carries a foreign tag, so its own tags decide");
+    }
+
+    @Test
+    void anUndecodableTaggingHeaderIsRejectedNotThrown() {
+        Fixture f = new Fixture("badtag");
+        f.policy(allow("\"s3:PutObject\",\"s3:PutObjectTagging\"", f.objects(), REQUEST_A));
+        // "%zz" is not a valid escape. The pair carries no usable condition key, so the request
+        // is refused by the policy rather than escaping the filter as a 500.
+        assertEquals(403, f.put("a/bad", "env=%zz", null), "an undecodable value");
+        assertEquals(403, f.put("a/bad", "%zz=a", null), "an undecodable key");
     }
 
     private static String allow(String actions, String resource, String condition) {
@@ -130,11 +155,11 @@ class S3ObjectTagConditionEnforcementIntegrationTest {
             bucket = "objtag-" + name + "-" + suffix;
             user = "objtag-" + name + "-" + suffix;
             given().header("Authorization", auth(ADMIN, "s3")).when().put("/" + bucket).then().statusCode(200);
-            seed("a/tagged-a", "tofu-estate=a");
-            seed("a/tagged-b", "tofu-estate=b");
+            seed("a/tagged-a", "env=a");
+            seed("a/tagged-b", "env=b");
             seed("a/untagged", null);
-            seed("b/theirs", "tofu-estate=b");
-            seed("b/theirs-2", "tofu-estate=b");
+            seed("b/theirs", "env=b");
+            seed("b/theirs-2", "env=b");
             given().formParam("Action", "CreateUser").formParam("UserName", user)
                     .header("Authorization", auth(ADMIN, "iam")).when().post("/").then().statusCode(200);
             accessKeyId = given().formParam("Action", "CreateAccessKey").formParam("UserName", user)
@@ -147,11 +172,32 @@ class S3ObjectTagConditionEnforcementIntegrationTest {
         }
 
         void seed(String key, String tagging) {
-            var req = given().header("Authorization", auth(ADMIN, "s3")).body("seed");
+            RequestSpecification req = given().header("Authorization", auth(ADMIN, "s3")).body("seed");
             if (tagging != null) {
                 req = req.header("x-amz-tagging", tagging);
             }
             req.when().put("/" + bucket + "/" + key).then().statusCode(200);
+        }
+
+        void versioning() {
+            given().header("Authorization", auth(ADMIN, "s3"))
+                    .body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
+                    .queryParam("versioning", "")
+                    .when().put("/" + bucket).then().statusCode(200);
+        }
+
+        /** Writes one version of a key as the admin and returns its version id. */
+        String seedVersion(String key, String tagging) {
+            return given().header("Authorization", auth(ADMIN, "s3")).body("seed")
+                    .header("x-amz-tagging", tagging)
+                    .when().put("/" + bucket + "/" + key).then().statusCode(200)
+                    .extract().header("x-amz-version-id");
+        }
+
+        int getVersion(String key, String versionId) {
+            return given().header("Authorization", auth(accessKeyId, "s3"))
+                    .queryParam("versionId", versionId)
+                    .when().get("/" + bucket + "/" + key).statusCode();
         }
 
         void policy(String statements) {
@@ -175,7 +221,7 @@ class S3ObjectTagConditionEnforcementIntegrationTest {
 
         /** ifMatch: null for none, "*none*" for If-None-Match: *, anything else is the If-Match value. */
         int put(String key, String tagging, String ifMatch) {
-            var req = given().header("Authorization", auth(accessKeyId, "s3")).body("written");
+            RequestSpecification req = given().header("Authorization", auth(accessKeyId, "s3")).body("written");
             if (tagging != null) {
                 req = req.header("x-amz-tagging", tagging);
             }

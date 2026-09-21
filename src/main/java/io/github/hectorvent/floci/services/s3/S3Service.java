@@ -2003,7 +2003,12 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     public Map<String, String> getObjectTagging(String bucketName, String key) {
-        S3Object obj = getStoredObject(bucketName, key, null);
+        return getObjectTagging(bucketName, key, null);
+    }
+
+    /** Tags of one version, or of the current version when {@code versionId} is null or "null". */
+    public Map<String, String> getObjectTagging(String bucketName, String key, String versionId) {
+        S3Object obj = getStoredObject(bucketName, key, "null".equals(versionId) ? null : versionId);
         return obj.getTags() != null ? obj.getTags() : Map.of();
     }
 

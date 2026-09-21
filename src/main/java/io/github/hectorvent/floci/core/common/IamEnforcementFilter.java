@@ -244,10 +244,10 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
 
         // A PutObject carrying If-Match compares against the object it replaces, and S3 authorizes
         // that read as s3:GetObject, WITHOUT the object's tags in the request context. Measured
-        // against real AWS (INTENTIUS/choudoufu#1342): under a GetObject allow conditioned on
-        // s3:ExistingObjectTag the conditional write is AccessDenied, under a GetObject allow
-        // scoped by prefix alone it succeeds, and with no GetObject at all it is denied.
-        // If-None-Match needs no such permission.
+        // against real AWS: under a GetObject allow conditioned on s3:ExistingObjectTag the
+        // conditional write is AccessDenied, under a GetObject allow scoped by prefix alone it
+        // succeeds, and with no GetObject at all it is denied. If-None-Match needs no such
+        // permission.
         if ("s3:PutObject".equals(action) && ctx.getHeaderString("If-Match") != null) {
             abortIfDenied(ctx, caller, "s3:GetObject", credentialScope, resources,
                     withoutObjectTags(targetContexts), region, accountId, akid);

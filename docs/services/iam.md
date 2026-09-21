@@ -464,6 +464,21 @@ floci populates:
   `ResourceId.N` or `InstanceId.N`), and for `s3:GetBucketTagging`, `s3:DeleteBucketTagging`
   and `s3:DeleteBucket` (the bucket). A request naming several EC2 resources is evaluated
   once per resource and denied when any of them fails the condition, as on AWS.
+- `s3:ExistingObjectTag/<key>`: the tags already on the target object version, for
+  `s3:GetObject`, `s3:GetObjectTagging`, `s3:GetObjectAcl`, `s3:PutObjectAcl`,
+  `s3:DeleteObjectTagging` and `s3:PutObjectTagging`. A `versionId` in the request selects the
+  version whose tags are read. **`s3:DeleteObject` and `s3:PutObject` do not receive this key**, as measured on AWS.
+  An allow conditioned on it denies the delete of a correctly tagged object, and a create cannot
+  be gated on tags an object does not have yet.
+- `s3:RequestObjectTag/<key>`: a tag the request asks to attach. `s3:PutObject` reads these
+  from the `x-amz-tagging` header and `s3:PutObjectTagging` from the `<Tagging>` body. Any pair
+  that does not decode is dropped, so a policy conditioned on the key denies such a request. Where
+  enforcement lets it through, the handler still answers a malformed header with
+  `400 InvalidTag`. `s3:RequestObjectTagKeys` is **not** populated, so a condition on it never
+  matches.
+- A `PutObject` carrying `If-Match` is authorized as `s3:GetObject` as well, and that second
+  check is made without the object's tags in the context, as measured on AWS. `If-None-Match`
+  needs no such permission.
 - `aws:PrincipalArn`: the caller's ARN, resolved from the signing access key. It is the
   IAM-user ARN for a user access key, the assumed-role ARN for an STS session, and
   `arn:aws:iam::<account>:root` for the bare account-id key (floci's account-root principal),

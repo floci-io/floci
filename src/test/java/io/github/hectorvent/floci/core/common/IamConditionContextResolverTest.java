@@ -139,7 +139,7 @@ class IamConditionContextResolverTest {
 
         assertNull(resolver.resolve("lambda", "lambda:InvokeFunction", containerRequest));
         // s3:DeleteObject is unsupported on purpose: real AWS gives it no object-tag keys, so a
-        // delete conditioned on s3:ExistingObjectTag is denied (INTENTIUS/choudoufu#1342).
+        // delete conditioned on s3:ExistingObjectTag is denied.
         assertNull(resolver.resolve("s3", "s3:DeleteObject", containerRequest));
         // A supported object action with nothing to read tags from offers no keys either.
         assertNull(resolver.resolve("s3", "s3:GetObject", containerRequest));
