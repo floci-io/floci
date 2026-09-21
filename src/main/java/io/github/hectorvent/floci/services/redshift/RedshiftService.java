@@ -54,8 +54,7 @@ import java.util.function.Consumer;
 public class RedshiftService {
     private static final Logger LOG = Logger.getLogger(RedshiftService.class);
 
-    // The parameter group real AWS attaches when a cluster is created without one named
-    // explicitly. Every cluster always has at least this one — see its two call sites.
+    // The group every cluster starts on until one is named.
     static final String DEFAULT_PARAMETER_GROUP_NAME = "default.redshift-1.0";
 
     private final AccountAwareStorageBackend<Cluster> clusters;
@@ -199,8 +198,7 @@ public class RedshiftService {
         cluster.setClusterSubnetGroupName(clusterSubnetGroupName);
         cluster.setVpcSecurityGroupIds(vpcSecurityGroupIds != null ? vpcSecurityGroupIds : List.of());
         cluster.setIamRoleArns(iamRoleArns != null ? List.copyOf(iamRoleArns) : List.of());
-        // Every cluster starts on the default group; a group named at create time is applied
-        // afterwards via modifyCluster.
+        // A group named at create time is applied afterwards via modifyCluster.
         cluster.setClusterParameterGroupName(DEFAULT_PARAMETER_GROUP_NAME);
         cluster.setClusterStatus("creating");
         clusters.put(identifier, cluster);
@@ -1179,10 +1177,7 @@ public class RedshiftService {
 
     public List<ClusterSubnetGroup> describeClusterSubnetGroups(String name) {
         if (name != null && !name.isBlank()) {
-            // Real AWS's error code is "...Fault"-suffixed, and the Terraform AWS provider's
-            // generated deserializer type-matches on that exact string (errs.IsA[*ClusterSubnetGroupNotFoundFault])
-            // to recognise "doesn't exist yet, go create it" — a bare code falls through to an
-            // unclassified error and the provider never gets past Observe.
+            // The Terraform AWS provider matches this exact "...Fault" code to detect a missing group.
             ClusterSubnetGroup group = subnetGroups.get(name)
                     .orElseThrow(() -> new AwsException("ClusterSubnetGroupNotFoundFault", "Cluster subnet group " + name + " not found", 400));
             return List.of(group);
