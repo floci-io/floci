@@ -63,6 +63,15 @@ public class SentEmail {
     @JsonProperty("RejectReason")
     private String rejectReason;
 
+    @JsonProperty("EmailTags")
+    private List<MessageTag> emailTags;
+
+    /**
+     * Per-recipient event timelines, derived at send time and served by {@code GetMessageInsights}.
+     */
+    @JsonProperty("Insights")
+    private List<EmailInsights> insights;
+
     public SentEmail() {}
 
     /** Constructor for Simple / Template content. */
@@ -154,4 +163,10 @@ public class SentEmail {
         this.bodyHtml = null;
         this.rawData = null;
     }
+
+    public List<MessageTag> getEmailTags() { return emailTags; }
+    public void setEmailTags(List<MessageTag> emailTags) { this.emailTags = emailTags; }
+
+    public List<EmailInsights> getInsights() { return insights; }
+    public void setInsights(List<EmailInsights> insights) { this.insights = insights; }
 }

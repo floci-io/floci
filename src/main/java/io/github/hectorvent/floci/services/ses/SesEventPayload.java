@@ -259,7 +259,7 @@ final class SesEventPayload {
                 + event.cause().name().toLowerCase(Locale.ROOT);
     }
 
-    private static String bounceDiagnosticCode(String recipient, boolean suppressed) {
+    static String bounceDiagnosticCode(String recipient, boolean suppressed) {
         if (suppressed) {
             return ACCOUNT_SUPPRESSION_DIAGNOSTIC;
         }
