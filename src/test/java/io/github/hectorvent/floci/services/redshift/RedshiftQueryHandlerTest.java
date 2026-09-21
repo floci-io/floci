@@ -297,6 +297,64 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
+    void testRestoreFromClusterSnapshotBySnapshotArn() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "restored-cluster");
+        params.putSingle("SnapshotArn", "arn:aws:redshift:us-east-1:acc:snapshot:src/my-snap");
+        Cluster cluster = availableCluster("restored-cluster");
+        when(service.restoreFromClusterSnapshot("restored-cluster", "my-snap", null)).thenReturn(cluster);
+
+        Response response = handler.handle("RestoreFromClusterSnapshot", params, "auth");
+        assertEquals(200, response.getStatus());
+        verify(service).restoreFromClusterSnapshot("restored-cluster", "my-snap", null);
+    }
+
+    @Test
+    void testRestoreFromClusterSnapshotMalformedArnIs400() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "restored-cluster");
+        params.putSingle("SnapshotArn", "not-an-arn");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("RestoreFromClusterSnapshot", params, "auth"));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void testRestoreFromClusterSnapshotWithoutSnapshotIs400() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "restored-cluster");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("RestoreFromClusterSnapshot", params, "auth"));
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void testRestoreFromClusterSnapshotForeignAccountArnNotFound() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "restored-cluster");
+        params.putSingle("SnapshotArn", "arn:aws:redshift:us-east-1:999999999999:snapshot:src/my-snap");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("RestoreFromClusterSnapshot", params, "auth"));
+        assertEquals("ClusterSnapshotNotFound", ex.getErrorCode());
+        verify(service, never()).restoreFromClusterSnapshot(any(), any(), any());
+    }
+
+    @Test
+    void testClusterXmlCarriesDefaultParameterGroupAndMultiAZ() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "c1");
+        when(service.describeClusters("c1")).thenReturn(List.of(availableCluster("c1")));
+
+        String xml = (String) handler.handle("DescribeClusters", params).getEntity();
+        assertTrue(xml.contains("<ParameterGroupName>default.redshift-1.0</ParameterGroupName>"));
+        assertTrue(xml.contains("<MultiAZ>disabled</MultiAZ>"));
+    }
+
+    @Test
     void testCreateClusterParameterGroup() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("ParameterGroupName", "test-pg");
@@ -547,7 +605,7 @@ class RedshiftQueryHandlerTest {
         cluster.setLoggingEnabled(true);
         cluster.setLoggingBucketName("my-bucket");
         cluster.setLoggingS3KeyPrefix("logs/");
-        when(service.enableLogging("test-cluster", "my-bucket", "logs/")).thenReturn(cluster);
+        when(service.enableLogging("test-cluster", "my-bucket", "logs/", null, List.of())).thenReturn(cluster);
 
         Response response = handler.handle("EnableLogging", params);
         assertEquals(200, response.getStatus());

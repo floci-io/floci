@@ -850,7 +850,7 @@ class RedshiftServiceTest {
         cluster.setClusterIdentifier("my-cluster");
         when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
 
-        Cluster result = service.enableLogging("my-cluster", "my-bucket", "logs/");
+        Cluster result = service.enableLogging("my-cluster", "my-bucket", "logs/", null, null);
 
         assertTrue(result.isLoggingEnabled());
         assertEquals("my-bucket", result.getLoggingBucketName());
@@ -899,14 +899,53 @@ class RedshiftServiceTest {
         cluster.setClusterIdentifier("my-cluster");
         when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
 
-        assertThrows(AwsException.class, () -> service.enableLogging("my-cluster", null, null));
+        assertThrows(AwsException.class, () -> service.enableLogging("my-cluster", null, null, null, null));
+    }
+
+    @Test
+    void testEnableLoggingCloudWatchDoesNotRequireBucketName() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+
+        Cluster result = service.enableLogging("my-cluster", null, null, "cloudwatch", List.of("connectionlog"));
+        assertTrue(result.isLoggingEnabled());
+        assertEquals("cloudwatch", result.getLoggingDestinationType());
+        assertEquals(List.of("connectionlog"), result.getLoggingExports());
+    }
+
+    @Test
+    void testCreateClusterAssignsDefaultParameterGroup() {
+        when(clusterBackend.get(anyString())).thenReturn(Optional.empty());
+        when(cm.start(any(), any(), any(), any())).thenReturn(new RedshiftContainerHandle("c1", "my-cluster", "localhost", 5432));
+
+        Cluster cluster = service.createCluster("my-cluster", "dc2.large", "admin", "password123");
+        assertEquals("default.redshift-1.0", cluster.getClusterParameterGroupName());
+    }
+
+    @Test
+    void testModifyClusterStoresMultiAZ() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+
+        assertTrue(service.modifyCluster("my-cluster", null, null, null, null, null, true).isMultiAZ());
+    }
+
+    @Test
+    void testDescribeDefaultParameterGroupIsSynthesized() {
+        when(parameterGroupBackend.get("default.redshift-1.0")).thenReturn(Optional.empty());
+
+        List<ClusterParameterGroup> groups = service.describeClusterParameterGroups("default.redshift-1.0");
+        assertEquals(1, groups.size());
+        assertEquals("default.redshift-1.0", groups.get(0).getParameterGroupName());
     }
 
     @Test
     void testEnableLoggingNotFound() {
         when(clusterBackend.get("missing")).thenReturn(Optional.empty());
 
-        assertThrows(AwsException.class, () -> service.enableLogging("missing", "my-bucket", null));
+        assertThrows(AwsException.class, () -> service.enableLogging("missing", "my-bucket", null, null, null));
     }
 
     @Test
