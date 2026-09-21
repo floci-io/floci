@@ -1713,12 +1713,12 @@ class RdsServiceTest {
         DbInstance instance = rdsService.createDbInstance("probe-db", "postgres", "16.3",
                 "probeadmin", "ProbePassw0rd!", "dbname", "db.t3.micro",
                 20, false, null, null, null, false, null,
-                Map.of("tofu-estate", "probe1"));
+                Map.of("team", "probe1"));
 
         assertEquals(DbInstanceStatus.AVAILABLE, instance.getStatus());
         assertEquals("arn:aws:rds:us-east-1:123456789012:db:probe-db", instance.getDbInstanceArn());
         assertNotNull(instance.getEndpoint());
-        assertEquals("probe1", instance.getTags().get("tofu-estate"));
+        assertEquals("probe1", instance.getTags().get("team"));
         // Nothing was started, so no runtime is claimed; the storage identity is kept for the retry.
         assertNull(instance.getContainerId());
         assertNull(instance.getContainerHost());
@@ -1736,10 +1736,10 @@ class RdsServiceTest {
         DbInstance created = rdsService.createDbInstance("probe-db", "postgres", "16.3",
                 "probeadmin", "ProbePassw0rd!", "dbname", "db.t3.micro",
                 20, false, null, null, null, false, null,
-                Map.of("tofu-estate", "probe1"));
+                Map.of("team", "probe1"));
 
         assertEquals(1, rdsService.listDbInstances("probe-db").size());
-        assertEquals("probe1", rdsService.listTagsForResource(created.getDbInstanceArn()).get("tofu-estate"));
+        assertEquals("probe1", rdsService.listTagsForResource(created.getDbInstanceArn()).get("team"));
 
         rdsService.addTagsToResource(created.getDbInstanceArn(), Map.of("Name", "probe-db"), "us-east-1");
         assertEquals("probe-db", rdsService.listTagsForResource(created.getDbInstanceArn()).get("Name"));

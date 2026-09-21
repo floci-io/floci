@@ -417,7 +417,7 @@ class S3VirtualHostIntegrationTest {
     }
 
     // A key may contain the bucket's own name as a path segment, for example
-    // "tofu-records/<bucket>/...". The raw request path of a virtual-hosted request is the key
+    // "archive/<bucket>/...". The raw request path of a virtual-hosted request is the key
     // alone, so the "/<bucket>/" inside it is part of the key and not the path-style bucket
     // prefix.
     @Test
@@ -429,7 +429,7 @@ class S3VirtualHostIntegrationTest {
         String segmentHost = segmentBucket + ".localhost";
         given().header("Host", segmentHost).when().put("/").then().statusCode(200);
 
-        String key = "tofu-records/" + segmentBucket + "/.store-sentinel";
+        String key = "archive/" + segmentBucket + "/.sentinel";
         given()
             .header("Host", segmentHost)
             .contentType("text/plain")
@@ -442,7 +442,7 @@ class S3VirtualHostIntegrationTest {
         given()
             .header("Host", segmentHost)
             .queryParam("list-type", "2")
-            .queryParam("prefix", "tofu-records/" + segmentBucket + "/")
+            .queryParam("prefix", "archive/" + segmentBucket + "/")
         .when()
             .get("/")
         .then()

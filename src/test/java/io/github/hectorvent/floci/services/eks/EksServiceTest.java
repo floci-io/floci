@@ -1026,13 +1026,13 @@ class EksServiceTest {
         CreateClusterRequest request = new CreateClusterRequest();
         request.setName("probe-eks");
         request.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
-        request.setTags(Map.of("tofu-estate", "probe1"));
+        request.setTags(Map.of("team", "probe1"));
 
         Cluster cluster = service.createCluster(request);
 
         assertEquals(ClusterStatus.ACTIVE, cluster.getStatus());
         assertEquals("https://localhost:6500", cluster.getEndpoint());
-        assertEquals("probe1", cluster.getTags().get("tofu-estate"));
+        assertEquals("probe1", cluster.getTags().get("team"));
         // No k3s API server exists. The empty CA is what says so.
         assertEquals("", cluster.getCertificateAuthority().getData());
         assertNull(cluster.getContainerId());
@@ -1047,12 +1047,12 @@ class EksServiceTest {
         CreateClusterRequest request = new CreateClusterRequest();
         request.setName("probe-eks");
         request.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
-        request.setTags(Map.of("tofu-estate", "probe1"));
+        request.setTags(Map.of("team", "probe1"));
         String arn = service.createCluster(request).getArn();
 
         assertEquals(ClusterStatus.ACTIVE, service.describeCluster("probe-eks").getStatus());
         assertEquals(List.of("probe-eks"), service.listClusters());
-        assertEquals("probe1", service.listTagsForResource(arn).get("tofu-estate"));
+        assertEquals("probe1", service.listTagsForResource(arn).get("team"));
 
         service.tagResource(arn, Map.of("Name", "probe-eks"));
         assertEquals("probe-eks", service.listTagsForResource(arn).get("Name"));
