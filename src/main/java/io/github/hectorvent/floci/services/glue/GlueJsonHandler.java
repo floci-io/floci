@@ -327,6 +327,7 @@ public class GlueJsonHandler {
                         : null;
                 glueService.putDataCatalogEncryptionSettings(settings);
                 yield Response.ok(Map.of()).build();
+            }
             case "CreateSecurityConfiguration" -> {
                 SecurityConfiguration configuration = glueService.createSecurityConfiguration(
                         request.path("Name").asText(null), request.get("EncryptionConfiguration"), region);
