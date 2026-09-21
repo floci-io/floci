@@ -637,194 +637,6 @@ class CloudFormationDeletionPolicyIntegrationTest {
      * downstream GetAtt consumer, and the whole parent rolls back.
      */
     @Test
-    void createChangeSet_nestedStackPreExistingLogGroup_rollsBackParentStack() throws Exception {
-        String suffix = Long.toString(System.nanoTime(), 36);
-        String logGroupName = "/aws/lambda/demo-fn-" + suffix;
-        String bucketName = "nested-stack-templates-" + suffix;
-        String templateUrl = bucketName + "/child-loggroup-" + suffix + ".json";
-
-        // Pre-create log group to induce ResourceAlreadyExists failure
-        given()
-                .header("X-Amz-Target", "Logs_20140328.CreateLogGroup")
-                .contentType("application/x-amz-json-1.1")
-                .body("{\"logGroupName\":\"" + logGroupName + "\"}")
-                .when().post("/").then().statusCode(200);
-
-        String childTemplate = """
-            {
-              "Resources": {
-                "MyLogGroup": {
-                  "Type": "AWS::Logs::LogGroup",
-                  "Properties": { "LogGroupName": "%s" }
-                }
-              }
-            }
-            """.formatted(logGroupName);
-
-        given().when().put("/" + bucketName).then().statusCode(200);
-        given().contentType("application/json").body(childTemplate)
-                .when().put("/" + templateUrl).then().statusCode(200);
-
-        String parentTemplate = """
-            {
-              "Resources": {
-                "ChildStack": {
-                  "Type": "AWS::CloudFormation::Stack",
-                  "Properties": { "TemplateURL": "http://localhost/%s" }
-                }
-              }
-            }
-            """.formatted(templateUrl);
-
-        String stackName = "parent-nested-fail-" + suffix;
-        String changeSetName = "cdk-deploy-change-set-" + suffix;
-
-        // CDK workflow: CreateChangeSet -> ExecuteChangeSet
-        given().contentType("application/x-www-form-urlencoded")
-                .formParam("Action", "CreateChangeSet")
-                .formParam("StackName", stackName)
-                .formParam("ChangeSetName", changeSetName)
-                .formParam("ChangeSetType", "CREATE")
-                .formParam("TemplateBody", parentTemplate)
-                .when().post("/").then().statusCode(200);
-
-        given().contentType("application/x-www-form-urlencoded")
-                .formParam("Action", "ExecuteChangeSet")
-                .formParam("StackName", stackName)
-                .formParam("ChangeSetName", changeSetName)
-                .when().post("/").then().statusCode(200);
-
-        // Await parent stack terminal status
-        long deadline = System.currentTimeMillis() + 15_000;
-        String parentStatus = "";
-        while (System.currentTimeMillis() < deadline) {
-            String xml = describeStacks(stackName);
-            int start = xml.indexOf("<StackStatus>") + "<StackStatus>".length();
-            int end = xml.indexOf("</StackStatus>", start);
-            if (start > "<StackStatus>".length() && end > start) {
-                parentStatus = xml.substring(start, end);
-                if (!parentStatus.endsWith("_IN_PROGRESS")) {
-                    break;
-                }
-            }
-            Thread.sleep(100);
-        }
-
-        assertThat(parentStatus, equalTo("ROLLBACK_COMPLETE"));
-    }
-
-    @Test
-    void updateChangeSet_nestedStackUpdateFails_rollsBackParentStack() throws Exception {
-        String suffix = Long.toString(System.nanoTime(), 36);
-        String bucketName = "nested-stack-templates-" + suffix;
-        String templateUrl = bucketName + "/child-update-" + suffix + ".json";
-        String logGroupName = "/aws/lambda/good-fn-" + suffix;
-
-        String childTemplateV1 = """
-            {
-              "Resources": {
-                "MyLogGroup": {
-                  "Type": "AWS::Logs::LogGroup",
-                  "Properties": { "LogGroupName": "%s" }
-                }
-              }
-            }
-            """.formatted(logGroupName);
-
-        given().when().put("/" + bucketName).then().statusCode(200);
-        given().contentType("application/json").body(childTemplateV1)
-                .when().put("/" + templateUrl).then().statusCode(200);
-
-        String parentTemplate = """
-            {
-              "Resources": {
-                "ChildStack": {
-                  "Type": "AWS::CloudFormation::Stack",
-                  "Properties": { "TemplateURL": "http://localhost/%s" }
-                }
-              }
-            }
-            """.formatted(templateUrl);
-
-        String stackName = "parent-update-fail-" + suffix;
-        String changeSetName1 = "cdk-deploy-create-" + suffix;
-
-        // Create stack via ChangeSet
-        given().contentType("application/x-www-form-urlencoded")
-                .formParam("Action", "CreateChangeSet")
-                .formParam("StackName", stackName)
-                .formParam("ChangeSetName", changeSetName1)
-                .formParam("ChangeSetType", "CREATE")
-                .formParam("TemplateBody", parentTemplate)
-                .when().post("/").then().statusCode(200);
-
-        given().contentType("application/x-www-form-urlencoded")
-                .formParam("Action", "ExecuteChangeSet")
-                .formParam("StackName", stackName)
-                .formParam("ChangeSetName", changeSetName1)
-                .when().post("/").then().statusCode(200);
-
-        awaitStackStatus(stackName, "CREATE_COMPLETE");
-
-        // Now update child template with an unprovisionable/failing resource
-        String badSecretName = "bad-secret-" + suffix;
-        String childTemplateV2 = """
-            {
-              "Resources": {
-                "MyLogGroup": {
-                  "Type": "AWS::Logs::LogGroup",
-                  "Properties": { "LogGroupName": "%s" }
-                },
-                "BadSecret": {
-                  "Type": "AWS::SecretsManager::Secret",
-                  "Properties": {
-                    "Name": "%s",
-                    "SecretString": "explicit",
-                    "GenerateSecretString": { "PasswordLength": 32 }
-                  }
-                }
-              }
-            }
-            """.formatted(logGroupName, badSecretName);
-
-        given().contentType("application/json").body(childTemplateV2)
-                .when().put("/" + templateUrl).then().statusCode(200);
-
-        // Update parent stack via ChangeSet
-        String changeSetName2 = "cdk-deploy-update-" + suffix;
-        given().contentType("application/x-www-form-urlencoded")
-                .formParam("Action", "CreateChangeSet")
-                .formParam("StackName", stackName)
-                .formParam("ChangeSetName", changeSetName2)
-                .formParam("ChangeSetType", "UPDATE")
-                .formParam("TemplateBody", parentTemplate)
-                .when().post("/").then().statusCode(200);
-
-        given().contentType("application/x-www-form-urlencoded")
-                .formParam("Action", "ExecuteChangeSet")
-                .formParam("StackName", stackName)
-                .formParam("ChangeSetName", changeSetName2)
-                .when().post("/").then().statusCode(200);
-
-        // Await parent stack terminal status
-        long deadline = System.currentTimeMillis() + 15_000;
-        String parentStatus = "";
-        while (System.currentTimeMillis() < deadline) {
-            String xml = describeStacks(stackName);
-            int start = xml.indexOf("<StackStatus>") + "<StackStatus>".length();
-            int end = xml.indexOf("</StackStatus>", start);
-            if (start > "<StackStatus>".length() && end > start) {
-                parentStatus = xml.substring(start, end);
-                if (!parentStatus.endsWith("_IN_PROGRESS")) {
-                    break;
-                }
-            }
-            Thread.sleep(100);
-        }
-
-        assertThat(parentStatus, equalTo("UPDATE_ROLLBACK_COMPLETE"));
-    }
-
     void createStack_nestedStackResourceFailsInternally_parentRollsBackBeforeConsumingItsOutputs()
             throws InterruptedException {
         String suffix = Long.toString(System.nanoTime(), 36);
@@ -896,6 +708,216 @@ class CloudFormationDeletionPolicyIntegrationTest {
             .then()
                 .statusCode(400)
                 .body("__type", equalTo("ParameterNotFound"));
+        } finally {
+            deleteStack(stackName);
+        }
+    }
+
+    @Test
+    void createChangeSet_nestedStackPreExistingLogGroup_rollsBackParentStack() throws Exception {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String logGroupName = "/aws/lambda/demo-fn-" + suffix;
+        String bucketName = "nested-stack-templates-" + suffix;
+        String templateUrl = bucketName + "/child-loggroup-" + suffix + ".json";
+
+        // Pre-create log group to induce ResourceAlreadyExists failure
+        given()
+                .header("X-Amz-Target", "Logs_20140328.CreateLogGroup")
+                .contentType("application/x-amz-json-1.1")
+                .body("{\"logGroupName\":\"" + logGroupName + "\"}")
+                .when().post("/").then().statusCode(200);
+
+        String childTemplate = """
+            {
+              "Resources": {
+                "MyLogGroup": {
+                  "Type": "AWS::Logs::LogGroup",
+                  "Properties": { "LogGroupName": "%s" }
+                }
+              }
+            }
+            """.formatted(logGroupName);
+
+        given().when().put("/" + bucketName).then().statusCode(200);
+        given().contentType("application/json").body(childTemplate)
+                .when().put("/" + templateUrl).then().statusCode(200);
+
+        String parentTemplate = """
+            {
+              "Resources": {
+                "ChildStack": {
+                  "Type": "AWS::CloudFormation::Stack",
+                  "Properties": { "TemplateURL": "http://localhost/%s" }
+                }
+              }
+            }
+            """.formatted(templateUrl);
+
+        String stackName = "parent-nested-fail-" + suffix;
+        String changeSetName = "cdk-deploy-change-set-" + suffix;
+
+        try {
+            // CDK workflow: CreateChangeSet -> ExecuteChangeSet
+            given().contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", "CreateChangeSet")
+                    .formParam("StackName", stackName)
+                    .formParam("ChangeSetName", changeSetName)
+                    .formParam("ChangeSetType", "CREATE")
+                    .formParam("TemplateBody", parentTemplate)
+                    .when().post("/").then().statusCode(200);
+
+            given().contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", "ExecuteChangeSet")
+                    .formParam("StackName", stackName)
+                    .formParam("ChangeSetName", changeSetName)
+                    .when().post("/").then().statusCode(200);
+
+            // Await parent stack terminal status
+            long deadline = System.currentTimeMillis() + 15_000;
+            String parentStatus = "";
+            while (System.currentTimeMillis() < deadline) {
+                String xml = describeStacks(stackName);
+                int start = xml.indexOf("<StackStatus>") + "<StackStatus>".length();
+                int end = xml.indexOf("</StackStatus>", start);
+                if (start > "<StackStatus>".length() && end > start) {
+                    parentStatus = xml.substring(start, end);
+                    if (!parentStatus.endsWith("_IN_PROGRESS")) {
+                        break;
+                    }
+                }
+                Thread.sleep(100);
+            }
+
+            assertThat(parentStatus, equalTo("ROLLBACK_COMPLETE"));
+
+            String events = describeStackEvents(stackName);
+            assertThat(events, containsString("<LogicalResourceId>ChildStack</LogicalResourceId>"));
+            assertThat(events, containsString("<ResourceStatus>CREATE_FAILED</ResourceStatus>"));
+            assertThat(events, containsString("<ResourceStatusReason>Nested stack " + stackName
+                    + "-ChildStack failed: The specified log group already exists: " + logGroupName
+                    + "</ResourceStatusReason>"));
+        } finally {
+            deleteStack(stackName);
+        }
+    }
+
+    @Test
+    void updateChangeSet_nestedStackUpdateFails_rollsBackParentStack() throws Exception {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String bucketName = "nested-stack-templates-" + suffix;
+        String templateUrl = bucketName + "/child-update-" + suffix + ".json";
+        String logGroupName = "/aws/lambda/good-fn-" + suffix;
+
+        String childTemplateV1 = """
+            {
+              "Resources": {
+                "MyLogGroup": {
+                  "Type": "AWS::Logs::LogGroup",
+                  "Properties": { "LogGroupName": "%s" }
+                }
+              }
+            }
+            """.formatted(logGroupName);
+
+        given().when().put("/" + bucketName).then().statusCode(200);
+        given().contentType("application/json").body(childTemplateV1)
+                .when().put("/" + templateUrl).then().statusCode(200);
+
+        String parentTemplate = """
+            {
+              "Resources": {
+                "ChildStack": {
+                  "Type": "AWS::CloudFormation::Stack",
+                  "Properties": { "TemplateURL": "http://localhost/%s" }
+                }
+              }
+            }
+            """.formatted(templateUrl);
+
+        String stackName = "parent-update-fail-" + suffix;
+        String changeSetName1 = "cdk-deploy-create-" + suffix;
+
+        try {
+            // Create stack via ChangeSet
+            given().contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", "CreateChangeSet")
+                    .formParam("StackName", stackName)
+                    .formParam("ChangeSetName", changeSetName1)
+                    .formParam("ChangeSetType", "CREATE")
+                    .formParam("TemplateBody", parentTemplate)
+                    .when().post("/").then().statusCode(200);
+
+            given().contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", "ExecuteChangeSet")
+                    .formParam("StackName", stackName)
+                    .formParam("ChangeSetName", changeSetName1)
+                    .when().post("/").then().statusCode(200);
+
+            awaitStackStatus(stackName, "CREATE_COMPLETE");
+
+            // Now update child template with an unprovisionable/failing resource placed first
+            String badSecretName = "bad-secret-" + suffix;
+            String childTemplateV2 = """
+                {
+                  "Resources": {
+                    "BadSecret": {
+                      "Type": "AWS::SecretsManager::Secret",
+                      "Properties": {
+                        "Name": "%s",
+                        "SecretString": "explicit",
+                        "GenerateSecretString": { "PasswordLength": 32 }
+                      }
+                    },
+                    "MyLogGroup": {
+                      "Type": "AWS::Logs::LogGroup",
+                      "Properties": { "LogGroupName": "%s" }
+                    }
+                  }
+                }
+                """.formatted(badSecretName, logGroupName);
+
+            given().contentType("application/json").body(childTemplateV2)
+                    .when().put("/" + templateUrl).then().statusCode(200);
+
+            // Update parent stack via ChangeSet
+            String changeSetName2 = "cdk-deploy-update-" + suffix;
+            given().contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", "CreateChangeSet")
+                    .formParam("StackName", stackName)
+                    .formParam("ChangeSetName", changeSetName2)
+                    .formParam("ChangeSetType", "UPDATE")
+                    .formParam("TemplateBody", parentTemplate)
+                    .when().post("/").then().statusCode(200);
+
+            given().contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", "ExecuteChangeSet")
+                    .formParam("StackName", stackName)
+                    .formParam("ChangeSetName", changeSetName2)
+                    .when().post("/").then().statusCode(200);
+
+            // Await parent stack terminal status
+            long deadline = System.currentTimeMillis() + 15_000;
+            String parentStatus = "";
+            while (System.currentTimeMillis() < deadline) {
+                String xml = describeStacks(stackName);
+                int start = xml.indexOf("<StackStatus>") + "<StackStatus>".length();
+                int end = xml.indexOf("</StackStatus>", start);
+                if (start > "<StackStatus>".length() && end > start) {
+                    parentStatus = xml.substring(start, end);
+                    if (!parentStatus.endsWith("_IN_PROGRESS")) {
+                        break;
+                    }
+                }
+                Thread.sleep(100);
+            }
+
+            assertThat(parentStatus, equalTo("UPDATE_ROLLBACK_COMPLETE"));
+
+            String events = describeStackEvents(stackName);
+            assertThat(events, containsString("<LogicalResourceId>ChildStack</LogicalResourceId>"));
+            assertThat(events, containsString("<ResourceStatusReason>Nested stack " + stackName
+                    + "-ChildStack rolled back or failed with status UPDATE_ROLLBACK_COMPLETE</ResourceStatusReason>"));
+            assertThat(events, not(containsString("failed: null")));
         } finally {
             deleteStack(stackName);
         }
