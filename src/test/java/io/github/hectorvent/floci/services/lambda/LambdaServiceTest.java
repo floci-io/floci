@@ -991,6 +991,50 @@ class LambdaServiceTest {
         assertEquals("InvalidParameterValueException", ex.getErrorCode());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "/",
+            "/var",
+            "/var/run",
+            "/var/run/docker.sock",
+            "/run",
+            "/run/user/1000",
+            "/run/../var/run",
+            "/home/ci/code/../../../var/run",
+            "/proc",
+            "/proc/1/root/var/run",
+            "/proc/self/root/var/run/docker.sock"
+    })
+    void hotReload_withoutAllowListRejectsDirectoriesThatCanHoldTheDockerSocket(String s3Key) {
+        LambdaService svc = serviceWithHotReload(true, null);
+        Map<String, Object> req = baseRequest("hr-socket");
+        req.put("Code", Map.of("S3Bucket", "hot-reload", "S3Key", s3Key));
+
+        AwsException ex = assertThrows(AwsException.class, () -> svc.createFunction(REGION, req), s3Key);
+
+        assertEquals("InvalidParameterValueException", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("Docker socket"), ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"/var/lib/app", "/varnish", "/running", "/process/code", "/tmp/my-fn", "/home/ci/code"})
+    void hotReload_withoutAllowListStillAcceptsOrdinaryCodeDirectories(String s3Key) {
+        LambdaService svc = serviceWithHotReload(true, null);
+        Map<String, Object> req = baseRequest("hr-ordinary");
+        req.put("Code", Map.of("S3Bucket", "hot-reload", "S3Key", s3Key));
+
+        assertEquals(s3Key, svc.createFunction(REGION, req).getHotReloadHostPath());
+    }
+
+    @Test
+    void hotReload_anExplicitAllowListIsTheOperatorsChoiceAndOverridesTheSocketGuard() {
+        LambdaService svc = serviceWithHotReload(true, List.of("/run/my-code"));
+        Map<String, Object> req = baseRequest("hr-explicit");
+        req.put("Code", Map.of("S3Bucket", "hot-reload", "S3Key", "/run/my-code/app"));
+
+        assertEquals("/run/my-code/app", svc.createFunction(REGION, req).getHotReloadHostPath());
+    }
+
     @Test
     void hotReload_dockerHostPathIsAlwaysPosixSeparated() {
         assertEquals("/home/ci/code/lib", LambdaService.toDockerHostPath(Path.of("/home/ci/code/lib")));

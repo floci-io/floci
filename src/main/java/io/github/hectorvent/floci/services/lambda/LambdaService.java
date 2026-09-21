@@ -283,15 +283,6 @@ public class LambdaService implements ResourceProvider {
     void init() {
         initializeStorage();
         rehydrateConcurrency();
-        warnWhenHotReloadHasNoAllowList();
-    }
-
-    private void warnWhenHotReloadHasNoAllowList() {
-        if (config != null && config.services().lambda().hotReload().enabled()
-                && config.services().lambda().hotReload().allowedPaths().isEmpty()) {
-            LOG.warn("Lambda hot-reload is enabled without FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ALLOWED_PATHS: "
-                    + "any absolute path on the Docker host can be bind-mounted into a function container");
-        }
     }
 
     /**
@@ -2992,6 +2983,11 @@ public class LambdaService implements ResourceProvider {
                         "Path '" + hostPath + "' is not under an allowed hot-reload mount prefix.", 400);
             }
         });
+        if (config.services().lambda().hotReload().allowedPaths().isEmpty() && reachesDockerSocketDirectory(normalized)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "Path '" + hostPath + "' can expose the Docker socket. Set "
+                            + "FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ALLOWED_PATHS to mount it.", 400);
+        }
         String resolvedHostPath = toDockerHostPath(normalized);
         fn.setHotReloadHostPath(resolvedHostPath);
         fn.setCodeLocalPath(null);
@@ -3009,6 +3005,19 @@ public class LambdaService implements ResourceProvider {
             path.append('/').append(name);
         }
         return path.length() == 0 ? "/" : path.toString();
+    }
+
+    /**
+     * True for the host root, {@code /var}, and anything in {@code /run} or {@code /var/run}, where the
+     * Docker socket lives. {@code /proc} counts too: {@code /proc/1/root/var/run} is a different string
+     * for the same directory, and no code directory lives there either.
+     */
+    static boolean reachesDockerSocketDirectory(Path normalized) {
+        return normalized.getNameCount() == 0
+                || normalized.equals(Path.of("/var"))
+                || normalized.startsWith(Path.of("/run"))
+                || normalized.startsWith(Path.of("/var/run"))
+                || normalized.startsWith(Path.of("/proc"));
     }
 
     private static boolean isUnderHotReloadPrefix(Path normalizedPath, String prefix) {
