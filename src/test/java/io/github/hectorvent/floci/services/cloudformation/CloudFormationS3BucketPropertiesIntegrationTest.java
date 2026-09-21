@@ -6,6 +6,8 @@ import org.junit.jupiter.api.Test;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 /**
@@ -15,8 +17,8 @@ import static org.junit.jupiter.api.Assertions.fail;
  * <p>Before this, {@code S3CfnProvisioner} translated {@code CorsConfiguration} and
  * {@code VersioningConfiguration} and nothing else, and the policy resource took a physical id and
  * stopped, so a stack reported {@code CREATE_COMPLETE} for a bucket with no lifecycle, no
- * public-access block, no default encryption, no tags and no policy. The template below is what a
- * record-store bootstrap project deploys, and its own verify step was what noticed.
+ * public-access block, no default encryption, no tags and no policy. The template below is the
+ * shape a bootstrap stack deploys: a versioned bucket, locked down, with a transport policy.
  */
 @QuarkusTest
 class CloudFormationS3BucketPropertiesIntegrationTest {
@@ -132,6 +134,58 @@ class CloudFormationS3BucketPropertiesIntegrationTest {
         given().when().get("/" + bucket + "?versioning").then().statusCode(200).body(not(containsString("<Status>")));
         given().when().get("/" + bucket + "?lifecycle").then().statusCode(404);
         given().when().get("/" + bucket + "?publicAccessBlock").then().statusCode(404);
+    }
+
+    @Test
+    void droppingThePolicyResourceTakesThePolicyOffTheBucket() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String bucket = "cfn-props-drop-" + suffix;
+        String stackName = "cfn-props-drop-stack-" + suffix;
+        String stackId = stack("CreateStack", stackName, template(bucket, 30));
+        await(stackId, "CREATE_COMPLETE");
+        bucketGet(bucket, "policy").body(containsString("DenyInsecureTransport"));
+
+        // The same template with the policy resource removed. CloudFormation deletes the dropped
+        // resource, which must clear the policy rather than report DELETE_COMPLETE and leave it.
+        stack("UpdateStack", stackName, """
+            { "Resources": { "recordsBucket": { "Type": "AWS::S3::Bucket",
+              "Properties": { "BucketName": "%s" } } } }
+            """.formatted(bucket));
+        await(stackId, "UPDATE_COMPLETE");
+
+        given().when().get("/" + bucket + "?policy").then().statusCode(404);
+    }
+
+    @Test
+    void thePolicyResourceIsIdentifiedByItsBucket() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String bucket = "cfn-props-ref-" + suffix;
+        String stackId = stack("CreateStack", "cfn-props-ref-stack-" + suffix, template(bucket, 30));
+        await(stackId, "CREATE_COMPLETE");
+
+        // primaryIdentifier in the registry schema is /properties/Bucket, so that is the physical
+        // id, and it is what makes the policy findable at delete.
+        String xml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackId)
+        .when().post("/").then().statusCode(200).extract().asString();
+        assertEquals(bucket, physicalIdOf(xml, "recordsBucketPolicy"),
+                "the policy's physical id is its bucket: " + xml);
+    }
+
+    /** The PhysicalResourceId of one member of a DescribeStackResources response. */
+    private static String physicalIdOf(String xml, String logicalId) {
+        String marker = "<LogicalResourceId>" + logicalId + "</LogicalResourceId>";
+        int at = xml.indexOf(marker);
+        assertTrue(at > 0, logicalId + " is not in the stack: " + xml);
+        int memberStart = xml.lastIndexOf("<member>", at);
+        int memberEnd = xml.indexOf("</member>", at);
+        String member = xml.substring(memberStart, memberEnd);
+        int idStart = member.indexOf("<PhysicalResourceId>");
+        assertTrue(idStart > 0, logicalId + " has no physical id: " + member);
+        idStart += "<PhysicalResourceId>".length();
+        return member.substring(idStart, member.indexOf("</PhysicalResourceId>", idStart));
     }
 
     private static io.restassured.response.ValidatableResponse bucketGet(String bucket, String subresource) {
