@@ -45,6 +45,7 @@ import io.github.hectorvent.floci.services.rds.model.GlobalCluster;
 import io.github.hectorvent.floci.services.rds.model.GlobalClusterMember;
 import io.github.hectorvent.floci.services.rds.model.OptionGroup;
 import io.github.hectorvent.floci.services.rds.model.OptionGroupOption;
+import io.github.hectorvent.floci.services.rds.proxy.RdsMysqlBinding;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
 import io.github.hectorvent.floci.services.resourcegroupstagging.ResourceGroupsTaggingService;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
@@ -743,7 +744,9 @@ public class RdsService implements Resettable, ResourceProvider {
                         instance.getEndpoint().address(),
                         masterUsername, masterPassword, dbName,
                         (user, pw) -> validateDbPasswordForScope(
-                                accountId, instanceRegion, id, user, pw));
+                                accountId, instanceRegion, id, user, pw),
+                        new RdsMysqlBinding(instance.getEndpoint().address(), proxyPort,
+                                instanceRegion, accountId, instance.getDbiResourceId()));
             } catch (RuntimeException | Error e) {
                 try {
                     deleteInstanceForScope(accountId, effectiveRegion, id);
@@ -2287,7 +2290,9 @@ public class RdsService implements Resettable, ResourceProvider {
                         instance.getEndpoint().address(),
                         effectiveMasterUser, instance.getMasterPassword(), instance.getDbName(),
                         (user, pw) -> validateDbPasswordForScope(
-                                accountId, instanceRegion, id, user, pw));
+                                accountId, instanceRegion, id, user, pw),
+                        new RdsMysqlBinding(instance.getEndpoint().address(), instance.getProxyPort(),
+                                instanceRegion, accountId, instance.getDbiResourceId()));
             } else {
                 // No backing container: created or last rebooted while no daemon was reachable.
                 instance = ensureInstanceBackend(id, effectiveRegion);
@@ -2370,7 +2375,9 @@ public class RdsService implements Resettable, ResourceProvider {
                     instance.getEndpoint().address(),
                     effectiveMasterUser, instance.getMasterPassword(), instance.getDbName(),
                     (user, pw) -> validateDbPasswordForScope(
-                            accountId, instanceRegion, id, user, pw));
+                            accountId, instanceRegion, id, user, pw),
+                    new RdsMysqlBinding(instance.getEndpoint().address(), instance.getProxyPort(),
+                            instanceRegion, accountId, instance.getDbiResourceId()));
         } catch (RuntimeException e) {
             stopStartedBackend(started, e);
             throw e;
@@ -2422,7 +2429,9 @@ public class RdsService implements Resettable, ResourceProvider {
                     cluster.getEndpoint().address(),
                     effectiveMasterUser, cluster.getMasterPassword(), cluster.getDatabaseName(),
                     (user, pw) -> validateDbClusterPasswordForScope(
-                            accountId, clusterRegion, id, user, pw));
+                            accountId, clusterRegion, id, user, pw),
+                    new RdsMysqlBinding(cluster.getEndpoint().address(), cluster.getProxyPort(),
+                            clusterRegion, accountId, cluster.getDbClusterResourceId()));
         } catch (RuntimeException e) {
             stopStartedBackend(started, e);
             throw e;
@@ -2702,7 +2711,9 @@ public class RdsService implements Resettable, ResourceProvider {
                         cluster.getEndpoint().address(),
                         effectiveMasterUser, masterPassword, databaseName,
                         (user, pw) -> validateDbClusterPasswordForScope(
-                                accountId, clusterRegion, id, user, pw));
+                                accountId, clusterRegion, id, user, pw),
+                        new RdsMysqlBinding(cluster.getEndpoint().address(), proxyPort,
+                                clusterRegion, accountId, cluster.getDbClusterResourceId()));
             }
 
             cluster.setServerlessV2MinCapacity(serverlessV2MinCapacity);
@@ -3945,7 +3956,9 @@ public class RdsService implements Resettable, ResourceProvider {
                                 ? validateDbClusterPasswordForScope(
                                         proxyAccountId, targetRegion, targetId, user, pw)
                                 : validateDbPasswordForScope(
-                                        proxyAccountId, targetRegion, targetId, user, pw));
+                                        proxyAccountId, targetRegion, targetId, user, pw),
+                        new RdsMysqlBinding(proxy.getEndpointHost(), proxy.getProxyPort(),
+                                targetRegion, proxyAccountId, proxy.getDbProxyResourceId()));
             }
             putTargetGroupForAccount(proxyAccountId, proxyKey, updatedTargetGroup);
             if (updatedProxy != null) {
@@ -5971,7 +5984,9 @@ public class RdsService implements Resettable, ResourceProvider {
                         ? validateDbClusterPasswordForScope(
                                 accountId, proxyRegion, targetId, user, password)
                         : validateDbPasswordForScope(
-                                accountId, proxyRegion, targetId, user, password));
+                                accountId, proxyRegion, targetId, user, password),
+                new RdsMysqlBinding(proxy.getEndpointHost(), proxy.getProxyPort(),
+                        proxyRegion, accountId, proxy.getDbProxyResourceId()));
     }
 
     private DbProxyTargetGroup copyProxyTargetGroup(DbProxyTargetGroup source) {
@@ -6061,7 +6076,9 @@ public class RdsService implements Resettable, ResourceProvider {
                             effectiveMasterUser, cluster.getMasterPassword(), cluster.getDatabaseName(),
                             (user, pw) -> validateDbClusterPasswordForScope(
                                     accountId, clusterRegion,
-                                    cluster.getDbClusterIdentifier(), user, pw));
+                                    cluster.getDbClusterIdentifier(), user, pw),
+                            new RdsMysqlBinding(cluster.getEndpoint().address(), proxyPort,
+                                    clusterRegion, accountId, cluster.getDbClusterResourceId()));
                 }
                 cluster.setStatus(DbInstanceStatus.AVAILABLE);
                 putClusterForScope(accountId, clusterRegion,
@@ -6187,7 +6204,9 @@ public class RdsService implements Resettable, ResourceProvider {
                             effectiveMasterUser, instance.getMasterPassword(), instance.getDbName(),
                             (user, pw) -> validateDbPasswordForScope(
                                     accountId, instanceRegion,
-                                    instance.getDbInstanceIdentifier(), user, pw));
+                                    instance.getDbInstanceIdentifier(), user, pw),
+                            new RdsMysqlBinding(instance.getEndpoint().address(), proxyPort,
+                                    instanceRegion, accountId, instance.getDbiResourceId()));
                 }
                 instance.setStatus(DbInstanceStatus.AVAILABLE);
                 putInstanceForScope(accountId, instanceRegion,

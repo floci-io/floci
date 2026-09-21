@@ -200,9 +200,9 @@ class RdsSigV4ValidatorTest {
                 Instant.now().minusSeconds(60), 900);
 
         assertTrue(validator.validate(token, "admin",
-                new RdsMysqlBinding("db.example.local", 3307, "us-east-1")));
+                new RdsMysqlBinding("db.example.local", 3307, "us-east-1", "123456789012", "db-ABCDEFGHIJKL01234")));
         assertFalse(validator.validate(token, "admin",
-                new RdsMysqlBinding("db.example.local", 3306, "us-east-1")));
+                new RdsMysqlBinding("db.example.local", 3306, "us-east-1", "123456789012", "db-ABCDEFGHIJKL01234")));
     }
 
     @Test
@@ -214,7 +214,7 @@ class RdsSigV4ValidatorTest {
                 Instant.now().minusSeconds(60), 900);
 
         assertFalse(validator.validate(token, "admin",
-                new RdsMysqlBinding("other.example.local", 3307, "us-east-1")));
+                new RdsMysqlBinding("other.example.local", 3307, "us-east-1", "123456789012", "db-ABCDEFGHIJKL01234")));
     }
 
     @Test
@@ -226,7 +226,7 @@ class RdsSigV4ValidatorTest {
                 Instant.now().minusSeconds(60), 900);
 
         assertFalse(validator.validate(token, "admin",
-                new RdsMysqlBinding("db.example.local", 3307, "eu-west-1")));
+                new RdsMysqlBinding("db.example.local", 3307, "eu-west-1", "123456789012", "db-ABCDEFGHIJKL01234")));
     }
 
     @Test
@@ -238,7 +238,7 @@ class RdsSigV4ValidatorTest {
                 "us-east-1", "s3", Instant.now().minusSeconds(60), 900);
 
         assertFalse(validator.validate(token, "admin",
-                new RdsMysqlBinding("db.example.local", 3307, "us-east-1")));
+                new RdsMysqlBinding("db.example.local", 3307, "us-east-1", "123456789012", "db-ABCDEFGHIJKL01234")));
     }
 
     @Test

@@ -37,6 +37,7 @@ import io.github.hectorvent.floci.services.rds.model.OptionGroupOption;
 import io.github.hectorvent.floci.services.rds.model.RdsEvent;
 import io.github.hectorvent.floci.services.rds.model.ReadReplicaRequest;
 import io.github.hectorvent.floci.services.rds.proxy.RdsAuthProxy;
+import io.github.hectorvent.floci.services.rds.proxy.RdsMysqlBinding;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
@@ -217,7 +218,7 @@ class RdsServiceTest {
             assertFalse(passwordCheck.validate("admin", "wrong"));
             return null;
         }).when(proxyManager).startProxy(any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
-                any(), any(), any(), any(), any());
+                any(), any(), any(), any(), any(), any());
 
         DbInstance instance = rdsService.createDbInstance("mypostgres", "postgres", "13",
                 "admin", "secret123", null, "db.t3.micro",
@@ -229,10 +230,24 @@ class RdsServiceTest {
     }
 
     @Test
+    void createDbInstancePublishesTheBindingIamTokensAndConnectPoliciesAreCheckedAgainst() {
+        DbInstance instance = rdsService.createDbInstance("mypostgres", "postgres", "13",
+                "admin", "secret123", null, "db.t3.micro",
+                20, false, null, null, null, null, false);
+
+        ArgumentCaptor<RdsMysqlBinding> binding = ArgumentCaptor.forClass(RdsMysqlBinding.class);
+        verify(proxyManager).startProxy(any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
+                any(), any(), any(), any(), any(), binding.capture());
+        assertEquals(new RdsMysqlBinding(instance.getEndpoint().address(), instance.getProxyPort(),
+                        "us-east-1", "123456789012", instance.getDbiResourceId()),
+                binding.getValue());
+    }
+
+    @Test
     void createDbInstanceRemovesVisibleRecordWhenProxyStartupFails() {
         doThrow(new IllegalStateException("proxy down"))
                 .when(proxyManager).startProxy(any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
-                        any(), any(), any(), any(), any());
+                        any(), any(), any(), any(), any(), any());
 
         assertThrows(IllegalStateException.class, () -> rdsService.createDbInstance(
                 "mypostgres", "postgres", "13",
@@ -745,7 +760,7 @@ class RdsServiceTest {
                 .thenReturn(secret);
         doThrow(new IllegalStateException("proxy down"))
                 .when(proxyManager).startProxy(any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
-                        any(), any(), any(), any(), any());
+                        any(), any(), any(), any(), any(), any());
         RdsService service = newService(containerManager, proxyManager,
                 new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(),
@@ -1400,7 +1415,7 @@ class RdsServiceTest {
         assertEquals("DBSubnetGroupNotFoundFault", exception.getErrorCode());
         verify(containerManager, never()).tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any());
         verify(proxyManager, never()).startProxy(any(), any(), anyBoolean(), anyInt(),
-                any(), anyInt(), any(), any(), any(), any(), any());
+                any(), anyInt(), any(), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -1465,7 +1480,7 @@ class RdsServiceTest {
         assertNull(cluster.getContainerId());
         verify(containerManager, never()).tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any());
         verify(proxyManager, never()).startProxy(any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
-                any(), any(), any(), any(), any());
+                any(), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -1698,7 +1713,7 @@ class RdsServiceTest {
         assertNull(instance.getDockerVolumeName());
         verify(containerManager, never()).tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any());
         verify(proxyManager, never()).startProxy(any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
-                any(), any(), any(), any(), any());
+                any(), any(), any(), any(), any(), any());
     }
 
     // ------------------------------------------------------------
@@ -1725,7 +1740,7 @@ class RdsServiceTest {
         assertEquals(0, instance.getContainerPort());
         assertNotNull(instance.getVolumeId());
         verify(proxyManager, never()).startProxy(any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
-                any(), any(), any(), any(), any());
+                any(), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -1791,7 +1806,7 @@ class RdsServiceTest {
         assertEquals(DbInstanceStatus.AVAILABLE, member.getStatus());
         assertNull(member.getContainerId());
         verify(proxyManager, never()).startProxy(any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
-                any(), any(), any(), any(), any());
+                any(), any(), any(), any(), any(), any());
 
         rdsService.deleteDbInstance("probe-member");
         rdsService.deleteDbCluster("probe-cluster");
@@ -1829,7 +1844,7 @@ class RdsServiceTest {
         verify(proxyManager).startProxy(
                 eq("rds-resource:" + created.getDbInstanceArn()), eq(DatabaseEngine.POSTGRES),
                 eq(false), eq(created.getProxyPort()), eq("127.0.0.1"), eq(15432), any(),
-                eq("admin"), eq("password"), eq("dbname"), any());
+                eq("admin"), eq("password"), eq("dbname"), any(), any());
 
         // Already backed, so a further call is a no-op rather than a second container. Three
         // calls in total: the create, the retry that found no daemon, and the retry that started it.
@@ -1851,7 +1866,7 @@ class RdsServiceTest {
                 .thenReturn(late);
         doThrow(new IllegalStateException("port in use")).doNothing()
                 .when(proxyManager).startProxy(any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
-                        any(), any(), any(), any(), any());
+                        any(), any(), any(), any(), any(), any());
 
         assertThrows(IllegalStateException.class,
                 () -> rdsService.ensureInstanceBackend("probe-db", "us-east-1"));
@@ -1891,10 +1906,10 @@ class RdsServiceTest {
                 eq(DatabaseEngine.POSTGRES), any(), eq("admin"), eq("password"), eq("dbname"));
         verify(proxyManager).startProxy(
                 eq("rds-resource:" + cluster.getDbClusterArn()), any(), anyBoolean(),
-                eq(cluster.getProxyPort()), eq("127.0.0.1"), eq(15432), any(), any(), any(), any(), any());
+                eq(cluster.getProxyPort()), eq("127.0.0.1"), eq(15432), any(), any(), any(), any(), any(), any());
         verify(proxyManager).startProxy(
                 eq("rds-resource:" + member.getDbInstanceArn()), any(), anyBoolean(),
-                eq(member.getProxyPort()), eq("127.0.0.1"), eq(15432), any(), any(), any(), any(), any());
+                eq(member.getProxyPort()), eq("127.0.0.1"), eq(15432), any(), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -1917,7 +1932,7 @@ class RdsServiceTest {
         verify(containerManager, never()).stop(any());
         verify(proxyManager).startProxy(
                 eq("rds-resource:" + created.getDbInstanceArn()), any(), anyBoolean(),
-                eq(created.getProxyPort()), eq("127.0.0.1"), eq(15432), any(), any(), any(), any(), any());
+                eq(created.getProxyPort()), eq("127.0.0.1"), eq(15432), any(), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -1946,7 +1961,7 @@ class RdsServiceTest {
         assertEquals(created.getProxyPort(), restored.getEndpoint().port());
         assertNull(restored.getContainerId());
         verify(daemonlessProxyManager, never()).startProxy(any(), any(), anyBoolean(), anyInt(),
-                any(), anyInt(), any(), any(), any(), any(), any());
+                any(), anyInt(), any(), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -1976,7 +1991,7 @@ class RdsServiceTest {
         assertEquals(DbInstanceStatus.AVAILABLE, restoredMember.getStatus());
         assertNull(restoredMember.getContainerId());
         verify(daemonlessProxyManager, never()).startProxy(any(), any(), anyBoolean(), anyInt(),
-                any(), anyInt(), any(), any(), any(), any(), any());
+                any(), anyInt(), any(), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -2042,7 +2057,7 @@ class RdsServiceTest {
         verify(containerManager, never()).tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any());
         verify(containerManager, never()).stop(any());
         verify(proxyManager, never()).startProxy(any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
-                any(), any(), any(), any(), any());
+                any(), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -2700,7 +2715,7 @@ class RdsServiceTest {
         verify(restoredProxyManager).startProxy(
                 eq("rds-resource:" + restored.getDbInstanceArn()), eq(DatabaseEngine.POSTGRES),
                 eq(false), eq(persistedProxyPort), eq("127.0.0.1"), eq(15432), any(),
-                eq("admin"), eq("secret"), eq("app"), any());
+                eq("admin"), eq("secret"), eq("app"), any(), any());
 
         restoredService.deleteDbInstance("mydb");
         verify(restoredContainerManager).removeVolume(
@@ -2753,11 +2768,11 @@ class RdsServiceTest {
         verify(restoredProxyManager).startProxy(
                 eq("rds-resource:" + restoredCluster.getDbClusterArn()), eq(DatabaseEngine.POSTGRES),
                 eq(false), eq(cluster.getProxyPort()), eq("127.0.0.1"), eq(15432), any(),
-                eq("admin"), eq("secret"), eq("app"), any());
+                eq("admin"), eq("secret"), eq("app"), any(), any());
         verify(restoredProxyManager).startProxy(
                 eq("rds-resource:" + restoredMember.getDbInstanceArn()), eq(DatabaseEngine.POSTGRES),
                 eq(false), eq(member.getProxyPort()), eq("127.0.0.1"), eq(15432), any(),
-                eq("admin"), eq("secret"), eq("app"), any());
+                eq("admin"), eq("secret"), eq("app"), any(), any());
     }
 
     @Test
@@ -3142,7 +3157,7 @@ class RdsServiceTest {
                 .doNothing()
                 .when(restoredProxyManager).startProxy(
                         any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
-                        any(), any(), any(), any(), any());
+                        any(), any(), any(), any(), any(), any());
         org.mockito.Mockito.doThrow(new IllegalStateException("cleanup failed"))
                 .doNothing()
                 .doNothing()
@@ -3267,7 +3282,7 @@ class RdsServiceTest {
                 .doNothing()
                 .when(restoredProxyManager).startProxy(
                         any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
-                        any(), any(), any(), any(), any());
+                        any(), any(), any(), any(), any(), any());
         org.mockito.Mockito.doThrow(new IllegalStateException("restore container cleanup failed"))
                 .doThrow(new IllegalStateException("delete container cleanup failed"))
                 .doNothing()
@@ -3833,7 +3848,7 @@ class RdsServiceTest {
             relayRunning.set(true);
             return null;
         }).when(proxyManager).startProxy(any(), any(), anyBoolean(), anyInt(), any(),
-                anyInt(), any(), any(), any(), any(), any());
+                anyInt(), any(), any(), any(), any(), any(), any());
         RdsService service = proxyStoreService(
                 regionResolver, config, proxies, targetGroups, instances, new InMemoryStorage<>());
         DbProxyAuth requiredAuth = new DbProxyAuth(
@@ -3887,7 +3902,7 @@ class RdsServiceTest {
             relayRunning.set(true);
             return null;
         }).when(proxyManager).startProxy(any(), any(), anyBoolean(), anyInt(), any(),
-                anyInt(), any(), any(), any(), any(), any());
+                anyInt(), any(), any(), any(), any(), any(), any());
         RdsService service = proxyStoreService(
                 regionResolver, config, proxies, targetGroups, instances, new InMemoryStorage<>());
         DbProxyAuth requiredAuth = new DbProxyAuth(
@@ -4153,7 +4168,7 @@ class RdsServiceTest {
             relayRunning.set(true);
             return null;
         }).when(proxyManager).startProxy(any(), any(), anyBoolean(), anyInt(), any(),
-                anyInt(), any(), any(), any(), any(), any());
+                anyInt(), any(), any(), any(), any(), any(), any());
         RdsService service = proxyStoreService(
                 regionResolver, config, proxies, targetGroups, instances, new InMemoryStorage<>());
 
@@ -4270,7 +4285,7 @@ class RdsServiceTest {
             relayRunning.set(true);
             return null;
         }).when(proxyManager).startProxy(any(), any(), anyBoolean(), anyInt(), any(),
-                anyInt(), any(), any(), any(), any(), any());
+                anyInt(), any(), any(), any(), any(), any(), any());
         RdsService service = proxyStoreService(
                 regionResolver, config, proxies, targetGroups, instances, new InMemoryStorage<>());
 
@@ -4340,7 +4355,7 @@ class RdsServiceTest {
         verify(proxyManager).startProxy(
                 eq("db-proxy:" + proxy.getDbProxyArn()), eq(DatabaseEngine.MYSQL),
                 anyBoolean(), eq(3306), eq("localhost"), eq(3306), any(),
-                eq("admin"), eq("secret"), eq("app"), any());
+                eq("admin"), eq("secret"), eq("app"), any(), any());
         verify(proxyManager).stopProxy("db-proxy:" + proxy.getDbProxyArn());
     }
 
@@ -4369,7 +4384,7 @@ class RdsServiceTest {
             relayRunning.set(true);
             throw startupFailure;
         }).when(proxyManager).startProxy(any(), any(), anyBoolean(), anyInt(), any(),
-                anyInt(), any(), any(), any(), any(), any());
+                anyInt(), any(), any(), any(), any(), any(), any());
         doAnswer(invocation -> {
             relayRunning.set(false);
             return null;
@@ -4836,7 +4851,7 @@ class RdsServiceTest {
             relayRunning.set(true);
             return null;
         }).when(proxyManager).startProxy(any(), any(), anyBoolean(), anyInt(), any(),
-                anyInt(), any(), any(), any(), any(), any());
+                anyInt(), any(), any(), any(), any(), any(), any());
         IllegalStateException deleteFailure =
                 new IllegalStateException("simulated post-mutation target-group delete failure");
         doAnswer(invocation -> {
@@ -4901,7 +4916,7 @@ class RdsServiceTest {
             relayRunning.set(true);
             return null;
         }).when(proxyManager).startProxy(any(), any(), anyBoolean(), anyInt(), any(),
-                anyInt(), any(), any(), any(), any(), any());
+                anyInt(), any(), any(), any(), any(), any(), any());
         IllegalStateException deleteFailure =
                 new IllegalStateException("simulated post-mutation proxy delete failure");
         doAnswer(invocation -> {
@@ -5064,9 +5079,9 @@ class RdsServiceTest {
         String relayKeyB = "rds-resource:" + instanceB.getDbInstanceArn();
 
         verify(proxyManager).startProxy(eq(relayKeyA), any(), anyBoolean(), anyInt(),
-                any(), anyInt(), any(), any(), any(), any(), any());
+                any(), anyInt(), any(), any(), any(), any(), any(), any());
         verify(proxyManager).startProxy(eq(relayKeyB), any(), anyBoolean(), anyInt(),
-                any(), anyInt(), any(), any(), any(), any(), any());
+                any(), anyInt(), any(), any(), any(), any(), any(), any());
 
         org.mockito.Mockito.clearInvocations(proxyManager);
         serviceA.deleteDbInstance("shared-db");
@@ -5181,7 +5196,7 @@ class RdsServiceTest {
         assertTrue(rawClusters.get("cluster1").isPresent());
         assertTrue(rawClusters.get(currentAccount + "/cluster1").isEmpty());
         verify(proxyManager, never()).startProxy(
-                any(), any(), anyBoolean(), anyInt(), any(), anyInt(), any(), any(), any(), any(), any());
+                any(), any(), anyBoolean(), anyInt(), any(), anyInt(), any(), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -5287,7 +5302,7 @@ class RdsServiceTest {
         assertEquals("insufficient-resource-limits", failed.getStatus());
         verify(proxyManager, never()).startProxy(
                 eq("db-proxy:" + proxy.getDbProxyArn()), any(), anyBoolean(), anyInt(),
-                any(), anyInt(), any(), any(), any(), any(), any());
+                any(), anyInt(), any(), any(), any(), any(), any(), any());
 
         DbProxy another = service.createDbProxy(
                 "another-proxy", "MYSQL", true, false, "NONE", PROXY_ROLE_ARN,
@@ -5307,7 +5322,7 @@ class RdsServiceTest {
         verify(proxyManager).startProxy(
                 eq("db-proxy:" + proxy.getDbProxyArn()), eq(DatabaseEngine.MYSQL),
                 anyBoolean(), eq(failed.getProxyPort()), any(), anyInt(),
-                any(), any(), any(), any(), any());
+                any(), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -5333,7 +5348,7 @@ class RdsServiceTest {
                 service.getDbProxy("app-proxy", "us-east-1").getStatus());
         verify(proxyManager, never()).startProxy(
                 eq("db-proxy:" + proxy.getDbProxyArn()), any(), anyBoolean(), anyInt(),
-                any(), anyInt(), any(), any(), any(), any(), any());
+                any(), anyInt(), any(), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -5398,7 +5413,7 @@ class RdsServiceTest {
         verify(restoredProxyManager).startProxy(eq("db-proxy:" + restored.getDbProxyArn()),
                 eq(DatabaseEngine.POSTGRES),
                 eq(false), anyInt(), eq("127.0.0.1"), eq(15432), any(),
-                eq("admin"), eq("secret"), eq("app"), any());
+                eq("admin"), eq("secret"), eq("app"), any(), any());
     }
 
     @Test
@@ -5470,7 +5485,7 @@ class RdsServiceTest {
         verify(restoredProxyManager).startProxy(eq("db-proxy:" + proxy.getDbProxyArn()),
                 eq(DatabaseEngine.POSTGRES),
                 eq(false), eq(5432), eq("127.0.0.1"), eq(15432), any(), eq("admin"),
-                eq("target-secret"), eq("app"), validator.capture());
+                eq("target-secret"), eq("app"), validator.capture(), any());
         assertTrue(validator.getValue().validate("admin", "target-secret"));
         assertFalse(validator.getValue().validate("admin", "default-secret"));
         assertTrue(rawProxies.get(targetAccount + "/us-east-1::app-proxy").isPresent());
