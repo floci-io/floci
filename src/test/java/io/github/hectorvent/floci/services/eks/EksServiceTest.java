@@ -1834,6 +1834,25 @@ class EksServiceTest {
     }
 
     @Test
+    void clusterCopyClearsExplicitVersionForWireResponse() throws Exception {
+        CreateClusterRequest explicitReq = createTestClusterRequest("wire-explicit-cluster");
+        explicitReq.setVersion("1.29");
+        Cluster explicitCluster = eksService.createCluster(explicitReq);
+        assertTrue(explicitCluster.isExplicitVersion());
+
+        Cluster responseCopy = explicitCluster.copy();
+        responseCopy.setExplicitVersion(false);
+        assertFalse(responseCopy.isExplicitVersion());
+        assertEquals("wire-explicit-cluster", responseCopy.getName());
+        assertEquals("1.29", responseCopy.getVersion());
+
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        String json = mapper.writeValueAsString(responseCopy);
+        assertFalse(json.contains("explicitVersion"));
+        assertTrue(json.contains("\"version\":\"1.29\""));
+    }
+
+    @Test
     void createClusterWithInvalidVersionFormatThrowsInvalidParameterException() {
         CreateClusterRequest req1 = createTestClusterRequest("v-prefix-cluster");
         req1.setVersion("v1.30");

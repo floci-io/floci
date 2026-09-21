@@ -61,7 +61,7 @@ public class EksController {
     @Path("/clusters")
     public Response createCluster(CreateClusterRequest request) {
         Cluster cluster = eksService.createCluster(request);
-        return Response.ok(Map.of("cluster", cluster)).build();
+        return Response.ok(Map.of("cluster", toClusterResponse(cluster))).build();
     }
 
     @GET
@@ -75,14 +75,29 @@ public class EksController {
     @Path("/clusters/{name}")
     public Response describeCluster(@PathParam("name") String name) {
         Cluster cluster = eksService.describeCluster(name);
-        return Response.ok(Map.of("cluster", cluster)).build();
+        return Response.ok(Map.of("cluster", toClusterResponse(cluster))).build();
     }
 
     @DELETE
     @Path("/clusters/{name}")
     public Response deleteCluster(@PathParam("name") String name) {
         Cluster cluster = eksService.deleteCluster(name);
-        return Response.ok(Map.of("cluster", cluster)).build();
+        return Response.ok(Map.of("cluster", toClusterResponse(cluster))).build();
+    }
+
+    /**
+     * Sanitizes the cluster model before emitting it as an AWS API response.
+     * explicitVersion is internal Floci metadata used for container image resolution
+     * across restarts and must not be included on the wire. Clearing it on a copy
+     * causes Jackson to omit the property due to @JsonInclude(NON_DEFAULT).
+     */
+    private Cluster toClusterResponse(Cluster cluster) {
+        if (cluster == null || !cluster.isExplicitVersion()) {
+            return cluster;
+        }
+        Cluster response = cluster.copy();
+        response.setExplicitVersion(false);
+        return response;
     }
 
     // Keep these concrete EKS resource paths declared explicitly so they outrank
