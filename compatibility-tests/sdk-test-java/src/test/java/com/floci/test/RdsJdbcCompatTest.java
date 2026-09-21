@@ -146,6 +146,27 @@ class RdsJdbcCompatTest {
 
     @Test
     @Order(4)
+    @DisplayName("IAM auth token generated for another host is rejected")
+    void rejectsIamAuthTokenGeneratedForAnotherHost() {
+        assumeInstanceCreated();
+
+        // Correctly signed, unexpired, same user: only the endpoint differs, as when a token
+        // minted for one instance is replayed against another.
+        String token = rds.utilities().generateAuthenticationToken(GenerateAuthenticationTokenRequest.builder()
+                .hostname("other-instance.example.local")
+                .port(proxyPort)
+                .username(USERNAME)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build());
+
+        assertThatThrownBy(() -> openPostgresConnection(USERNAME, token))
+                .isInstanceOf(SQLException.class)
+                .hasMessageContaining("password authentication failed");
+    }
+
+    @Test
+    @Order(5)
     @DisplayName("IAM auth rejected on instance created without IAM")
     void iamAuthRejectedWhenDisabledAtCreate() {
         assumeInstanceCreated();
@@ -191,7 +212,7 @@ class RdsJdbcCompatTest {
     }
 
     @Test
-    @Order(5)
+    @Order(6)
     @DisplayName("Toggle IAM via modify on a running instance")
     void toggleIamViaModifyOnRunningInstance() throws Exception {
         assumeInstanceCreated();
@@ -274,7 +295,7 @@ class RdsJdbcCompatTest {
     }
 
     @Test
-    @Order(6)
+    @Order(7)
     @DisplayName("Modify password keeps proxy reachable and delete releases port")
     void modifyKeepsProxyReachableAndDeleteReleasesPort() throws Exception {
         assumeInstanceCreated();
