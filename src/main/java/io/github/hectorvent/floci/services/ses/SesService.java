@@ -692,9 +692,11 @@ public class SesService {
                     "Email address is not verified. The following identities failed the check in region "
                             + region.toUpperCase(Locale.ROOT) + ": " + template.getFromEmailAddress(), 400);
         }
-        if (configurationSetName != null && !configurationSetName.isBlank()) {
-            configSetService.get(configurationSetName, region);
-        }
+        String effectiveConfigSet = resolveDefaultConfigurationSet(configurationSetName,
+                template.getFromEmailAddress(), region);
+        configSetService.validateForSending(effectiveConfigSet, region);
+        Map<String, String> suppressedReasons =
+                collectSuppressedReasons(List.of(emailAddress), effectiveConfigSet, region);
 
         // AWS registers the recipient as a pending-verification identity as part of sending the
         // verification email, so ListIdentities / GetIdentityVerificationAttributes surface it.
@@ -708,27 +710,42 @@ public class SesService {
         String renderedHtml = body + "<p>" + CUSTOM_VERIFICATION_DISCLAIMER + "</p>";
 
         String messageId = UUID.randomUUID().toString();
+        // The template content is account-supplied, so it goes through the same content scan as
+        // any other send; a rejected verification email is recorded without its body and not relayed.
+        boolean rejected = SesContentScan.containsTestVirus(template.getTemplateSubject(), renderedHtml);
         SentEmail email = new SentEmail(messageId, region, template.getFromEmailAddress(),
                 List.of(emailAddress), List.of(), List.of(), List.of(),
                 template.getTemplateSubject(), null, renderedHtml);
         email.setReturnPath(template.getFromEmailAddress());
         email.setInsights(SesMessageInsights.build(List.of(emailAddress),
-                SesRecipientEvents.classify(List.of(emailAddress), Map.of(), false),
+                SesRecipientEvents.classify(List.of(emailAddress), suppressedReasons, rejected),
                 email.getSentAt()));
+        if (rejected) {
+            email.discardContent(SesRecipientEvents.CONTENT_REJECT_REASON);
+        }
         sentEmailService.record(region, messageId, email);
-        smtpRelay.relay(SmtpRelay.RelayMessage.builder(template.getFromEmailAddress())
-                .returnPath(template.getFromEmailAddress())
-                .to(List.of(emailAddress))
-                .cc(List.of())
-                .bcc(List.of())
-                .replyTo(List.of())
-                .subject(template.getTemplateSubject())
-                .bodyHtml(renderedHtml)
-                .headers(List.of())
-                .messageId(messageId)
-                .build());
-        LOG.infov("SES custom verification email sent: to={0}, template={1}, messageId={2}",
-                emailAddress, templateName, messageId);
+        if (!rejected && suppressedReasons.isEmpty()) {
+            smtpRelay.relay(SmtpRelay.RelayMessage.builder(template.getFromEmailAddress())
+                    .returnPath(template.getFromEmailAddress())
+                    .to(List.of(emailAddress))
+                    .cc(List.of())
+                    .bcc(List.of())
+                    .replyTo(List.of())
+                    .subject(template.getTemplateSubject())
+                    .bodyHtml(renderedHtml)
+                    .headers(List.of())
+                    .messageId(messageId)
+                    .build());
+            LOG.infov("SES custom verification email sent: to={0}, template={1}, messageId={2}",
+                    emailAddress, templateName, messageId);
+        } else {
+            LOG.infov("SES custom verification email not relayed ({0}): to={1}, template={2}, messageId={3}",
+                    rejected ? "content rejected" : "recipient suppressed", emailAddress, templateName,
+                    messageId);
+        }
+        publishSendEvents(effectiveConfigSet, messageId, template.getFromEmailAddress(),
+                template.getTemplateSubject(), List.of(emailAddress), List.of(), List.of(),
+                List.of(emailAddress), suppressedReasons, rejected, List.of(), List.of(), region);
         return messageId;
     }
 

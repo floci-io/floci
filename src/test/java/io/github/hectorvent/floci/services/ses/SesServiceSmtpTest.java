@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.ses;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
+import io.github.hectorvent.floci.services.ses.model.CustomVerificationEmailTemplate;
+import io.github.hectorvent.floci.services.ses.model.InsightsEvent;
 import io.github.hectorvent.floci.services.ses.model.SentEmail;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -27,6 +29,8 @@ class SesServiceSmtpTest {
     private SesConfigurationSetService configSets;
     private SesSentEmailService sentEmails;
     private SesSuppressionService suppression;
+    private SesCvetService cvetTemplates;
+    private SesIdentityService identities;
     private InMemoryStorage<String, SentEmail> emailStore;
 
     @BeforeEach
@@ -37,6 +41,57 @@ class SesServiceSmtpTest {
         configSets = builder.configSetService();
         sentEmails = builder.sentEmailService();
         suppression = builder.suppressionService();
+        cvetTemplates = builder.cvetService();
+        identities = builder.identityService();
+    }
+
+    private void cvetTemplate(String name, String subject, String content) {
+        identities.verifyEmailIdentity("verifier@example.com", "us-east-1");
+        CustomVerificationEmailTemplate template = new CustomVerificationEmailTemplate();
+        template.setTemplateName(name);
+        template.setFromEmailAddress("verifier@example.com");
+        template.setTemplateSubject(subject);
+        template.setTemplateContent(content);
+        template.setSuccessRedirectionURL("https://example.com/ok");
+        template.setFailureRedirectionURL("https://example.com/ng");
+        cvetTemplates.createCustomVerificationEmailTemplate(template, "us-east-1");
+    }
+
+    @Test
+    void sendCustomVerificationEmail_signatureInTheTemplateSubject_isRejectedAndNotRelayed() {
+        // The scan covers the subject as well as the content, and neither reaches the relay.
+        cvetTemplate("cvet-subject", SesContentScan.signature(), "<p>clean</p>");
+
+        String messageId = service.sendCustomVerificationEmail("target@example.com", "cvet-subject",
+                null, "us-east-1");
+
+        assertEquals("Bad content", storedEmail(messageId).getRejectReason());
+        assertEquals(List.of("SEND", "REJECT"), insightsEventTypes(messageId));
+        verify(smtpRelay, never()).relay(any());
+    }
+
+    @Test
+    void sendCustomVerificationEmail_signatureInTheTemplateContent_isRejectedAndNotRelayed() {
+        cvetTemplate("cvet-content", "clean", "<p>" + SesContentScan.signature() + "</p>");
+
+        String messageId = service.sendCustomVerificationEmail("target@example.com", "cvet-content",
+                null, "us-east-1");
+
+        assertEquals("Bad content", storedEmail(messageId).getRejectReason());
+        verify(smtpRelay, never()).relay(any());
+    }
+
+    @Test
+    void sendCustomVerificationEmail_suppressedRecipient_isRecordedButNotRelayed() {
+        cvetTemplate("cvet-suppressed", "clean", "<p>clean</p>");
+        suppression.putSuppressedDestination("us-east-1", "blocked@example.com", "BOUNCE");
+
+        String messageId = service.sendCustomVerificationEmail("blocked@example.com",
+                "cvet-suppressed", null, "us-east-1");
+
+        assertNull(storedEmail(messageId).getRejectReason());
+        assertEquals(List.of("SEND", "BOUNCE"), insightsEventTypes(messageId));
+        verify(smtpRelay, never()).relay(any());
     }
 
     private SentEmail storedEmail(String messageId) {
@@ -44,6 +99,12 @@ class SesServiceSmtpTest {
                 .filter(e -> messageId.equals(e.getMessageId()))
                 .findFirst()
                 .orElseThrow();
+    }
+
+    private List<String> insightsEventTypes(String messageId) {
+        return storedEmail(messageId).getInsights().get(0).events().stream()
+                .map(InsightsEvent::type)
+                .toList();
     }
 
     private SmtpRelay.RelayMessage capturedRelay() {

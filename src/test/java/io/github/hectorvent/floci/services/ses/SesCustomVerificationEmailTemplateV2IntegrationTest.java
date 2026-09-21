@@ -9,6 +9,8 @@ import org.junit.jupiter.api.TestMethodOrder;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.hasKey;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
 
 /**
@@ -154,5 +156,41 @@ class SesCustomVerificationEmailTemplateV2IntegrationTest {
         .when().post(BASE).then().statusCode(400)
                 .body("__type", equalTo("BadRequestException"))
                 .body("message", equalTo("The success redirection URL is invalid"));
+    }
+
+    @Test
+    @Order(11)
+    void sendWithTemplateCarryingTheTestSignature_isRecordedWithoutItsBodyAndNotRelayed() {
+        // The signature comes from the scanner so it never appears in test source; the JSON needs
+        // its one backslash escaped.
+        String content = SesContentScan.signature().replace("\\", "\\\\");
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("""
+                    {"TemplateName": "cvet-v2-scan", "FromEmailAddress": "%s", "TemplateSubject": "scan",
+                     "TemplateContent": "<p>%s</p>",
+                     "SuccessRedirectionURL": "https://example.com/ok",
+                     "FailureRedirectionURL": "https://example.com/ng"}
+                    """.formatted(FROM, content))
+        .when().post(BASE).then().statusCode(200);
+
+        // Sending registers the recipient as a pending identity in the shared region, so it is
+        // removed again below; a domain other tests assert on must not be used here.
+        String messageId = given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"EmailAddress\":\"scan-target@cvet-scan.floci.test\",\"TemplateName\":\"cvet-v2-scan\"}")
+        .when().post("/v2/email/outbound-custom-verification-emails").then().statusCode(200)
+                .extract().jsonPath().getString("MessageId");
+
+        try {
+            given().header("Authorization", AUTH)
+            .when().get("/_aws/ses?id=" + messageId).then().statusCode(200)
+                    .body("messages[0].RejectReason", equalTo("Bad content"))
+                    .body("messages[0]", not(hasKey("Subject")))
+                    .body("messages[0]", not(hasKey("Body")));
+        } finally {
+            given().header("Authorization", AUTH)
+            .when().delete("/v2/email/identities/scan-target@cvet-scan.floci.test");
+            given().header("Authorization", AUTH)
+            .when().delete(BASE + "/cvet-v2-scan");
+        }
     }
 }

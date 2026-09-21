@@ -1809,6 +1809,109 @@ class SesEventPublishingV2IntegrationTest {
         }
     }
 
+    @Test
+    @Order(37)
+    void customVerificationEmail_publishesThroughTheSameClassifierAsAnyOtherSend() throws Exception {
+        // SendCustomVerificationEmail accepts a ConfigurationSetName like the other send APIs, so a
+        // clean verification email publishes a Send and one carrying the signature adds a Reject.
+        String signature = SesContentScan.signature().replace("\\", "\\\\");
+        String recipient = "cvet-events@cvet-events.floci.test";
+        createCustomVerificationTemplate("cvet-events-clean", "<p>verify</p>");
+        createCustomVerificationTemplate("cvet-events-scan", "<p>" + signature + "</p>");
+        try {
+            drainQueue();
+            sendCustomVerificationEmail(recipient, "cvet-events-clean", CS);
+            List<JsonNode> clean = receiveSesEvents(1);
+            assertEquals(List.of("Send"), clean.stream().map(e -> e.path("eventType").asText()).toList());
+
+            drainQueue();
+            String messageId = sendCustomVerificationEmail(recipient, "cvet-events-scan", CS);
+            List<JsonNode> rejected = receiveSesEvents(2);
+            assertEquals(2, rejected.size(), "expected Send and Reject");
+            assertTrue(rejected.stream().anyMatch(e -> "Reject".equals(e.path("eventType").asText())));
+            assertTrue(rejected.stream().allMatch(e -> messageId.equals(e.path("mail").path("messageId").asText())));
+        } finally {
+            given().header("Authorization", SES_AUTH).when().delete("/v2/email/identities/" + recipient);
+            given().header("Authorization", SES_AUTH)
+            .when().delete("/v2/email/custom-verification-email-templates/cvet-events-clean");
+            given().header("Authorization", SES_AUTH)
+            .when().delete("/v2/email/custom-verification-email-templates/cvet-events-scan");
+        }
+    }
+
+    private void createCustomVerificationTemplate(String name, String content) {
+        given().contentType("application/json").header("Authorization", SES_AUTH)
+                .body("""
+                    {"TemplateName": "%s", "FromEmailAddress": "%s", "TemplateSubject": "verify",
+                     "TemplateContent": "%s",
+                     "SuccessRedirectionURL": "https://example.com/ok",
+                     "FailureRedirectionURL": "https://example.com/ng"}
+                    """.formatted(name, SENDER, content))
+        .when().post("/v2/email/custom-verification-email-templates").then().statusCode(200);
+    }
+
+    private String sendCustomVerificationEmail(String recipient, String templateName, String configurationSet) {
+        String configurationSetField = configurationSet == null
+                ? "" : ", \"ConfigurationSetName\": \"" + configurationSet + "\"";
+        return given().contentType("application/json").header("Authorization", SES_AUTH)
+                .body("""
+                    {"EmailAddress": "%s", "TemplateName": "%s"%s}
+                    """.formatted(recipient, templateName, configurationSetField))
+        .when().post("/v2/email/outbound-custom-verification-emails").then().statusCode(200)
+                .extract().jsonPath().getString("MessageId");
+    }
+
+    @Test
+    @Order(38)
+    void customVerificationEmail_sharesTheSendPreambleWithTheOtherSendPaths() throws Exception {
+        // The identity's default configuration set, the account suppression list and a paused
+        // configuration set apply to a verification email exactly as they do to SendEmail.
+        String recipient = "cvet-preamble@cvet-events.floci.test";
+        createCustomVerificationTemplate("cvet-preamble", "<p>verify</p>");
+        try {
+            given().contentType("application/json").header("Authorization", SES_AUTH)
+                    .body("{\"ConfigurationSetName\":\"" + CS + "\"}")
+            .when().put("/v2/email/identities/" + SENDER + "/configuration-set").then().statusCode(200);
+            drainQueue();
+            sendCustomVerificationEmail(recipient, "cvet-preamble", null);
+            assertEquals(List.of("Send"),
+                    receiveSesEvents(1).stream().map(e -> e.path("eventType").asText()).toList(),
+                    "the identity default configuration set publishes without an explicit name");
+
+            given().contentType("application/json").header("Authorization", SES_AUTH)
+                    .body("{\"EmailAddress\":\"" + recipient + "\",\"Reason\":\"BOUNCE\"}")
+            .when().put("/v2/email/suppression/addresses").then().statusCode(200);
+            drainQueue();
+            sendCustomVerificationEmail(recipient, "cvet-preamble", CS);
+            JsonNode bounce = receiveSesEvents(2).stream()
+                    .filter(e -> "Bounce".equals(e.path("eventType").asText())).findFirst().orElseThrow();
+            assertEquals("OnAccountSuppressionList", bounce.path("bounce").path("bounceSubType").asText());
+
+            given().contentType("application/json").header("Authorization", SES_AUTH)
+                    .body("{\"ConfigurationSetName\":\"cvet-paused\"}")
+            .when().post("/v2/email/configuration-sets").then().statusCode(200);
+            given().contentType("application/json").header("Authorization", SES_AUTH)
+                    .body("{\"SendingEnabled\":false}")
+            .when().put("/v2/email/configuration-sets/cvet-paused/sending").then().statusCode(200);
+            given().contentType("application/json").header("Authorization", SES_AUTH)
+                    .body("""
+                        {"EmailAddress": "%s", "TemplateName": "cvet-preamble", "ConfigurationSetName": "cvet-paused"}
+                        """.formatted(recipient))
+            .when().post("/v2/email/outbound-custom-verification-emails").then().statusCode(400)
+                    .body("__type", equalTo("SendingPausedException"));
+        } finally {
+            given().contentType("application/json").header("Authorization", SES_AUTH).body("{}")
+            .when().put("/v2/email/identities/" + SENDER + "/configuration-set");
+            given().header("Authorization", SES_AUTH)
+            .when().delete("/v2/email/suppression/addresses/" + recipient);
+            given().header("Authorization", SES_AUTH)
+            .when().delete("/v2/email/configuration-sets/cvet-paused");
+            given().header("Authorization", SES_AUTH)
+            .when().delete("/v2/email/custom-verification-email-templates/cvet-preamble");
+            given().header("Authorization", SES_AUTH).when().delete("/v2/email/identities/" + recipient);
+        }
+    }
+
     private void sendEmail(String to) {
         given()
                 .contentType("application/json")
