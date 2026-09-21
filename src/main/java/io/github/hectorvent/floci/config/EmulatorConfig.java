@@ -2567,9 +2567,10 @@ public interface EmulatorConfig {
             boolean enabled();
 
             /**
-             * Optional allow-list of absolute path prefixes. When non-empty, the S3Key supplied
-             * to a hot-reload CreateFunction/UpdateFunctionCode must start with one of these
-             * prefixes. Empty = all absolute paths are accepted.
+             * Optional allow-list of absolute directories. When set, the S3Key supplied to a
+             * hot-reload CreateFunction/UpdateFunctionCode must be one of these directories or
+             * inside one, compared after {@code .} and {@code ..} segments are resolved.
+             * Unset = all absolute paths are accepted.
              *
              * Env var: FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ALLOWED_PATHS
              */

@@ -126,6 +126,8 @@ FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ENABLED=true
 FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ALLOWED_PATHS=/home/user/projects,/tmp
 ```
 
+An `S3Key` is accepted when it is one of the listed directories or inside one. `.` and `..` segments are resolved first, so `/home/user/projects/../secrets` and a sibling such as `/home/user/projects-old` are rejected. Symbolic links on the Docker host are not resolved by Floci. A path containing `:` is rejected. Without an allow-list any absolute host path is accepted, and Floci logs a warning at startup when hot-reload is enabled that way.
+
 **Docker Compose setup**: enable the feature and share the Docker socket:
 
 ```yaml

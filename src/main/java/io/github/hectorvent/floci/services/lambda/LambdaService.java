@@ -39,6 +39,7 @@ import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -282,6 +283,15 @@ public class LambdaService implements ResourceProvider {
     void init() {
         initializeStorage();
         rehydrateConcurrency();
+        warnWhenHotReloadHasNoAllowList();
+    }
+
+    private void warnWhenHotReloadHasNoAllowList() {
+        if (config != null && config.services().lambda().hotReload().enabled()
+                && config.services().lambda().hotReload().allowedPaths().isEmpty()) {
+            LOG.warn("Lambda hot-reload is enabled without FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ALLOWED_PATHS: "
+                    + "any absolute path on the Docker host can be bind-mounted into a function container");
+        }
     }
 
     /**
@@ -2965,19 +2975,43 @@ public class LambdaService implements ResourceProvider {
             throw new AwsException("InvalidParameterValueException",
                     "Hot-reload S3Key must be an absolute path on the Docker host, got: " + hostPath, 400);
         }
+        if (hostPath.contains(":")) {
+            throw new AwsException("InvalidParameterValueException",
+                    "Hot-reload S3Key must not contain ':', got: " + hostPath, 400);
+        }
+        Path normalized;
+        try {
+            normalized = Path.of(hostPath).normalize();
+        } catch (InvalidPathException e) {
+            throw new AwsException("InvalidParameterValueException",
+                    "Hot-reload S3Key is not a valid path: " + hostPath, 400);
+        }
         config.services().lambda().hotReload().allowedPaths().ifPresent(allowed -> {
-            if (allowed.stream().noneMatch(hostPath::startsWith)) {
+            if (allowed.stream().noneMatch(prefix -> isUnderHotReloadPrefix(normalized, prefix))) {
                 throw new AwsException("InvalidParameterValueException",
                         "Path '" + hostPath + "' is not under an allowed hot-reload mount prefix.", 400);
             }
         });
-        fn.setHotReloadHostPath(hostPath);
+        String resolvedHostPath = normalized.toString();
+        fn.setHotReloadHostPath(resolvedHostPath);
         fn.setCodeLocalPath(null);
         fn.setS3Bucket(null);
         fn.setS3Key(null);
         fn.setCodeSizeBytes(0);
         fn.setCodeSha256("");
-        LOG.infov("Hot-reload configured for function {0}: bind-mounting {1}", fn.getFunctionName(), hostPath);
+        LOG.infov("Hot-reload configured for function {0}: bind-mounting {1}", fn.getFunctionName(), resolvedHostPath);
+    }
+
+    private static boolean isUnderHotReloadPrefix(Path normalizedPath, String prefix) {
+        if (prefix == null || prefix.isBlank()) {
+            return false;
+        }
+        try {
+            return normalizedPath.startsWith(Path.of(prefix).normalize());
+        } catch (InvalidPathException ignored) {
+            // A malformed prefix can never contain a path, so it does not allow anything.
+            return false;
+        }
     }
 
     // ──────────────────────────── Permissions (Policy) ────────────────────────────

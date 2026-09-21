@@ -13,6 +13,8 @@ import io.github.hectorvent.floci.services.lambda.zip.CodeStore;
 import io.github.hectorvent.floci.services.lambda.zip.ZipExtractor;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
@@ -956,6 +958,75 @@ class LambdaServiceTest {
         AwsException ex = assertThrows(AwsException.class, () -> svc.createFunction(REGION, req));
         assertEquals("InvalidParameterValueException", ex.getErrorCode());
         assertTrue(ex.getMessage().contains("allowed"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "/home/ci/code/../../",
+            "/home/ci/code/../../../etc",
+            "/home/ci/code/sub/../../..",
+            "/home/ci/code/./../secrets",
+            "/home/ci/code-evil",
+            "/home/ci/codex/my-fn",
+            "/home/ci"
+    })
+    void hotReload_allowListRejectsTraversalAndSiblingPrefixes(String s3Key) {
+        LambdaService svc = serviceWithHotReload(true, List.of("/home/ci/code"));
+        Map<String, Object> req = baseRequest("hr-escape");
+        req.put("Code", Map.of("S3Bucket", "hot-reload", "S3Key", s3Key));
+
+        AwsException ex = assertThrows(AwsException.class, () -> svc.createFunction(REGION, req), s3Key);
+
+        assertEquals("InvalidParameterValueException", ex.getErrorCode());
+    }
+
+    @Test
+    void hotReload_rejectsAColonInThePath() {
+        LambdaService svc = serviceWithHotReload(true, null);
+        Map<String, Object> req = baseRequest("hr-colon");
+        req.put("Code", Map.of("S3Bucket", "hot-reload", "S3Key", "/home/ci/code:/etc"));
+
+        AwsException ex = assertThrows(AwsException.class, () -> svc.createFunction(REGION, req));
+
+        assertEquals("InvalidParameterValueException", ex.getErrorCode());
+    }
+
+    @Test
+    void hotReload_allowListAcceptsThePrefixItselfAndItsChildren() {
+        LambdaService svc = serviceWithHotReload(true, List.of("/home/ci/code"));
+
+        Map<String, Object> exact = baseRequest("hr-exact");
+        exact.put("Code", Map.of("S3Bucket", "hot-reload", "S3Key", "/home/ci/code"));
+        assertEquals("/home/ci/code", svc.createFunction(REGION, exact).getHotReloadHostPath());
+
+        Map<String, Object> child = baseRequest("hr-child");
+        child.put("Code", Map.of("S3Bucket", "hot-reload", "S3Key", "/home/ci/code/app"));
+        assertEquals("/home/ci/code/app", svc.createFunction(REGION, child).getHotReloadHostPath());
+    }
+
+    @Test
+    void hotReload_storesTheNormalizedPathHandedToDocker() {
+        LambdaService svc = serviceWithHotReload(true, List.of("/home/ci/code"));
+        Map<String, Object> req = baseRequest("hr-normalized");
+        req.put("Code", Map.of("S3Bucket", "hot-reload", "S3Key", "/home/ci/code/app/../lib/"));
+
+        assertEquals("/home/ci/code/lib", svc.createFunction(REGION, req).getHotReloadHostPath());
+    }
+
+    @Test
+    void hotReload_traversalIsRejectedOnUpdateFunctionCodeToo() {
+        LambdaService svc = serviceWithHotReload(true, List.of("/home/ci/code"));
+        Map<String, Object> create = baseRequest("hr-update");
+        create.put("Code", Map.of("S3Bucket", "hot-reload", "S3Key", "/home/ci/code/app"));
+        svc.createFunction(REGION, create);
+
+        Map<String, Object> update = new HashMap<>();
+        update.put("S3Bucket", "hot-reload");
+        update.put("S3Key", "/home/ci/code/../../");
+        AwsException ex = assertThrows(AwsException.class,
+                () -> svc.updateFunctionCode(REGION, "hr-update", update));
+
+        assertEquals("InvalidParameterValueException", ex.getErrorCode());
     }
 
     @Test
