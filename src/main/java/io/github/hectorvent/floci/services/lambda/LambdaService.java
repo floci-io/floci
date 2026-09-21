@@ -2992,7 +2992,7 @@ public class LambdaService implements ResourceProvider {
                         "Path '" + hostPath + "' is not under an allowed hot-reload mount prefix.", 400);
             }
         });
-        String resolvedHostPath = normalized.toString();
+        String resolvedHostPath = toDockerHostPath(normalized);
         fn.setHotReloadHostPath(resolvedHostPath);
         fn.setCodeLocalPath(null);
         fn.setS3Bucket(null);
@@ -3000,6 +3000,15 @@ public class LambdaService implements ResourceProvider {
         fn.setCodeSizeBytes(0);
         fn.setCodeSha256("");
         LOG.infov("Hot-reload configured for function {0}: bind-mounting {1}", fn.getFunctionName(), resolvedHostPath);
+    }
+
+    /** Docker on the host expects a POSIX path, whatever separator the JVM running Floci uses. */
+    static String toDockerHostPath(Path normalized) {
+        StringBuilder path = new StringBuilder();
+        for (Path name : normalized) {
+            path.append('/').append(name);
+        }
+        return path.length() == 0 ? "/" : path.toString();
     }
 
     private static boolean isUnderHotReloadPrefix(Path normalizedPath, String prefix) {

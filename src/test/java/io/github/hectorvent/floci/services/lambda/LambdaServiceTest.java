@@ -992,6 +992,13 @@ class LambdaServiceTest {
     }
 
     @Test
+    void hotReload_dockerHostPathIsAlwaysPosixSeparated() {
+        assertEquals("/home/ci/code/lib", LambdaService.toDockerHostPath(Path.of("/home/ci/code/lib")));
+        assertEquals("/home", LambdaService.toDockerHostPath(Path.of("/home")));
+        assertEquals("/", LambdaService.toDockerHostPath(Path.of("/")));
+    }
+
+    @Test
     void hotReload_allowListAcceptsThePrefixItselfAndItsChildren() {
         LambdaService svc = serviceWithHotReload(true, List.of("/home/ci/code"));
 
