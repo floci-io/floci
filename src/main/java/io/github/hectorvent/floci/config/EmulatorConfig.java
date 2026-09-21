@@ -2884,6 +2884,18 @@ public interface EmulatorConfig {
          */
         @WithDefault("true")
         boolean irsaSigningKey();
+
+        /**
+         * When true, registers a {@code MutatingWebhookConfiguration} in each new cluster so pods
+         * whose service account has an EKS Pod Identity association are mutated at admission with a
+         * projected pod identity token and the container credentials environment variables.
+         *
+         * <p>Requires {@link EmulatorConfig#tls()} to be enabled: Kubernetes rejects an admission
+         * webhook URL that is not {@code https}. With TLS off the webhook is skipped with a warning
+         * and pods start unmutated.
+         */
+        @WithDefault("true")
+        boolean podIdentityWebhook();
     }
 
     /**

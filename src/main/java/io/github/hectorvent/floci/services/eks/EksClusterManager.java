@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.eks;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
@@ -49,6 +50,7 @@ import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -74,6 +76,13 @@ public class EksClusterManager {
     // Tar entry extracted at /etc; the archive path creates /etc/rancher/k3s, which does not
     // exist yet in a created-but-not-started k3s container.
     private static final String REGISTRIES_TAR_ENTRY = "rancher/k3s/registries.yaml";
+    // k3s applies every manifest in its server manifests directory at startup, and again whenever
+    // one changes on disk, so dropping the file in before the container starts is enough to get the
+    // MutatingWebhookConfiguration registered. The directory sits under the cluster's named data
+    // volume; the Docker copy resolves through the container's mounts, so the file lands there.
+    static final String K3S_DATA_DIR = "/var/lib/rancher/k3s";
+    static final String POD_IDENTITY_MANIFEST_FILE = "floci-eks-pod-identity.yaml";
+    static final String POD_IDENTITY_MANIFEST_TAR_ENTRY = "server/manifests/" + POD_IDENTITY_MANIFEST_FILE;
     private static final String ENDPOINT_MODE_NETWORK = "network";
     public static final String DEFAULT_POD_CIDR = "10.42.0.0/16";
 
@@ -105,6 +114,7 @@ public class EksClusterManager {
     private final RegionResolver regionResolver;
     private final Ec2MetadataServer metadataServer;
     private final EksOidcService oidcService;
+    private final FlociCertificateAuthority certificateAuthority;
     private final Map<String, Instance> clusterNodeInstances = new ConcurrentHashMap<>();
 
     public EksClusterManager(ContainerBuilder containerBuilder,
@@ -116,7 +126,7 @@ public class EksClusterManager {
                              EmulatorConfig config,
                              RegionResolver regionResolver) {
         this(containerBuilder, lifecycleManager, containerDetector, portAllocator,
-                dockerHostResolver, ecrRegistryManager, config, regionResolver, null, null);
+                dockerHostResolver, ecrRegistryManager, config, regionResolver, null, null, null);
     }
 
     public EksClusterManager(ContainerBuilder containerBuilder,
@@ -129,7 +139,21 @@ public class EksClusterManager {
                              RegionResolver regionResolver,
                              Ec2MetadataServer metadataServer) {
         this(containerBuilder, lifecycleManager, containerDetector, portAllocator,
-                dockerHostResolver, ecrRegistryManager, config, regionResolver, metadataServer, null);
+                dockerHostResolver, ecrRegistryManager, config, regionResolver, metadataServer, null, null);
+    }
+
+    public EksClusterManager(ContainerBuilder containerBuilder,
+                             ContainerLifecycleManager lifecycleManager,
+                             ContainerDetector containerDetector,
+                             PortAllocator portAllocator,
+                             DockerHostResolver dockerHostResolver,
+                             EcrRegistryManager ecrRegistryManager,
+                             EmulatorConfig config,
+                             RegionResolver regionResolver,
+                             Ec2MetadataServer metadataServer,
+                             EksOidcService oidcService) {
+        this(containerBuilder, lifecycleManager, containerDetector, portAllocator, dockerHostResolver,
+                ecrRegistryManager, config, regionResolver, metadataServer, oidcService, null);
     }
 
     @Inject
@@ -142,7 +166,8 @@ public class EksClusterManager {
                              EmulatorConfig config,
                              RegionResolver regionResolver,
                              Ec2MetadataServer metadataServer,
-                             EksOidcService oidcService) {
+                             EksOidcService oidcService,
+                             FlociCertificateAuthority certificateAuthority) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.containerDetector = containerDetector;
@@ -153,6 +178,7 @@ public class EksClusterManager {
         this.regionResolver = regionResolver;
         this.metadataServer = metadataServer;
         this.oidcService = oidcService;
+        this.certificateAuthority = certificateAuthority;
     }
 
     /**
@@ -247,7 +273,7 @@ public class EksClusterManager {
                 .withName(containerName)
                 .withEnv("K3S_KUBECONFIG_MODE", "644")
                 .withPortBinding(K3S_API_SERVER_PORT, hostPort)
-                .withNamedVolume(volumeName, "/var/lib/rancher/k3s")
+                .withNamedVolume(volumeName, K3S_DATA_DIR)
                 .withDockerNetwork(config.services().eks().dockerNetwork())
                 .withPrivileged(true)
                 .withLogRotation()
@@ -314,6 +340,7 @@ public class EksClusterManager {
             copyWebhookIntoContainer(containerId, webhookLocalFile, cluster.getName());
         }
         injectEcrRegistryMirror(containerId, cluster.getName());
+        registerPodIdentityWebhook(containerId, cluster);
         if (signingKeyFiles != null) {
             copySigningKeysIntoContainer(containerId, signingKeyFiles, cluster.getName());
         }
@@ -906,7 +933,8 @@ public class EksClusterManager {
         }
         String endpoint = "http://" + dockerHostResolver.resolve() + ":" + config.port();
         String content = buildRegistriesYaml(config.defaultAccountId(), regions, config.port(), endpoint);
-        writeRegistriesYaml(clusterName, content);
+        writeLocalCopy(Paths.get(config.services().eks().dataPath(), "registries", clusterName,
+                "registries.yaml"), content, clusterName);
         try {
             lifecycleManager.getDockerClient()
                     .copyArchiveToContainerCmd(containerId)
@@ -920,16 +948,101 @@ public class EksClusterManager {
         }
     }
 
+    /**
+     * Drops the cluster's {@code MutatingWebhookConfiguration} into the k3s server manifests
+     * directory of the (created, not-yet-started) container, so the API server registers it as it
+     * comes up and starts sending pod CREATE admission reviews to Floci.
+     *
+     * <p>Kubernetes requires an {@code https} {@code clientConfig.url} and a {@code caBundle} it
+     * trusts, neither of which Floci can offer with TLS off, so the webhook is skipped with a
+     * warning in that case. A failure here leaves the cluster running without pod identity
+     * injection, matching the token webhook and the ECR mirror.
+     */
+    void registerPodIdentityWebhook(String containerId, Cluster cluster) {
+        if (!config.services().eks().podIdentityWebhook()) {
+            return;
+        }
+        String clusterName = cluster.getName();
+        if (!config.tls().enabled()) {
+            LOG.warnv("EKS Pod Identity injection is off for cluster {0}: Kubernetes only accepts an "
+                    + "https admission webhook URL, and Floci serves HTTP with floci.tls.enabled=false. "
+                    + "Set FLOCI_TLS_ENABLED=true to have pods mutated. Pods still start, without the "
+                    + "pod identity token or credentials environment variables.", clusterName);
+            return;
+        }
+        if (certificateAuthority == null) {
+            LOG.warnv("EKS Pod Identity injection is off for cluster {0}: no local CA is available to "
+                    + "put in the webhook caBundle", clusterName);
+            return;
+        }
+        String url = "https://" + dockerHostResolver.resolve() + ":" + config.port()
+                + podIdentityWebhookPath(clusterName, resolveClusterAccountId(cluster));
+        String manifest = buildPodIdentityWebhookConfiguration(url, certificateAuthority.caPem());
+        writeLocalCopy(Paths.get(config.services().eks().dataPath(), "webhook", clusterName,
+                POD_IDENTITY_MANIFEST_FILE), manifest, clusterName);
+        try {
+            lifecycleManager.getDockerClient()
+                    .copyArchiveToContainerCmd(containerId)
+                    .withTarInputStream(new ByteArrayInputStream(
+                            tarSingleFile(POD_IDENTITY_MANIFEST_TAR_ENTRY, manifest)))
+                    .withRemotePath(K3S_DATA_DIR)
+                    .exec();
+            LOG.infov("Registered the EKS Pod Identity mutating webhook ({0}) for cluster {1}", url, clusterName);
+        } catch (Exception e) {
+            LOG.warnv("EKS cluster {0} gets no pod identity injection: could not copy {1} into the k3s "
+                    + "container: {2}", clusterName, POD_IDENTITY_MANIFEST_FILE, e.getMessage());
+        }
+    }
+
+    /**
+     * The Floci pod identity admission route. The account is in the path for the same reason the
+     * token webhook puts its scope there: the API server calls Floci with no AWS credentials, so a
+     * cluster owned by a non-default account would otherwise never be found.
+     */
+    static String podIdentityWebhookPath(String clusterName, String accountId) {
+        return "/_floci/eks/clusters/" + clusterName + "/pod-identity-webhook/scope/" + accountId;
+    }
+
+    /**
+     * Builds the {@code MutatingWebhookConfiguration} k3s auto-applies. Scoped to pod {@code CREATE}
+     * alone, and {@code failurePolicy: Ignore} so an unreachable or failing Floci never blocks a pod
+     * from being created. The {@code caBundle} is Floci's local CA, base64 of the PEM as Kubernetes
+     * expects.
+     */
+    static String buildPodIdentityWebhookConfiguration(String url, String caPem) {
+        return """
+                apiVersion: admissionregistration.k8s.io/v1
+                kind: MutatingWebhookConfiguration
+                metadata:
+                  name: floci-eks-pod-identity
+                webhooks:
+                  - name: pod-identity.eks.floci.io
+                    admissionReviewVersions: ["v1"]
+                    sideEffects: None
+                    failurePolicy: Ignore
+                    reinvocationPolicy: Never
+                    timeoutSeconds: 10
+                    clientConfig:
+                      url: "%s"
+                      caBundle: "%s"
+                    rules:
+                      - operations: ["CREATE"]
+                        apiGroups: [""]
+                        apiVersions: ["v1"]
+                        resources: ["pods"]
+                        scope: "*"
+                """.formatted(url, Base64.getEncoder().encodeToString(caPem.getBytes(StandardCharsets.UTF_8)));
+    }
+
     /** Best-effort local copy for inspection/debugging; the container copy streams from memory. */
-    private void writeRegistriesYaml(String clusterName, String content) {
-        Path localFile = Paths.get(config.services().eks().dataPath(), "registries", clusterName, "registries.yaml")
-                .toAbsolutePath().normalize();
+    private void writeLocalCopy(Path file, String content, String clusterName) {
+        Path localFile = file.toAbsolutePath().normalize();
         try {
             Files.createDirectories(localFile.getParent());
             Files.writeString(localFile, content);
         } catch (IOException e) {
-            LOG.debugv("Could not write local registries.yaml copy for cluster {0}: {1}",
-                    clusterName, e.getMessage());
+            LOG.debugv("Could not write local {0} copy for cluster {1}: {2}",
+                    localFile.getFileName(), clusterName, e.getMessage());
         }
     }
 

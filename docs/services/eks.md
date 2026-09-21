@@ -91,13 +91,38 @@ Floci supports the EKS Pod Identity association management plane. You can map a 
 - **Updating**: `UpdatePodIdentityAssociation` modifies the associated `roleArn`, `targetRoleArn`, `disableSessionTags`, or `policy`.
 - **Deletion**: `DeletePodIdentityAssociation` removes an association and returns its final metadata. Deleting an EKS cluster automatically purges all of its pod identity associations.
 
+### Credential injection at admission
+
+Floci registers a `MutatingWebhookConfiguration` in every real-mode cluster, scoped to pod `CREATE`. When a pod is created, Floci looks up an association matching the pod's namespace and its `spec.serviceAccountName`. A pod that matches nothing is admitted unchanged.
+
+Injection happens only when the `eks-pod-identity-agent` addon is installed on the cluster, which is what real EKS requires too. Install it with `CreateAddon` before expecting pods to be mutated.
+
+A matching pod is patched exactly the way real EKS patches it. Every init container and container gets:
+
+| What | Value |
+|---|---|
+| `AWS_CONTAINER_CREDENTIALS_FULL_URI` | `http://169.254.170.23/v1/credentials` |
+| `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE` | `/var/run/secrets/pods.eks.amazonaws.com/serviceaccount/eks-pod-identity-token` |
+| Volume mount | `/var/run/secrets/pods.eks.amazonaws.com/serviceaccount`, read-only, from volume `eks-pod-identity-token` |
+
+The volume is a projected service account token with audience `pods.eks.amazonaws.com`, `expirationSeconds: 86400` and path `eks-pod-identity-token`. A name the pod already carries (a volume, a mount, or either environment variable) is left as the workload set it.
+
+**Nothing answers `169.254.170.23` yet.** This change injects the plumbing only: an injected pod has the token and the environment variables, and the AWS SDK credential chain now reaches the container credentials provider, but the request to that URI goes nowhere. Pods still need access entries, node credentials, or explicit credential configuration. The credential endpoint is a separate change.
+
+#### TLS is required
+
+Kubernetes only accepts an `https` `clientConfig.url` on a `MutatingWebhookConfiguration`, together with a `caBundle` the API server trusts. Floci serves HTTP with the default `floci.tls.enabled=false`, so the webhook is skipped with a warning in that case and pods start unmutated. Set `FLOCI_TLS_ENABLED=true` to get injection; the `caBundle` is then Floci's local CA, the same one served at `GET /_floci/ca.pem`.
+
+The webhook URL uses the hostname containers reach Floci on. When Floci runs natively that is `host.docker.internal`, which the self-signed certificate covers. When Floci itself runs in a container the hostname is its container IP, and the self-signed certificate carries no SAN for it, so the API server rejects the handshake. Pods still start, unmutated. Point `FLOCI_SERVICES_LAMBDA_DOCKER_HOST_OVERRIDE` at a name the certificate covers (add it with `FLOCI_HOSTNAME`) to make the webhook reachable from that setup.
+
+The webhook carries `failurePolicy: Ignore`, and Floci admits the pod unchanged on any internal error, so a webhook that cannot be registered or cannot be reached never prevents a pod from being created. Registration failures log a warning and leave the cluster running.
+
+The manifest is written into the cluster's k3s server manifests directory (`/var/lib/rancher/k3s/server/manifests`) before the container starts, so k3s applies it as the API server comes up.
+
 ### Limitations and Scope
 
-Credentials delivery directly into pods is not yet supported:
-- Mutating webhook injection for pod environment variables (`AWS_CONTAINER_CREDENTIALS_FULL_URI`, `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE`) is not implemented.
-- The link-local metadata credential endpoint (`169.254.170.23`) is not implemented.
-
-Applications running inside pods cannot currently exchange tokens for temporary AWS credentials via the link-local endpoint. Use access entries, node credentials, or explicit credential configuration until the pod identity agent endpoint is added.
+- The link-local credential endpoint (`169.254.170.23`) that answers the injected URI is not implemented, so injected pods cannot yet obtain credentials.
+- Token validation, association-to-role resolution and STS credential issuance belong to that endpoint and do not exist yet.
 
 ## Addon management
 
@@ -340,6 +365,7 @@ back (for example Docker is unavailable), the cluster is marked `FAILED` instead
 | `FLOCI_SERVICES_EKS_IAM_AUTH_WEBHOOK` | `true` | Wire a token-auth webhook into k3s so `aws eks get-token` works |
 | `FLOCI_SERVICES_EKS_ECR_REGISTRY_MIRROR` | `true` | Inject a containerd `registries.yaml` so pods can pull images pushed to [Floci ECR](ecr.md) |
 | `FLOCI_SERVICES_EKS_IRSA_SIGNING_KEY` | `true` | Pass the cluster OIDC signing key to k3s so in-cluster projected service account tokens can assume IAM roles via Floci STS |
+| `FLOCI_SERVICES_EKS_POD_IDENTITY_WEBHOOK` | `true` | Register a mutating admission webhook that injects pod identity credentials. Needs `FLOCI_TLS_ENABLED=true` |
 | `FLOCI_SERVICES_EKS_IMDS` | `false` | Enable link-local IMDS (`169.254.169.254`) proxy in cluster containers |
 
 ### Kubernetes versions and network configuration

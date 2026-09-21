@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.eks;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
@@ -42,6 +43,7 @@ import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermission;
@@ -49,6 +51,7 @@ import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -1342,6 +1345,136 @@ class EksClusterManagerTest {
 
             assertThrows(RuntimeException.class, () -> manager.startCluster(cluster));
             verify(lifecycleManager, Mockito.times(2)).removeIfExists("floci-eks-fail-cluster");
+        }
+    }
+
+    @Nested
+    class RegisterPodIdentityWebhook {
+
+        @TempDir
+        Path tempDir;
+
+        private static final String CA_PEM = "-----BEGIN CERTIFICATE-----\nfloci-root-ca\n-----END CERTIFICATE-----\n";
+
+        private EmulatorConfig config;
+        private EmulatorConfig.EksServiceConfig eks;
+        private EmulatorConfig.TlsConfig tls;
+        private ContainerLifecycleManager lifecycleManager;
+        private CopyArchiveToContainerCmd copyCmd;
+        private EksClusterManager manager;
+
+        @BeforeEach
+        void setUp() {
+            config = Mockito.mock(EmulatorConfig.class);
+            EmulatorConfig.ServicesConfig services = Mockito.mock(EmulatorConfig.ServicesConfig.class);
+            eks = Mockito.mock(EmulatorConfig.EksServiceConfig.class);
+            tls = Mockito.mock(EmulatorConfig.TlsConfig.class);
+            when(config.services()).thenReturn(services);
+            when(services.eks()).thenReturn(eks);
+            when(config.tls()).thenReturn(tls);
+            when(config.port()).thenReturn(4566);
+            when(eks.podIdentityWebhook()).thenReturn(true);
+            when(eks.dataPath()).thenReturn(tempDir.toString());
+            when(eks.defaultImage()).thenReturn("rancher/k3s:v1.30.0-k3s1");
+            when(eks.dockerNetwork()).thenReturn(Optional.empty());
+            when(eks.endpointMode()).thenReturn("host");
+            when(config.defaultAccountId()).thenReturn("000000000000");
+            when(tls.enabled()).thenReturn(true);
+
+            lifecycleManager = Mockito.mock(ContainerLifecycleManager.class);
+            DockerClient dockerClient = Mockito.mock(DockerClient.class);
+            copyCmd = Mockito.mock(CopyArchiveToContainerCmd.class, Mockito.RETURNS_SELF);
+            when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+            when(dockerClient.copyArchiveToContainerCmd(anyString())).thenReturn(copyCmd);
+            when(lifecycleManager.create(any())).thenReturn("container-1");
+            when(lifecycleManager.startCreated(any(), any()))
+                    .thenReturn(new ContainerInfo("container-1", Map.of()));
+
+            ContainerBuilder containerBuilder = Mockito.mock(ContainerBuilder.class);
+            ContainerBuilder.Builder builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
+            when(containerBuilder.newContainer(anyString())).thenReturn(builder);
+            when(builder.build()).thenReturn(Mockito.mock(ContainerSpec.class));
+
+            DockerHostResolver dockerHostResolver = Mockito.mock(DockerHostResolver.class);
+            when(dockerHostResolver.resolve()).thenReturn("host.docker.internal");
+
+            RegionResolver regionResolver = Mockito.mock(RegionResolver.class);
+            when(regionResolver.getAccountId()).thenReturn("000000000000");
+            when(regionResolver.getDefaultRegion()).thenReturn("us-east-1");
+
+            FlociCertificateAuthority certificateAuthority = Mockito.mock(FlociCertificateAuthority.class);
+            when(certificateAuthority.caPem()).thenReturn(CA_PEM);
+
+            manager = new EksClusterManager(
+                    containerBuilder, lifecycleManager,
+                    Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
+                    dockerHostResolver, Mockito.mock(EcrRegistryManager.class), config,
+                    regionResolver, null, null, certificateAuthority);
+        }
+
+        private Cluster cluster() {
+            Cluster cluster = new Cluster();
+            cluster.setName("demo");
+            cluster.setAccountId("000000000000");
+            return cluster;
+        }
+
+        @Test
+        void configurationCarriesTheCaBundleAndAnHttpsUrl() {
+            String manifest = EksClusterManager.buildPodIdentityWebhookConfiguration(
+                    "https://host.docker.internal:4566/_floci/eks/clusters/demo/pod-identity-webhook/scope/000000000000", CA_PEM);
+
+            assertTrue(manifest.contains("kind: MutatingWebhookConfiguration"));
+            assertTrue(manifest.contains("url: \"https://host.docker.internal:4566"
+                    + "/_floci/eks/clusters/demo/pod-identity-webhook/scope/000000000000\""));
+            assertTrue(manifest.contains("caBundle: \""
+                    + Base64.getEncoder().encodeToString(CA_PEM.getBytes(StandardCharsets.UTF_8)) + "\""));
+            assertTrue(manifest.contains("failurePolicy: Ignore"));
+            assertTrue(manifest.contains("operations: [\"CREATE\"]"));
+            assertTrue(manifest.contains("resources: [\"pods\"]"));
+            assertFalse(manifest.contains("url: \"http://"), "Kubernetes rejects a non-https webhook URL");
+        }
+
+        @Test
+        void writesTheManifestIntoTheK3sManifestsDirectory() throws Exception {
+            manager.registerPodIdentityWebhook("container-1", cluster());
+
+            verify(copyCmd).withRemotePath("/var/lib/rancher/k3s");
+            verify(copyCmd).exec();
+            String written = Files.readString(tempDir.resolve("webhook").resolve("demo")
+                    .resolve("floci-eks-pod-identity.yaml"));
+            assertTrue(written.contains("https://host.docker.internal:4566"
+                    + "/_floci/eks/clusters/demo/pod-identity-webhook/scope/000000000000"));
+        }
+
+        @Test
+        void skipsWithAWarningWhenTlsIsDisabled() {
+            when(tls.enabled()).thenReturn(false);
+
+            manager.registerPodIdentityWebhook("container-1", cluster());
+
+            verify(lifecycleManager, never()).getDockerClient();
+        }
+
+        @Test
+        void skipsWhenTheKnobIsOff() {
+            when(eks.podIdentityWebhook()).thenReturn(false);
+
+            manager.registerPodIdentityWebhook("container-1", cluster());
+
+            verify(lifecycleManager, never()).getDockerClient();
+        }
+
+        @Test
+        void registrationFailureLeavesTheClusterRunning() {
+            when(copyCmd.exec()).thenThrow(new RuntimeException("no such container"));
+            Cluster cluster = cluster();
+
+            manager.startCluster(cluster);
+
+            verify(copyCmd).exec();
+            verify(lifecycleManager).startCreated(any(), any());
+            assertEquals("container-1", cluster.getContainerId());
         }
     }
 }
