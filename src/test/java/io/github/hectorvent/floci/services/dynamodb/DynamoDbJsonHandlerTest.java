@@ -18,6 +18,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -757,6 +759,101 @@ class DynamoDbJsonHandlerTest {
                 """));
         assertEquals("One or more parameter values were invalid: "
                 + "ProjectionType is ALL, but NonKeyAttributes is specified", ex.getMessage());
+    }
+
+    @Test
+    void updateTableDropsADefinitionNoKeyUses() throws Exception {
+        handler.handle("CreateTable", json("""
+                {
+                    "TableName": "Drops",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """), "eu-west-1");
+
+        Response response = handler.handle("UpdateTable", json("""
+                {
+                    "TableName": "Drops",
+                    "AttributeDefinitions": [
+                        {"AttributeName": "g1", "AttributeType": "S"},
+                        {"AttributeName": "extraUnused", "AttributeType": "S"}
+                    ],
+                    "GlobalSecondaryIndexUpdates": [{"Create": {
+                        "IndexName": "gsi1",
+                        "KeySchema": [{"AttributeName": "g1", "KeyType": "HASH"}],
+                        "Projection": {"ProjectionType": "KEYS_ONLY"}
+                    }}]
+                }
+                """), "eu-west-1");
+
+        JsonNode body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        assertEquals(List.of("g1", "pk"), sortedAttributeNames(body.get("TableDescription")));
+    }
+
+    @Test
+    void updateTableDeletingAGsiPrunesOnlyThatIndexKeyAttribute() throws Exception {
+        handler.handle("CreateTable", json("""
+                {
+                    "TableName": "Prunes",
+                    "KeySchema": [
+                        {"AttributeName": "pk", "KeyType": "HASH"},
+                        {"AttributeName": "sk", "KeyType": "RANGE"}
+                    ],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "pk", "AttributeType": "S"},
+                        {"AttributeName": "sk", "AttributeType": "S"},
+                        {"AttributeName": "gsiSk", "AttributeType": "S"}
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST",
+                    "GlobalSecondaryIndexes": [{
+                        "IndexName": "gsi1",
+                        "KeySchema": [
+                            {"AttributeName": "pk", "KeyType": "HASH"},
+                            {"AttributeName": "gsiSk", "KeyType": "RANGE"}
+                        ],
+                        "Projection": {"ProjectionType": "KEYS_ONLY"}
+                    }]
+                }
+                """), "eu-west-1");
+
+        Response response = handler.handle("UpdateTable", json("""
+                {
+                    "TableName": "Prunes",
+                    "GlobalSecondaryIndexUpdates": [{"Delete": {"IndexName": "gsi1"}}]
+                }
+                """), "eu-west-1");
+
+        JsonNode body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        assertEquals(List.of("pk", "sk"), sortedAttributeNames(body.get("TableDescription")));
+    }
+
+    @Test
+    void updateTableRejectsAnIndexKeyOnlyTheStoredDefinitionsCarry() {
+        createUsersTable("eu-west-1");
+        AwsException ex = expectValidationException("UpdateTable", json("""
+                {
+                    "TableName": "Users",
+                    "AttributeDefinitions": [{"AttributeName": "g3", "AttributeType": "S"}],
+                    "GlobalSecondaryIndexUpdates": [{"Create": {
+                        "IndexName": "gsiSharedPk",
+                        "KeySchema": [
+                            {"AttributeName": "userId", "KeyType": "HASH"},
+                            {"AttributeName": "g3", "KeyType": "RANGE"}
+                        ],
+                        "Projection": {"ProjectionType": "KEYS_ONLY"}
+                    }}]
+                }
+                """));
+        assertEquals("Attribute: userId is not defined in AttributeDefinitions", ex.getMessage());
+    }
+
+    private List<String> sortedAttributeNames(JsonNode tableDescription) {
+        List<String> names = new ArrayList<>();
+        tableDescription.path("AttributeDefinitions")
+                .forEach(definition -> names.add(definition.path("AttributeName").asText()));
+        names.sort(Comparator.naturalOrder());
+        return names;
     }
 
     // Checked against real DynamoDB: the projection is validated before the table lookup.

@@ -1888,13 +1888,16 @@ public class DynamoDbService implements ResourceProvider {
             }
         }
 
-        Set<String> knownAttrs = table.getAttributeDefinitions().stream()
-                .map(AttributeDefinition::getAttributeName)
-                .collect(Collectors.toSet());
-        if (newAttrDefs != null) newAttrDefs.forEach(ad -> knownAttrs.add(ad.getAttributeName()));
+        // A new index's key attributes must all appear in the request's own AttributeDefinitions.
+        // The definitions already stored on the table do not satisfy this, even for an attribute
+        // the table key uses.
+        Set<String> requestAttrs = new HashSet<>();
+        if (newAttrDefs != null) {
+            newAttrDefs.forEach(ad -> requestAttrs.add(ad.getAttributeName()));
+        }
         for (GlobalSecondaryIndex newGsi : gsiCreates) {
             for (KeySchemaElement k : newGsi.getKeySchema()) {
-                if (!knownAttrs.contains(k.getAttributeName())) {
+                if (!requestAttrs.contains(k.getAttributeName())) {
                     throw new AwsException("ValidationException",
                             "Attribute: " + k.getAttributeName() + " is not defined in AttributeDefinitions", 400);
                 }
@@ -1935,10 +1938,39 @@ public class DynamoDbService implements ResourceProvider {
                 }
             }
         }
+        pruneUnusedAttributeDefinitions(table);
 
         tableStore.put(storageKey, table);
         LOG.infov("Updated table: {0} in region {1}", canonicalTableName, region);
         return table;
+    }
+
+    /**
+     * UpdateTable keeps only the attribute definitions a key schema still uses. A definition sent
+     * with the request but used by no key is dropped in the same response, and deleting an index
+     * drops the definitions only that index used. CreateTable rejects an unused definition instead.
+     */
+    private void pruneUnusedAttributeDefinitions(TableDefinition table) {
+        Set<String> used = new HashSet<>();
+        for (KeySchemaElement k : table.getKeySchema()) {
+            used.add(k.getAttributeName());
+        }
+        for (LocalSecondaryIndex lsi : table.getLocalSecondaryIndexes()) {
+            for (KeySchemaElement k : lsi.getKeySchema()) {
+                used.add(k.getAttributeName());
+            }
+        }
+        for (GlobalSecondaryIndex gsi : table.getGlobalSecondaryIndexes()) {
+            for (KeySchemaElement k : gsi.getKeySchema()) {
+                used.add(k.getAttributeName());
+            }
+        }
+        List<AttributeDefinition> kept = table.getAttributeDefinitions().stream()
+                .filter(ad -> used.contains(ad.getAttributeName()))
+                .collect(Collectors.toCollection(ArrayList::new));
+        if (kept.size() != table.getAttributeDefinitions().size()) {
+            table.setAttributeDefinitions(kept);
+        }
     }
 
     // --- Global-table replicas ---
