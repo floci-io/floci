@@ -691,6 +691,29 @@ class SesEventPublishingTest {
         return events;
     }
 
+    @Test
+    @Order(9)
+    @DisplayName("suppressionlist@simulator publishes a General bounce, not a Reject")
+    void sendToSuppressionListSimulator_publishesABounce() throws Exception {
+        drainQueue();
+        sendEmailTo("suppressionlist@simulator.amazonses.com");
+        List<JsonNode> events = receiveEvents(2);
+
+        assertThat(events).hasSize(2);
+        assertThat(events).noneMatch(e -> "Reject".equals(e.path("eventType").asText()));
+        JsonNode bounce = events.stream()
+                .filter(e -> "Bounce".equals(e.path("eventType").asText()))
+                .findFirst().orElseThrow();
+        // Verified against real SES on 2026-09-21: an ordinary hard bounce whose diagnostic names
+        // the suppression.
+        assertThat(bounce.path("bounce").path("bounceType").asText()).isEqualTo("Permanent");
+        assertThat(bounce.path("bounce").path("bounceSubType").asText()).isEqualTo("General");
+        JsonNode recipient = bounce.path("bounce").path("bouncedRecipients").get(0);
+        assertThat(recipient.path("emailAddress").asText()).isEqualTo("suppressionlist@simulator.amazonses.com");
+        assertThat(recipient.path("status").asText()).isEqualTo("5.1.1");
+        assertThat(recipient.path("diagnosticCode").asText()).contains("suppressed address: suppressionlist@");
+    }
+
     private void sendEmailTo(String to) {
         ses.sendEmail(SendEmailRequest.builder()
                 .fromEmailAddress(identity)
