@@ -1825,7 +1825,7 @@ public class DynamoDbService implements ResourceProvider {
                 String tableName = get.path("TableName").asText();
                 JsonNode key = get.get("Key");
                 try {
-                    results.add(getItem(tableName, key, region));
+                    results.add(projectTransactGet(getItem(tableName, key, region), get));
                     cancelReasons.add(new TransactionCanceledException.CancellationReason("", null));
                 } catch (AwsException e) {
                     if ("ValidationException".equals(e.getErrorCode())) {
@@ -1847,6 +1847,20 @@ public class DynamoDbService implements ResourceProvider {
         }
 
         return results;
+    }
+
+    /**
+     * GetItem and BatchGetItem keep an empty Item when the projection matches nothing.
+     * TransactGetItems omits it.
+     */
+    private JsonNode projectTransactGet(JsonNode item, JsonNode get) {
+        String projectionExpression = get.path("ProjectionExpression").textValue();
+        if (item == null || projectionExpression == null) {
+            return item;
+        }
+        ObjectNode projected = ProjectionEvaluator.project(item, projectionExpression,
+                get.has("ExpressionAttributeNames") ? get.get("ExpressionAttributeNames") : null);
+        return projected.isEmpty() ? null : projected;
     }
 
     // --- UpdateTable ---

@@ -1819,6 +1819,67 @@ class DynamoDbJsonHandlerTest {
     }
 
     @Test
+    void transactGetItemsKeepsOnlyTheProjectedAttributes() throws Exception {
+        seedTransactGetItem();
+        ObjectNode get = mapper.createObjectNode();
+        get.put("TableName", "Users");
+        get.set("Key", item("userId", "u1"));
+        get.put("ProjectionExpression", "#k");
+        get.set("ExpressionAttributeNames", mapper.createObjectNode().put("#k", "keep"));
+        ObjectNode request = mapper.createObjectNode();
+        request.set("TransactItems", mapper.createArrayNode().add(mapper.createObjectNode().set("Get", get)));
+
+        Response response = handler.handle("TransactGetItems", request, "eu-west-1");
+
+        JsonNode body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        JsonNode returned = body.get("Responses").get(0).get("Item");
+        assertEquals(1, returned.size());
+        assertEquals("stay", returned.get("keep").get("S").asText());
+    }
+
+    @Test
+    void transactGetItemsLeavesAMissingKeyWithoutAnItemUnderAProjection() throws Exception {
+        seedTransactGetItem();
+        ObjectNode get = mapper.createObjectNode();
+        get.put("TableName", "Users");
+        get.set("Key", item("userId", "absent"));
+        get.put("ProjectionExpression", "keep");
+        ObjectNode request = mapper.createObjectNode();
+        request.set("TransactItems", mapper.createArrayNode().add(mapper.createObjectNode().set("Get", get)));
+
+        Response response = handler.handle("TransactGetItems", request, "eu-west-1");
+
+        JsonNode body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        assertEquals(200, response.getStatus());
+        assertFalse(body.get("Responses").get(0).has("Item"));
+    }
+
+    @Test
+    void transactGetItemsOmitsItemWhenTheProjectionMatchesNothing() throws Exception {
+        seedTransactGetItem();
+        ObjectNode get = mapper.createObjectNode();
+        get.put("TableName", "Users");
+        get.set("Key", item("userId", "u1"));
+        get.put("ProjectionExpression", "#x");
+        get.set("ExpressionAttributeNames", mapper.createObjectNode().put("#x", "doesNotExist"));
+        ObjectNode request = mapper.createObjectNode();
+        request.set("TransactItems", mapper.createArrayNode().add(mapper.createObjectNode().set("Get", get)));
+
+        Response response = handler.handle("TransactGetItems", request, "eu-west-1");
+
+        JsonNode body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        assertFalse(body.get("Responses").get(0).has("Item"));
+    }
+
+    private void seedTransactGetItem() throws Exception {
+        createUsersTable("eu-west-1");
+        ObjectNode putRequest = mapper.createObjectNode();
+        putRequest.put("TableName", "Users");
+        putRequest.set("Item", item("userId", "u1", "keep", "stay"));
+        handler.handle("PutItem", putRequest, "eu-west-1");
+    }
+
+    @Test
     void executeStatementRejectsATooDeepParameter() {
         createUsersTable("eu-west-1");
         var request = mapper.createObjectNode();
