@@ -829,6 +829,52 @@ class DynamoDbJsonHandlerTest {
     }
 
     @Test
+    void updateTableDeletingAGsiKeepsTheAttributesAnLsiStillUses() throws Exception {
+        handler.handle("CreateTable", json("""
+                {
+                    "TableName": "SharedKeys",
+                    "KeySchema": [
+                        {"AttributeName": "pk", "KeyType": "HASH"},
+                        {"AttributeName": "sk", "KeyType": "RANGE"}
+                    ],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "pk", "AttributeType": "S"},
+                        {"AttributeName": "sk", "AttributeType": "S"},
+                        {"AttributeName": "lsiSk", "AttributeType": "N"},
+                        {"AttributeName": "gsiSk", "AttributeType": "S"}
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST",
+                    "LocalSecondaryIndexes": [{
+                        "IndexName": "lsi1",
+                        "KeySchema": [
+                            {"AttributeName": "pk", "KeyType": "HASH"},
+                            {"AttributeName": "lsiSk", "KeyType": "RANGE"}
+                        ],
+                        "Projection": {"ProjectionType": "KEYS_ONLY"}
+                    }],
+                    "GlobalSecondaryIndexes": [{
+                        "IndexName": "gsi1",
+                        "KeySchema": [
+                            {"AttributeName": "pk", "KeyType": "HASH"},
+                            {"AttributeName": "gsiSk", "KeyType": "RANGE"}
+                        ],
+                        "Projection": {"ProjectionType": "KEYS_ONLY"}
+                    }]
+                }
+                """), "eu-west-1");
+
+        Response response = handler.handle("UpdateTable", json("""
+                {
+                    "TableName": "SharedKeys",
+                    "GlobalSecondaryIndexUpdates": [{"Delete": {"IndexName": "gsi1"}}]
+                }
+                """), "eu-west-1");
+
+        JsonNode body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        assertEquals(List.of("lsiSk", "pk", "sk"), sortedAttributeNames(body.get("TableDescription")));
+    }
+
+    @Test
     void updateTableRejectsAnIndexKeyOnlyTheStoredDefinitionsCarry() {
         createUsersTable("eu-west-1");
         AwsException ex = expectValidationException("UpdateTable", json("""

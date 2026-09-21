@@ -1949,6 +1949,7 @@ public class DynamoDbService implements ResourceProvider {
      * UpdateTable keeps only the attribute definitions a key schema still uses. A definition sent
      * with the request but used by no key is dropped in the same response, and deleting an index
      * drops the definitions only that index used. CreateTable rejects an unused definition instead.
+     * AWS documents neither rule. Both are observed behaviour.
      */
     private void pruneUnusedAttributeDefinitions(TableDefinition table) {
         Set<String> used = new HashSet<>();
