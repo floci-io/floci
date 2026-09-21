@@ -416,10 +416,10 @@ class S3VirtualHostIntegrationTest {
             .statusCode(204);
     }
 
-    // A key may contain the bucket's own name as a path segment. choudoufu's record keys are
-    // "tofu-records/<estate>/...", and naming a bucket after the estate it serves is ordinary.
-    // The raw request path of a virtual-hosted request is the key alone, so the "/<bucket>/"
-    // inside it is part of the key and not the path-style bucket prefix.
+    // A key may contain the bucket's own name as a path segment, for example
+    // "tofu-records/<bucket>/...". The raw request path of a virtual-hosted request is the key
+    // alone, so the "/<bucket>/" inside it is part of the key and not the path-style bucket
+    // prefix.
     @Test
     @Order(90)
     void keyContainingTheBucketNameAsASegmentIsStoredWhole() {
