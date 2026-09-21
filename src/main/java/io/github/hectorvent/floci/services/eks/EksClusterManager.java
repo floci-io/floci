@@ -393,6 +393,7 @@ public class EksClusterManager {
 
         applyEndpoints(cluster, containerName, hostPort, info);
         configureLinkLocalMetadataEndpoint(cluster, containerId);
+        configurePodIdentityRelay(cluster, containerId);
         attachClusterLogs(cluster);
 
         LOG.infov("k3s container {0} started for cluster {1} on port {2} (internal: {3})",
@@ -449,6 +450,7 @@ public class EksClusterManager {
         cluster.setHostPort(hostPort);
         applyEndpoints(cluster, containerName, hostPort, info);
         configureLinkLocalMetadataEndpoint(cluster, info.containerId());
+        configurePodIdentityRelay(cluster, info.containerId());
         attachClusterLogsFromNow(cluster);
 
         LOG.infov("Adopted surviving k3s container {0} for EKS cluster {1} on port {2} (internal: {3})",
@@ -1140,10 +1142,6 @@ public class EksClusterManager {
      * alone, and {@code failurePolicy: Ignore} so an unreachable or failing Floci never blocks a pod
      * from being created. The {@code caBundle} is Floci's local CA, base64 of the PEM as Kubernetes
      * expects.
-     *
-     * <p>{@code timeoutSeconds} is 3, not the Kubernetes default of 10: Floci is a local process, so
-     * a healthy call takes milliseconds, and the timeout only ever runs down when Floci is
-     * unreachable. Every pod creation in the cluster pays it in that case, so it is kept short.
      */
     static String buildPodIdentityWebhookConfiguration(String url, String caPem) {
         return """
@@ -1157,7 +1155,7 @@ public class EksClusterManager {
                     sideEffects: None
                     failurePolicy: Ignore
                     reinvocationPolicy: Never
-                    timeoutSeconds: 3
+                    timeoutSeconds: 10
                     clientConfig:
                       url: "%s"
                       caBundle: "%s"
@@ -1313,6 +1311,39 @@ public class EksClusterManager {
             LOG.infov("Configured link-local IMDS endpoint for EKS cluster {0}", cluster.getName());
         } catch (Exception e) {
             LOG.warnv("Could not configure link-local IMDS endpoint for EKS cluster {0}: {1}",
+                    cluster.getName(), e.getMessage());
+        }
+    }
+
+    void configurePodIdentityRelay(Cluster cluster, String containerId) {
+        if (!config.services().eks().podIdentityWebhook()) {
+            return;
+        }
+        try {
+            ContainerExecResult install = execInContainerForResult(containerId,
+                    Ec2MetadataProxy.installCommand(), 180);
+            if (install.exitCode() != 0) {
+                LOG.warnv("Could not install Pod Identity relay dependencies for EKS cluster {0}: {1}",
+                        cluster.getName(), install.summary());
+                return;
+            }
+
+            String flociHost = dockerHostResolver.resolve();
+            int flociPort = config.port();
+
+            ContainerExecResult start = execInContainerForResult(containerId,
+                    Ec2MetadataProxy.podIdentityStartCommand(flociHost, flociPort), 30);
+            if (start.exitCode() != 0) {
+                LOG.warnv("Could not start link-local Pod Identity relay for EKS cluster {0}: {1}",
+                        cluster.getName(), start.summary());
+                return;
+            }
+
+            configurePodNetworkRouting(cluster, containerId);
+
+            LOG.infov("Configured link-local Pod Identity relay for EKS cluster {0}", cluster.getName());
+        } catch (Exception e) {
+            LOG.warnv("Could not configure link-local Pod Identity relay for EKS cluster {0}: {1}",
                     cluster.getName(), e.getMessage());
         }
     }

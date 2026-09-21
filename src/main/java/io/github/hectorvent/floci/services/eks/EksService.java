@@ -1079,6 +1079,16 @@ public class EksService implements TagHandler, ResourceProvider {
         }, 2, 3, TimeUnit.SECONDS);
     }
 
+    public Optional<Cluster> findClusterByIssuer(String issuer) {
+        if (issuer == null || issuer.isBlank()) {
+            return Optional.empty();
+        }
+        return allClusters().stream()
+                .filter(c -> c.getIdentity() != null && c.getIdentity().getOidc() != null
+                        && issuer.equals(c.getIdentity().getOidc().getIssuer()))
+                .findFirst();
+    }
+
     private List<Cluster> allClusters() {
         if (storage instanceof AccountAwareStorageBackend<Cluster> aware) {
             return aware.scanAllAccounts();

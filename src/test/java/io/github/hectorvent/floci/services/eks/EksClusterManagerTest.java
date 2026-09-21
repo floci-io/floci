@@ -61,6 +61,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -876,6 +877,114 @@ class EksClusterManagerTest {
             manager.unregisterMetadataEndpoint(cluster);
             verify(metadataServer).unregisterInstance(any());
             assertNull(manager.getRegisteredClusterNodeInstance(cluster));
+        }
+    }
+
+    @Nested
+    class ConfigurePodIdentityRelay {
+
+        private EmulatorConfig config;
+        private EmulatorConfig.EksServiceConfig eks;
+        private ContainerLifecycleManager lifecycleManager;
+        private DockerClient dockerClient;
+        private DockerHostResolver dockerHostResolver;
+        private EksClusterManager manager;
+        private List<String[]> capturedCmds;
+
+        @BeforeEach
+        void setUp() {
+            config = Mockito.mock(EmulatorConfig.class);
+            EmulatorConfig.ServicesConfig services = Mockito.mock(EmulatorConfig.ServicesConfig.class);
+            eks = Mockito.mock(EmulatorConfig.EksServiceConfig.class);
+            when(config.services()).thenReturn(services);
+            when(services.eks()).thenReturn(eks);
+            when(eks.podIdentityWebhook()).thenReturn(true);
+            when(config.port()).thenReturn(4566);
+
+            lifecycleManager = Mockito.mock(ContainerLifecycleManager.class);
+            dockerClient = Mockito.mock(DockerClient.class);
+            when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+
+            dockerHostResolver = Mockito.mock(DockerHostResolver.class);
+            when(dockerHostResolver.resolve()).thenReturn("floci-host");
+
+            capturedCmds = new ArrayList<>();
+            ExecCreateCmd execCreate = Mockito.mock(ExecCreateCmd.class, Mockito.withSettings().defaultAnswer(Mockito.RETURNS_SELF));
+            ExecCreateCmdResponse execResponse = Mockito.mock(ExecCreateCmdResponse.class);
+            when(execResponse.getId()).thenReturn("exec-123");
+            when(dockerClient.execCreateCmd(anyString())).thenReturn(execCreate);
+            when(execCreate.withCmd(any(String[].class))).thenAnswer(inv -> {
+                Object[] args = inv.getArguments();
+                if (args.length == 1 && args[0] instanceof String[] command) {
+                    capturedCmds.add(command);
+                } else {
+                    capturedCmds.add(Arrays.copyOf(args, args.length, String[].class));
+                }
+                return execCreate;
+            });
+            when(execCreate.exec()).thenReturn(execResponse);
+
+            ExecStartCmd execStart = Mockito.mock(ExecStartCmd.class);
+            when(dockerClient.execStartCmd(anyString())).thenReturn(execStart);
+            when(execStart.exec(any())).thenAnswer(inv -> {
+                ResultCallback<Frame> cb = inv.getArgument(0);
+                cb.onComplete();
+                return cb;
+            });
+
+            InspectExecCmd inspectExec = Mockito.mock(InspectExecCmd.class);
+            InspectExecResponse inspectResponse = Mockito.mock(InspectExecResponse.class);
+            when(inspectResponse.getExitCodeLong()).thenReturn(0L);
+            when(inspectExec.exec()).thenReturn(inspectResponse);
+            when(dockerClient.inspectExecCmd(anyString())).thenReturn(inspectExec);
+
+            manager = new EksClusterManager(
+                    Mockito.mock(ContainerBuilder.class), lifecycleManager,
+                    Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
+                    dockerHostResolver, Mockito.mock(EcrRegistryManager.class),
+                    config, Mockito.mock(RegionResolver.class), null);
+        }
+
+        @Test
+        void configuresRelayWhenPodIdentityEnabled() {
+            Cluster cluster = new Cluster();
+            cluster.setName("test-cluster");
+
+            manager.configurePodIdentityRelay(cluster, "cid-1");
+
+            assertEquals(3, capturedCmds.size());
+            assertTrue(capturedCmds.get(0)[2].contains("command -v socat"));
+            assertTrue(capturedCmds.get(1)[2].contains("169.254.170.23"));
+            assertTrue(capturedCmds.get(1)[2].contains("TCP:floci-host:4566"));
+            assertTrue(capturedCmds.get(1)[2].contains("floci-pod-identity-proxy.pid"));
+            assertTrue(capturedCmds.get(2)[2].contains("FLOCI-LINK-LOCAL"));
+            assertTrue(capturedCmds.get(2)[2].contains("169.254.170.23"));
+        }
+
+        @Test
+        void skipsRelayWhenPodIdentityDisabled() {
+            when(eks.podIdentityWebhook()).thenReturn(false);
+
+            Cluster cluster = new Cluster();
+            cluster.setName("test-cluster");
+
+            manager.configurePodIdentityRelay(cluster, "cid-1");
+
+            assertTrue(capturedCmds.isEmpty());
+        }
+
+        @Test
+        void failsGracefullyWhenExecFails() {
+            InspectExecCmd inspectExec = Mockito.mock(InspectExecCmd.class);
+            InspectExecResponse inspectResponse = Mockito.mock(InspectExecResponse.class);
+            when(inspectResponse.getExitCodeLong()).thenReturn(1L);
+            when(inspectExec.exec()).thenReturn(inspectResponse);
+            when(dockerClient.inspectExecCmd(anyString())).thenReturn(inspectExec);
+
+            Cluster cluster = new Cluster();
+            cluster.setName("test-cluster");
+
+            assertDoesNotThrow(() -> manager.configurePodIdentityRelay(cluster, "cid-1"));
         }
     }
 

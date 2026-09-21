@@ -16,7 +16,8 @@ public final class EksPodNetworkRouting {
     public static final String DEFAULT_POD_CIDR = "10.42.0.0/16";
     public static final String CHAIN_NAME = "FLOCI-LINK-LOCAL";
     public static final LinkLocalEndpoint IMDS_ENDPOINT = new LinkLocalEndpoint("169.254.169.254", 80);
-    public static final List<LinkLocalEndpoint> DEFAULT_ENDPOINTS = List.of(IMDS_ENDPOINT);
+    public static final LinkLocalEndpoint POD_IDENTITY_ENDPOINT = new LinkLocalEndpoint("169.254.170.23", 80);
+    public static final List<LinkLocalEndpoint> DEFAULT_ENDPOINTS = List.of(IMDS_ENDPOINT, POD_IDENTITY_ENDPOINT);
 
     private EksPodNetworkRouting() {}
 

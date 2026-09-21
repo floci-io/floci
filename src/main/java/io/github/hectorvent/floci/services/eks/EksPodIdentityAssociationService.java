@@ -23,6 +23,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -275,6 +276,19 @@ public class EksPodIdentityAssociationService {
         for (StoredAssociation stored : associations.scan(key -> key.startsWith(prefix))) {
             associations.delete(prefix + stored.association().associationId());
         }
+    }
+
+    public synchronized Optional<PodIdentityAssociation> findAssociation(Cluster cluster,
+                                                                         String namespace,
+                                                                         String serviceAccount) {
+        if (cluster == null || cluster.getStatus() != ClusterStatus.ACTIVE) {
+            return Optional.empty();
+        }
+        String prefix = prefix(cluster);
+        return associations.scan(key -> key.startsWith(prefix)).stream()
+                .map(StoredAssociation::association)
+                .filter(a -> a.namespace().equals(namespace) && a.serviceAccount().equals(serviceAccount))
+                .findFirst();
     }
 
     private static String prefix(Cluster cluster) {
