@@ -1251,6 +1251,37 @@ class EksClusterManagerTest {
         }
 
         @Test
+        void resolveClusterImagePreservesExplicitVersionAcrossSerializationRoundTrip() throws Exception {
+            ObjectMapper mapper = new ObjectMapper();
+
+            // Cluster with explicit version 1.29 (matching default version string)
+            Cluster explicit129 = new Cluster();
+            explicit129.setName("explicit-129");
+            explicit129.setVersion("1.29");
+            explicit129.setExplicitVersion(true);
+
+            String jsonExplicit = mapper.writeValueAsString(explicit129);
+            assertTrue(jsonExplicit.contains("\"explicitVersion\":true"));
+
+            Cluster reloadedExplicit = mapper.readValue(jsonExplicit, Cluster.class);
+            assertTrue(reloadedExplicit.isExplicitVersion());
+            assertEquals("rancher/k3s:v1.29.14-k3s1", manager.resolveClusterImage(reloadedExplicit));
+
+            // Cluster without explicit version
+            Cluster unversioned = new Cluster();
+            unversioned.setName("unversioned");
+            unversioned.setVersion("1.29");
+            unversioned.setExplicitVersion(false);
+
+            String jsonUnversioned = mapper.writeValueAsString(unversioned);
+            assertFalse(jsonUnversioned.contains("explicitVersion"));
+
+            Cluster reloadedUnversioned = mapper.readValue(jsonUnversioned, Cluster.class);
+            assertFalse(reloadedUnversioned.isExplicitVersion());
+            assertEquals("rancher/k3s:latest", manager.resolveClusterImage(reloadedUnversioned));
+        }
+
+        @Test
         void resolveClusterImageUsesConfiguredImageTemplate() {
             when(eks.imageTemplate()).thenReturn(Optional.of("internal.registry.io/k3s:v%s-custom"));
 

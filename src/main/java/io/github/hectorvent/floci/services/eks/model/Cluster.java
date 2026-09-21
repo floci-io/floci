@@ -77,7 +77,8 @@ public class Cluster {
     @JsonIgnore
     private String podCidr;
 
-    @JsonIgnore
+    @JsonProperty("explicitVersion")
+    @JsonInclude(JsonInclude.Include.NON_DEFAULT)
     private boolean explicitVersion;
 
     /**
