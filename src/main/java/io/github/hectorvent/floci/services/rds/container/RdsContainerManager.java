@@ -743,6 +743,84 @@ public class RdsContainerManager {
         }
     }
 
+    public String createMySqlSnapshot(
+            String containerId, String masterUsername, String masterPassword) {
+        String effectiveUser = masterUsername != null && !masterUsername.isBlank()
+                ? masterUsername : "root";
+        String effectivePassword = masterPassword != null ? masterPassword : "";
+        String[] cmd = mysqlDumpCommand(effectiveUser, effectivePassword);
+        try {
+            ContainerExecResult result = execInContainer(containerId, cmd, 120);
+            if (result.exitCode() != 0) {
+                throw new RuntimeException("mysqldump failed with exit code "
+                        + result.exitCode() + ": " + result.stderr());
+            }
+            return result.output();
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to create MySQL snapshot", e);
+        }
+    }
+
+    static String[] mysqlDumpCommand(String user, String password) {
+        return new String[]{
+                "mysqldump",
+                "--user=" + user,
+                "--password=" + password,
+                "--all-databases",
+                "--single-transaction",
+                "--routines",
+                "--events",
+                "--triggers",
+                "--set-gtid-purged=OFF"
+        };
+    }
+
+    public void restoreMySqlSnapshot(
+            String containerId, String masterUsername, String masterPassword, String sqlDump) {
+        String effectiveUser = masterUsername != null && !masterUsername.isBlank()
+                ? masterUsername : "root";
+        String effectivePassword = masterPassword != null ? masterPassword : "";
+        try {
+            ByteArrayOutputStream archive = new ByteArrayOutputStream();
+            try (TarArchiveOutputStream tar = new TarArchiveOutputStream(archive)) {
+                tar.setLongFileMode(TarArchiveOutputStream.LONGFILE_GNU);
+                addTarEntry(tar, "dump.sql", sqlDump);
+                addTarEntry(tar, "restore.sh", mysqlRestoreScript());
+            }
+
+            try (ByteArrayInputStream tarStream = new ByteArrayInputStream(archive.toByteArray())) {
+                lifecycleManager.getDockerClient().copyArchiveToContainerCmd(containerId)
+                        .withRemotePath("/tmp")
+                        .withTarInputStream(tarStream)
+                        .exec();
+            }
+
+            ContainerExecResult result = execInContainer(containerId,
+                    new String[]{"sh", "/tmp/restore.sh", effectiveUser, effectivePassword}, 120);
+            if (result.exitCode() != 0) {
+                String message = result.stderr().isEmpty() ? result.output() : result.stderr();
+                throw new RuntimeException("MySQL restore failed with exit code "
+                        + result.exitCode() + ": " + message);
+            }
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to restore MySQL snapshot", e);
+        }
+    }
+
+    static String mysqlRestoreScript() {
+        return """
+                #!/bin/sh
+                set -e
+                USER="$1"
+                PASSWORD="$2"
+                mysql --user="$USER" --password="$PASSWORD" < /tmp/dump.sql
+                """;
+    }
+
     static String postgresRestoreScript() {
         return """
                 #!/bin/sh

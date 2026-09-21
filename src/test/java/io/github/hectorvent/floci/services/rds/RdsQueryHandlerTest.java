@@ -2,11 +2,12 @@ package io.github.hectorvent.floci.services.rds;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.docdb.DocDbQueryHandler;
+import io.github.hectorvent.floci.services.neptune.NeptuneQueryHandler;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
 import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
-import io.github.hectorvent.floci.services.docdb.DocDbQueryHandler;
-import io.github.hectorvent.floci.services.neptune.NeptuneQueryHandler;
+import io.github.hectorvent.floci.services.rds.model.DbClusterSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceSettings;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
@@ -25,6 +26,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 
@@ -1875,6 +1877,199 @@ class RdsQueryHandlerTest {
     }
 
     @Test
+    void createDbClusterSnapshotForwardsTagsAndReturnsAwsXml() {
+        DbClusterSnapshot snapshot = makeClusterSnapshot("cluster-snapshot");
+        snapshot.setTags(Map.of("owner", "platform"));
+        when(service.createDbClusterSnapshot(
+                "cluster-snapshot", "source-cluster", Map.of("owner", "platform"), null))
+                .thenReturn(snapshot);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBClusterSnapshotIdentifier", "cluster-snapshot");
+        p.add("DBClusterIdentifier", "source-cluster");
+        p.add("Tags.Tag.1.Key", "owner");
+        p.add("Tags.Tag.1.Value", "platform");
+        Response response = handler.handle("CreateDBClusterSnapshot", p);
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<CreateDBClusterSnapshotResult>"), body);
+        assertTrue(body.contains(
+                "<DBClusterSnapshotIdentifier>cluster-snapshot</DBClusterSnapshotIdentifier>"),
+                body);
+        assertTrue(body.contains("<DBClusterIdentifier>source-cluster</DBClusterIdentifier>"),
+                body);
+        assertTrue(body.contains("<Engine>aurora-postgresql</Engine>"), body);
+        assertTrue(body.contains("<Key>owner</Key><Value>platform</Value>"), body);
+        verify(service).createDbClusterSnapshot(
+                "cluster-snapshot", "source-cluster", Map.of("owner", "platform"), null);
+    }
+
+    @Test
+    void deleteDbClusterSnapshotForwardsIdentifierAndReturnsDeletedState() {
+        DbClusterSnapshot snapshot = makeClusterSnapshot("cluster-snapshot");
+        snapshot.setStatus("deleted");
+        when(service.deleteDbClusterSnapshot("cluster-snapshot", "us-west-2"))
+                .thenReturn(snapshot);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBClusterSnapshotIdentifier", "cluster-snapshot");
+        Response response = handler.handle("DeleteDBClusterSnapshot", p, "us-west-2");
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<DeleteDBClusterSnapshotResult>"), body);
+        assertTrue(body.contains("<Status>deleted</Status>"), body);
+        verify(service).deleteDbClusterSnapshot("cluster-snapshot", "us-west-2");
+    }
+
+    @Test
+    void copyDbClusterSnapshotForwardsCopyTagsAndReturnsSourceArn() {
+        DbClusterSnapshot snapshot = makeClusterSnapshot("copy-snapshot");
+        snapshot.setSourceDbClusterSnapshotArn(
+                "arn:aws:rds:us-east-1:123456789012:cluster-snapshot:source-snapshot");
+        when(service.copyDbClusterSnapshot(
+                "source-snapshot", "copy-snapshot", true,
+                Map.of("Name", "copy"), null))
+                .thenReturn(snapshot);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("SourceDBClusterSnapshotIdentifier", "source-snapshot");
+        p.add("TargetDBClusterSnapshotIdentifier", "copy-snapshot");
+        p.add("CopyTags", "true");
+        p.add("Tags.Tag.1.Key", "Name");
+        p.add("Tags.Tag.1.Value", "copy");
+        Response response = handler.handle("CopyDBClusterSnapshot", p);
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<CopyDBClusterSnapshotResult>"), body);
+        assertTrue(body.contains("<SourceDBClusterSnapshotArn>arn:aws:rds:us-east-1:"
+                + "123456789012:cluster-snapshot:source-snapshot"
+                + "</SourceDBClusterSnapshotArn>"), body);
+        verify(service).copyDbClusterSnapshot(
+                "source-snapshot", "copy-snapshot", true, Map.of("Name", "copy"), null);
+    }
+
+    @Test
+    void restoreDbClusterFromSnapshotForwardsOptionalSettings() {
+        DbCluster cluster = makeCluster("restored-cluster");
+        cluster.setEngineIdentifier("aurora-postgresql");
+        cluster.setDeletionProtection(true);
+        cluster.setVpcSecurityGroupIds(List.of("sg-123", "sg-456"));
+        when(service.restoreDbClusterFromSnapshot(
+                "restored-cluster", "cluster-snapshot", "aurora-postgresql", "16.4",
+                5432, "restored_db", "custom-subnets", List.of("sg-123", "sg-456"),
+                "custom-parameters", Map.of("environment", "staging"), true, true,
+                "us-west-2"))
+                .thenReturn(cluster);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBClusterIdentifier", "restored-cluster");
+        p.add("SnapshotIdentifier", "cluster-snapshot");
+        p.add("Engine", "aurora-postgresql");
+        p.add("EngineVersion", "16.4");
+        p.add("Port", "5432");
+        p.add("DatabaseName", "restored_db");
+        p.add("DBSubnetGroupName", "custom-subnets");
+        p.add("VpcSecurityGroupIds.VpcSecurityGroupId.1", "sg-123");
+        p.add("VpcSecurityGroupIds.VpcSecurityGroupId.2", "sg-456");
+        p.add("DBClusterParameterGroupName", "custom-parameters");
+        p.add("Tags.Tag.1.Key", "environment");
+        p.add("Tags.Tag.1.Value", "staging");
+        p.add("DeletionProtection", "true");
+        p.add("EnableIAMDatabaseAuthentication", "true");
+        Response response = handler.handle("RestoreDBClusterFromSnapshot", p, "us-west-2");
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<RestoreDBClusterFromSnapshotResult>"), body);
+        assertTrue(body.contains("<DeletionProtection>true</DeletionProtection>"), body);
+        assertTrue(body.contains("<VpcSecurityGroupId>sg-123</VpcSecurityGroupId>"), body);
+        assertTrue(body.contains("<VpcSecurityGroupId>sg-456</VpcSecurityGroupId>"), body);
+        verify(service).restoreDbClusterFromSnapshot(
+                "restored-cluster", "cluster-snapshot", "aurora-postgresql", "16.4",
+                5432, "restored_db", "custom-subnets", List.of("sg-123", "sg-456"),
+                "custom-parameters", Map.of("environment", "staging"), true, true,
+                "us-west-2");
+    }
+
+    @Test
+    void clusterSnapshotAttributeActionsUseRestoreValues() {
+        DbClusterSnapshot snapshot = makeClusterSnapshot("cluster-snapshot");
+        snapshot.setRestoreAccountIds(List.of("111111111111"));
+        when(service.describeDbClusterSnapshotAttributes("cluster-snapshot", null))
+                .thenReturn(snapshot);
+        when(service.modifyDbClusterSnapshotAttribute(
+                "cluster-snapshot", "restore", List.of("222222222222"),
+                List.of("111111111111"), null))
+                .thenAnswer(invocation -> {
+                    snapshot.setRestoreAccountIds(List.of("222222222222"));
+                    return snapshot;
+                });
+
+        MultivaluedMap<String, String> describeParams = params();
+        describeParams.add("DBClusterSnapshotIdentifier", "cluster-snapshot");
+        Response describe = handler.handle(
+                "DescribeDBClusterSnapshotAttributes", describeParams);
+        assertEquals(200, describe.getStatus());
+        String describeBody = (String) describe.getEntity();
+        assertTrue(describeBody.contains("<DBClusterSnapshotAttributesResult>"), describeBody);
+        assertTrue(describeBody.contains("<AttributeName>restore</AttributeName>"), describeBody);
+        assertTrue(describeBody.contains("<AttributeValue>111111111111</AttributeValue>"),
+                describeBody);
+
+        MultivaluedMap<String, String> modifyParams = params();
+        modifyParams.add("DBClusterSnapshotIdentifier", "cluster-snapshot");
+        modifyParams.add("AttributeName", "restore");
+        modifyParams.add("ValuesToAdd.AttributeValue.1", "222222222222");
+        modifyParams.add("ValuesToRemove.AttributeValue.1", "111111111111");
+        Response modify = handler.handle("ModifyDBClusterSnapshotAttribute", modifyParams);
+        assertEquals(200, modify.getStatus());
+        String modifyBody = (String) modify.getEntity();
+        assertTrue(modifyBody.contains("<AttributeValue>222222222222</AttributeValue>"),
+                modifyBody);
+        verify(service).modifyDbClusterSnapshotAttribute(
+                "cluster-snapshot", "restore", List.of("222222222222"),
+                List.of("111111111111"), null);
+    }
+
+    @Test
+    void describeDbClusterSnapshotsForwardsFiltersAndReturnsSnapshotList() {
+        DbClusterSnapshot snapshot = makeClusterSnapshot("cluster-snapshot");
+        when(service.describeDbClusterSnapshots(
+                null, "source-cluster", "manual", "us-west-2"))
+                .thenReturn(List.of(snapshot));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBClusterIdentifier", "source-cluster");
+        p.add("SnapshotType", "manual");
+        Response response = handler.handle("DescribeDBClusterSnapshots", p, "us-west-2");
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<DescribeDBClusterSnapshotsResult>"), body);
+        assertTrue(body.contains(
+                "<DBClusterSnapshotIdentifier>cluster-snapshot</DBClusterSnapshotIdentifier>"),
+                body);
+        verify(service).describeDbClusterSnapshots(
+                null, "source-cluster", "manual", "us-west-2");
+    }
+
+    @Test
+    void describeDbClusterSnapshotsRejectsSnapshotAndClusterIdentifiersTogether() {
+        MultivaluedMap<String, String> p = params();
+        p.add("DBClusterSnapshotIdentifier", "cluster-snapshot");
+        p.add("DBClusterIdentifier", "source-cluster");
+
+        Response response = handler.handle("DescribeDBClusterSnapshots", p, "us-west-2");
+
+        assertEquals(400, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("InvalidParameterCombination"));
+        verifyNoInteractions(service);
+    }
+
+    @Test
     void restoreDbInstanceFromDbSnapshot_success() {
         DbInstance instance = makeInstance("mydb");
         when(service.restoreDbInstanceFromDbSnapshot(eq("mydb"), eq("mysnap"), eq("db.t3.large"), eq("us-east-1a"), eq(true), eq("my-subnets"), eq(List.of("sg-123")), eq(Map.of("Env", "Prod")), isNull()))
@@ -2325,6 +2520,27 @@ class RdsQueryHandlerTest {
         group.setSubnetIds(List.of("subnet-a", "subnet-b"));
         group.setSubnetAvailabilityZones(Map.of("subnet-a", "us-east-1a", "subnet-b", "us-east-1b"));
         return group;
+    }
+
+    private static DbClusterSnapshot makeClusterSnapshot(String id) {
+        DbClusterSnapshot snapshot = new DbClusterSnapshot();
+        snapshot.setDbClusterSnapshotIdentifier(id);
+        snapshot.setDbClusterSnapshotArn(
+                "arn:aws:rds:us-east-1:123456789012:cluster-snapshot:" + id);
+        snapshot.setDbClusterIdentifier("source-cluster");
+        snapshot.setSnapshotCreateTime(Instant.parse("2026-09-21T00:00:00Z"));
+        snapshot.setClusterCreateTime(Instant.parse("2026-09-20T00:00:00Z"));
+        snapshot.setEngine(DatabaseEngine.POSTGRES);
+        snapshot.setEngineIdentifier("aurora-postgresql");
+        snapshot.setEngineVersion("16.3");
+        snapshot.setStatus("available");
+        snapshot.setPercentProgress(100);
+        snapshot.setSnapshotType("manual");
+        snapshot.setMasterUsername("admin");
+        snapshot.setDatabaseName("appdb");
+        snapshot.setPort(5432);
+        snapshot.setStorageEncrypted(true);
+        return snapshot;
     }
 
     private static DbCluster makeCluster(String id) {

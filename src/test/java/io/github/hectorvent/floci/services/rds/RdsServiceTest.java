@@ -12,15 +12,16 @@ import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.ec2.model.Vpc;
 import io.github.hectorvent.floci.services.ec2.model.VpcIpv6CidrBlockAssociation;
+import io.github.hectorvent.floci.services.kms.KmsService;
+import io.github.hectorvent.floci.services.kms.model.KmsKey;
+import io.github.hectorvent.floci.services.rds.container.RdsContainerHandle;
+import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
 import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
-import io.github.hectorvent.floci.services.rds.container.RdsContainerHandle;
-import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
+import io.github.hectorvent.floci.services.rds.model.DbClusterSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbEndpoint;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
-import io.github.hectorvent.floci.services.kms.KmsService;
-import io.github.hectorvent.floci.services.kms.model.KmsKey;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceSettings;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
@@ -52,13 +53,13 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.OptionalInt;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -3036,6 +3037,339 @@ class RdsServiceTest {
     }
 
     @Test
+    void createDbClusterSnapshotCapturesPostgresDataAndClusterMetadata() {
+        DbCluster cluster = rdsService.createDbCluster(
+                "source-cluster", "aurora-postgresql", "16.3", "admin", "password",
+                "appdb", true, null, null, "us-east-1a", false, "us-east-1",
+                null, null, null, false, null, "provisioned", true);
+        when(containerManager.createPostgresSnapshot(cluster.getContainerId(), "admin"))
+                .thenReturn("POSTGRES_CLUSTER_DUMP");
+
+        DbClusterSnapshot snapshot = rdsService.createDbClusterSnapshot(
+                "cluster-snapshot", "source-cluster", Map.of("owner", "platform"));
+
+        assertEquals("cluster-snapshot", snapshot.getDbClusterSnapshotIdentifier());
+        assertEquals("source-cluster", snapshot.getDbClusterIdentifier());
+        assertEquals("arn:aws:rds:us-east-1:123456789012:cluster-snapshot:cluster-snapshot",
+                snapshot.getDbClusterSnapshotArn());
+        assertEquals(DatabaseEngine.POSTGRES, snapshot.getEngine());
+        assertEquals("aurora-postgresql", snapshot.getEngineIdentifier());
+        assertEquals("16.3", snapshot.getEngineVersion());
+        assertEquals("available", snapshot.getStatus());
+        assertEquals("manual", snapshot.getSnapshotType());
+        assertEquals(100, snapshot.getPercentProgress());
+        assertEquals("admin", snapshot.getMasterUsername());
+        assertEquals("appdb", snapshot.getDatabaseName());
+        assertTrue(snapshot.isIamDatabaseAuthenticationEnabled());
+        assertTrue(snapshot.isStorageEncrypted());
+        assertEquals(Map.of("owner", "platform"), snapshot.getTags());
+        verify(containerManager).createPostgresSnapshot(cluster.getContainerId(), "admin");
+    }
+
+    @Test
+    void clusterSnapshotTagsRoundTripThroughResourceTaggingApis() {
+        DbCluster cluster = rdsService.createDbCluster(
+                "source-cluster", "aurora-postgresql", "16.3", "admin", "password",
+                "appdb", false, null);
+        when(containerManager.createPostgresSnapshot(cluster.getContainerId(), "admin"))
+                .thenReturn("POSTGRES_CLUSTER_DUMP");
+        DbClusterSnapshot snapshot = rdsService.createDbClusterSnapshot(
+                "cluster-snapshot", "source-cluster", Map.of("owner", "platform"));
+
+        assertEquals(Map.of("owner", "platform"),
+                rdsService.listTagsForResource(snapshot.getDbClusterSnapshotArn()));
+
+        rdsService.addTagsToResource(
+                snapshot.getDbClusterSnapshotArn(), Map.of("environment", "staging"));
+        assertEquals(Map.of("owner", "platform", "environment", "staging"),
+                rdsService.listTagsForResource(snapshot.getDbClusterSnapshotArn()));
+
+        rdsService.removeTagsFromResource(
+                snapshot.getDbClusterSnapshotArn(), List.of("owner"));
+        assertEquals(Map.of("environment", "staging"),
+                rdsService.listTagsForResource(snapshot.getDbClusterSnapshotArn()));
+    }
+
+    @Test
+    void createAndRestoreMysqlClusterSnapshotUseMysqlDumpPath() {
+        DbCluster source = rdsService.createDbCluster(
+                "mysql-source", "aurora-mysql", "8.0.36", "admin", "password",
+                "appdb", false, null);
+        when(containerManager.createMySqlSnapshot(
+                source.getContainerId(), "admin", "password"))
+                .thenReturn("MYSQL_CLUSTER_DUMP");
+
+        rdsService.createDbClusterSnapshot("mysql-snapshot", "mysql-source", Map.of());
+        DbCluster restored = rdsService.restoreDbClusterFromSnapshot(
+                "mysql-restored", "mysql-snapshot", "aurora-mysql", null,
+                null, null, null, List.of(), null, Map.of(), false, false,
+                "us-east-1");
+
+        assertEquals(DatabaseEngine.MYSQL, restored.getEngine());
+        assertEquals("aurora-mysql", restored.getEngineIdentifier());
+        verify(containerManager).createMySqlSnapshot(
+                source.getContainerId(), "admin", "password");
+        verify(containerManager).restoreMySqlSnapshot(
+                restored.getContainerId(), "admin", "password", "MYSQL_CLUSTER_DUMP");
+    }
+
+    @Test
+    void copyDbClusterSnapshotCopiesDataTagsAndSourceArnButNotRestoreAccounts() {
+        DbCluster sourceCluster = rdsService.createDbCluster(
+                "source-cluster", "aurora-postgresql", "16.3", "admin", "password",
+                "appdb", false, null);
+        when(containerManager.createPostgresSnapshot(sourceCluster.getContainerId(), "admin"))
+                .thenReturn("CLUSTER_DUMP");
+        DbClusterSnapshot source = rdsService.createDbClusterSnapshot(
+                "source-snapshot", "source-cluster", Map.of("owner", "platform"));
+        rdsService.modifyDbClusterSnapshotAttribute(
+                "source-snapshot", "restore", List.of("111111111111"), List.of(),
+                "us-east-1");
+
+        DbClusterSnapshot copy = rdsService.copyDbClusterSnapshot(
+                source.getDbClusterSnapshotArn(), "copy-snapshot", true,
+                Map.of("Name", "copy"), "us-east-1");
+
+        assertEquals(source.getDbClusterSnapshotArn(), copy.getSourceDbClusterSnapshotArn());
+        assertEquals(Map.of("owner", "platform", "Name", "copy"), copy.getTags());
+        assertTrue(copy.getRestoreAccountIds().isEmpty());
+
+        DbCluster restored = rdsService.restoreDbClusterFromSnapshot(
+                "copy-restored", "copy-snapshot", "aurora-postgresql", null,
+                null, null, null, List.of(), null, Map.of(), false, false,
+                "us-east-1");
+        verify(containerManager).restorePostgresSnapshot(
+                restored.getContainerId(), "admin", "CLUSTER_DUMP");
+    }
+
+    @Test
+    void restoreDbClusterFromSnapshotAppliesSupportedOverrides() {
+        DbCluster source = rdsService.createDbCluster(
+                "source-cluster", "aurora-postgresql", "16.3", "admin", "password",
+                "source_db", false, null);
+        when(containerManager.createPostgresSnapshot(source.getContainerId(), "admin"))
+                .thenReturn("CLUSTER_DUMP");
+        rdsService.createDbClusterSnapshot(
+                "cluster-snapshot", "source-cluster", Map.of("source", "true"));
+
+        DbCluster restored = rdsService.restoreDbClusterFromSnapshot(
+                "restored-cluster", "cluster-snapshot", "aurora-postgresql", "16.4",
+                5432, "restored_db", null, List.of("sg-12345678"), null,
+                Map.of("environment", "staging"), true, true, "us-east-1");
+
+        assertEquals("16.4", restored.getEngineVersion());
+        assertEquals("restored_db", restored.getDatabaseName());
+        assertNotEquals(5432, restored.getEndpoint().port());
+        assertEquals(List.of("sg-12345678"), restored.getVpcSecurityGroupIds());
+        assertEquals(Map.of("environment", "staging"), restored.getTags());
+        assertTrue(restored.isDeletionProtection());
+        assertTrue(restored.isIamDatabaseAuthenticationEnabled());
+        verify(containerManager).restorePostgresSnapshot(
+                restored.getContainerId(), "admin", "CLUSTER_DUMP");
+
+        AwsException protectedDelete = assertThrows(AwsException.class,
+                () -> rdsService.deleteDbCluster("restored-cluster"));
+        assertEquals("InvalidDBClusterStateFault", protectedDelete.getErrorCode());
+    }
+
+    @Test
+    void describeDbClusterSnapshotsFiltersByIdentifierClusterAndType() {
+        DbCluster first = rdsService.createDbCluster(
+                "cluster-one", "aurora-postgresql", "16.3", "admin", "password",
+                "app", false, null);
+        DbCluster second = rdsService.createDbCluster(
+                "cluster-two", "aurora-postgresql", "16.3", "admin", "password",
+                "app", false, null);
+        when(containerManager.createPostgresSnapshot(any(), eq("admin")))
+                .thenReturn("CLUSTER_DUMP");
+        rdsService.createDbClusterSnapshot("snapshot-one", first.getDbClusterIdentifier(), Map.of());
+        rdsService.createDbClusterSnapshot("snapshot-two", second.getDbClusterIdentifier(), Map.of());
+
+        assertEquals(2, rdsService.describeDbClusterSnapshots(
+                null, null, null, "us-east-1").size());
+        assertEquals("snapshot-one", rdsService.describeDbClusterSnapshots(
+                        "snapshot-one", null, null, "us-east-1")
+                .iterator().next().getDbClusterSnapshotIdentifier());
+        assertEquals("snapshot-two", rdsService.describeDbClusterSnapshots(
+                        null, "cluster-two", "manual", "us-east-1")
+                .iterator().next().getDbClusterSnapshotIdentifier());
+        assertTrue(rdsService.describeDbClusterSnapshots(
+                null, "cluster-one", "automated", "us-east-1").isEmpty());
+    }
+
+    @Test
+    void clusterSnapshotLifecycleValidatesStateIdentityEngineAndAttributes() {
+        DbCluster cluster = rdsService.createDbCluster(
+                "source-cluster", "aurora-postgresql", "16.3", "admin", "password",
+                "app", false, null);
+        when(containerManager.createPostgresSnapshot(cluster.getContainerId(), "admin"))
+                .thenReturn("CLUSTER_DUMP");
+        rdsService.createDbClusterSnapshot("cluster-snapshot", "source-cluster", Map.of());
+
+        AwsException duplicate = assertThrows(AwsException.class, () ->
+                rdsService.createDbClusterSnapshot(
+                        "cluster-snapshot", "source-cluster", Map.of()));
+        assertEquals("DBClusterSnapshotAlreadyExistsFault", duplicate.getErrorCode());
+
+        AwsException engineMismatch = assertThrows(AwsException.class, () ->
+                rdsService.restoreDbClusterFromSnapshot(
+                        "restored", "cluster-snapshot", "aurora-mysql", null,
+                        null, null, null, List.of(), null, Map.of(), false, false,
+                        "us-east-1"));
+        assertEquals("InvalidParameterCombination", engineMismatch.getErrorCode());
+
+        DbClusterSnapshot modified = rdsService.modifyDbClusterSnapshotAttribute(
+                "cluster-snapshot", "restore", List.of("all", "111111111111"),
+                List.of(), "us-east-1");
+        assertEquals(List.of("all", "111111111111"), modified.getRestoreAccountIds());
+        DbClusterSnapshot removed = rdsService.modifyDbClusterSnapshotAttribute(
+                "cluster-snapshot", "restore", List.of(), List.of("all"), "us-east-1");
+        assertEquals(List.of("111111111111"), removed.getRestoreAccountIds());
+
+        AwsException badAttribute = assertThrows(AwsException.class, () ->
+                rdsService.modifyDbClusterSnapshotAttribute(
+                        "cluster-snapshot", "share", List.of("all"), List.of(),
+                        "us-east-1"));
+        assertEquals("InvalidParameterValue", badAttribute.getErrorCode());
+
+        modified.setStatus("creating");
+        AwsException invalidState = assertThrows(AwsException.class,
+                () -> rdsService.deleteDbClusterSnapshot("cluster-snapshot", "us-east-1"));
+        assertEquals("InvalidDBClusterSnapshotStateFault", invalidState.getErrorCode());
+    }
+
+    @Test
+    void deleteDbClusterSnapshotRemovesMetadataAndBackingData() {
+        DbCluster cluster = rdsService.createDbCluster(
+                "source-cluster", "aurora-postgresql", "16.3", "admin", "password",
+                "app", false, null);
+        when(containerManager.createPostgresSnapshot(cluster.getContainerId(), "admin"))
+                .thenReturn("CLUSTER_DUMP");
+        rdsService.createDbClusterSnapshot("cluster-snapshot", "source-cluster", Map.of());
+
+        DbClusterSnapshot deleted = rdsService.deleteDbClusterSnapshot(
+                "cluster-snapshot", "us-east-1");
+
+        assertEquals("deleted", deleted.getStatus());
+        AwsException missing = assertThrows(AwsException.class, () ->
+                rdsService.describeDbClusterSnapshotAttributes(
+                        "cluster-snapshot", "us-east-1"));
+        assertEquals("DBClusterSnapshotNotFoundFault", missing.getErrorCode());
+        AwsException missingCopy = assertThrows(AwsException.class, () ->
+                rdsService.copyDbClusterSnapshot(
+                        "cluster-snapshot", "copy", false, Map.of(), "us-east-1"));
+        assertEquals("DBClusterSnapshotNotFoundFault", missingCopy.getErrorCode());
+    }
+
+    @Test
+    void clusterSnapshotCreateRollsBackDataWhenMetadataPersistenceFails() {
+        InMemoryStorage<String, DbClusterSnapshot> metadataBacking = new InMemoryStorage<>();
+        StorageBackend<String, DbClusterSnapshot> metadata = spy(metadataBacking);
+        InMemoryStorage<String, String> data = new InMemoryStorage<>();
+        RdsService service = clusterSnapshotStoreService(metadata, data);
+        DbCluster cluster = service.createDbCluster(
+                "source-cluster", "aurora-postgresql", "16.3", "admin", "password",
+                "app", false, null);
+        when(containerManager.createPostgresSnapshot(cluster.getContainerId(), "admin"))
+                .thenReturn("CLUSTER_DUMP");
+        doAnswer(invocation -> {
+            invocation.callRealMethod();
+            throw new IllegalStateException("metadata persistence failed");
+        }).when(metadata).put(anyString(), any());
+
+        IllegalStateException failure = assertThrows(IllegalStateException.class, () ->
+                service.createDbClusterSnapshot(
+                        "cluster-snapshot", "source-cluster", Map.of()));
+
+        assertEquals("metadata persistence failed", failure.getMessage());
+        assertTrue(metadataBacking.keys().isEmpty());
+        assertTrue(data.keys().isEmpty());
+    }
+
+    @Test
+    void clusterSnapshotDeleteRestoresMetadataAndDataWhenPersistenceFails() {
+        InMemoryStorage<String, DbClusterSnapshot> metadataBacking = new InMemoryStorage<>();
+        StorageBackend<String, DbClusterSnapshot> metadata = spy(metadataBacking);
+        InMemoryStorage<String, String> data = new InMemoryStorage<>();
+        RdsService service = clusterSnapshotStoreService(metadata, data);
+        DbCluster cluster = service.createDbCluster(
+                "source-cluster", "aurora-postgresql", "16.3", "admin", "password",
+                "app", false, null);
+        when(containerManager.createPostgresSnapshot(cluster.getContainerId(), "admin"))
+                .thenReturn("CLUSTER_DUMP");
+        service.createDbClusterSnapshot(
+                "cluster-snapshot", "source-cluster", Map.of());
+        doAnswer(invocation -> {
+            invocation.callRealMethod();
+            throw new IllegalStateException("metadata deletion failed");
+        }).when(metadata).delete(anyString());
+
+        IllegalStateException failure = assertThrows(IllegalStateException.class, () ->
+                service.deleteDbClusterSnapshot("cluster-snapshot", "us-east-1"));
+
+        assertEquals("metadata deletion failed", failure.getMessage());
+        assertEquals("cluster-snapshot", service.describeDbClusterSnapshotAttributes(
+                "cluster-snapshot", "us-east-1").getDbClusterSnapshotIdentifier());
+        assertEquals("copy-snapshot", service.copyDbClusterSnapshot(
+                "cluster-snapshot", "copy-snapshot", false, Map.of(), "us-east-1")
+                .getDbClusterSnapshotIdentifier());
+    }
+
+    @Test
+    void failedClusterSnapshotRestoreRemovesRuntimeAndReleasesProxyPort() {
+        DbCluster source = rdsService.createDbCluster(
+                "source-cluster", "aurora-postgresql", "16.3", "admin", "password",
+                "app", false, null);
+        when(containerManager.createPostgresSnapshot(source.getContainerId(), "admin"))
+                .thenReturn("CLUSTER_DUMP");
+        rdsService.createDbClusterSnapshot(
+                "cluster-snapshot", "source-cluster", Map.of());
+        doThrow(new IllegalStateException("restore failed"))
+                .when(containerManager).restorePostgresSnapshot(any(), any(), any());
+
+        AwsException failure = assertThrows(AwsException.class, () ->
+                rdsService.restoreDbClusterFromSnapshot(
+                        "failed-restore", "cluster-snapshot", "aurora-postgresql", null,
+                        null, null, null, List.of(), null, Map.of(), true, false,
+                        "us-east-1"));
+
+        assertEquals("InvalidDBClusterSnapshotStateFault", failure.getErrorCode());
+        assertThrows(AwsException.class, () -> rdsService.getDbCluster("failed-restore"));
+        verify(containerManager).stop(any());
+        verify(containerManager).removeVolume(any(), any(), any());
+
+        DbCluster replacement = rdsService.createDbCluster(
+                "replacement", "aurora-postgresql", "16.3", "admin", "password",
+                "app", false, null);
+        assertEquals(7001, replacement.getEndpoint().port());
+    }
+
+    @Test
+    void clusterSnapshotArnCopyKeepsRegionsIsolated() {
+        DbCluster cluster = rdsService.createDbCluster(
+                "source-cluster", "aurora-postgresql", "16.3", "admin", "password",
+                "app", false, null);
+        when(containerManager.createPostgresSnapshot(cluster.getContainerId(), "admin"))
+                .thenReturn("CLUSTER_DUMP");
+        DbClusterSnapshot source = rdsService.createDbClusterSnapshot(
+                "cluster-snapshot", "source-cluster", Map.of(), "us-east-1");
+
+        AwsException missingInWest = assertThrows(AwsException.class, () ->
+                rdsService.describeDbClusterSnapshots(
+                        "cluster-snapshot", null, null, "us-west-2"));
+        assertEquals("DBClusterSnapshotNotFoundFault", missingInWest.getErrorCode());
+
+        DbClusterSnapshot copy = rdsService.copyDbClusterSnapshot(
+                source.getDbClusterSnapshotArn(), "west-copy", false, Map.of(), "us-west-2");
+
+        assertEquals("arn:aws:rds:us-west-2:123456789012:cluster-snapshot:west-copy",
+                copy.getDbClusterSnapshotArn());
+        assertEquals("west-copy", rdsService.describeDbClusterSnapshots(
+                        "west-copy", null, null, "us-west-2")
+                .iterator().next().getDbClusterSnapshotIdentifier());
+    }
+
+    @Test
     void failedInstanceRestoreClearsRuntimeStateAndReleasesItsEndpointPort() {
         InMemoryStorage<String, DbInstance> instances = new InMemoryStorage<>();
         instances.put("broken", persistedInstance("broken", "123456789012", "secret", 7000));
@@ -5901,6 +6235,16 @@ class RdsServiceTest {
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), null, null, null,
                 new InMemoryStorage<>(), new InMemoryStorage<>(), optionGroups, null, kmsService);
+    }
+
+    private RdsService clusterSnapshotStoreService(
+            StorageBackend<String, DbClusterSnapshot> clusterSnapshots,
+            StorageBackend<String, String> clusterSnapshotData) {
+        return new RdsService(containerManager, proxyManager, ec2Service, regionResolver, config,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), null, null, null,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                null, kmsService, clusterSnapshots, clusterSnapshotData);
     }
 
     private DbInstance createInstanceWithOptionGroup(

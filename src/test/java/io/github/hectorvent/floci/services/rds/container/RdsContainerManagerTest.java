@@ -27,6 +27,7 @@ import com.github.dockerjava.api.command.CopyArchiveToContainerCmd;
 import com.github.dockerjava.api.model.Bind;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -1153,6 +1154,34 @@ class RdsContainerManagerTest {
 
         assertTrue(script.contains("USER=\"$1\""),
                 "Script must assign the first argument to the USER variable");
+    }
+
+    @Test
+    void mysqlDumpCommandCapturesAllDatabasesAndDatabaseObjects() {
+        String[] command = RdsContainerManager.mysqlDumpCommand("admin", "p@ss word");
+
+        assertArrayEquals(new String[]{
+                "mysqldump",
+                "--user=admin",
+                "--password=p@ss word",
+                "--all-databases",
+                "--single-transaction",
+                "--routines",
+                "--events",
+                "--triggers",
+                "--set-gtid-purged=OFF"
+        }, command);
+    }
+
+    @Test
+    void mysqlRestoreScriptUsesQuotedCredentialsAndDumpFile() {
+        String script = RdsContainerManager.mysqlRestoreScript();
+
+        assertTrue(script.contains("USER=\"$1\""), script);
+        assertTrue(script.contains("PASSWORD=\"$2\""), script);
+        assertTrue(script.contains("--user=\"$USER\""), script);
+        assertTrue(script.contains("--password=\"$PASSWORD\""), script);
+        assertTrue(script.contains("< /tmp/dump.sql"), script);
     }
 
     private static EmulatorConfig config(Path hostRoot) {

@@ -6,15 +6,15 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsQueryResponse;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
+import io.github.hectorvent.floci.services.docdb.DocDbQueryHandler;
+import io.github.hectorvent.floci.services.neptune.NeptuneQueryHandler;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
 import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
+import io.github.hectorvent.floci.services.rds.model.DbClusterSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbEndpoint;
-import io.github.hectorvent.floci.services.docdb.DocDbQueryHandler;
-import io.github.hectorvent.floci.services.neptune.NeptuneQueryHandler;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceSettings;
-import io.github.hectorvent.floci.services.rds.model.LogExportChanges;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbProxy;
@@ -24,6 +24,7 @@ import io.github.hectorvent.floci.services.rds.model.DbProxyTargetGroup;
 import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
 import io.github.hectorvent.floci.services.rds.model.GlobalCluster;
 import io.github.hectorvent.floci.services.rds.model.GlobalClusterMember;
+import io.github.hectorvent.floci.services.rds.model.LogExportChanges;
 import io.github.hectorvent.floci.services.rds.model.OptionGroup;
 import io.github.hectorvent.floci.services.rds.model.OptionGroupOption;
 import io.github.hectorvent.floci.services.rds.model.RdsEvent;
@@ -113,6 +114,14 @@ public class RdsQueryHandler {
                 case "DescribeDBSnapshots" -> handleDescribeDbSnapshots(params, region);
                 case "DescribeDBSnapshotAttributes" -> handleDescribeDbSnapshotAttributes(params, region);
                 case "ModifyDBSnapshotAttribute" -> handleModifyDbSnapshotAttribute(params, region);
+                case "CreateDBClusterSnapshot" -> handleCreateDbClusterSnapshot(params, region);
+                case "DeleteDBClusterSnapshot" -> handleDeleteDbClusterSnapshot(params, region);
+                case "CopyDBClusterSnapshot" -> handleCopyDbClusterSnapshot(params, region);
+                case "RestoreDBClusterFromSnapshot" -> handleRestoreDbClusterFromSnapshot(params, region);
+                case "DescribeDBClusterSnapshotAttributes" ->
+                        handleDescribeDbClusterSnapshotAttributes(params, region);
+                case "ModifyDBClusterSnapshotAttribute" ->
+                        handleModifyDbClusterSnapshotAttribute(params, region);
                 case "DescribeDBProxies" -> handleDescribeDbProxies(params, region);
                 case "CreateDBProxy" -> handleCreateDbProxy(params, region);
                 case "ModifyDBProxy" -> handleModifyDbProxy(params, region);
@@ -122,7 +131,7 @@ public class RdsQueryHandler {
                 case "DescribeDBProxyTargetGroups" -> handleDescribeDbProxyTargetGroups(params, region);
                 case "ModifyDBProxyTargetGroup" -> handleModifyDbProxyTargetGroup(params, region);
                 case "DescribeDBProxyTargets" -> handleDescribeDbProxyTargets(params, region);
-                case "DescribeDBClusterSnapshots" -> handleDescribeDbClusterSnapshots(params);
+                case "DescribeDBClusterSnapshots" -> handleDescribeDbClusterSnapshots(params, region);
                 case "DescribeGlobalClusters" -> handleDescribeGlobalClusters(params);
                 case "CreateGlobalCluster" -> handleCreateGlobalCluster(params, region);
                 case "ModifyGlobalCluster" -> handleModifyGlobalCluster(params);
@@ -1421,6 +1430,110 @@ public class RdsQueryHandler {
         }
     }
 
+    private Response handleCreateDbClusterSnapshot(
+            MultivaluedMap<String, String> params, String region) {
+        String snapshotId = params.getFirst("DBClusterSnapshotIdentifier");
+        String clusterId = params.getFirst("DBClusterIdentifier");
+        Response missing = firstMissingParam(
+                "DBClusterSnapshotIdentifier", snapshotId,
+                "DBClusterIdentifier", clusterId);
+        if (missing != null) {
+            return missing;
+        }
+        DbClusterSnapshot snapshot = service.createDbClusterSnapshot(
+                snapshotId, clusterId, parseTags(params), region);
+        return Response.ok(AwsQueryResponse.envelope(
+                "CreateDBClusterSnapshot", AwsNamespaces.RDS,
+                dbClusterSnapshotXml(snapshot))).build();
+    }
+
+    private Response handleDeleteDbClusterSnapshot(
+            MultivaluedMap<String, String> params, String region) {
+        String snapshotId = params.getFirst("DBClusterSnapshotIdentifier");
+        Response missing = firstMissingParam("DBClusterSnapshotIdentifier", snapshotId);
+        if (missing != null) {
+            return missing;
+        }
+        DbClusterSnapshot snapshot = service.deleteDbClusterSnapshot(snapshotId, region);
+        return Response.ok(AwsQueryResponse.envelope(
+                "DeleteDBClusterSnapshot", AwsNamespaces.RDS,
+                dbClusterSnapshotXml(snapshot))).build();
+    }
+
+    private Response handleCopyDbClusterSnapshot(
+            MultivaluedMap<String, String> params, String region) {
+        String sourceId = params.getFirst("SourceDBClusterSnapshotIdentifier");
+        String targetId = params.getFirst("TargetDBClusterSnapshotIdentifier");
+        Response missing = firstMissingParam(
+                "SourceDBClusterSnapshotIdentifier", sourceId,
+                "TargetDBClusterSnapshotIdentifier", targetId);
+        if (missing != null) {
+            return missing;
+        }
+        Boolean copyTags = parseOptionalBoolean(params, "CopyTags");
+        DbClusterSnapshot snapshot = service.copyDbClusterSnapshot(
+                sourceId, targetId, Boolean.TRUE.equals(copyTags), parseTags(params), region);
+        return Response.ok(AwsQueryResponse.envelope(
+                "CopyDBClusterSnapshot", AwsNamespaces.RDS,
+                dbClusterSnapshotXml(snapshot))).build();
+    }
+
+    private Response handleRestoreDbClusterFromSnapshot(
+            MultivaluedMap<String, String> params, String region) {
+        String clusterId = params.getFirst("DBClusterIdentifier");
+        String snapshotId = params.getFirst("SnapshotIdentifier");
+        String engine = params.getFirst("Engine");
+        Response missing = firstMissingParam(
+                "DBClusterIdentifier", clusterId,
+                "SnapshotIdentifier", snapshotId,
+                "Engine", engine);
+        if (missing != null) {
+            return missing;
+        }
+        DbCluster cluster = service.restoreDbClusterFromSnapshot(
+                clusterId, snapshotId, engine, params.getFirst("EngineVersion"),
+                parseIntegerParam(params, "Port"), params.getFirst("DatabaseName"),
+                params.getFirst("DBSubnetGroupName"), vpcSecurityGroupIds(params),
+                params.getFirst("DBClusterParameterGroupName"), parseTags(params),
+                parseOptionalBoolean(params, "DeletionProtection"),
+                parseOptionalBoolean(params, "EnableIAMDatabaseAuthentication"), region);
+        return Response.ok(AwsQueryResponse.envelope(
+                "RestoreDBClusterFromSnapshot", AwsNamespaces.RDS,
+                dbClusterXml(cluster))).build();
+    }
+
+    private Response handleDescribeDbClusterSnapshotAttributes(
+            MultivaluedMap<String, String> params, String region) {
+        String snapshotId = params.getFirst("DBClusterSnapshotIdentifier");
+        Response missing = firstMissingParam("DBClusterSnapshotIdentifier", snapshotId);
+        if (missing != null) {
+            return missing;
+        }
+        DbClusterSnapshot snapshot = service.describeDbClusterSnapshotAttributes(
+                snapshotId, region);
+        return Response.ok(AwsQueryResponse.envelope(
+                "DescribeDBClusterSnapshotAttributes", AwsNamespaces.RDS,
+                dbClusterSnapshotAttributesResultXml(snapshot))).build();
+    }
+
+    private Response handleModifyDbClusterSnapshotAttribute(
+            MultivaluedMap<String, String> params, String region) {
+        String snapshotId = params.getFirst("DBClusterSnapshotIdentifier");
+        String attributeName = params.getFirst("AttributeName");
+        Response missing = firstMissingParam(
+                "DBClusterSnapshotIdentifier", snapshotId,
+                "AttributeName", attributeName);
+        if (missing != null) {
+            return missing;
+        }
+        DbClusterSnapshot snapshot = service.modifyDbClusterSnapshotAttribute(
+                snapshotId, attributeName, memberList(params, "ValuesToAdd"),
+                memberList(params, "ValuesToRemove"), region);
+        return Response.ok(AwsQueryResponse.envelope(
+                "ModifyDBClusterSnapshotAttribute", AwsNamespaces.RDS,
+                dbClusterSnapshotAttributesResultXml(snapshot))).build();
+    }
+
     private Response handleDescribeDbProxies(MultivaluedMap<String, String> params, String region) {
         XmlBuilder xml = new XmlBuilder().start("DBProxies");
         for (DbProxy p : service.listDbProxies(params.getFirst("DBProxyName"), region)) {
@@ -1906,12 +2019,26 @@ public class RdsQueryHandler {
         return xml.end(elementName).build();
     }
 
-    private Response handleDescribeDbClusterSnapshots(MultivaluedMap<String, String> params) {
-        // DB cluster snapshots are not modeled; return the RDS Query API's wire-accurate
-        // empty result (empty <DBClusterSnapshots> wrapper, no <Marker>) so SDK clients
-        // complete the read instead of failing with UnsupportedOperation.
-        String result = new XmlBuilder().start("DBClusterSnapshots").end("DBClusterSnapshots").build();
-        return Response.ok(AwsQueryResponse.envelope("DescribeDBClusterSnapshots", AwsNamespaces.RDS, result)).build();
+    private Response handleDescribeDbClusterSnapshots(
+            MultivaluedMap<String, String> params, String region) {
+        String snapshotId = params.getFirst("DBClusterSnapshotIdentifier");
+        String clusterId = params.getFirst("DBClusterIdentifier");
+        if (snapshotId != null && !snapshotId.isBlank()
+                && clusterId != null && !clusterId.isBlank()) {
+            throw new AwsException("InvalidParameterCombination",
+                    "DBClusterSnapshotIdentifier and DBClusterIdentifier cannot both be specified.",
+                    400);
+        }
+        Collection<DbClusterSnapshot> snapshots = service.describeDbClusterSnapshots(
+                snapshotId, clusterId,
+                params.getFirst("SnapshotType"), region);
+        XmlBuilder xml = new XmlBuilder().start("DBClusterSnapshots");
+        for (DbClusterSnapshot snapshot : snapshots) {
+            xml.raw(dbClusterSnapshotXml(snapshot));
+        }
+        xml.end("DBClusterSnapshots");
+        return Response.ok(AwsQueryResponse.envelope(
+                "DescribeDBClusterSnapshots", AwsNamespaces.RDS, xml.build())).build();
     }
 
     // ── XML builders ──────────────────────────────────────────────────────────
@@ -1954,6 +2081,68 @@ public class RdsQueryHandler {
         xml.end("AttributeValues");
         xml.end("DBSnapshotAttribute").end("DBSnapshotAttributes");
         return xml.end("DBSnapshotAttributesResult").build();
+    }
+
+    private String dbClusterSnapshotXml(DbClusterSnapshot snapshot) {
+        XmlBuilder xml = new XmlBuilder().start("DBClusterSnapshot")
+                .elem("DBClusterSnapshotIdentifier", snapshot.getDbClusterSnapshotIdentifier())
+                .elem("DBClusterIdentifier", snapshot.getDbClusterIdentifier())
+                .elem("SnapshotCreateTime", snapshot.getSnapshotCreateTime() != null
+                        ? snapshot.getSnapshotCreateTime().toString() : "")
+                .elem("Engine", snapshot.getEngineIdentifier())
+                .elem("EngineVersion", snapshot.getEngineVersion())
+                .elem("Status", snapshot.getStatus())
+                .elem("PercentProgress", snapshot.getPercentProgress())
+                .elem("SnapshotType", snapshot.getSnapshotType())
+                .elem("MasterUsername", snapshot.getMasterUsername())
+                .elem("Port", snapshot.getPort())
+                .elem("StorageEncrypted", snapshot.isStorageEncrypted())
+                .elem("IAMDatabaseAuthenticationEnabled",
+                        snapshot.isIamDatabaseAuthenticationEnabled());
+        if (snapshot.getDatabaseName() != null && !snapshot.getDatabaseName().isBlank()) {
+            xml.elem("DatabaseName", snapshot.getDatabaseName());
+        }
+        if (snapshot.getEngineMode() != null && !snapshot.getEngineMode().isBlank()) {
+            xml.elem("EngineMode", snapshot.getEngineMode());
+        }
+        if (snapshot.getClusterCreateTime() != null) {
+            xml.elem("ClusterCreateTime", snapshot.getClusterCreateTime().toString());
+        }
+        if (snapshot.getVpcId() != null && !snapshot.getVpcId().isBlank()) {
+            xml.elem("VpcId", snapshot.getVpcId());
+        }
+        if (snapshot.getDbClusterResourceId() != null
+                && !snapshot.getDbClusterResourceId().isBlank()) {
+            xml.elem("DbClusterResourceId", snapshot.getDbClusterResourceId());
+        }
+        if (snapshot.getSourceDbClusterSnapshotArn() != null
+                && !snapshot.getSourceDbClusterSnapshotArn().isBlank()) {
+            xml.elem("SourceDBClusterSnapshotArn", snapshot.getSourceDbClusterSnapshotArn());
+        }
+        if (snapshot.getDbClusterSnapshotArn() != null) {
+            xml.elem("DBClusterSnapshotArn", snapshot.getDbClusterSnapshotArn());
+        }
+        xml.start("TagList");
+        writeTags(xml, snapshot.getTags());
+        return xml.end("TagList").end("DBClusterSnapshot").build();
+    }
+
+    private String dbClusterSnapshotAttributesResultXml(DbClusterSnapshot snapshot) {
+        XmlBuilder xml = new XmlBuilder().start("DBClusterSnapshotAttributesResult")
+                .elem("DBClusterSnapshotIdentifier",
+                        snapshot.getDbClusterSnapshotIdentifier())
+                .start("DBClusterSnapshotAttributes")
+                .start("DBClusterSnapshotAttribute")
+                .elem("AttributeName", "restore")
+                .start("AttributeValues");
+        for (String accountId : snapshot.getRestoreAccountIds()) {
+            xml.elem("AttributeValue", accountId);
+        }
+        return xml.end("AttributeValues")
+                .end("DBClusterSnapshotAttribute")
+                .end("DBClusterSnapshotAttributes")
+                .end("DBClusterSnapshotAttributesResult")
+                .build();
     }
 
     private String dbInstanceInnerXml(DbInstance i) {
@@ -2186,15 +2375,20 @@ public class RdsQueryHandler {
         xml.elem("IAMDatabaseAuthenticationEnabled", c.isIamDatabaseAuthenticationEnabled())
            .elem("MultiAZ", c.isMultiAz())
            .elem("StorageEncrypted", c.isStorageEncrypted())
+           .elem("DeletionProtection", c.isDeletionProtection())
            .elem("AvailabilityZone", c.getAvailabilityZone() != null ? c.getAvailabilityZone() : config.defaultAvailabilityZone())
            .elem("PreferredMaintenanceWindow", "mon:00:00-mon:03:00")
            .elem("PreferredBackupWindow", "04:00-06:00")
-           .start("VpcSecurityGroups")
-             .start("VpcSecurityGroupMembership")
-               .elem("VpcSecurityGroupId", "sg-00000000")
-               .elem("Status", "active")
-             .end("VpcSecurityGroupMembership")
-           .end("VpcSecurityGroups")
+           .start("VpcSecurityGroups");
+        List<String> groupIds = c.getVpcSecurityGroupIds().isEmpty()
+                ? List.of("sg-00000000") : c.getVpcSecurityGroupIds();
+        for (String groupId : groupIds) {
+            xml.start("VpcSecurityGroupMembership")
+                    .elem("VpcSecurityGroupId", groupId)
+                    .elem("Status", "active")
+                    .end("VpcSecurityGroupMembership");
+        }
+        xml.end("VpcSecurityGroups")
            .elem("DBSubnetGroup", c.getDbSubnetGroupName() != null ? c.getDbSubnetGroupName() : "default")
            .elem("DbClusterResourceId", c.getDbClusterResourceId())
            .elem("DBClusterArn", c.getDbClusterArn());

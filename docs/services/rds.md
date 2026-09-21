@@ -56,6 +56,12 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `DescribeDBSnapshots` | List DB instance snapshots |
 | `DescribeDBSnapshotAttributes` | Return a snapshot's `restore` attribute (accounts authorized to copy/restore it) |
 | `ModifyDBSnapshotAttribute` | Add or remove accounts authorized to copy/restore a snapshot |
+| `CreateDBClusterSnapshot` | Save an available Aurora-compatible cluster's metadata and database contents |
+| `DeleteDBClusterSnapshot` | Delete an available manual cluster snapshot and its saved data |
+| `CopyDBClusterSnapshot` | Copy an available cluster snapshot, its saved data, and optionally its tags |
+| `RestoreDBClusterFromSnapshot` | Create an Aurora-compatible cluster from a saved cluster snapshot |
+| `DescribeDBClusterSnapshotAttributes` | Return a cluster snapshot's `restore` attribute |
+| `ModifyDBClusterSnapshotAttribute` | Add or remove accounts from a cluster snapshot's `restore` attribute |
 | `DescribeDBProxies` | List DB proxies |
 | `CreateDBProxy` | Create a DB proxy |
 | `ModifyDBProxy` | Update mutable DB proxy authentication, logging, timeout, TLS, role, and security-group settings |
@@ -65,7 +71,7 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `DescribeDBProxyTargetGroups` | List a proxy's target groups |
 | `ModifyDBProxyTargetGroup` | Update target-group connection-pool configuration |
 | `DescribeDBProxyTargets` | List a proxy target group's registered targets |
-| `DescribeDBClusterSnapshots` | Return an empty cluster-snapshot list (snapshots are not modeled) |
+| `DescribeDBClusterSnapshots` | List manual cluster snapshots, optionally filtered by snapshot, cluster, or type |
 | `DescribeGlobalClusters` | List the account's global clusters with their primary and secondary members; see [Global clusters](#global-clusters) |
 | `CreateGlobalCluster` | Create an Aurora global database, empty or with an existing Aurora cluster as its primary |
 | `ModifyGlobalCluster` | Rename a global cluster, set deletion protection, or upgrade its engine version (members follow) |
@@ -94,16 +100,20 @@ checked against the instance's other window. Modifications apply immediately —
 
 !!! note "DB snapshot tagging and lifecycle"
 
-    `CreateDBSnapshot` accepts `Tags`, and `TagResource`/`UntagResource`/`ListTagsForResource`
-    work against a snapshot's ARN like they do for other tagged resource types.
+    `CreateDBSnapshot` and `CreateDBClusterSnapshot` accept `Tags`, and the RDS tagging APIs
+    work against either snapshot ARN like they do for other tagged resource types.
     `DescribeDBSnapshotAttributes`/`ModifyDBSnapshotAttribute` are modeled as plain in-memory
-    state (no real cross-account sharing). `DeleteDBSnapshot` is not implemented, so a snapshot
-    persists for the life of the account; Terraform's `aws_db_snapshot` can be created but not
-    destroyed. Snapshots are region-scoped like DB instances and clusters: `DBSnapshotArn` reflects
-    the request's signed region, and a snapshot is only visible to `Describe`/`Tag` calls signed
-    for that same region. Aurora cluster snapshots and RDS reserved instances aren't modeled at
-    all (`DescribeDBClusterSnapshots` always returns an empty list, and there's no
-    reserved-instance API), so tagging doesn't apply to either.
+    state (no real cross-account sharing); the cluster-snapshot attribute pair behaves the same
+    way. `DeleteDBSnapshot` is not implemented, so an instance snapshot persists for the life of
+    the account; Terraform's `aws_db_snapshot` can be created but not destroyed. Available manual
+    cluster snapshots can be deleted or copied by identifier or ARN. Copies retain the source data
+    and can copy source tags or add request tags. Restoring a cluster snapshot recreates PostgreSQL
+    or MySQL data and applies the supported engine, network, parameter-group, tag,
+    deletion-protection, and IAM-auth overrides. The optional AWS database `Port` is validated, but
+    the returned endpoint keeps its allocated Floci proxy port so it remains reachable locally.
+    Snapshots are region-scoped like DB instances and clusters: their ARNs reflect the request's
+    signed region, and a snapshot is only visible to describe and tagging calls signed for that same
+    region. RDS reserved instances remain unmodeled, so tagging does not apply to them.
 
 ## Configuration
 

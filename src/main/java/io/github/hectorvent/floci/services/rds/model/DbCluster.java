@@ -44,6 +44,8 @@ public class DbCluster {
     private Map<String, String> tags = new LinkedHashMap<>();
     private String engineMode;
     private boolean storageEncrypted;
+    private boolean deletionProtection;
+    private List<String> vpcSecurityGroupIds = new ArrayList<>();
 
     private String dockerVolumeName;
     private String volumeId;
@@ -187,6 +189,16 @@ public class DbCluster {
 
     public boolean isStorageEncrypted() { return storageEncrypted; }
     public void setStorageEncrypted(boolean storageEncrypted) { this.storageEncrypted = storageEncrypted; }
+
+    public boolean isDeletionProtection() { return deletionProtection; }
+    public void setDeletionProtection(boolean deletionProtection) { this.deletionProtection = deletionProtection; }
+
+    public List<String> getVpcSecurityGroupIds() { return vpcSecurityGroupIds; }
+    public void setVpcSecurityGroupIds(List<String> vpcSecurityGroupIds) {
+        this.vpcSecurityGroupIds = vpcSecurityGroupIds != null
+                ? new ArrayList<>(vpcSecurityGroupIds)
+                : new ArrayList<>();
+    }
 
     public String getDockerVolumeName() { return dockerVolumeName; }
     public void setDockerVolumeName(String dockerVolumeName) { this.dockerVolumeName = dockerVolumeName; }
