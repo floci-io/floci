@@ -9,6 +9,6 @@ package io.github.hectorvent.floci.services.rds.proxy;
  * @param resourceId the instance's {@code DbiResourceId}, or the cluster's
  *                   {@code DbClusterResourceId} for an Aurora cluster endpoint
  */
-public record RdsMysqlBinding(String advertisedHost, int publishedPort, String region,
+public record RdsProxyBinding(String advertisedHost, int publishedPort, String region,
                               String accountId, String resourceId) {
 }

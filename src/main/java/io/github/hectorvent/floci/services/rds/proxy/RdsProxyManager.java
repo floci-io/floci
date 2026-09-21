@@ -35,14 +35,14 @@ public class RdsProxyManager {
                                         String advertisedHost,
                                         String masterUsername, String masterPassword, String dbName,
                                         RdsAuthProxy.MasterPasswordCheck passwordValidator,
-                                        RdsMysqlBinding mysqlBinding) {
+                                        RdsProxyBinding binding) {
         tlsCertificates.ensureHost(advertisedHost);
         EmulatorConfig.RdsServiceConfig rdsConfig = config.services().rds();
         RdsAuthProxy proxy = new RdsAuthProxy(
                 instanceId, backendHost, backendPort, engine, iamEnabled,
                 masterUsername, masterPassword, dbName, sigV4Validator, tlsCertificates, passwordValidator,
                 rdsConfig.proxyHandshakeTimeoutMillis(), rdsConfig.proxyBackendConnectTimeoutMillis(),
-                rdsConfig.proxyMaxConnections(), mysqlBinding);
+                rdsConfig.proxyMaxConnections(), binding);
         try {
             proxy.start(proxyPort);
         } catch (IOException e) {

@@ -66,7 +66,7 @@ public class RdsSigV4Validator {
         return validate(token, clientUsername, null);
     }
 
-    public boolean validate(String token, String clientUsername, RdsMysqlBinding binding) {
+    public boolean validate(String token, String clientUsername, RdsProxyBinding binding) {
         try {
             URI uri = URI.create("http://" + token);
             String host = uri.getHost();
@@ -106,7 +106,7 @@ public class RdsSigV4Validator {
      * token's principal must be allowed to connect as {@code dbUser} to the bound database.
      * An access key that IAM does not know is bypassed, as {@code IamEnforcementFilter} does.
      */
-    private boolean isAllowedToConnect(String accessKeyId, String dbUser, RdsMysqlBinding binding) {
+    private boolean isAllowedToConnect(String accessKeyId, String dbUser, RdsProxyBinding binding) {
         CallerContext caller = iamService.resolveCallerContext(accessKeyId);
         if (caller == null) {
             return true;

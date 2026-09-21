@@ -88,7 +88,7 @@ public class PostgresProtocolHandler {
     public static AuthenticatedSession authenticate(Socket client, BackendConnector backendConnector,
                                       String masterUsername, String masterPassword, String dbName,
                                       boolean iamEnabled, RdsSigV4Validator sigV4,
-                                      RdsMysqlBinding binding,
+                                      RdsProxyBinding binding,
                                       RdsProxyTlsCertificates tlsCertificates,
                                       PasswordValidator passwordValidator,
                                       int handshakeTimeoutMillis) throws IOException {

@@ -37,7 +37,7 @@ import io.github.hectorvent.floci.services.rds.model.OptionGroupOption;
 import io.github.hectorvent.floci.services.rds.model.RdsEvent;
 import io.github.hectorvent.floci.services.rds.model.ReadReplicaRequest;
 import io.github.hectorvent.floci.services.rds.proxy.RdsAuthProxy;
-import io.github.hectorvent.floci.services.rds.proxy.RdsMysqlBinding;
+import io.github.hectorvent.floci.services.rds.proxy.RdsProxyBinding;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
@@ -235,10 +235,10 @@ class RdsServiceTest {
                 "admin", "secret123", null, "db.t3.micro",
                 20, false, null, null, null, null, false);
 
-        ArgumentCaptor<RdsMysqlBinding> binding = ArgumentCaptor.forClass(RdsMysqlBinding.class);
+        ArgumentCaptor<RdsProxyBinding> binding = ArgumentCaptor.forClass(RdsProxyBinding.class);
         verify(proxyManager).startProxy(any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
                 any(), any(), any(), any(), any(), binding.capture());
-        assertEquals(new RdsMysqlBinding(instance.getEndpoint().address(), instance.getProxyPort(),
+        assertEquals(new RdsProxyBinding(instance.getEndpoint().address(), instance.getProxyPort(),
                         "us-east-1", "123456789012", instance.getDbiResourceId()),
                 binding.getValue());
     }
