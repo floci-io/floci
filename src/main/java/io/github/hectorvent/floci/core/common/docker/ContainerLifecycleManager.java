@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.core.common.docker;
 import io.github.hectorvent.floci.config.ContainerCaBundle;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.CreateContainerCmd;
 import com.github.dockerjava.api.command.CreateContainerResponse;
@@ -21,6 +22,7 @@ import com.github.dockerjava.api.model.Mount;
 import com.github.dockerjava.api.model.MountType;
 import com.github.dockerjava.api.model.Ports;
 import com.github.dockerjava.core.command.WaitContainerResultCallback;
+import io.quarkus.runtime.annotations.RegisterForReflection;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
@@ -134,6 +136,20 @@ public class ContainerLifecycleManager {
     }
 
     private String create(ContainerSpec spec, String resolvedImage, String platform) {
+        String containerId = createWithCaBundle(spec, resolvedImage, platform);
+        if (spec.hasNetworkConfiguration()) {
+            try {
+                attachNetworkBeforeStart(containerId, spec);
+            } catch (RuntimeException e) {
+                removeIfExists(containerId);
+                throw new IllegalStateException(
+                        "Failed to attach pre-start network configuration for container " + containerId, e);
+            }
+        }
+        return containerId;
+    }
+
+    private String createWithCaBundle(ContainerSpec spec, String resolvedImage, String platform) {
         LOG.debugv("Creating container from spec: image={0}, name={1}", spec.image(), spec.name());
 
         // Built once: a dynamic port binding allocates its host port here.
@@ -195,6 +211,44 @@ public class ContainerLifecycleManager {
     }
 
     /**
+     * Applies endpoint IPAM while the container is still in CREATED state. docker-java does not
+     * expose Docker's {@code NetworkingConfig} on create, but it does expose the equivalent
+     * network-connect endpoint, so the container is reconnected before it starts.
+     */
+    private void attachNetworkBeforeStart(String containerId, ContainerSpec spec) {
+        if (!spec.hasPortBindings()) {
+            dockerClient.disconnectFromNetworkCmd()
+                    .withContainerId(containerId)
+                    .withNetworkId(spec.networkMode())
+                    .exec();
+        }
+        ContainerNetwork endpoint = new ContainerNetwork().withIpamConfig(new LinkLocalIpam(spec.linkLocalIps()));
+        dockerClient.connectToNetworkCmd()
+                .withContainerId(containerId)
+                .withNetworkId(spec.networkMode())
+                .withContainerNetwork(endpoint)
+                .exec();
+    }
+
+    /**
+     * Docker Engine accepts LinkLocalIPs, but docker-java omits the model property. Registered for
+     * reflection because Jackson finds the added getter reflectively in a native image.
+     */
+    @RegisterForReflection
+    private static final class LinkLocalIpam extends ContainerNetwork.Ipam {
+        private final List<String> linkLocalIps;
+
+        private LinkLocalIpam(List<String> linkLocalIps) {
+            this.linkLocalIps = List.copyOf(linkLocalIps);
+        }
+
+        @JsonProperty("LinkLocalIPs")
+        public List<String> getLinkLocalIps() {
+            return linkLocalIps;
+        }
+    }
+
+    /**
      * Copies the CA bundle into the created, not yet started, container so runtimes that read
      * {@code SSL_CERT_FILE} and friends at init find it. A copy rather than a bind mount because
      * when Floci itself runs in Docker its persistent path is not a host path the daemon can mount.
@@ -237,7 +291,8 @@ public class ContainerLifecycleManager {
         startContainer(containerId);
         LOG.infov("Started container {0}", containerId);
 
-        if (spec.networkMode() != null && !spec.networkMode().isBlank() && spec.hasPortBindings()) {
+        if (spec.networkMode() != null && !spec.networkMode().isBlank()
+                && spec.hasPortBindings() && !spec.hasNetworkConfiguration()) {
             try {
                 dockerClient.connectToNetworkCmd()
                         .withContainerId(containerId)

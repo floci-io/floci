@@ -145,6 +145,7 @@ public class ContainerBuilder {
         private String user;
         private final List<String> groupAdd = new ArrayList<>();
         private final List<String> dnsServers = new ArrayList<>();
+        private final List<String> linkLocalIps = new ArrayList<>();
         private final List<DeviceRequest> deviceRequests = new ArrayList<>();
 
         Builder(String image, EmulatorConfig config, DockerHostResolver dockerHostResolver,
@@ -297,6 +298,19 @@ public class ContainerBuilder {
          */
         public Builder withNetworkMode(String networkMode) {
             this.networkMode = networkMode;
+            return this;
+        }
+
+        /**
+         * Adds a link-local IPv4 address to the container's endpoint on the configured Docker
+         * network, which must be user-defined. Only that one network is supported. The spec is
+         * rejected at {@link #build()} when the address or the network is not valid for this.
+         * Docker does not check that an address is unique on the network, so callers allocate them.
+         */
+        public Builder withLinkLocalIp(String ip) {
+            if (ip != null && !ip.isBlank() && !linkLocalIps.contains(ip.trim())) {
+                linkLocalIps.add(ip.trim());
+            }
             return this;
         }
 
@@ -642,7 +656,8 @@ public class ContainerBuilder {
                     List.copyOf(deviceRequests),
                     nanoCpus,
                     cpuShares,
-                    readonlyRootfs
+                    readonlyRootfs,
+                    List.copyOf(linkLocalIps)
             );
         }
     }
