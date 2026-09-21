@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.PersistentStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -37,12 +38,15 @@ import io.github.hectorvent.floci.services.eks.model.Provider;
 import io.github.hectorvent.floci.services.eks.model.ResourcesVpcConfig;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -1992,5 +1996,148 @@ class EksServiceTest {
         CreateClusterRequest req = createTestClusterRequest("no-vpc-cluster");
         Cluster cluster = eksService.createCluster(req);
         assertEquals("10.42.0.0/16", cluster.getPodCidr());
+    }
+
+    private static final Map<String, Object> LAUNCH_TEMPLATE = Map.of(
+            "id", "lt-0a1b2c3d4e5f60718",
+            "name", "my-node-launch-template",
+            "version", "3");
+
+    private static final Map<String, Object> REMOTE_ACCESS = Map.of(
+            "ec2SshKey", "my-keypair",
+            "sourceSecurityGroups", List.of("sg-0123456789abcdef0", "sg-0fedcba9876543210"));
+
+    private static final List<Object> TAINTS = List.of(
+            Map.of("key", "dedicated", "value", "gpu", "effect", "NO_SCHEDULE"),
+            Map.of("key", "spot", "value", "true", "effect", "PREFER_NO_SCHEDULE"));
+
+    private static final Map<String, Object> NODE_REPAIR_CONFIG = Map.of(
+            "enabled", true,
+            "maxUnhealthyNodeThresholdPercentage", 20,
+            "maxParallelNodesRepairedCount", 2);
+
+    private static final Map<String, Object> WARM_POOL_CONFIG = Map.of(
+            "enabled", true,
+            "minSize", 2,
+            "maxGroupPreparedCapacity", 5,
+            "poolState", "Stopped",
+            "reuseOnScaleIn", false);
+
+    private CreateNodeGroupRequest nodeGroupRequestWithStructuredInputs(String name) {
+        CreateNodeGroupRequest request = nodeGroupRequest(name);
+        request.setLaunchTemplate(LAUNCH_TEMPLATE);
+        request.setRemoteAccess(REMOTE_ACCESS);
+        request.setTaints(TAINTS);
+        request.setNodeRepairConfig(NODE_REPAIR_CONFIG);
+        request.setWarmPoolConfig(WARM_POOL_CONFIG);
+        return request;
+    }
+
+    private void assertStructuredInputsEchoed(Nodegroup nodeGroup) {
+        assertEquals(LAUNCH_TEMPLATE, nodeGroup.getLaunchTemplate());
+        assertEquals(REMOTE_ACCESS, nodeGroup.getRemoteAccess());
+        assertEquals(TAINTS, nodeGroup.getTaints());
+        assertEquals(NODE_REPAIR_CONFIG, nodeGroup.getNodeRepairConfig());
+        assertEquals(WARM_POOL_CONFIG, nodeGroup.getWarmPoolConfig());
+    }
+
+    @Test
+    void createNodeGroupStoresStructuredInputs() {
+        createTestCluster("my-eks-cluster");
+
+        Nodegroup created = eksService.createNodeGroup("my-eks-cluster",
+                nodeGroupRequestWithStructuredInputs("structured-ng"));
+
+        assertStructuredInputsEchoed(created);
+    }
+
+    @Test
+    void describeNodeGroupReturnsStructuredInputsWithNestedFieldsIntact() {
+        createTestCluster("my-eks-cluster");
+        eksService.createNodeGroup("my-eks-cluster", nodeGroupRequestWithStructuredInputs("structured-ng"));
+
+        Nodegroup described = eksService.describeNodeGroup("my-eks-cluster", "structured-ng");
+
+        assertStructuredInputsEchoed(described);
+        // The nested members are what OpenTofu diffs against its declared block, so spot-check
+        // them individually rather than trusting the whole-map comparison alone.
+        Map<?, ?> launchTemplate = (Map<?, ?>) described.getLaunchTemplate();
+        assertEquals("lt-0a1b2c3d4e5f60718", launchTemplate.get("id"));
+        assertEquals("my-node-launch-template", launchTemplate.get("name"));
+        assertEquals("3", launchTemplate.get("version"));
+        Map<?, ?> remoteAccess = (Map<?, ?>) described.getRemoteAccess();
+        assertEquals("my-keypair", remoteAccess.get("ec2SshKey"));
+        assertEquals(List.of("sg-0123456789abcdef0", "sg-0fedcba9876543210"),
+                remoteAccess.get("sourceSecurityGroups"));
+        Map<?, ?> firstTaint = (Map<?, ?>) described.getTaints().getFirst();
+        assertEquals("dedicated", firstTaint.get("key"));
+        assertEquals("gpu", firstTaint.get("value"));
+        assertEquals("NO_SCHEDULE", firstTaint.get("effect"));
+        assertEquals(20, ((Map<?, ?>) described.getNodeRepairConfig())
+                .get("maxUnhealthyNodeThresholdPercentage"));
+        assertEquals("Stopped", ((Map<?, ?>) described.getWarmPoolConfig()).get("poolState"));
+    }
+
+    @Test
+    void createNodeGroupWithoutStructuredInputsOmitsThemInsteadOfEmittingNulls() throws Exception {
+        createTestCluster("my-eks-cluster");
+        eksService.createNodeGroup("my-eks-cluster", nodeGroupRequest("bare-ng"));
+
+        Nodegroup described = eksService.describeNodeGroup("my-eks-cluster", "bare-ng");
+        assertNull(described.getLaunchTemplate());
+        assertNull(described.getRemoteAccess());
+        assertNull(described.getTaints());
+        assertNull(described.getNodeRepairConfig());
+        assertNull(described.getWarmPoolConfig());
+
+        // An explicit null on the wire is drift in its own right: OpenTofu reads it as "the remote
+        // value is set to nothing" rather than "unset", so the keys must be absent entirely.
+        ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
+        Map<String, Object> wire = mapper.readValue(mapper.writeValueAsString(described),
+                new TypeReference<Map<String, Object>>() {
+                });
+        assertFalse(wire.containsKey("launchTemplate"));
+        assertFalse(wire.containsKey("remoteAccess"));
+        assertFalse(wire.containsKey("taints"));
+        assertFalse(wire.containsKey("nodeRepairConfig"));
+        assertFalse(wire.containsKey("warmPoolConfig"));
+    }
+
+    @Test
+    void nodeGroupStructuredInputsSurviveRestart(@TempDir Path directory) {
+        EksService before = persistentEksService(directory);
+        before.init();
+        before.createCluster(createTestClusterRequest("restart-ng-cluster"));
+        Nodegroup created = before.createNodeGroup("restart-ng-cluster",
+                nodeGroupRequestWithStructuredInputs("restart-ng"));
+
+        EksService after = persistentEksService(directory);
+        after.init();
+
+        Nodegroup described = after.describeNodeGroup("restart-ng-cluster", "restart-ng");
+        assertStructuredInputsEchoed(described);
+        assertEquals(created.getLaunchTemplate(), described.getLaunchTemplate());
+        assertEquals(created.getTaints(), described.getTaints());
+    }
+
+    /**
+     * A service whose stores are real JSON files under {@code directory}, one per store name, so a
+     * second instance over the same directory reloads through Jackson exactly as a restart does.
+     */
+    private EksService persistentEksService(Path directory) {
+        StorageFactory storageFactory = new StorageFactory(null, null) {
+            @Override
+            public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
+                    TypeReference<Map<String, V>> typeReference) {
+                PersistentStorage<String, V> backend =
+                        new PersistentStorage<>(directory.resolve(fileName), typeReference);
+                backend.load();
+                return new AccountAwareStorageBackend<>(backend, null, "000000000000");
+            }
+        };
+        return new EksService(storageFactory, testConfig(true),
+                new RegionResolver("us-east-1", "000000000000"), null, realEc2Service(),
+                new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class),
+                mock(EksPodIdentityAssociationService.class));
     }
 }

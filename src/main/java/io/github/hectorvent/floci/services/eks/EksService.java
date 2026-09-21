@@ -596,6 +596,11 @@ public class EksService implements TagHandler, ResourceProvider {
         nodegroup.setInstanceTypes(request.getInstanceTypes());
         nodegroup.setScalingConfig(request.getScalingConfig());
         nodegroup.setUpdateConfig(request.getUpdateConfig());
+        nodegroup.setRemoteAccess(request.getRemoteAccess());
+        nodegroup.setTaints(request.getTaints());
+        nodegroup.setLaunchTemplate(request.getLaunchTemplate());
+        nodegroup.setNodeRepairConfig(request.getNodeRepairConfig());
+        nodegroup.setWarmPoolConfig(request.getWarmPoolConfig());
         nodegroup.setLabels(request.getLabels());
         nodegroup.setTags(request.getTags());
         nodegroup.setClientRequestToken(request.getClientRequestToken());
@@ -651,6 +656,13 @@ public class EksService implements TagHandler, ResourceProvider {
         nodeGroup.setResources(defaultNodeGroupResources(nodegroupName));
         nodeGroup.setHealth(defaultNodeGroupHealth());
         nodeGroup.setUpdateConfig(request.getUpdateConfig() != null ? request.getUpdateConfig() : defaultUpdateConfig());
+        // Echoed back verbatim, and left unset when absent: EKS omits these rather than returning
+        // an explicit null, and a null is drift to a caller diffing against its declared config.
+        nodeGroup.setRemoteAccess(request.getRemoteAccess());
+        nodeGroup.setTaints(request.getTaints());
+        nodeGroup.setLaunchTemplate(request.getLaunchTemplate());
+        nodeGroup.setNodeRepairConfig(request.getNodeRepairConfig());
+        nodeGroup.setWarmPoolConfig(request.getWarmPoolConfig());
         nodeGroup.setLabels(request.getLabels() != null ? new HashMap<>(request.getLabels()) : null);
         nodeGroup.setTags(request.getTags() != null ? new HashMap<>(request.getTags()) : new HashMap<>());
 

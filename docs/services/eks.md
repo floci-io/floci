@@ -200,6 +200,54 @@ EKS clusters support configuring KMS envelope encryption for secrets and control
 - **Backfill**: Existing persisted clusters created before this feature was introduced are automatically backfilled on startup with default disabled logging.
 - **Scope**: Floci stores and returns control plane logging configuration. Shipping log streams to Amazon CloudWatch Logs log groups is out of scope.
 
+## Node group inputs
+
+`CreateNodegroup` accepts the full documented input set and stores every member, so `CreateNodegroup` and `DescribeNodegroup` both return exactly what was supplied.
+
+### Scalar and collection inputs
+
+`nodegroupName`, `nodeRole`, `subnets`, `version`, `releaseVersion`, `amiType`, `capacityType`, `diskSize`, `instanceTypes`, `scalingConfig`, `labels`, `tags`, and `clientRequestToken`. Several of these receive an AWS-shaped default when omitted: `capacityType` becomes `ON_DEMAND`, `amiType` becomes `AL2_x86_64`, `diskSize` becomes `20`, `instanceTypes` becomes `["t3.medium"]`, `version` is inherited from the cluster, and `releaseVersion` becomes `<version>-eks-1`.
+
+### Structured inputs
+
+`launchTemplate`, `remoteAccess`, `taints`, `updateConfig`, `nodeRepairConfig`, and `warmPoolConfig` are recorded as supplied and echoed back verbatim, including nested members:
+
+```json
+{
+  "nodegroupName": "my-nodegroup",
+  "nodeRole": "arn:aws:iam::000000000000:role/eks-node-role",
+  "subnets": ["subnet-123"],
+  "launchTemplate": {
+    "id": "lt-0a1b2c3d4e5f60718",
+    "version": "3"
+  },
+  "remoteAccess": {
+    "ec2SshKey": "my-keypair",
+    "sourceSecurityGroups": ["sg-0123456789abcdef0"]
+  },
+  "taints": [
+    {"key": "dedicated", "value": "gpu", "effect": "NO_SCHEDULE"}
+  ],
+  "nodeRepairConfig": {"enabled": true},
+  "warmPoolConfig": {"enabled": true, "minSize": 2, "poolState": "Stopped"}
+}
+```
+
+- **Omission**: When a structured input is not supplied, it is omitted from `CreateNodegroup` and `DescribeNodegroup` responses rather than serialized as an explicit `null`. The exception is `updateConfig`, which receives the AWS default of `{"maxUnavailable": 1}`.
+- **Validation**: Floci does not validate these structures. A `launchTemplate` is not resolved against EC2, so a reference to a launch template that does not exist is accepted where real EKS would reject it.
+- **No backfill**: Node groups created before this was supported genuinely had no launch template, taints, remote access, node repair config, or warm pool config, so there is nothing to reconstruct. They continue to omit those members, which is the correct answer for them.
+
+### Metadata only
+
+**These inputs are recorded as metadata and have no effect on the cluster.** Floci does not act on any of them:
+
+- A `launchTemplate` association is stored and returned, but **its user data is never executed** and its AMI, instance type, block device mappings, and network settings are not applied to anything Floci runs.
+- `remoteAccess` does not open SSH access, and the referenced key pair and security groups are not wired up.
+- `taints` are not applied to Kubernetes nodes, so pods are not repelled from them.
+- `nodeRepairConfig` starts no repair loop, and `warmPoolConfig` pre-initializes no instances.
+
+The value of storing them is state fidelity: infrastructure tools read `DescribeNodegroup` back and compare it against their declared configuration. Dropping `launchTemplate` in particular made the OpenTofu AWS provider see a node group with no launch template where one was declared, which is a `ForceNew` difference and caused a destroy and recreate on every plan.
+
 ## Modes
 
 ### Mock mode (`mock: true`)
@@ -693,6 +741,7 @@ eks.deleteCluster(r -> r.name("my-cluster"));
 The following EKS features are not yet supported:
 
 - `UpdateClusterConfig` / `UpdateClusterVersion`
+- `UpdateNodegroupConfig` / `UpdateNodegroupVersion`
 - Add-ons (`CreateAddon`, `DescribeAddon`, `ListAddons`)
 - Identity provider configs
 - Access policies
