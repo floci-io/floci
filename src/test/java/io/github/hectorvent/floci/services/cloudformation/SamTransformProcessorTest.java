@@ -412,6 +412,33 @@ class SamTransformProcessorTest {
     }
 
     @Test
+    void expandSamTemplate_functionWithHotReloadCodeUri() throws Exception {
+        // Everything after the first slash is the key, so the documented double slash is what
+        // keeps a hot-reload host path absolute; the pair must reach AWS::Lambda::Function intact.
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "HotFunc": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "index.handler",
+                    "Runtime": "nodejs20.x",
+                    "CodeUri": "s3://hot-reload//home/dev/project/dist"
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode code = processor.expandSamTemplate(template)
+                .path("Resources").path("HotFunc").path("Properties").path("Code");
+
+        assertEquals("hot-reload", code.path("S3Bucket").asText());
+        assertEquals("/home/dev/project/dist", code.path("S3Key").asText());
+    }
+
+    @Test
     void expandSamTemplate_functionPreservesMetadata() throws Exception {
         JsonNode template = objectMapper.readTree("""
             {

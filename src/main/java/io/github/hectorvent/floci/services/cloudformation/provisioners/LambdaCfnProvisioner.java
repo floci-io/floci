@@ -19,6 +19,8 @@ import org.jboss.logging.Logger;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.InvalidPathException;
+import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
@@ -272,7 +274,7 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
                 // pair to LambdaService unchanged; it enforces the hot-reload enablement and
                 // path allow-list and reports its own errors, which fail the resource.
                 return new LambdaCodeSpec(Map.of("S3Bucket", s3Bucket, "S3Key", s3Key),
-                        "hot-reload:" + s3Key);
+                        "hot-reload:" + canonicalHotReloadPath(s3Key));
             }
             if (s3Bucket != null && s3Key != null) {
                 // A template that names its code explicitly must fail if that code cannot be
@@ -403,6 +405,21 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
+    /**
+     * The form LambdaService stores a hot-reload host path in: normalized, so {@code /a/../b/}
+     * and {@code /b} are the same mount. Identities and change detection use it so a redeploy
+     * that only rewrites the path spelling, or a function adopted from a direct CreateFunction,
+     * is not mistaken for a code change. The raw key still goes to Lambda, which validates it and
+     * reports its own error for a path it cannot use.
+     */
+    private static String canonicalHotReloadPath(String s3Key) {
+        try {
+            return Path.of(s3Key).normalize().toString();
+        } catch (InvalidPathException e) {
+            return s3Key;
+        }
+    }
+
     private boolean lambdaCodeChanged(LambdaFunction fn,
                                       LambdaCodeSpec code, String previousIdentity) {
         if (previousIdentity != null) {
@@ -413,7 +430,8 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
             return !Objects.equals(fn.getImageUri(), request.get("ImageUri"));
         }
         if (HOT_RELOAD_BUCKET.equals(request.get("S3Bucket"))) {
-            return !Objects.equals(fn.getHotReloadHostPath(), request.get("S3Key"));
+            return !Objects.equals(fn.getHotReloadHostPath(),
+                    canonicalHotReloadPath((String) request.get("S3Key")));
         }
         if (request.containsKey("S3Bucket") && request.containsKey("S3Key")) {
             return !Objects.equals(fn.getS3Bucket(), request.get("S3Bucket"))

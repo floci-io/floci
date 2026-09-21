@@ -95,6 +95,38 @@ class CloudFormationLambdaHotReloadCodeTest {
     }
 
     @Test
+    void aRespelledHostPathIsNotACodeChange() {
+        // LambdaService stores the normalized path (#4053); the template may spell the same
+        // directory with a trailing slash or a ".." segment. Neither is a new mount.
+        when(lambdaService.getFunction(REGION, FUNCTION_NAME)).thenReturn(hotReloadFunction(HOST_PATH));
+
+        StackResource result = provision("/home/dev/project/build/../dist/", FUNCTION_NAME,
+                Map.of("FlociLambdaCodeIdentity", "hot-reload:" + HOST_PATH));
+
+        verify(lambdaService, never()).updateFunctionCode(anyString(), anyString(), anyMap());
+        assertEquals("hot-reload:" + HOST_PATH, result.getAttributes().get("FlociLambdaCodeIdentity"));
+    }
+
+    @Test
+    void anAdoptedFunctionIsComparedAgainstTheCanonicalTemplatePath() {
+        when(lambdaService.getFunction(REGION, FUNCTION_NAME)).thenReturn(hotReloadFunction(HOST_PATH));
+
+        provision(HOST_PATH + "/", FUNCTION_NAME, Map.of());
+
+        verify(lambdaService, never()).updateFunctionCode(anyString(), anyString(), anyMap());
+    }
+
+    @Test
+    void theRawKeyStillReachesLambdaForValidation() {
+        StackResource result = provision("relative/dist", null, Map.of());
+
+        ArgumentCaptor<Map<String, Object>> request = ArgumentCaptor.captor();
+        verify(lambdaService).createFunction(eq(REGION), request.capture());
+        assertEquals("relative/dist", ((Map<?, ?>) request.getValue().get("Code")).get("S3Key"));
+        assertEquals("CREATE_COMPLETE", result.getStatus());
+    }
+
+    @Test
     void aChangedHostPathUpdatesTheFunctionCode() {
         when(lambdaService.getFunction(REGION, FUNCTION_NAME)).thenReturn(hotReloadFunction(HOST_PATH));
 
