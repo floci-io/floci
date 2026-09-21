@@ -136,7 +136,7 @@ public class CloudWatchLogsHandler {
             if (g.getKmsKeyId() != null) {
                 node.put("kmsKeyId", g.getKmsKeyId());
             }
-            node.put("storedBytes", 0);
+            node.put("storedBytes", logsService.getStoredBytesForLogGroup(g.getLogGroupName(), region));
             node.put("metricFilterCount", metricFilterHandler.metricFilterCount(g.getLogGroupName(), region));
             groupsArray.add(node);
         }
