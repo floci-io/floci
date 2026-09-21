@@ -60,6 +60,19 @@ public class Cluster {
     public String getLoggingS3KeyPrefix() { return loggingS3KeyPrefix; }
     public void setLoggingS3KeyPrefix(String loggingS3KeyPrefix) { this.loggingS3KeyPrefix = loggingS3KeyPrefix; }
 
+    private String loggingDestinationType;
+    private List<String> loggingExports;
+
+    public String getLoggingDestinationType() { return loggingDestinationType; }
+    public void setLoggingDestinationType(String loggingDestinationType) { this.loggingDestinationType = loggingDestinationType; }
+    public List<String> getLoggingExports() { return loggingExports; }
+    public void setLoggingExports(List<String> loggingExports) { this.loggingExports = loggingExports; }
+
+    private boolean multiAZ = false;
+
+    public boolean isMultiAZ() { return multiAZ; }
+    public void setMultiAZ(boolean multiAZ) { this.multiAZ = multiAZ; }
+
     // Real backend address of this cluster's PostgreSQL container. `endpoint` now points at the
     // auth proxy, not the container, so the container address is kept here for proxy wiring and
     // for restarting the proxy after a reboot or an adopt-on-startup.

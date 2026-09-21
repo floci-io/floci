@@ -90,6 +90,13 @@ public class RedshiftQueryHandler {
                             clusterSubnetGroupName, vpcSecurityGroupIds)
                     : service.createCluster(identifier, nodeType, masterUsername, masterUserPassword,
                             clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns);
+            String parameterGroupName = params.getFirst("ClusterParameterGroupName");
+            String multiAz = params.getFirst("MultiAZ");
+            boolean hasParameterGroup = parameterGroupName != null && !parameterGroupName.isBlank();
+            if (hasParameterGroup || multiAz != null) {
+                cluster = service.modifyCluster(identifier, null, null, null, parameterGroupName, null,
+                        multiAz == null ? null : Boolean.parseBoolean(multiAz));
+            }
             String xml = new XmlBuilder()
                     .start("CreateClusterResponse")
                       .start("CreateClusterResult")
@@ -195,7 +202,7 @@ public class RedshiftQueryHandler {
             String snapshotArn = params.getFirst("SnapshotArn");
             String nodeType = params.getFirst("NodeType");
             Cluster cluster = service.restoreFromClusterSnapshot(
-                    clusterIdentifier, resolveSnapshotIdentifier(snapshotIdentifier, snapshotArn), nodeType);
+                    clusterIdentifier, resolveSnapshotIdentifier(snapshotIdentifier, snapshotArn, authorizationHeader), nodeType);
             String xml = new XmlBuilder()
                     .start("RestoreFromClusterSnapshotResponse")
                       .start("RestoreFromClusterSnapshotResult")
@@ -503,8 +510,10 @@ public class RedshiftQueryHandler {
             String masterUserPassword = params.getFirst("MasterUserPassword");
             String clusterParameterGroupName = params.getFirst("ClusterParameterGroupName");
             List<String> vpcSecurityGroupIds = memberList(params, "VpcSecurityGroupIds");
+            String multiAz = params.getFirst("MultiAZ");
             Cluster cluster = service.modifyCluster(clusterIdentifier, nodeType, numberOfNodes,
-                    masterUserPassword, clusterParameterGroupName, vpcSecurityGroupIds);
+                    masterUserPassword, clusterParameterGroupName, vpcSecurityGroupIds,
+                    multiAz == null ? null : Boolean.parseBoolean(multiAz));
             String xml = new XmlBuilder()
                     .start("ModifyClusterResponse")
                       .start("ModifyClusterResult")
@@ -611,7 +620,8 @@ public class RedshiftQueryHandler {
             }
             String bucketName = params.getFirst("BucketName");
             String s3KeyPrefix = params.getFirst("S3KeyPrefix");
-            Cluster cluster = service.enableLogging(clusterIdentifier, bucketName, s3KeyPrefix);
+            Cluster cluster = service.enableLogging(clusterIdentifier, bucketName, s3KeyPrefix,
+                    params.getFirst("LogDestinationType"), memberList(params, "LogExports"));
             String xml = new XmlBuilder()
                     .start("EnableLoggingResponse")
                       .start("EnableLoggingResult")
@@ -765,10 +775,8 @@ public class RedshiftQueryHandler {
             .elem("ClusterStatus", cluster.getClusterStatus())
             .elem("ClusterAvailabilityStatus", availabilityStatus(cluster.getClusterStatus()))
             .elem("AvailabilityZoneRelocationStatus", "disabled")
-            // Real AWS always returns "enabled" or "disabled" here — never blank — and the
-            // Terraform provider's read path treats any other value as an error, not a missing
-            // field. floci runs one Postgres container per cluster; Multi-AZ has no meaning here.
-            .elem("MultiAZ", "disabled")
+            // AWS always returns "enabled" or "disabled" here, never blank.
+            .elem("MultiAZ", cluster.isMultiAZ() ? "enabled" : "disabled")
             .elem("ClusterSubnetGroupName", cluster.getClusterSubnetGroupName());
 
         if (cluster.getMasterPasswordSecretArn() != null) {
@@ -792,14 +800,16 @@ public class RedshiftQueryHandler {
             builder.end("IamRoles");
         }
 
-        if (cluster.getClusterParameterGroupName() != null) {
-            builder.start("ClusterParameterGroups")
-                .start("ClusterParameterGroup")
-                  .elem("ParameterGroupName", cluster.getClusterParameterGroupName())
-                  .elem("ParameterApplyStatus", "in-sync")
-                .end("ClusterParameterGroup")
-              .end("ClusterParameterGroups");
-        }
+        // Falls back to the default group for clusters persisted before it was assigned on create.
+        String parameterGroupName = cluster.getClusterParameterGroupName() != null
+                ? cluster.getClusterParameterGroupName()
+                : RedshiftService.DEFAULT_PARAMETER_GROUP_NAME;
+        builder.start("ClusterParameterGroups")
+            .start("ClusterParameterGroup")
+              .elem("ParameterGroupName", parameterGroupName)
+              .elem("ParameterApplyStatus", "in-sync")
+            .end("ClusterParameterGroup")
+          .end("ClusterParameterGroups");
 
         if (cluster.getTags() != null && !cluster.getTags().isEmpty()) {
             builder.start("Tags");
@@ -837,24 +847,35 @@ public class RedshiftQueryHandler {
         };
     }
 
-    // RestoreFromClusterSnapshot accepts SnapshotIdentifier OR SnapshotArn — real AWS lets
-    // callers restore from a snapshot ARN (needed for cross-account/cross-region snapshots)
-    // without knowing its bare identifier. Terraform's aws_redshift_cluster sends only
-    // snapshot_arn when that's the field the caller populated, so falling back to
-    // SnapshotIdentifier alone left every such restore with a null identifier.
-    private String resolveSnapshotIdentifier(String snapshotIdentifier, String snapshotArn) {
+    // RestoreFromClusterSnapshot accepts SnapshotIdentifier OR SnapshotArn (Terraform sends only
+    // snapshot_arn when that is the field the caller set).
+    private String resolveSnapshotIdentifier(String snapshotIdentifier, String snapshotArn, String authorizationHeader) {
         if (snapshotIdentifier != null && !snapshotIdentifier.isBlank()) {
             return snapshotIdentifier;
         }
-        if (snapshotArn != null && !snapshotArn.isBlank()) {
-            // arn:aws:redshift:<region>:<account>:snapshot:<clusterIdentifier>/<snapshotIdentifier>
-            String resource = AwsArnUtils.parse(snapshotArn).resource();
-            int slash = resource.lastIndexOf('/');
-            if (slash >= 0 && slash < resource.length() - 1) {
-                return resource.substring(slash + 1);
-            }
+        if (snapshotArn == null || snapshotArn.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "SnapshotIdentifier or SnapshotArn is required", 400);
         }
-        return snapshotIdentifier;
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(snapshotArn);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("InvalidParameterValue", "Invalid SnapshotArn: " + snapshotArn, 400);
+        }
+        // arn:aws:redshift:<region>:<account>:snapshot:<clusterIdentifier>/<snapshotIdentifier>
+        String resource = arn.resource();
+        int slash = resource.lastIndexOf('/');
+        if (!"redshift".equals(arn.service()) || !resource.startsWith("snapshot:")
+                || slash < 0 || slash == resource.length() - 1) {
+            throw new AwsException("InvalidParameterValue", "Invalid SnapshotArn: " + snapshotArn, 400);
+        }
+        // Snapshots are stored per account and region; an ARN from elsewhere must not resolve to
+        // a local snapshot that merely shares the identifier.
+        if (!arn.accountId().equals(regionResolver.getAccountId())
+                || !arn.region().equals(regionResolver.resolveRegionFromAuth(authorizationHeader))) {
+            throw new AwsException("ClusterSnapshotNotFound", "Snapshot " + snapshotArn + " not found", 404);
+        }
+        return resource.substring(slash + 1);
     }
 
     private String buildSnapshotXml(Snapshot snapshot) {
@@ -877,16 +898,22 @@ public class RedshiftQueryHandler {
         return builder.end("Snapshot").build();
     }
 
-    // Shared by DescribeLoggingStatus/EnableLogging/DisableLogging, which all return the same
-    // shape. No log delivery is emulated, so LastSuccessfulDeliveryTime/LastFailureTime/
-    // LastFailureMessage/LogDestinationType/LogExports are never populated — omitted rather than
-    // faked, the same as the optional elements in buildSnapshotXml above.
+    // Shared by DescribeLoggingStatus/EnableLogging/DisableLogging. No log delivery is emulated, so
+    // the delivery timestamps and failure fields are omitted rather than faked.
     private String buildLoggingStatusXml(Cluster cluster) {
-        return new XmlBuilder()
+        XmlBuilder builder = new XmlBuilder()
             .elem("LoggingEnabled", cluster.isLoggingEnabled())
             .elem("BucketName", cluster.getLoggingBucketName())
             .elem("S3KeyPrefix", cluster.getLoggingS3KeyPrefix())
-            .build();
+            .elem("LogDestinationType", cluster.getLoggingDestinationType());
+        if (cluster.getLoggingExports() != null) {
+            builder.start("LogExports");
+            for (String export : cluster.getLoggingExports()) {
+                builder.elem("member", export);
+            }
+            builder.end("LogExports");
+        }
+        return builder.build();
     }
 
     private String buildClusterParameterGroupXml(ClusterParameterGroup group) {
