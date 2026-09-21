@@ -308,7 +308,7 @@ public class RedshiftServerlessJsonHandler {
         putArray(node, "iamRoles", n.getIamRoles());
         putLogExports(node, n.getLogExports());
         node.put("status", n.getStatus());
-        putEpoch(node, "creationDate", n.getCreationDate());
+        putDateTime(node, "creationDate", n.getCreationDate());
         return node;
     }
 
@@ -338,7 +338,7 @@ public class RedshiftServerlessJsonHandler {
             endpoint.put("port", w.getEndpointPort() != null ? w.getEndpointPort() : 5439);
             endpoint.putArray("vpcEndpoints");
         }
-        putEpoch(node, "creationDate", w.getCreationDate());
+        putDateTime(node, "creationDate", w.getCreationDate());
         return node;
     }
 
@@ -350,7 +350,7 @@ public class RedshiftServerlessJsonHandler {
         node.put("namespaceArn", s.getNamespaceArn());
         node.put("ownerAccount", s.getOwnerAccount());
         node.put("status", s.getStatus());
-        putEpoch(node, "snapshotCreateTime", s.getSnapshotCreateTime());
+        putDateTime(node, "snapshotCreateTime", s.getSnapshotCreateTime());
         return node;
     }
 
@@ -372,9 +372,13 @@ public class RedshiftServerlessJsonHandler {
         }
     }
 
-    private void putEpoch(ObjectNode node, String field, Instant instant) {
+    // Redshift Serverless's "creationDate" / "snapshotCreateTime" fields use the smithy
+    // date-time timestamp format (an RFC 3339 string), not epoch seconds - the real
+    // aws-sdk-go-v2 deserializer type-asserts the JSON value to a string and fails hard
+    // ("expected Timestamp to be of type string, got json.Number instead") on a bare number.
+    private void putDateTime(ObjectNode node, String field, Instant instant) {
         if (instant != null) {
-            node.put(field, instant.getEpochSecond());
+            node.put(field, instant.toString());
         }
     }
 
