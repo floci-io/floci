@@ -596,61 +596,19 @@ public class RedshiftQueryHandler {
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
         }
         case "DescribeLoggingStatus" -> {
-            String clusterIdentifier = params.getFirst("ClusterIdentifier");
-            if (clusterIdentifier == null || clusterIdentifier.isBlank()) {
-                throw new AwsException("InvalidParameterValue", "ClusterIdentifier is required", 400);
-            }
-            Cluster cluster = service.describeLoggingStatus(clusterIdentifier);
-            String xml = new XmlBuilder()
-                    .start("DescribeLoggingStatusResponse")
-                      .start("DescribeLoggingStatusResult")
-                        .raw(buildLoggingStatusXml(cluster))
-                      .end("DescribeLoggingStatusResult")
-                      .start("ResponseMetadata")
-                        .elem("RequestId", "test-req-id")
-                      .end("ResponseMetadata")
-                    .end("DescribeLoggingStatusResponse")
-                    .build();
-            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+            String clusterIdentifier = requireParam(params, "ClusterIdentifier");
+            return loggingStatusResponse(action, service.describeLoggingStatus(clusterIdentifier));
         }
         case "EnableLogging" -> {
-            String clusterIdentifier = params.getFirst("ClusterIdentifier");
-            if (clusterIdentifier == null || clusterIdentifier.isBlank()) {
-                throw new AwsException("InvalidParameterValue", "ClusterIdentifier is required", 400);
-            }
-            String bucketName = params.getFirst("BucketName");
-            String s3KeyPrefix = params.getFirst("S3KeyPrefix");
-            Cluster cluster = service.enableLogging(clusterIdentifier, bucketName, s3KeyPrefix,
-                    params.getFirst("LogDestinationType"), memberList(params, "LogExports"));
-            String xml = new XmlBuilder()
-                    .start("EnableLoggingResponse")
-                      .start("EnableLoggingResult")
-                        .raw(buildLoggingStatusXml(cluster))
-                      .end("EnableLoggingResult")
-                      .start("ResponseMetadata")
-                        .elem("RequestId", "test-req-id")
-                      .end("ResponseMetadata")
-                    .end("EnableLoggingResponse")
-                    .build();
-            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+            String clusterIdentifier = requireParam(params, "ClusterIdentifier");
+            Cluster cluster = service.enableLogging(clusterIdentifier, params.getFirst("BucketName"),
+                    params.getFirst("S3KeyPrefix"), params.getFirst("LogDestinationType"),
+                    memberList(params, "LogExports"));
+            return loggingStatusResponse(action, cluster);
         }
         case "DisableLogging" -> {
-            String clusterIdentifier = params.getFirst("ClusterIdentifier");
-            if (clusterIdentifier == null || clusterIdentifier.isBlank()) {
-                throw new AwsException("InvalidParameterValue", "ClusterIdentifier is required", 400);
-            }
-            Cluster cluster = service.disableLogging(clusterIdentifier);
-            String xml = new XmlBuilder()
-                    .start("DisableLoggingResponse")
-                      .start("DisableLoggingResult")
-                        .raw(buildLoggingStatusXml(cluster))
-                      .end("DisableLoggingResult")
-                      .start("ResponseMetadata")
-                        .elem("RequestId", "test-req-id")
-                      .end("ResponseMetadata")
-                    .end("DisableLoggingResponse")
-                    .build();
-            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+            String clusterIdentifier = requireParam(params, "ClusterIdentifier");
+            return loggingStatusResponse(action, service.disableLogging(clusterIdentifier));
         }
         case "RebootCluster" -> {
             String clusterIdentifier = params.getFirst("ClusterIdentifier");
@@ -800,7 +758,7 @@ public class RedshiftQueryHandler {
             builder.end("IamRoles");
         }
 
-        // Falls back to the default group for clusters persisted before it was assigned on create.
+        // Clusters persisted before the default was assigned on create have no name stored.
         String parameterGroupName = cluster.getClusterParameterGroupName() != null
                 ? cluster.getClusterParameterGroupName()
                 : RedshiftService.DEFAULT_PARAMETER_GROUP_NAME;
@@ -847,8 +805,7 @@ public class RedshiftQueryHandler {
         };
     }
 
-    // RestoreFromClusterSnapshot accepts SnapshotIdentifier OR SnapshotArn (Terraform sends only
-    // snapshot_arn when that is the field the caller set).
+    // RestoreFromClusterSnapshot accepts SnapshotIdentifier or SnapshotArn.
     private String resolveSnapshotIdentifier(String snapshotIdentifier, String snapshotArn, String authorizationHeader) {
         if (snapshotIdentifier != null && !snapshotIdentifier.isBlank()) {
             return snapshotIdentifier;
@@ -869,8 +826,7 @@ public class RedshiftQueryHandler {
                 || slash < 0 || slash == resource.length() - 1) {
             throw new AwsException("InvalidParameterValue", "Invalid SnapshotArn: " + snapshotArn, 400);
         }
-        // Snapshots are stored per account and region; an ARN from elsewhere must not resolve to
-        // a local snapshot that merely shares the identifier.
+        // An ARN from another account or region must not match a local snapshot by name.
         if (!arn.accountId().equals(regionResolver.getAccountId())
                 || !arn.region().equals(regionResolver.resolveRegionFromAuth(authorizationHeader))) {
             throw new AwsException("ClusterSnapshotNotFound", "Snapshot " + snapshotArn + " not found", 404);
@@ -879,9 +835,7 @@ public class RedshiftQueryHandler {
     }
 
     private String buildSnapshotXml(Snapshot snapshot) {
-        // SnapshotArn/SnapshotCreateTime are absent on a snapshot created before this
-        // field existed (an on-disk store surviving an upgrade) — omit rather than fail,
-        // the same graceful-degradation the other optional elements below already use.
+        // Both are absent on snapshots persisted before these fields existed; omit them.
         String createTime = snapshot.getSnapshotCreateTime() != null
                 ? DateTimeFormatter.ISO_INSTANT.format(snapshot.getSnapshotCreateTime())
                 : null;
@@ -898,8 +852,21 @@ public class RedshiftQueryHandler {
         return builder.end("Snapshot").build();
     }
 
-    // Shared by DescribeLoggingStatus/EnableLogging/DisableLogging. No log delivery is emulated, so
-    // the delivery timestamps and failure fields are omitted rather than faked.
+    private Response loggingStatusResponse(String operation, Cluster cluster) {
+        String xml = new XmlBuilder()
+                .start(operation + "Response")
+                  .start(operation + "Result")
+                    .raw(buildLoggingStatusXml(cluster))
+                  .end(operation + "Result")
+                  .start("ResponseMetadata")
+                    .elem("RequestId", "test-req-id")
+                  .end("ResponseMetadata")
+                .end(operation + "Response")
+                .build();
+        return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+    }
+
+    // No log delivery is emulated, so delivery timestamps and failure fields are omitted.
     private String buildLoggingStatusXml(Cluster cluster) {
         XmlBuilder builder = new XmlBuilder()
             .elem("LoggingEnabled", cluster.isLoggingEnabled())

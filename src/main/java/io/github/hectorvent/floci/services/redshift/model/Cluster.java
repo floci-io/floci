@@ -46,9 +46,7 @@ public class Cluster {
     public List<String> getIamRoleArns() { return iamRoleArns; }
     public void setIamRoleArns(List<String> iamRoleArns) { this.iamRoleArns = iamRoleArns; }
 
-    // Audit logging config as set by EnableLogging/DisableLogging. No log delivery is emulated —
-    // floci tracks only the configuration a caller set, the same way snapshot handling tracks a
-    // dump file without emulating S3 upload.
+    // Audit logging config as set by EnableLogging; no log delivery is emulated.
     private boolean loggingEnabled = false;
     private String loggingBucketName;
     private String loggingS3KeyPrefix;
