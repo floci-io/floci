@@ -4,6 +4,8 @@ import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.testutil.IamServiceTestHelper;
 import io.github.hectorvent.floci.testutil.SigV4TokenTestHelper;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.lang.reflect.Method;
 import java.time.Instant;
@@ -281,6 +283,37 @@ class RdsSigV4ValidatorTest {
 
         assertFalse(validator.validate(token, "admin",
                 new RdsProxyBinding("other.example.local", 3307, "us-east-1", "123456789012", "db-ABCDEFGHIJKL01234")));
+    }
+
+    /**
+     * Natively Floci advertises {@code host.docker.internal} (the name Lambda containers reach it
+     * by) while host clients connect to the loopback interface; in Docker with published ports the
+     * same split applies. A loopback name therefore names this same endpoint.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"localhost", "127.0.0.1"})
+    void validateAcceptsTokenSignedForLoopbackWhenTheEndpointAdvertisesAnotherName(String loopbackHost)
+            throws Exception {
+        IamService iamService = IamServiceTestHelper.iamServiceWithAccessKey("AKIDRDS", "secret-rds");
+        RdsSigV4Validator validator = new RdsSigV4Validator(iamService);
+        String token = SigV4TokenTestHelper.createRdsToken(
+                loopbackHost, 3307, "admin", "AKIDRDS", "secret-rds",
+                Instant.now().minusSeconds(60), 900);
+
+        assertTrue(validator.validate(token, "admin",
+                new RdsProxyBinding("host.docker.internal", 3307, "us-east-1", "123456789012", "db-ABCDEFGHIJKL01234")));
+    }
+
+    @Test
+    void validateRejectsLoopbackTokenSignedForAnotherPort() throws Exception {
+        IamService iamService = IamServiceTestHelper.iamServiceWithAccessKey("AKIDRDS", "secret-rds");
+        RdsSigV4Validator validator = new RdsSigV4Validator(iamService);
+        String token = SigV4TokenTestHelper.createRdsToken(
+                "localhost", 3308, "admin", "AKIDRDS", "secret-rds",
+                Instant.now().minusSeconds(60), 900);
+
+        assertFalse(validator.validate(token, "admin",
+                new RdsProxyBinding("host.docker.internal", 3307, "us-east-1", "123456789012", "db-ABCDEFGHIJKL01234")));
     }
 
     @Test

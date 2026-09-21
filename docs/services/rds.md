@@ -427,7 +427,7 @@ The RDS auth proxy validates the master username and password at the proxy layer
 
 IAM database authentication is also supported. Set `--enable-iam-database-authentication` at instance creation time and use `aws rds generate-db-auth-token` to obtain a token.
 
-As on RDS, a token is only good for the endpoint it was generated for: the hostname, port and region passed to `generate-db-auth-token` must be the ones the instance (or cluster, or RDS Proxy) publishes, and the username must match the `DBUser` in the token exactly. With [IAM enforcement](iam.md#iam-enforcement-mode) turned on, the token's principal must also be allowed `rds-db:connect` on the database user, scoped the way AWS scopes it:
+As on RDS, a token is only good for the endpoint it was generated for: the hostname, port and region passed to `generate-db-auth-token` must be the ones the instance (or cluster, or RDS Proxy) publishes, and the username must match the `DBUser` in the token exactly. Because clients on the host reach the same proxy over the loopback interface, a token generated for `localhost` or `127.0.0.1` on the published port is accepted as well. Clients on a Docker network connect by Floci's container name, so set `FLOCI_SERVICES_RDS_ENDPOINT_HOST` to that name (see [Docker Compose](#docker-compose)) so it is what the endpoint publishes and tokens are generated for. With [IAM enforcement](iam.md#iam-enforcement-mode) turned on, the token's principal must also be allowed `rds-db:connect` on the database user, scoped the way AWS scopes it:
 
 ```
 arn:aws:rds-db:<region>:<account-id>:dbuser:<DbiResourceId>/<db-user-name>

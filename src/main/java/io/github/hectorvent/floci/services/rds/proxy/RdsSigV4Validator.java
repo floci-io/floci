@@ -82,7 +82,7 @@ public class RdsSigV4Validator {
             String authority = (port > 0) ? host + ":" + port : host;
 
             String[] credential = credentialScope(rawQuery);
-            if (binding != null && (!binding.advertisedHost().equalsIgnoreCase(host)
+            if (binding != null && (!binding.acceptsHost(host)
                     || binding.publishedPort() != port
                     || credential == null
                     || !binding.region().equals(credential[2])
