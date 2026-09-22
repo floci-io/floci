@@ -80,7 +80,7 @@ aws sqs receive-message \
 
 ## SNS → SQS Fan-Out
 
-Floci supports real SNS → SQS fan-out. When you publish to a topic, all SQS-subscribed queues receive the message immediately.
+Floci supports real SNS → SQS fan-out. When you publish to a topic, every SQS-subscribed queue receives the message.
 
 Supported subscription protocols:
 - `sqs`: delivers to a Floci SQS queue
