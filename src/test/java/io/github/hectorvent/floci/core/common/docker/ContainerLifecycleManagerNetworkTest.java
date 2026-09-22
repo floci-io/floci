@@ -11,12 +11,17 @@ import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.command.RemoveContainerCmd;
 import com.github.dockerjava.api.command.StartContainerCmd;
 import com.github.dockerjava.api.model.ContainerNetwork;
+import com.github.dockerjava.api.model.HostConfig;
 import com.github.dockerjava.api.model.NetworkSettings;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
+import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.EndpointInfo;
 import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.mockito.Mock;
@@ -26,6 +31,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -152,9 +159,73 @@ class ContainerLifecycleManagerNetworkTest {
         verify(disconnectCmd, never()).exec();
     }
 
+    /**
+     * Docker only honours host, none and container:<id> on the HostConfig at creation, refuses
+     * to connect a container to them afterwards, and publishes no host ports through them. A
+     * port-bound spec must therefore still put the mode on the HostConfig instead of taking the
+     * publish-then-connect path, which left such containers on the default bridge.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"host", "none", "container:sibling"})
+    void createAppliesNamespaceNetworkModeInsteadOfPublishingPorts(String networkMode) {
+        manager().create(spec(networkMode, Map.of(9200, 9400), List.of()));
+
+        HostConfig hostConfig = createdHostConfig();
+        assertEquals(networkMode, hostConfig.getNetworkMode());
+        assertNull(hostConfig.getPortBindings());
+        verify(connectCmd, never()).exec();
+    }
+
+    @Test
+    void createDoesNotAllocateDynamicPortsOnHostNetwork() {
+        manager().create(spec("host", Map.of(9200, 0), List.of()));
+
+        verify(portAllocator, never()).allocateAny();
+    }
+
+    @Test
+    void createAndStartDoesNotConnectHostNetworkAfterStart() {
+        when(dockerClient.startContainerCmd("container-id")).thenReturn(mock(StartContainerCmd.class));
+
+        ContainerInfo info = manager().createAndStart(spec("host", Map.of(9200, 9400), List.of()));
+
+        verify(connectCmd, never()).exec();
+        assertTrue(info.publishedHostPort(9200).isEmpty());
+    }
+
+    @Test
+    void endpointsOfHostNetworkContainersPointAtLocalhostWhenFlociRunsInDocker() {
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        when(dockerClient.startContainerCmd("container-id")).thenReturn(mock(StartContainerCmd.class));
+        InspectContainerCmd inspectCmd = mock(InspectContainerCmd.class, RETURNS_SELF);
+        InspectContainerResponse inspect = mock(InspectContainerResponse.class);
+        when(dockerClient.inspectContainerCmd("container-id")).thenReturn(inspectCmd);
+        when(inspectCmd.exec()).thenReturn(inspect);
+        when(inspect.getHostConfig()).thenReturn(HostConfig.newHostConfig().withNetworkMode("host"));
+
+        ContainerInfo info = manager().createAndStart(spec("host", Map.of(9200, 9400), List.of(9200)));
+
+        assertEquals(new EndpointInfo("localhost", 9200), info.getEndpoint(9200));
+    }
+
+    private HostConfig createdHostConfig() {
+        ArgumentCaptor<HostConfig> hostConfig = ArgumentCaptor.forClass(HostConfig.class);
+        verify(createCmd).withHostConfig(hostConfig.capture());
+        return hostConfig.getValue();
+    }
+
     private ContainerLifecycleManager manager() {
         return new ContainerLifecycleManager(dockerClient, imageCacheService, containerDetector,
                 portAllocator, config);
+    }
+
+    private static ContainerSpec spec(String networkMode, Map<Integer, Integer> portBindings,
+                                      List<Integer> exposedPorts) {
+        return new ContainerSpec(
+                "busybox:stable", "probe", List.of(), null, null, null, portBindings, List.of(),
+                exposedPorts, networkMode, List.of(), List.of(), List.of(), List.of(), Map.of(), null,
+                false, null, List.of(), null, null, List.of(), List.of(), null, null, false,
+                List.of());
     }
 
     private static ContainerSpec specWithLinkLocalIp(Map<Integer, Integer> portBindings) {

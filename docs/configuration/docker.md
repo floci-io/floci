@@ -195,6 +195,8 @@ Environment variable: `FLOCI_SERVICES_DOCKER_NETWORK`
 
 Individual services can override the network with their own `docker-network` setting (e.g. `floci.services.lambda.docker-network`).
 
+A network mode of `host`, `none` or `container:<id>` places the spawned containers in that network namespace instead of on a Docker network. Docker publishes no host ports there, so a container on the host network serves its own port directly on the host (an OpenSearch domain listens on `9200` rather than on a port from its configured range), and Floci reaches it via `localhost`.
+
 !!! tip
     In Docker Compose, the default network name is `<project-name>_default`. If your compose file is in a directory named `myapp`, the network is `myapp_default`.
 

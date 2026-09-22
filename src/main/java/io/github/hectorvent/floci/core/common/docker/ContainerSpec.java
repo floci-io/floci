@@ -78,6 +78,7 @@ public record ContainerSpec(
 ) {
     private static final Pattern LINK_LOCAL_IPV4 = Pattern.compile("^169\\.254\\.(\\d{1,3})\\.(\\d{1,3})$");
     private static final Set<String> NETWORKS_WITHOUT_ENDPOINT_IPAM = Set.of("bridge", "default", "host", "none");
+    private static final Set<String> NAMESPACE_NETWORK_MODES = Set.of("host", "none");
 
     public ContainerSpec {
         if (linkLocalIps != null && !linkLocalIps.isEmpty()) {
@@ -201,6 +202,23 @@ public record ContainerSpec(
      */
     public boolean hasPortBindings() {
         return portBindings != null && !portBindings.isEmpty();
+    }
+
+    /**
+     * Returns true when the network mode hands the container an existing network namespace
+     * ({@code host}, {@code none} or {@code container:<id>}) instead of an endpoint on a Docker
+     * network. Docker applies these modes at creation only and publishes no ports through them.
+     */
+    public boolean sharesNetworkNamespace() {
+        return networkMode != null
+                && (NAMESPACE_NETWORK_MODES.contains(networkMode) || networkMode.startsWith("container:"));
+    }
+
+    /**
+     * Returns true when Docker can publish the requested port bindings on the host.
+     */
+    public boolean publishesPorts() {
+        return hasPortBindings() && !sharesNetworkNamespace();
     }
 
     /**

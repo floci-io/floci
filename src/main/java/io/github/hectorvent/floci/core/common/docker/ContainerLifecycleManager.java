@@ -295,7 +295,7 @@ public class ContainerLifecycleManager {
         LOG.infov("Started container {0}", containerId);
 
         if (spec.networkMode() != null && !spec.networkMode().isBlank()
-                && spec.hasPortBindings() && !spec.hasNetworkConfiguration()) {
+                && spec.publishesPorts() && !spec.hasNetworkConfiguration()) {
             try {
                 dockerClient.connectToNetworkCmd()
                         .withContainerId(containerId)
@@ -313,7 +313,7 @@ public class ContainerLifecycleManager {
     }
 
     private ContainerInfo withPublishedHostPorts(ContainerInfo info, ContainerSpec spec) {
-        if (spec.portBindings() == null || spec.portBindings().isEmpty()) {
+        if (!spec.publishesPorts()) {
             return info;
         }
 
@@ -991,7 +991,7 @@ public class ContainerLifecycleManager {
         // binding. ECR's sibling registry is the exception: it always publishes
         // its port because host-side docker clients (and CDK in compat tests)
         // connect via localhost:<hostPort>.
-        if (spec.hasPortBindings()) {
+        if (spec.publishesPorts()) {
             Ports ports = new Ports();
             for (Map.Entry<Integer, Integer> entry : spec.portBindings().entrySet()) {
                 int containerPort = entry.getKey();
@@ -1006,13 +1006,17 @@ public class ContainerLifecycleManager {
                 LOG.debugv("Port binding: {0} -> {1}", String.valueOf(containerPort), String.valueOf(hostPort));
             }
             hostConfig.withPortBindings(ports);
+        } else if (spec.hasPortBindings()) {
+            LOG.infov("Container {0} joins network {1}, which publishes no host ports; it serves {2} directly there",
+                    spec.name(), spec.networkMode(), spec.portBindings().keySet());
         }
 
-        // Network mode: only set during creation when there are no host port bindings.
+        // Network mode: only set during creation when no host ports are published.
         // withNetworkMode() + port bindings suppresses port publishing on macOS Docker Desktop,
-        // so containers with port bindings (e.g. ECR registry) connect to the network
-        // after start via connectToNetworkCmd() instead.
-        if (spec.networkMode() != null && !spec.networkMode().isBlank() && !spec.hasPortBindings()) {
+        // so containers with published ports (e.g. ECR registry) connect to the network
+        // after start via connectToNetworkCmd() instead. host, none and container:<id> publish
+        // nothing and cannot be connected after creation, so they always go on the HostConfig.
+        if (spec.networkMode() != null && !spec.networkMode().isBlank() && !spec.publishesPorts()) {
             hostConfig.withNetworkMode(spec.networkMode());
         }
 
@@ -1123,6 +1127,11 @@ public class ContainerLifecycleManager {
         return networkMode != null && networkMode.startsWith("container:");
     }
 
+    private static boolean isHostNetworkMode(InspectContainerResponse inspect) {
+        HostConfig hostConfig = inspect.getHostConfig();
+        return hostConfig != null && "host".equals(hostConfig.getNetworkMode());
+    }
+
     private Map<Integer, EndpointInfo> resolveEndpoints(String containerId, ContainerSpec spec) {
         if (spec.exposedPorts() == null || spec.exposedPorts().isEmpty()) {
             return Map.of();
@@ -1155,6 +1164,9 @@ public class ContainerLifecycleManager {
             // Fallback to container port
             return new EndpointInfo("localhost", containerPort);
         } else {
+            if (isHostNetworkMode(inspect)) {
+                return new EndpointInfo("localhost", containerPort);
+            }
             // Container mode: use container IP on the docker network.
             // Prefer the configured network's IP — the container may be on multiple
             // networks (bridge + the configured network) when connectToNetworkCmd()
