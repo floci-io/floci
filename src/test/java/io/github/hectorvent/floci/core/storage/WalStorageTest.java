@@ -196,4 +196,87 @@ class WalStorageTest {
         store1.shutdown();
         store2.shutdown();
     }
+
+    @Test
+    void putAllEntriesAreReplayedByAFreshInstance() {
+        Path snapshotPath = tempDir.resolve("batch-snapshot.json");
+        Path walPath = tempDir.resolve("batch-data.wal");
+
+        WalStorage<String, String> store1 = new WalStorage<>(snapshotPath, walPath,
+                new TypeReference<Map<String, String>>() {}, 600000);
+        store1.load();
+        store1.put("key1", "old");
+        store1.putAll(Map.of("key1", "new", "key2", "value2", "key3", "value3"));
+
+        WalStorage<String, String> store2 = new WalStorage<>(snapshotPath, walPath,
+                new TypeReference<Map<String, String>>() {}, 600000);
+        store2.load();
+        assertEquals("new", store2.get("key1").orElseThrow());
+        assertEquals("value2", store2.get("key2").orElseThrow());
+        assertEquals("value3", store2.get("key3").orElseThrow());
+
+        store1.shutdown();
+        store2.shutdown();
+    }
+
+    @Test
+    void putAllOfAnEmptyBatchLeavesTheWalUntouched() throws IOException {
+        Path walPath = tempDir.resolve("data.wal");
+        storage.put("key1", "value1");
+        long sizeBeforeEmptyBatch = Files.size(walPath);
+
+        storage.putAll(Map.of());
+
+        assertEquals(sizeBeforeEmptyBatch, Files.size(walPath));
+    }
+
+    @Test
+    void flushOfAnUnchangedStoreLeavesTheSnapshotUntouched() throws IOException {
+        Path snapshotPath = tempDir.resolve("idle-snapshot.json");
+        Path walPath = tempDir.resolve("idle-data.wal");
+
+        WalStorage<String, String> store = new WalStorage<>(snapshotPath, walPath,
+                new TypeReference<Map<String, String>>() {}, 600000);
+        store.load();
+        store.put("key1", "value1");
+        store.flush();
+
+        // Nothing changed since the last snapshot, so a flush has nothing to write: a marker
+        // placed in the file afterwards must survive it.
+        Files.writeString(snapshotPath, "left alone");
+        store.flush();
+        assertEquals("left alone", Files.readString(snapshotPath));
+
+        store.put("key2", "value2");
+        store.flush();
+        assertTrue(Files.readString(snapshotPath).contains("key2"));
+
+        store.delete("key2");
+        store.flush();
+        assertFalse(Files.readString(snapshotPath).contains("key2"));
+
+        store.shutdown();
+    }
+
+    @Test
+    void entriesReplayedFromTheWalAreCompactedByTheNextFlush() throws IOException {
+        Path snapshotPath = tempDir.resolve("replayed-snapshot.json");
+        Path walPath = tempDir.resolve("replayed-data.wal");
+
+        WalStorage<String, String> store1 = new WalStorage<>(snapshotPath, walPath,
+                new TypeReference<Map<String, String>>() {}, 600000);
+        store1.load();
+        store1.put("key1", "value1");
+
+        WalStorage<String, String> store2 = new WalStorage<>(snapshotPath, walPath,
+                new TypeReference<Map<String, String>>() {}, 600000);
+        store2.load();
+        store2.flush();
+
+        assertTrue(Files.readString(snapshotPath).contains("key1"));
+        assertEquals(0L, Files.size(walPath));
+
+        store1.shutdown();
+        store2.shutdown();
+    }
 }
