@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.core.storage.WriteProfile;
 import io.github.hectorvent.floci.services.cloudwatch.logs.filter.FilterPattern;
 import io.github.hectorvent.floci.services.cloudwatch.logs.filter.FilterPatternException;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogEvent;
@@ -117,8 +118,10 @@ public class CloudWatchLogsService implements ResourceProvider {
                         new TypeReference<>() {}),
                 storageFactory.create("cloudwatchlogs", "cwlogs-streams.json",
                         new TypeReference<>() {}),
+                // Every PutLogEvents call lands here, so under persistent mode the store is
+                // journaled instead of rewritten in full per batch (#2500).
                 storageFactory.create("cloudwatchlogs", "cwlogs-events.json",
-                        new TypeReference<>() {}),
+                        new TypeReference<>() {}, WriteProfile.APPEND_HEAVY),
                 storageFactory.create("cloudwatchlogs", "cwlogs-subscription-filters.json",
                         new TypeReference<>() {}),
                 storageFactory.create("cloudwatchlogs", "cwlogs-metric-filters.json",
@@ -689,9 +692,10 @@ public class CloudWatchLogsService implements ResourceProvider {
 
     /**
      * Keeps an account's event store under {@link #maxStoredEvents} by dropping the oldest events.
-     * The store is persisted as a single document rewritten in full on each flush, so its size
-     * is the cost of every flush; without a ceiling a chatty function turns log ingestion into a
-     * sustained disk writer.
+     * The ceiling bounds the memory footprint and the snapshot that the store is compacted into:
+     * under persistent mode a batch is appended to the journal and the whole store is rewritten
+     * only on the compaction interval, but without a ceiling a chatty function would still grow
+     * every snapshot without bound.
      * <p>
      * The ceiling is best-effort rather than atomic: this method is not synchronized, so two
      * concurrent PutLogEvents calls for the same account can each scan and evict independently and
