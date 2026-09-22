@@ -8,6 +8,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
@@ -58,7 +59,7 @@ class CloudFormationDynamoDbGlobalTableIntegrationTest {
                         "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
                         "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
                         "BillingMode": "PAY_PER_REQUEST",
-                        "Replicas": [{"Region": "us-east-1"}]
+                        "Replicas": [{"Region": "us-east-1"}, {"Region": "us-west-2"}]
                       }
                     },
                     "RefParam": {
@@ -87,6 +88,15 @@ class CloudFormationDynamoDbGlobalTableIntegrationTest {
         String tableId = described.getString("Table.TableId");
         assertTrue(tableArn != null && tableArn.startsWith("arn:aws:dynamodb:"), "TableArn: " + tableArn);
         assertFalse(tableId == null || tableId.isBlank(), "DescribeTable reported no TableId");
+
+        // The Replicas property is applied: the non-local region is tracked and surfaced by
+        // DescribeTable. Whether the deployment region itself appears in Replicas is deliberately not
+        // asserted here: on AWS a global table lists its stack region as a replica too, and reporting
+        // that is a DescribeTable follow-up (the reconcile must keep filtering the local region, since
+        // the UpdateTable ReplicaUpdates API rejects adding it).
+        List<String> replicaRegions = described.getList("Table.Replicas.RegionName");
+        assertTrue(replicaRegions != null && replicaRegions.contains("us-west-2"),
+                "DescribeTable Replicas did not report us-west-2: " + replicaRegions);
 
         assertEquals(tableName, parameterValue("/gt-v2/" + suffix + "/ref"));
         assertEquals(tableArn, parameterValue("/gt-v2/" + suffix + "/arn"));
