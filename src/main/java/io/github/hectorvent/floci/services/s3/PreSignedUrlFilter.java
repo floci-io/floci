@@ -19,7 +19,9 @@ import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 @Provider
@@ -28,6 +30,15 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
     private static final Logger LOG = Logger.getLogger(PreSignedUrlFilter.class);
     private static final String LEGACY_ACCESS_KEY_ID = "test";
     private static final String LEGACY_SECRET_KEY = "test";
+    private static final Set<String> CHECKSUM_HEADERS_REQUIRING_SIGNATURE =
+            Set.of(
+                    "x-amz-checksum-algorithm",
+                    "x-amz-checksum-crc32",
+                    "x-amz-checksum-crc32c",
+                    "x-amz-checksum-crc64nvme",
+                    "x-amz-checksum-sha1",
+                    "x-amz-checksum-sha256",
+                    "x-amz-sdk-checksum-algorithm");
 
     private final PreSignedUrlGenerator presignGenerator;
     private final S3Service s3Service;
@@ -131,6 +142,13 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
             if (!verifySigV4Signature(requestContext, signature, secretKey)) {
                 requestContext.abortWith(errorResponse(403, "SignatureDoesNotMatch",
                         "The request signature we calculated does not match the signature you provided."));
+                return;
+            }
+
+            List<String> unsignedChecksumHeaders = unsignedChecksumHeaders(
+                    requestContext.getHeaders().keySet(), queryParams.getFirst("X-Amz-SignedHeaders"));
+            if (!unsignedChecksumHeaders.isEmpty()) {
+                requestContext.abortWith(headersNotSignedResponse(unsignedChecksumHeaders));
             }
         } else if (presignGenerator.shouldValidateSignatures()) {
             String path = requestContext.getUriInfo().getPath();
@@ -289,6 +307,21 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
         return value == null ? "" : value.trim().replaceAll(" +", " ");
     }
 
+    static List<String> unsignedChecksumHeaders(Set<String> requestHeaderNames, String signedHeaders) {
+        Set<String> normalizedSignedHeaders = List.of(signedHeaders.split(";"))
+                .stream()
+                .map(name -> name.toLowerCase(Locale.ROOT))
+                .collect(Collectors.toSet());
+
+        return requestHeaderNames.stream()
+                .map(name -> name.toLowerCase(Locale.ROOT))
+                .filter(CHECKSUM_HEADERS_REQUIRING_SIGNATURE::contains)
+                .filter(name -> !normalizedSignedHeaders.contains(name))
+                .distinct()
+                .sorted()
+                .toList();
+    }
+
     static String awsUriEncode(String value) {
         StringBuilder encoded = new StringBuilder();
         for (byte b : value.getBytes(StandardCharsets.UTF_8)) {
@@ -313,5 +346,17 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
                 .end("Error")
                 .build();
         return Response.status(status).entity(xml).type(MediaType.APPLICATION_XML).build();
+    }
+
+    private static Response headersNotSignedResponse(List<String> headerNames) {
+        String xml = new XmlBuilder()
+                .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
+                .start("Error")
+                  .elem("Code", "AccessDenied")
+                  .elem("Message", "There were headers present in the request which were not signed")
+                  .elem("HeadersNotSigned", String.join(",", headerNames))
+                .end("Error")
+                .build();
+        return Response.status(403).entity(xml).type(MediaType.APPLICATION_XML).build();
     }
 }
