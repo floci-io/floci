@@ -3033,6 +3033,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         return subnet;
     }
 
+    public Vpc requireVpc(String region, String vpcId) {
+        ensureDefaultResources(region);
+        return getRequiredVpc(region, vpcId);
+    }
+
     /**
      * Resolves a subnet for an EC2 placement availability zone. Prefer the seeded default subnet
      * when several local subnets share the zone, but allow user-created subnets to make custom

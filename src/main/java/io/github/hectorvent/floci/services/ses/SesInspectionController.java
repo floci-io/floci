@@ -55,6 +55,9 @@ public class SesInspectionController {
                 node.putNull("Region");
             }
             node.put("Source", email.getSource());
+            if (email.getRejectReason() != null) {
+                node.put("RejectReason", email.getRejectReason());
+            }
             if (email.getReturnPath() != null) {
                 node.put("ReturnPath", email.getReturnPath());
             }

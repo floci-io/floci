@@ -57,6 +57,7 @@ quarkus:
         - ui/*.html
         - ec2/*.yaml
         - sagemaker/*.yaml
+        - eks/*.json
         - i18n/*.properties
         - org/apache/velocity/runtime/defaults/*.properties
         # DriverManager finds the JDBC drivers through ServiceLoader, and the MySQL
@@ -592,6 +593,7 @@ floci:
       mock: false
       provider: k3s
       default-image: "rancher/k3s:latest"
+      # image-template: "myregistry.io/k3s:v%s" # optional custom image format template taking cluster version
       api-server-base-port: 6500
       api-server-max-port: 6599
       data-path: ./data/eks
@@ -601,7 +603,9 @@ floci:
       ecr-registry-mirror: true    # inject a registries.yaml so pods can pull images pushed to Floci ECR
       disable-cni: false           # start k3s without its bundled flannel/kube-proxy so a real CNI (e.g. Cilium) can take over
       imds: false                  # expose link-local IMDS (169.254.169.254) inside the cluster container
+      imds-pod-network: false      # route link-local IMDS traffic from ordinary pod network namespaces (requires imds: true)
       irsa-signing-key: true       # sign k3s service account tokens with the cluster OIDC key
+      pod-identity-webhook: true   # register a mutating webhook that injects pod identity credentials (needs floci.tls.enabled)
     mwaa:
       enabled: true
       mock: false
@@ -829,4 +833,6 @@ floci:
     codeartifact:
       enabled: true
     marketplace:
+      enabled: true
+    dms:
       enabled: true

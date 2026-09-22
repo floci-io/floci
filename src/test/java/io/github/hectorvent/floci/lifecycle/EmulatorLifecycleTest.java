@@ -5,13 +5,13 @@ import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.ServiceRegistry;
 import io.github.hectorvent.floci.core.storage.PersistentPathValidator;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
-import io.github.hectorvent.floci.lifecycle.InitLifecycleState;
 import io.github.hectorvent.floci.lifecycle.inithook.InitializationHook;
 import io.github.hectorvent.floci.lifecycle.inithook.InitializationHooksRunner;
 import io.github.hectorvent.floci.services.appsync.graphql.SchemaCreationWorker;
 import io.github.hectorvent.floci.services.docdb.container.DocDbContainerManager;
 import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
+import io.github.hectorvent.floci.services.elasticache.ElastiCacheMemcachedService;
 import io.github.hectorvent.floci.services.elasticache.ElastiCacheService;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerManager;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheMemcachedContainerManager;
@@ -39,6 +39,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -73,6 +74,7 @@ class EmulatorLifecycleTest {
     @Mock private IamService iamService;
     @Mock private EmulatorConfig.ElastiCacheServiceConfig elastiCacheServiceConfig;
     @Mock private ElastiCacheService elastiCacheService;
+    @Mock private ElastiCacheMemcachedService elastiCacheMemcachedService;
     @Mock private ElastiCacheContainerManager elastiCacheContainerManager;
     @Mock private ElastiCacheMemcachedContainerManager elastiCacheMemcachedContainerManager;
     @Mock private ElastiCacheProxyManager elastiCacheProxyManager;
@@ -131,7 +133,7 @@ class EmulatorLifecycleTest {
 
         emulatorLifecycle = new EmulatorLifecycle(
                 storageFactory, serviceRegistry, config,
-                iamService, elastiCacheService,
+                iamService, elastiCacheService, elastiCacheMemcachedService,
                 elastiCacheContainerManager, elastiCacheMemcachedContainerManager,
                 elastiCacheProxyManager, rdsContainerManager, rdsProxyManager,
                 memoryDbContainerManager, memoryDbProxyManager,
@@ -206,15 +208,18 @@ class EmulatorLifecycleTest {
         stubStorageConfig();
         when(elastiCacheServiceConfig.enabled()).thenReturn(true);
         when(elastiCacheService.restorePersistedRuntime())
-                .thenReturn(java.util.concurrent.CompletableFuture.completedFuture(null));
+                .thenReturn(CompletableFuture.completedFuture(null));
+        when(elastiCacheMemcachedService.restorePersistedRuntime())
+                .thenReturn(CompletableFuture.completedFuture(null));
         when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
         when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
 
         emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
 
-        var inOrder = Mockito.inOrder(storageFactory, elastiCacheService);
+        InOrder inOrder = Mockito.inOrder(storageFactory, elastiCacheService, elastiCacheMemcachedService);
         inOrder.verify(storageFactory).loadAll();
         inOrder.verify(elastiCacheService).restorePersistedRuntime();
+        inOrder.verify(elastiCacheMemcachedService).restorePersistedRuntime();
     }
 
     @Test
@@ -227,6 +232,7 @@ class EmulatorLifecycleTest {
         emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
 
         Mockito.verify(elastiCacheService, Mockito.never()).restorePersistedRuntime();
+        Mockito.verify(elastiCacheMemcachedService, Mockito.never()).restorePersistedRuntime();
     }
 
     @Test

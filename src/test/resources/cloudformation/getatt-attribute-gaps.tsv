@@ -53,7 +53,6 @@ AWS::SecretsManager::Secret	Id	Fn::GetAtt Id on a secret is its ARN, which the p
 AWS::EKS::Cluster	ClusterSecurityGroupId	not modeled: Floci does not create a cluster security group, so there is no id to publish
 AWS::EKS::Cluster	EncryptionConfigKeyArn	not modeled: Floci does not apply envelope encryption, so no KMS key arn is resolved
 AWS::EKS::Cluster	Id	not modeled: Floci identifies a cluster by its Name (the primary identifier and Ref), not a separate Id
-AWS::EKS::Nodegroup	Id	not published: Floci identifies a nodegroup by its name within the cluster, which is the Ref, not the composite Id
 AWS::IAM::Policy	Id	not published: Floci uses the policy name for Ref, AWS returns an opaque generated identifier that Floci does not model
 AWS::IAM::ManagedPolicy	AttachmentCount	not published: the attachment count is dynamic and Floci does not expose it as a stable Fn::GetAtt value
 AWS::IAM::ManagedPolicy	CreateDate	not published: Floci does not surface the policy create date as an Fn::GetAtt value

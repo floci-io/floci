@@ -10,10 +10,13 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.Ipv4Cidrs;
+import io.github.hectorvent.floci.services.ec2.SecurityGroupPolicy;
 import io.github.hectorvent.floci.services.ec2.model.IpPermission;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
+import io.github.hectorvent.floci.services.ec2.model.Vpc;
 import io.github.hectorvent.floci.services.eks.model.CertificateAuthority;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
 import io.github.hectorvent.floci.services.eks.model.AccessConfig;
@@ -57,6 +60,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
@@ -88,13 +93,15 @@ public class EksService implements TagHandler, ResourceProvider {
     private final EksOidcService oidcService;
     private final EksAccessEntryService accessEntries;
     private final EksPodIdentityAssociationService podIdentityAssociations;
+    private final EksAddonService addons;
     private final ScheduledExecutorService poller = Executors.newSingleThreadScheduledExecutor();
 
     @Inject
     public EksService(StorageFactory storageFactory, EmulatorConfig config,
             RegionResolver regionResolver, EksClusterManager clusterManager, Ec2Service ec2Service,
             EksOidcService oidcService, EksAccessEntryService accessEntries,
-            EksPodIdentityAssociationService podIdentityAssociations) {
+            EksPodIdentityAssociationService podIdentityAssociations,
+            EksAddonService addons) {
         this.storage = storageFactory.create("eks", "eks-clusters.json",
                 new TypeReference<Map<String, Cluster>>() {
                 });
@@ -111,13 +118,22 @@ public class EksService implements TagHandler, ResourceProvider {
         this.oidcService = oidcService;
         this.accessEntries = accessEntries;
         this.podIdentityAssociations = podIdentityAssociations;
+        this.addons = addons;
+    }
+
+    public EksService(StorageFactory storageFactory, EmulatorConfig config,
+            RegionResolver regionResolver, EksClusterManager clusterManager, Ec2Service ec2Service,
+            EksOidcService oidcService, EksAccessEntryService accessEntries,
+            EksPodIdentityAssociationService podIdentityAssociations) {
+        this(storageFactory, config, regionResolver, clusterManager, ec2Service,
+                oidcService, accessEntries, podIdentityAssociations, null);
     }
 
     public EksService(StorageFactory storageFactory, EmulatorConfig config,
             RegionResolver regionResolver, EksClusterManager clusterManager, Ec2Service ec2Service,
             EksOidcService oidcService, EksAccessEntryService accessEntries) {
         this(storageFactory, config, regionResolver, clusterManager, ec2Service,
-                oidcService, accessEntries, null);
+                oidcService, accessEntries, null, null);
     }
 
     @PostConstruct
@@ -171,6 +187,7 @@ public class EksService implements TagHandler, ResourceProvider {
             try {
                 LOG.infov("Restoring k3s container for persisted EKS cluster {0}", cluster.getName());
                 cluster.setStatus(ClusterStatus.CREATING);
+                cluster.setPodCidr(EksClusterManager.DEFAULT_POD_CIDR);
                 clusterManager.restoreCluster(cluster);
             } catch (Exception e) {
                 if (!clusterManager.isDockerReachable()) {
@@ -428,7 +445,27 @@ public class EksService implements TagHandler, ResourceProvider {
         cluster.setArn(arn);
         cluster.setAccountId(accountId);
         cluster.setCreatedAt(Instant.now());
-        cluster.setVersion(request.getVersion() != null ? request.getVersion() : "1.29");
+
+        if (request.getVersion() != null && !request.getVersion().isBlank()) {
+            String requestedVersion = request.getVersion().trim();
+            Matcher matcher = K8S_VERSION_PATTERN.matcher(requestedVersion);
+            if (!matcher.matches()) {
+                throw new AwsException("InvalidParameterException",
+                        "The specified parameter version is not valid: " + requestedVersion, 400);
+            }
+            int minor = Integer.parseInt(matcher.group(1));
+            if (minor < MIN_SUPPORTED_K8S_MINOR) {
+                throw new AwsException("InvalidParameterException",
+                        "Unsupported Kubernetes version '" + requestedVersion + "'. Supported versions are 1."
+                                + MIN_SUPPORTED_K8S_MINOR + " and above.", 400);
+            }
+            cluster.setVersion(requestedVersion);
+            cluster.setExplicitVersion(true);
+        } else {
+            cluster.setVersion(DEFAULT_K8S_VERSION);
+            cluster.setExplicitVersion(false);
+        }
+
         cluster.setRoleArn(request.getRoleArn());
         ResourcesVpcConfig vpcConfig = buildVpcConfigResponse(request.getResourcesVpcConfig(), resolvedVpcId);
         SecurityGroup clusterSg = null;
@@ -445,7 +482,9 @@ public class EksService implements TagHandler, ResourceProvider {
             }
         }
         cluster.setResourcesVpcConfig(vpcConfig);
-        cluster.setKubernetesNetworkConfig(buildNetworkConfig(request.getKubernetesNetworkConfig()));
+        String vpcCidr = resolveClusterVpcCidr(region, vpcConfig.getVpcId());
+        cluster.setKubernetesNetworkConfig(buildNetworkConfig(request.getKubernetesNetworkConfig(), vpcCidr));
+        cluster.setPodCidr(EksClusterManager.DEFAULT_POD_CIDR);
         cluster.setLogging(buildLogging(request.getLogging()));
         cluster.setEncryptionConfig(buildEncryptionConfig(request.getEncryptionConfig()));
         cluster.setStatus(ClusterStatus.CREATING);
@@ -536,6 +575,9 @@ public class EksService implements TagHandler, ResourceProvider {
         if (podIdentityAssociations != null) {
             podIdentityAssociations.deleteClusterAssociations(cluster);
         }
+        if (addons != null) {
+            addons.deleteClusterAddons(cluster);
+        }
         storage.delete(name);
         oidcService.deleteKey(name);
         return cluster;
@@ -554,6 +596,11 @@ public class EksService implements TagHandler, ResourceProvider {
         nodegroup.setInstanceTypes(request.getInstanceTypes());
         nodegroup.setScalingConfig(request.getScalingConfig());
         nodegroup.setUpdateConfig(request.getUpdateConfig());
+        nodegroup.setRemoteAccess(request.getRemoteAccess());
+        nodegroup.setTaints(request.getTaints());
+        nodegroup.setLaunchTemplate(request.getLaunchTemplate());
+        nodegroup.setNodeRepairConfig(request.getNodeRepairConfig());
+        nodegroup.setWarmPoolConfig(request.getWarmPoolConfig());
         nodegroup.setLabels(request.getLabels());
         nodegroup.setTags(request.getTags());
         nodegroup.setClientRequestToken(request.getClientRequestToken());
@@ -609,6 +656,13 @@ public class EksService implements TagHandler, ResourceProvider {
         nodeGroup.setResources(defaultNodeGroupResources(nodegroupName));
         nodeGroup.setHealth(defaultNodeGroupHealth());
         nodeGroup.setUpdateConfig(request.getUpdateConfig() != null ? request.getUpdateConfig() : defaultUpdateConfig());
+        // Echoed back verbatim, and left unset when absent: EKS omits these rather than returning
+        // an explicit null, and a null is drift to a caller diffing against its declared config.
+        nodeGroup.setRemoteAccess(request.getRemoteAccess());
+        nodeGroup.setTaints(request.getTaints());
+        nodeGroup.setLaunchTemplate(request.getLaunchTemplate());
+        nodeGroup.setNodeRepairConfig(request.getNodeRepairConfig());
+        nodeGroup.setWarmPoolConfig(request.getWarmPoolConfig());
         nodeGroup.setLabels(request.getLabels() != null ? new HashMap<>(request.getLabels()) : null);
         nodeGroup.setTags(request.getTags() != null ? new HashMap<>(request.getTags()) : new HashMap<>());
 
@@ -818,15 +872,76 @@ public class EksService implements TagHandler, ResourceProvider {
         return response;
     }
 
-    private KubernetesNetworkConfig buildNetworkConfig(KubernetesNetworkConfig request) {
-        KubernetesNetworkConfig config = new KubernetesNetworkConfig();
-        if (request != null) {
-            config.setServiceIpv4Cidr(request.getServiceIpv4Cidr() != null ? request.getServiceIpv4Cidr() : "10.100.0.0/16");
-            config.setIpFamily(request.getIpFamily() != null ? request.getIpFamily() : "ipv4");
-        } else {
-            config.setServiceIpv4Cidr("10.100.0.0/16");
-            config.setIpFamily("ipv4");
+    public static final String DEFAULT_SERVICE_IPV4_CIDR = "10.100.0.0/16";
+    public static final String ALTERNATIVE_SERVICE_IPV4_CIDR = "172.20.0.0/16";
+    public static final String DEFAULT_K8S_VERSION = "1.29";
+    public static final Pattern K8S_VERSION_PATTERN = Pattern.compile("^1\\.(\\d+)$");
+    public static final int MIN_SUPPORTED_K8S_MINOR = 28;
+
+    static void validateServiceIpv4Cidr(String cidr) {
+        if (cidr == null || !SecurityGroupPolicy.validCidr(cidr)) {
+            throw new AwsException("InvalidParameterException",
+                    "The specified parameter kubernetesNetworkConfig.serviceIpv4Cidr is not valid: " + cidr, 400);
         }
+        int slash = cidr.indexOf('/');
+        int prefix;
+        try {
+            prefix = Integer.parseInt(cidr.substring(slash + 1));
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidParameterException",
+                    "The specified parameter kubernetesNetworkConfig.serviceIpv4Cidr is not valid: " + cidr, 400);
+        }
+        if (prefix < 12 || prefix > 24) {
+            throw new AwsException("InvalidParameterException",
+                    "The specified parameter kubernetesNetworkConfig.serviceIpv4Cidr must have a prefix between /12 and /24: " + cidr, 400);
+        }
+        if (!Ipv4Cidrs.contains("10.0.0.0/8", cidr)
+                && !Ipv4Cidrs.contains("172.16.0.0/12", cidr)
+                && !Ipv4Cidrs.contains("192.168.0.0/16", cidr)) {
+            throw new AwsException("InvalidParameterException",
+                    "The specified parameter kubernetesNetworkConfig.serviceIpv4Cidr must fall within RFC 1918 private address ranges: " + cidr, 400);
+        }
+    }
+
+    String resolveClusterVpcCidr(String region, String vpcId) {
+        if (ec2Service != null && vpcId != null && !vpcId.isBlank()) {
+            try {
+                Vpc vpc = ec2Service.requireVpc(region, vpcId);
+                if (vpc.getCidrBlock() != null && !vpc.getCidrBlock().isBlank()) {
+                    return vpc.getCidrBlock();
+                }
+            } catch (Exception e) {
+                LOG.debugv("Could not resolve VPC CIDR for vpc {0}: {1}", vpcId, e.getMessage());
+            }
+        }
+        return null;
+    }
+
+    private KubernetesNetworkConfig buildNetworkConfig(KubernetesNetworkConfig request, String vpcCidr) {
+        KubernetesNetworkConfig config = new KubernetesNetworkConfig();
+        String requestedCidr = request != null ? request.getServiceIpv4Cidr() : null;
+        String resolvedCidr;
+        if (requestedCidr != null && !requestedCidr.isBlank()) {
+            validateServiceIpv4Cidr(requestedCidr);
+            if (vpcCidr != null && Ipv4Cidrs.overlaps(requestedCidr, vpcCidr)) {
+                throw new AwsException("InvalidParameterException",
+                        "The specified service IPv4 CIDR " + requestedCidr + " overlaps with the VPC CIDR " + vpcCidr, 400);
+            }
+            resolvedCidr = requestedCidr;
+        } else {
+            if (vpcCidr != null && Ipv4Cidrs.overlaps(DEFAULT_SERVICE_IPV4_CIDR, vpcCidr)) {
+                if (Ipv4Cidrs.overlaps(ALTERNATIVE_SERVICE_IPV4_CIDR, vpcCidr)) {
+                    throw new AwsException("InvalidParameterException",
+                            "Default service IPv4 CIDR blocks (10.100.0.0/16 and 172.20.0.0/16) overlap with the VPC CIDR "
+                                    + vpcCidr + ". Please specify a non-overlapping serviceIpv4Cidr.", 400);
+                }
+                resolvedCidr = ALTERNATIVE_SERVICE_IPV4_CIDR;
+            } else {
+                resolvedCidr = DEFAULT_SERVICE_IPV4_CIDR;
+            }
+        }
+        config.setServiceIpv4Cidr(resolvedCidr);
+        config.setIpFamily(request != null && request.getIpFamily() != null ? request.getIpFamily() : "ipv4");
         return config;
     }
 
@@ -962,6 +1077,16 @@ public class EksService implements TagHandler, ResourceProvider {
                 LOG.error("Error in EKS readiness poller", e);
             }
         }, 2, 3, TimeUnit.SECONDS);
+    }
+
+    public Optional<Cluster> findClusterByIssuer(String issuer) {
+        if (issuer == null || issuer.isBlank()) {
+            return Optional.empty();
+        }
+        return allClusters().stream()
+                .filter(c -> c.getIdentity() != null && c.getIdentity().getOidc() != null
+                        && issuer.equals(c.getIdentity().getOidc().getIssuer()))
+                .findFirst();
     }
 
     private List<Cluster> allClusters() {

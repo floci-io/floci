@@ -1,12 +1,14 @@
 package io.github.hectorvent.floci.services.eks;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
+import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
@@ -16,6 +18,7 @@ import io.github.hectorvent.floci.services.eks.model.CertificateAuthority;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
 import io.github.hectorvent.floci.services.eks.model.ClusterIdentity;
 import io.github.hectorvent.floci.services.eks.model.ClusterOidcKey;
+import io.github.hectorvent.floci.services.eks.model.LogSetup;
 import io.github.hectorvent.floci.services.eks.model.OidcIdentity;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
@@ -36,6 +39,7 @@ import org.jboss.logging.Logger;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.Closeable;
 import java.io.File;
 import java.io.IOException;
 import java.net.HttpURLConnection;
@@ -49,6 +53,7 @@ import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -74,7 +79,27 @@ public class EksClusterManager {
     // Tar entry extracted at /etc; the archive path creates /etc/rancher/k3s, which does not
     // exist yet in a created-but-not-started k3s container.
     private static final String REGISTRIES_TAR_ENTRY = "rancher/k3s/registries.yaml";
+    // k3s applies every manifest in its server manifests directory at startup, and again whenever
+    // one changes on disk, so dropping the file in before the container starts is enough to get the
+    // MutatingWebhookConfiguration registered. The directory sits under the cluster's named data
+    // volume; the Docker copy resolves through the container's mounts, so the file lands there.
+    static final String K3S_DATA_DIR = "/var/lib/rancher/k3s";
+    static final String POD_IDENTITY_MANIFEST_FILE = "floci-eks-pod-identity.yaml";
+    static final String POD_IDENTITY_MANIFEST_TAR_ENTRY = "server/manifests/" + POD_IDENTITY_MANIFEST_FILE;
     private static final String ENDPOINT_MODE_NETWORK = "network";
+    public static final String DEFAULT_POD_CIDR = "10.42.0.0/16";
+
+    public static final Map<String, String> SUPPORTED_K8S_VERSIONS = Map.of(
+            "1.28", "rancher/k3s:v1.28.15-k3s1",
+            "1.29", "rancher/k3s:v1.29.14-k3s1",
+            "1.30", "rancher/k3s:v1.30.10-k3s1",
+            "1.31", "rancher/k3s:v1.31.5-k3s1",
+            "1.32", "rancher/k3s:v1.32.2-k3s1",
+            "1.33", "rancher/k3s:v1.33.1-k3s1",
+            "1.34", "rancher/k3s:v1.34.1-k3s1",
+            "1.35", "rancher/k3s:v1.35.0-k3s1",
+            "1.36", "rancher/k3s:v1.36.0-k3s1"
+    );
 
     static final String SA_SIGNING_KEY_FILE = "sa-signing-key.pem";
     static final String SA_PUBLIC_KEY_FILE = "sa-public-key.pem";
@@ -92,7 +117,10 @@ public class EksClusterManager {
     private final RegionResolver regionResolver;
     private final Ec2MetadataServer metadataServer;
     private final EksOidcService oidcService;
+    private final FlociCertificateAuthority certificateAuthority;
+    private final ContainerLogStreamer logStreamer;
     private final Map<String, Instance> clusterNodeInstances = new ConcurrentHashMap<>();
+    private final Map<String, Closeable> clusterLogHandles = new ConcurrentHashMap<>();
 
     public EksClusterManager(ContainerBuilder containerBuilder,
                              ContainerLifecycleManager lifecycleManager,
@@ -103,7 +131,7 @@ public class EksClusterManager {
                              EmulatorConfig config,
                              RegionResolver regionResolver) {
         this(containerBuilder, lifecycleManager, containerDetector, portAllocator,
-                dockerHostResolver, ecrRegistryManager, config, regionResolver, null, null);
+                dockerHostResolver, ecrRegistryManager, config, regionResolver, null, null, null, null);
     }
 
     public EksClusterManager(ContainerBuilder containerBuilder,
@@ -116,7 +144,53 @@ public class EksClusterManager {
                              RegionResolver regionResolver,
                              Ec2MetadataServer metadataServer) {
         this(containerBuilder, lifecycleManager, containerDetector, portAllocator,
-                dockerHostResolver, ecrRegistryManager, config, regionResolver, metadataServer, null);
+                dockerHostResolver, ecrRegistryManager, config, regionResolver, metadataServer, null, null, null);
+    }
+
+    public EksClusterManager(ContainerBuilder containerBuilder,
+                             ContainerLifecycleManager lifecycleManager,
+                             ContainerDetector containerDetector,
+                             PortAllocator portAllocator,
+                             DockerHostResolver dockerHostResolver,
+                             EcrRegistryManager ecrRegistryManager,
+                             EmulatorConfig config,
+                             RegionResolver regionResolver,
+                             Ec2MetadataServer metadataServer,
+                             EksOidcService oidcService) {
+        this(containerBuilder, lifecycleManager, containerDetector, portAllocator,
+                dockerHostResolver, ecrRegistryManager, config, regionResolver, metadataServer, oidcService, null, null);
+    }
+
+    public EksClusterManager(ContainerBuilder containerBuilder,
+                             ContainerLifecycleManager lifecycleManager,
+                             ContainerDetector containerDetector,
+                             PortAllocator portAllocator,
+                             DockerHostResolver dockerHostResolver,
+                             EcrRegistryManager ecrRegistryManager,
+                             EmulatorConfig config,
+                             RegionResolver regionResolver,
+                             Ec2MetadataServer metadataServer,
+                             EksOidcService oidcService,
+                             FlociCertificateAuthority certificateAuthority) {
+        this(containerBuilder, lifecycleManager, containerDetector, portAllocator,
+                dockerHostResolver, ecrRegistryManager, config, regionResolver, metadataServer, oidcService,
+                certificateAuthority, null);
+    }
+
+    public EksClusterManager(ContainerBuilder containerBuilder,
+                             ContainerLifecycleManager lifecycleManager,
+                             ContainerDetector containerDetector,
+                             PortAllocator portAllocator,
+                             DockerHostResolver dockerHostResolver,
+                             EcrRegistryManager ecrRegistryManager,
+                             EmulatorConfig config,
+                             RegionResolver regionResolver,
+                             Ec2MetadataServer metadataServer,
+                             EksOidcService oidcService,
+                             ContainerLogStreamer logStreamer) {
+        this(containerBuilder, lifecycleManager, containerDetector, portAllocator,
+                dockerHostResolver, ecrRegistryManager, config, regionResolver, metadataServer, oidcService,
+                null, logStreamer);
     }
 
     @Inject
@@ -129,7 +203,9 @@ public class EksClusterManager {
                              EmulatorConfig config,
                              RegionResolver regionResolver,
                              Ec2MetadataServer metadataServer,
-                             EksOidcService oidcService) {
+                             EksOidcService oidcService,
+                             FlociCertificateAuthority certificateAuthority,
+                             ContainerLogStreamer logStreamer) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.containerDetector = containerDetector;
@@ -140,6 +216,8 @@ public class EksClusterManager {
         this.regionResolver = regionResolver;
         this.metadataServer = metadataServer;
         this.oidcService = oidcService;
+        this.certificateAuthority = certificateAuthority;
+        this.logStreamer = logStreamer;
     }
 
     /**
@@ -187,7 +265,7 @@ public class EksClusterManager {
      * {@link #isReady(Cluster)} returns true and {@link #finalizeCluster(Cluster)} is called.
      */
     public void startCluster(Cluster cluster) {
-        String image = config.services().eks().defaultImage();
+        String image = resolveClusterImage(cluster);
         if (cluster.getDockerName() == null) {
             cluster.setDockerName(accountQualifiedName(cluster));
         }
@@ -217,7 +295,15 @@ public class EksClusterManager {
         // filesystem, so chmod works correctly and data persists across container restarts.
         String volumeName = cluster.getDockerName();
 
-        List<String> serverArgs = buildServerArgs(config.services().eks().disableCni());
+        String serviceCidr = cluster.getKubernetesNetworkConfig() != null
+                && cluster.getKubernetesNetworkConfig().getServiceIpv4Cidr() != null
+                ? cluster.getKubernetesNetworkConfig().getServiceIpv4Cidr()
+                : EksService.DEFAULT_SERVICE_IPV4_CIDR;
+        String clusterCidr = cluster.getPodCidr() != null && !cluster.getPodCidr().isBlank()
+                ? cluster.getPodCidr()
+                : DEFAULT_POD_CIDR;
+
+        List<String> serverArgs = buildServerArgs(config.services().eks().disableCni(), serviceCidr, clusterCidr);
 
         // The account label comes from the cluster record when set (restore runs with no request
         // context); regionResolver is the fallback for the create path.
@@ -226,7 +312,7 @@ public class EksClusterManager {
                 .withName(containerName)
                 .withEnv("K3S_KUBECONFIG_MODE", "644")
                 .withPortBinding(K3S_API_SERVER_PORT, hostPort)
-                .withNamedVolume(volumeName, "/var/lib/rancher/k3s")
+                .withNamedVolume(volumeName, K3S_DATA_DIR)
                 .withDockerNetwork(config.services().eks().dockerNetwork())
                 .withPrivileged(true)
                 .withLogRotation()
@@ -293,13 +379,22 @@ public class EksClusterManager {
             copyWebhookIntoContainer(containerId, webhookLocalFile, cluster.getName());
         }
         injectEcrRegistryMirror(containerId, cluster.getName());
+        registerPodIdentityWebhook(containerId, cluster);
         if (signingKeyFiles != null) {
             copySigningKeysIntoContainer(containerId, signingKeyFiles, cluster.getName());
         }
-        ContainerInfo info = lifecycleManager.startCreated(containerId, spec);
+        ContainerInfo info;
+        try {
+            info = lifecycleManager.startCreated(containerId, spec);
+        } catch (Exception e) {
+            lifecycleManager.removeIfExists(containerName);
+            throw e;
+        }
 
         applyEndpoints(cluster, containerName, hostPort, info);
         configureLinkLocalMetadataEndpoint(cluster, containerId);
+        configurePodIdentityRelay(cluster, containerId);
+        attachClusterLogs(cluster);
 
         LOG.infov("k3s container {0} started for cluster {1} on port {2} (internal: {3})",
                 containerId, cluster.getName(), String.valueOf(hostPort), cluster.getInternalEndpoint());
@@ -307,7 +402,7 @@ public class EksClusterManager {
 
     /**
      * Re-latches a persisted cluster onto its k3s container after a Floci restart. A surviving
-     * container — running, or stopped by a Docker daemon reboot — is adopted (started if needed),
+     * container - running, or stopped by a Docker daemon reboot - is adopted (started if needed),
      * keeping its published API server port and data volume, so the cluster's workloads come back
      * as they were. When the container is gone, the cluster is recreated via {@link #startCluster};
      * the named k3s data volume is reused if it survived. Callers should put the cluster back into
@@ -355,6 +450,8 @@ public class EksClusterManager {
         cluster.setHostPort(hostPort);
         applyEndpoints(cluster, containerName, hostPort, info);
         configureLinkLocalMetadataEndpoint(cluster, info.containerId());
+        configurePodIdentityRelay(cluster, info.containerId());
+        attachClusterLogsFromNow(cluster);
 
         LOG.infov("Adopted surviving k3s container {0} for EKS cluster {1} on port {2} (internal: {3})",
                 info.containerId(), cluster.getName(), String.valueOf(hostPort), cluster.getInternalEndpoint());
@@ -449,16 +546,107 @@ public class EksClusterManager {
      */
     public void stopCluster(Cluster cluster) {
         unregisterMetadataEndpoint(cluster);
+        Closeable logStream = clusterLogHandles.remove(clusterResourceName(cluster));
         if (cluster.getContainerId() == null) {
+            closeQuietly(logStream);
             return;
         }
         if (config.services().eks().keepRunningOnShutdown()) {
+            closeQuietly(logStream);
             LOG.infov("Leaving k3s container for cluster {0} running", cluster.getName());
             return;
         }
-        lifecycleManager.stopAndRemove(cluster.getContainerId(), null);
+        lifecycleManager.stopAndRemove(cluster.getContainerId(), logStream);
         ContainerStorageHelper.removeNamedVolume(config, lifecycleManager, clusterResourceName(cluster));
         LOG.infov("Stopped k3s container for cluster {0}", cluster.getName());
+    }
+
+    private static void closeQuietly(Closeable closeable) {
+        if (closeable != null) {
+            try {
+                closeable.close();
+            } catch (Exception ignored) {
+                // Swallowing is safe because closing an already closed or failed log stream during shutdown is best-effort.
+            }
+        }
+    }
+
+    /**
+     * Checks whether the cluster has API server control plane logging enabled.
+     */
+    public static boolean hasLoggingEnabled(Cluster cluster) {
+        return hasLoggingEnabled(cluster, "api");
+    }
+
+    /**
+     * Checks whether the cluster has the specified control plane log type enabled.
+     */
+    public static boolean hasLoggingEnabled(Cluster cluster, String logType) {
+        if (cluster == null || cluster.getLogging() == null || logType == null) {
+            return false;
+        }
+        List<LogSetup> clusterLogging = cluster.getLogging().getClusterLogging();
+        if (clusterLogging == null || clusterLogging.isEmpty()) {
+            return false;
+        }
+        for (LogSetup setup : clusterLogging) {
+            if (Boolean.TRUE.equals(setup.getEnabled()) && setup.getTypes() != null
+                    && setup.getTypes().contains(logType)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Attaches CloudWatch Logs delivery for the cluster container if logging is enabled.
+     */
+    public void attachClusterLogs(Cluster cluster) {
+        attachClusterLogs(cluster, false);
+    }
+
+    /**
+     * Attaches CloudWatch Logs delivery for an adopted cluster container, only forwarding lines
+     * emitted from now on.
+     */
+    public void attachClusterLogsFromNow(Cluster cluster) {
+        attachClusterLogs(cluster, true);
+    }
+
+    private void attachClusterLogs(Cluster cluster, boolean fromNow) {
+        if (logStreamer == null || cluster == null || !hasLoggingEnabled(cluster)) {
+            return;
+        }
+        String containerId = cluster.getContainerId();
+        if (containerId == null || containerId.isBlank()) {
+            return;
+        }
+        String resourceName = clusterResourceName(cluster);
+        if (clusterLogHandles.containsKey(resourceName)) {
+            return;
+        }
+        try {
+            String logGroup = "/aws/eks/" + cluster.getName() + "/cluster";
+            String hash = containerId.length() >= 32 ? containerId.substring(0, 32) : containerId;
+            String logStream = "kube-apiserver-" + hash;
+            String region = clusterRegion(cluster);
+            String accountId = resolveClusterAccountId(cluster);
+            Closeable handle = fromNow
+                    ? logStreamer.attachFromNowForAccount(
+                            accountId, containerId, logGroup, logStream, region, "eks:" + cluster.getName())
+                    : logStreamer.attachForAccount(
+                            accountId, containerId, logGroup, logStream, region, "eks:" + cluster.getName());
+            if (handle != null) {
+                clusterLogHandles.put(resourceName, handle);
+            }
+        } catch (Exception e) {
+            LOG.warnv("Could not attach control plane log stream for EKS cluster {0}: {1}",
+                    cluster.getName(), e.getMessage());
+        }
+    }
+
+    Closeable getLogHandle(Cluster cluster) {
+        return clusterLogHandles.get(clusterResourceName(cluster));
     }
 
     /**
@@ -559,11 +747,38 @@ public class EksClusterManager {
     }
 
     /**
+     * Resolves the k3s container image for a cluster.
+     * Uses imageTemplate if configured, otherwise maps explicitly requested Kubernetes versions
+     * to stable k3s images, falling back to the configured defaultImage when no version was requested.
+     */
+    String resolveClusterImage(Cluster cluster) {
+        String configuredDefault = config.services().eks().defaultImage();
+        boolean hasExplicitVersion = cluster != null
+                && (cluster.isExplicitVersion()
+                        || (cluster.getVersion() != null && !EksService.DEFAULT_K8S_VERSION.equals(cluster.getVersion())));
+        if (hasExplicitVersion) {
+            String version = cluster.getVersion();
+            if (config.services().eks().imageTemplate().isPresent()) {
+                String template = config.services().eks().imageTemplate().get();
+                return template.contains("%s") ? String.format(template, version) : template;
+            }
+            String mapped = SUPPORTED_K8S_VERSIONS.get(version);
+            if (mapped != null) {
+                return mapped;
+            }
+            return "rancher/k3s:v" + version + ".0-k3s1";
+        }
+        return configuredDefault != null && !configuredDefault.isBlank()
+                ? configuredDefault
+                : "rancher/k3s:latest";
+    }
+
+    /**
      * Builds the k3s {@code server} command-line args. When {@code disableCni} is true, flannel,
-     * k3s's default network policy controller, and kube-proxy are all disabled up front — see the
+     * k3s's default network policy controller, and kube-proxy are all disabled up front: see the
      * {@code disableCni} config javadoc for why this must happen at startup, not after the fact.
      */
-    static List<String> buildServerArgs(boolean disableCni) {
+    static List<String> buildServerArgs(boolean disableCni, String serviceCidr, String clusterCidr) {
         List<String> serverArgs = new ArrayList<>(List.of("server",
                 "--disable=traefik",
                 "--tls-san=localhost"));
@@ -572,7 +787,17 @@ public class EksClusterManager {
             serverArgs.add("--disable-network-policy");
             serverArgs.add("--disable-kube-proxy");
         }
+        if (serviceCidr != null && !serviceCidr.isBlank()) {
+            serverArgs.add("--service-cidr=" + serviceCidr);
+        }
+        if (clusterCidr != null && !clusterCidr.isBlank()) {
+            serverArgs.add("--cluster-cidr=" + clusterCidr);
+        }
         return serverArgs;
+    }
+
+    static List<String> buildServerArgs(boolean disableCni) {
+        return buildServerArgs(disableCni, null, null);
     }
 
     /**
@@ -842,7 +1067,8 @@ public class EksClusterManager {
         }
         String endpoint = "http://" + dockerHostResolver.resolve() + ":" + config.port();
         String content = buildRegistriesYaml(config.defaultAccountId(), regions, config.port(), endpoint);
-        writeRegistriesYaml(clusterName, content);
+        writeLocalCopy(Paths.get(config.services().eks().dataPath(), "registries", clusterName,
+                "registries.yaml"), content, clusterName);
         try {
             lifecycleManager.getDockerClient()
                     .copyArchiveToContainerCmd(containerId)
@@ -856,16 +1082,105 @@ public class EksClusterManager {
         }
     }
 
+    /**
+     * Drops the cluster's {@code MutatingWebhookConfiguration} into the k3s server manifests
+     * directory of the (created, not-yet-started) container, so the API server registers it as it
+     * comes up and starts sending pod CREATE admission reviews to Floci.
+     *
+     * <p>Kubernetes requires an {@code https} {@code clientConfig.url} and a {@code caBundle} it
+     * trusts, neither of which Floci can offer with TLS off, so the webhook is skipped with a
+     * warning in that case. A failure here leaves the cluster running without pod identity
+     * injection, matching the token webhook and the ECR mirror.
+     */
+    void registerPodIdentityWebhook(String containerId, Cluster cluster) {
+        if (!config.services().eks().podIdentityWebhook()) {
+            return;
+        }
+        String clusterName = cluster.getName();
+        if (!config.tls().enabled()) {
+            LOG.warnv("EKS Pod Identity injection is off for cluster {0}: Kubernetes only accepts an "
+                    + "https admission webhook URL, and Floci serves HTTP with floci.tls.enabled=false. "
+                    + "Set FLOCI_TLS_ENABLED=true to have pods mutated. Pods still start, without the "
+                    + "pod identity token or credentials environment variables.", clusterName);
+            return;
+        }
+        if (certificateAuthority == null) {
+            LOG.warnv("EKS Pod Identity injection is off for cluster {0}: no local CA is available to "
+                    + "put in the webhook caBundle", clusterName);
+            return;
+        }
+        String url = "https://" + dockerHostResolver.resolve() + ":" + config.port()
+                + podIdentityWebhookPath(clusterName, resolveClusterAccountId(cluster));
+        String manifest = buildPodIdentityWebhookConfiguration(url, certificateAuthority.caPem());
+        writeLocalCopy(Paths.get(config.services().eks().dataPath(), "webhook", clusterName,
+                POD_IDENTITY_MANIFEST_FILE), manifest, clusterName);
+        try {
+            lifecycleManager.getDockerClient()
+                    .copyArchiveToContainerCmd(containerId)
+                    .withTarInputStream(new ByteArrayInputStream(
+                            tarSingleFile(POD_IDENTITY_MANIFEST_TAR_ENTRY, manifest)))
+                    .withRemotePath(K3S_DATA_DIR)
+                    .exec();
+            LOG.infov("Registered the EKS Pod Identity mutating webhook ({0}) for cluster {1}", url, clusterName);
+        } catch (Exception e) {
+            LOG.warnv("EKS cluster {0} gets no pod identity injection: could not copy {1} into the k3s "
+                    + "container: {2}", clusterName, POD_IDENTITY_MANIFEST_FILE, e.getMessage());
+        }
+    }
+
+    /**
+     * The Floci pod identity admission route. The account is in the path for the same reason the
+     * token webhook puts its scope there: the API server calls Floci with no AWS credentials, so a
+     * cluster owned by a non-default account would otherwise never be found.
+     */
+    static String podIdentityWebhookPath(String clusterName, String accountId) {
+        return "/_floci/eks/clusters/" + clusterName + "/pod-identity-webhook/scope/" + accountId;
+    }
+
+    /**
+     * Builds the {@code MutatingWebhookConfiguration} k3s auto-applies. Scoped to pod {@code CREATE}
+     * alone, and {@code failurePolicy: Ignore} so an unreachable or failing Floci never blocks a pod
+     * from being created. The {@code caBundle} is Floci's local CA, base64 of the PEM as Kubernetes
+     * expects.
+     *
+     * <p>{@code timeoutSeconds} is 3, not the Kubernetes default of 10: Floci is a local process, so
+     * a healthy call takes milliseconds, and the timeout only ever runs down when Floci is
+     * unreachable. Every pod creation in the cluster pays it in that case, so it is kept short.
+     */
+    static String buildPodIdentityWebhookConfiguration(String url, String caPem) {
+        return """
+                apiVersion: admissionregistration.k8s.io/v1
+                kind: MutatingWebhookConfiguration
+                metadata:
+                  name: floci-eks-pod-identity
+                webhooks:
+                  - name: pod-identity.eks.floci.io
+                    admissionReviewVersions: ["v1"]
+                    sideEffects: None
+                    failurePolicy: Ignore
+                    reinvocationPolicy: Never
+                    timeoutSeconds: 3
+                    clientConfig:
+                      url: "%s"
+                      caBundle: "%s"
+                    rules:
+                      - operations: ["CREATE"]
+                        apiGroups: [""]
+                        apiVersions: ["v1"]
+                        resources: ["pods"]
+                        scope: "*"
+                """.formatted(url, Base64.getEncoder().encodeToString(caPem.getBytes(StandardCharsets.UTF_8)));
+    }
+
     /** Best-effort local copy for inspection/debugging; the container copy streams from memory. */
-    private void writeRegistriesYaml(String clusterName, String content) {
-        Path localFile = Paths.get(config.services().eks().dataPath(), "registries", clusterName, "registries.yaml")
-                .toAbsolutePath().normalize();
+    private void writeLocalCopy(Path file, String content, String clusterName) {
+        Path localFile = file.toAbsolutePath().normalize();
         try {
             Files.createDirectories(localFile.getParent());
             Files.writeString(localFile, content);
         } catch (IOException e) {
-            LOG.debugv("Could not write local registries.yaml copy for cluster {0}: {1}",
-                    clusterName, e.getMessage());
+            LOG.debugv("Could not write local {0} copy for cluster {1}: {2}",
+                    localFile.getFileName(), clusterName, e.getMessage());
         }
     }
 
@@ -993,9 +1308,66 @@ public class EksClusterManager {
                 return;
             }
 
+            if (config.services().eks().imdsPodNetwork()) {
+                configurePodNetworkRouting(cluster, containerId);
+            }
+
             LOG.infov("Configured link-local IMDS endpoint for EKS cluster {0}", cluster.getName());
         } catch (Exception e) {
             LOG.warnv("Could not configure link-local IMDS endpoint for EKS cluster {0}: {1}",
+                    cluster.getName(), e.getMessage());
+        }
+    }
+
+    void configurePodIdentityRelay(Cluster cluster, String containerId) {
+        if (!config.services().eks().podIdentityWebhook() || !config.tls().enabled()) {
+            return;
+        }
+        try {
+            ContainerExecResult install = execInContainerForResult(containerId,
+                    Ec2MetadataProxy.installCommand(), 180);
+            if (install.exitCode() != 0) {
+                LOG.warnv("Could not install Pod Identity relay dependencies for EKS cluster {0}: {1}",
+                        cluster.getName(), install.summary());
+                return;
+            }
+
+            String flociHost = dockerHostResolver.resolve();
+            int flociPort = config.port();
+
+            ContainerExecResult start = execInContainerForResult(containerId,
+                    Ec2MetadataProxy.podIdentityStartCommand(flociHost, flociPort), 30);
+            if (start.exitCode() != 0) {
+                LOG.warnv("Could not start link-local Pod Identity relay for EKS cluster {0}: {1}",
+                        cluster.getName(), start.summary());
+                return;
+            }
+
+            configurePodNetworkRouting(cluster, containerId, List.of(EksPodNetworkRouting.POD_IDENTITY_ENDPOINT));
+
+            LOG.infov("Configured link-local Pod Identity relay for EKS cluster {0}", cluster.getName());
+        } catch (Exception e) {
+            LOG.warnv("Could not configure link-local Pod Identity relay for EKS cluster {0}: {1}",
+                    cluster.getName(), e.getMessage());
+        }
+    }
+
+    void configurePodNetworkRouting(Cluster cluster, String containerId) {
+        configurePodNetworkRouting(cluster, containerId, EksPodNetworkRouting.DEFAULT_ENDPOINTS);
+    }
+
+    void configurePodNetworkRouting(Cluster cluster, String containerId, List<LinkLocalEndpoint> endpoints) {
+        try {
+            String[] routingCmd = EksPodNetworkRouting.buildRoutingCommand(
+                    EksPodNetworkRouting.DEFAULT_POD_CIDR,
+                    endpoints);
+            ContainerExecResult routing = execInContainerForResult(containerId, routingCmd, 15);
+            if (routing.exitCode() != 0) {
+                LOG.warnv("Could not configure link-local pod network routing for EKS cluster {0}: {1}",
+                        cluster.getName(), routing.summary());
+            }
+        } catch (Exception e) {
+            LOG.warnv("Could not configure link-local pod network routing for EKS cluster {0}: {1}",
                     cluster.getName(), e.getMessage());
         }
     }

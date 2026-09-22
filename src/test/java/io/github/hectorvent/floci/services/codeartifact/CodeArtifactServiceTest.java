@@ -164,6 +164,19 @@ class CodeArtifactServiceTest {
     }
 
     @Test
+    void deleteDomainOfMissingDomainReturnsResourceNotFound() {
+        // AWS returns this even though the API reference does not list it on DeleteDomain.
+        AwsException e = assertThrows(AwsException.class, () -> service.deleteDomain(REGION, "never-created", null));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+        assertEquals(404, e.getHttpStatus());
+
+        service.createDomain(REGION, "once", null, Map.of());
+        service.deleteDomain(REGION, "once", null);
+        AwsException again = assertThrows(AwsException.class, () -> service.deleteDomain(REGION, "once", null));
+        assertEquals("ResourceNotFoundException", again.getErrorCode());
+    }
+
+    @Test
     void describeDomainReflectsLiveRepositoryCount() {
         service.createDomain(REGION, "counted", null, Map.of());
         assertEquals(0, service.describeDomain(REGION, "counted", null).repositoryCount());

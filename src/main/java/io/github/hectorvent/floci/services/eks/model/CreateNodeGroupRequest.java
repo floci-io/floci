@@ -7,6 +7,12 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * {@code CreateNodegroup} request body. {@code clusterName} is absent because it travels in the
+ * URI path. Recursive sub-structures (remoteAccess, taints, launchTemplate, updateConfig,
+ * nodeRepairConfig, warmPoolConfig) round-trip as generic JSON, matching the convention
+ * {@link Nodegroup} records: the management plane only echoes them back.
+ */
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class CreateNodeGroupRequest {
@@ -43,6 +49,21 @@ public class CreateNodeGroupRequest {
 
     @JsonProperty("updateConfig")
     private Object updateConfig;
+
+    @JsonProperty("remoteAccess")
+    private Object remoteAccess;
+
+    @JsonProperty("taints")
+    private List<Object> taints;
+
+    @JsonProperty("launchTemplate")
+    private Object launchTemplate;
+
+    @JsonProperty("nodeRepairConfig")
+    private Object nodeRepairConfig;
+
+    @JsonProperty("warmPoolConfig")
+    private Object warmPoolConfig;
 
     @JsonProperty("labels")
     private Map<String, String> labels;
@@ -87,6 +108,21 @@ public class CreateNodeGroupRequest {
 
     public Object getUpdateConfig() { return updateConfig; }
     public void setUpdateConfig(Object updateConfig) { this.updateConfig = updateConfig; }
+
+    public Object getRemoteAccess() { return remoteAccess; }
+    public void setRemoteAccess(Object remoteAccess) { this.remoteAccess = remoteAccess; }
+
+    public List<Object> getTaints() { return taints; }
+    public void setTaints(List<Object> taints) { this.taints = taints; }
+
+    public Object getLaunchTemplate() { return launchTemplate; }
+    public void setLaunchTemplate(Object launchTemplate) { this.launchTemplate = launchTemplate; }
+
+    public Object getNodeRepairConfig() { return nodeRepairConfig; }
+    public void setNodeRepairConfig(Object nodeRepairConfig) { this.nodeRepairConfig = nodeRepairConfig; }
+
+    public Object getWarmPoolConfig() { return warmPoolConfig; }
+    public void setWarmPoolConfig(Object warmPoolConfig) { this.warmPoolConfig = warmPoolConfig; }
 
     public Map<String, String> getLabels() { return labels; }
     public void setLabels(Map<String, String> labels) { this.labels = labels; }

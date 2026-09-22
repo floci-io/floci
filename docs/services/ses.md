@@ -387,13 +387,16 @@ Floci recognises the AWS [mailbox simulator addresses](https://docs.aws.amazon.c
 | Recipient address | Events emitted (in addition to `Send`) |
 |---|---|
 | `success@simulator.amazonses.com` | `Delivery` |
-| `bounce@simulator.amazonses.com` | `Bounce` |
-| `complaint@simulator.amazonses.com` | `Complaint` |
-| `suppressionlist@simulator.amazonses.com` | `Reject` |
+| `bounce@simulator.amazonses.com`, `suppressionlist@simulator.amazonses.com` | `Bounce` |
+| `complaint@simulator.amazonses.com` | `Delivery`, then `Complaint` |
 
 A `+label` subaddress is supported on any of these, so `bounce+order-123@simulator.amazonses.com` triggers a `Bounce` just like the bare address — the label lets senders distinguish test messages. Only `+` separates the label; `bounce-label@...` is not a simulator address.
 
 A successful send without a simulator-address recipient emits only the `Send` event.
+
+A recipient on the [account-level suppression list](https://docs.aws.amazon.com/ses/latest/dg/sending-email-suppression-list.html) produces a `Bounce` with `bounceSubType: OnAccountSuppressionList` or a `Complaint` with `complaintSubType: OnAccountSuppressionList`, following the stored reason, and never a `Delivery`. Events are split by cause: a message that reaches both `bounce@simulator` and a suppressed address publishes two `Bounce` events, each listing only its own recipients, with `mail.destination` carrying the full envelope on both. These shapes were verified against real SES on 2026-09-21.
+
+`Reject` is emitted the way AWS documents it: a message carrying the [EICAR test file](https://www.eicar.org/download-anti-malware-testfile/) in its subject, a header or a body is accepted (the send returns a `MessageId`) and then rejected with a `Reject` event whose `reason` is `Bad content`. The message is not relayed, the stored record keeps only its source, its envelope and `RejectReason`, and its `Send` and `Reject` events carry the envelope but no subject or headers in `mail`, where SES would include them, so the signature reaches neither the mailbox store nor an event destination. The test string itself is deliberately not reproduced here.
 
 Account-level VDM (Virtual Deliverability Manager) attributes are stored per region. `PutAccountVdmAttributes` sets `VdmEnabled` (opt-in, defaults `DISABLED`) plus the optional `DashboardAttributes.EngagementMetrics` and `GuardianAttributes.OptimizedSharedDelivery`. `GetAccount` omits `VdmAttributes` until VDM has been configured for the region, then returns `VdmEnabled`, adding the `DashboardAttributes`/`GuardianAttributes` sub-objects only while `VdmEnabled` is `ENABLED`. Floci stores the settings but does not run VDM analytics.
 

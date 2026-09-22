@@ -165,7 +165,7 @@ class EcrServiceTest {
         when(registryManager.tryEnsureStarted()).thenReturn(false);
 
         Repository repo = service.createRepository(REPO, null, "IMMUTABLE", true, null, null,
-                Map.of("Project", "choudoufu"), REGION);
+                Map.of("Project", "platform"), REGION);
 
         assertEquals(REPO, repo.getRepositoryName());
         assertEquals(ACCOUNT, repo.getRegistryId());
@@ -173,7 +173,7 @@ class EcrServiceTest {
                 repo.getRepositoryArn());
         assertTrue(repo.getRepositoryUri().endsWith("/" + REPO), repo.getRepositoryUri());
         assertEquals("IMMUTABLE", repo.getImageTagMutability());
-        assertEquals("choudoufu", repo.getTags().get("Project"));
+        assertEquals("platform", repo.getTags().get("Project"));
     }
 
     @Test

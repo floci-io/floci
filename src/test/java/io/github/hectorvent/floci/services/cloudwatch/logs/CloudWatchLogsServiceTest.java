@@ -819,6 +819,49 @@ class CloudWatchLogsServiceTest {
     }
 
     @Test
+    void putLogEventsStoresTheBatchWithOneBackendWrite() {
+        String accountId = "111111111111";
+        CountingStorageBackend<String, LogEvent> rawEvents = new CountingStorageBackend<>();
+        CloudWatchLogsService batchService = new CloudWatchLogsService(
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, "000000000000"),
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, "000000000000"),
+                new AccountAwareStorageBackend<>(rawEvents, null, "000000000000"),
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, "000000000000"),
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, "000000000000"),
+                10_000,
+                new RegionResolver(REGION, "000000000000"));
+        batchService.createLogGroupForAccount(accountId, "/app/logs", null, null, REGION);
+        batchService.createLogStreamForAccount(accountId, "/app/logs", "stream-1", REGION);
+
+        batchService.putLogEventsForAccount(accountId, "/app/logs", "stream-1", List.of(
+                Map.of("timestamp", 1_000L, "message", "first"),
+                Map.of("timestamp", 2_000L, "message", "second"),
+                Map.of("timestamp", 3_000L, "message", "third")), REGION);
+
+        assertEquals(1, rawEvents.putAllCalls);
+        assertEquals(0, rawEvents.putCalls);
+        assertEquals(3, rawEvents.keys().size());
+        assertTrue(rawEvents.keys().stream().allMatch(key -> key.startsWith(accountId + "/")));
+    }
+
+    private static final class CountingStorageBackend<K, V> extends InMemoryStorage<K, V> {
+        private int putCalls;
+        private int putAllCalls;
+
+        @Override
+        public void put(K key, V value) {
+            putCalls++;
+            super.put(key, value);
+        }
+
+        @Override
+        public void putAll(Map<K, V> entries) {
+            putAllCalls++;
+            entries.forEach((key, value) -> super.put(key, value));
+        }
+    }
+
+    @Test
     void maxEventsPerQueryIsRespected() {
         CloudWatchLogsService limitedService = new CloudWatchLogsService(
                 new InMemoryStorage<>(),

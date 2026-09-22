@@ -16,7 +16,7 @@ proxy behind them yet.
 | Action | Description |
 | --- | --- |
 | `CreateDomain` | Creates a domain (max 10 per account per Region), optionally with a KMS encryption key and initial tags. |
-| `DeleteDomain` | Deletes a domain; fails with `ConflictException` while it still contains repositories. |
+| `DeleteDomain` | Deletes a domain; fails with `ConflictException` while it still contains repositories, and with `ResourceNotFoundException` for a missing domain (as AWS does, although the API reference does not list it). |
 | `DescribeDomain` | Returns a domain's full description, including its repository count. |
 | `ListDomains` | Lists domain summaries for the account and Region, paginated. |
 | `PutDomainPermissionsPolicy` | Attaches or replaces a domain's resource policy, versioned by `policyRevision`. |

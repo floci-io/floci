@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InstanceState;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
@@ -15,6 +16,7 @@ import io.github.hectorvent.floci.services.ec2.model.Tag;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -32,6 +34,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -207,6 +210,92 @@ class Ec2InstanceCfnProvisionerTest {
     }
 
     @Test
+    void changingPrivateIpAddressReplacesTheInstanceAndRecordsTheCleanup() throws Exception {
+        Instance i1 = new Instance();
+        i1.setInstanceId("i-1");
+        i1.setImageId("ami-1");
+        Instance i2 = new Instance();
+        i2.setInstanceId("i-2");
+        i2.setImageId("ami-1");
+        when(ec2.runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(), anyList(),
+                any(), any(), anyList(), any(), any(), any()))
+                .thenReturn(reservationOf(i1), reservationOf(i2));
+        StackResource r = resource("Server");
+        provisioner.provision(r, props("{\"ImageId\": \"ami-1\", \"PrivateIpAddress\": \"10.0.0.5\"}"), ctx(null));
+        assertEquals("i-1", r.getPhysicalId());
+
+        when(ec2.describeInstances("us-east-1", List.of("i-1"), null))
+                .thenReturn(List.of(reservationOf(i1)));
+        provisioner.provision(r, props("{\"ImageId\": \"ami-1\", \"PrivateIpAddress\": \"10.0.0.6\"}"), ctx("i-1"));
+
+        assertEquals("i-2", r.getPhysicalId());
+        assertTrue(provisioner.hasReplacementUpdate(r));
+        assertEquals("i-1", provisioner.updateCleanupPhysicalId(r));
+    }
+
+    @Test
+    void changingAvailabilityZoneReplacesTheInstance() throws Exception {
+        Instance i1 = new Instance();
+        i1.setInstanceId("i-1");
+        i1.setImageId("ami-1");
+        Instance i2 = new Instance();
+        i2.setInstanceId("i-2");
+        i2.setImageId("ami-1");
+        when(ec2.runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(), anyList(),
+                any(), any(), anyList(), any(), any(), any()))
+                .thenReturn(reservationOf(i1), reservationOf(i2));
+        StackResource r = resource("Server");
+        provisioner.provision(r, props("{\"ImageId\": \"ami-1\", \"AvailabilityZone\": \"us-east-1a\"}"), ctx(null));
+
+        when(ec2.describeInstances("us-east-1", List.of("i-1"), null))
+                .thenReturn(List.of(reservationOf(i1)));
+        provisioner.provision(r, props("{\"ImageId\": \"ami-1\", \"AvailabilityZone\": \"us-east-1b\"}"), ctx("i-1"));
+
+        assertEquals("i-2", r.getPhysicalId());
+        assertTrue(provisioner.hasReplacementUpdate(r));
+    }
+
+    @Test
+    void unchangedDeclaredCreateOnlyPropertiesReuseTheInstance() throws Exception {
+        Instance i1 = new Instance();
+        i1.setInstanceId("i-1");
+        i1.setImageId("ami-1");
+        stubLaunch(i1);
+        StackResource r = resource("Server");
+        String template = "{\"ImageId\": \"ami-1\", \"PrivateIpAddress\": \"10.0.0.5\", "
+                + "\"AvailabilityZone\": \"us-east-1a\"}";
+        provisioner.provision(r, props(template), ctx(null));
+
+        when(ec2.describeInstances("us-east-1", List.of("i-1"), null))
+                .thenReturn(List.of(reservationOf(i1)));
+        provisioner.provision(r, props(template), ctx("i-1"));
+
+        assertEquals("i-1", r.getPhysicalId());
+        verify(ec2, times(1)).runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(),
+                anyList(), any(), any(), anyList(), any(), any(), any());
+    }
+
+    @Test
+    void aNewlyDeclaredCreateOnlyValueWithNoPriorRecordDoesNotReplaceTheInstance() throws Exception {
+        Instance i1 = new Instance();
+        i1.setInstanceId("i-1");
+        i1.setImageId("ami-1");
+        stubLaunch(i1);
+        StackResource r = resource("Server");
+        // The prior provision declared no PrivateIpAddress, so none was recorded; a first declared
+        // value is not treated as a change, only recorded for next time.
+        provisioner.provision(r, props("{\"ImageId\": \"ami-1\"}"), ctx(null));
+
+        when(ec2.describeInstances("us-east-1", List.of("i-1"), null))
+                .thenReturn(List.of(reservationOf(i1)));
+        provisioner.provision(r, props("{\"ImageId\": \"ami-1\", \"PrivateIpAddress\": \"10.0.0.5\"}"), ctx("i-1"));
+
+        assertEquals("i-1", r.getPhysicalId());
+        verify(ec2, times(1)).runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(),
+                anyList(), any(), any(), anyList(), any(), any(), any());
+    }
+
+    @Test
     void reusedInstanceReconcilesTagsInPlace() throws Exception {
         Instance i1 = new Instance();
         i1.setInstanceId("i-1");
@@ -230,6 +319,62 @@ class Ec2InstanceCfnProvisionerTest {
         verify(ec2).deleteTags(eq("us-east-1"), eq(List.of("i-1")), removed.capture());
         assertEquals(1, removed.getValue().size());
         assertEquals("old", removed.getValue().get(0).getKey());
+    }
+
+    @Test
+    void reusedInstanceResizesInstanceTypeInPlace() throws Exception {
+        Instance i1 = new Instance();
+        i1.setInstanceId("i-1");
+        i1.setImageId("ami-1");
+        i1.setInstanceType("t3.micro");
+        stubLaunch(i1);
+        StackResource r = resource("Server");
+        provisioner.provision(r, props("{\"ImageId\": \"ami-1\", \"InstanceType\": \"t3.micro\"}"), ctx(null));
+
+        when(ec2.describeInstances("us-east-1", List.of("i-1"), null))
+                .thenReturn(List.of(reservationOf(i1)));
+        provisioner.provision(r, props("{\"ImageId\": \"ami-1\", \"InstanceType\": \"t3.small\"}"), ctx("i-1"));
+
+        assertEquals("i-1", r.getPhysicalId());
+        verify(ec2).modifyInstanceAttribute("us-east-1", "i-1", "instanceType", "t3.small");
+    }
+
+    @Test
+    void reusedInstanceReattachesChangedSecurityGroups() throws Exception {
+        Instance i1 = new Instance();
+        i1.setInstanceId("i-1");
+        i1.setImageId("ami-1");
+        i1.setSecurityGroups(new ArrayList<>(List.of(new GroupIdentifier("sg-1", "old"))));
+        stubLaunch(i1);
+        StackResource r = resource("Server");
+        provisioner.provision(r, props("{\"ImageId\": \"ami-1\"}"), ctx(null));
+
+        when(ec2.describeInstances("us-east-1", List.of("i-1"), null))
+                .thenReturn(List.of(reservationOf(i1)));
+        provisioner.provision(r, props("{\"ImageId\": \"ami-1\", \"SecurityGroupIds\": [\"sg-2\"]}"), ctx("i-1"));
+
+        verify(ec2).modifyInstanceGroups("us-east-1", "i-1", List.of("sg-2"));
+    }
+
+    @Test
+    void reusedInstanceLeavesUnchangedMutablePropertiesAlone() throws Exception {
+        Instance i1 = new Instance();
+        i1.setInstanceId("i-1");
+        i1.setImageId("ami-1");
+        i1.setInstanceType("t3.small");
+        i1.setSecurityGroups(new ArrayList<>(List.of(new GroupIdentifier("sg-1", "keep"))));
+        stubLaunch(i1);
+        StackResource r = resource("Server");
+        String template = "{\"ImageId\": \"ami-1\", \"InstanceType\": \"t3.small\", "
+                + "\"SecurityGroupIds\": [\"sg-1\"]}";
+        provisioner.provision(r, props(template), ctx(null));
+
+        when(ec2.describeInstances("us-east-1", List.of("i-1"), null))
+                .thenReturn(List.of(reservationOf(i1)));
+        provisioner.provision(r, props(template), ctx("i-1"));
+
+        verify(ec2, never()).modifyInstanceAttribute(anyString(), anyString(), anyString(), anyString());
+        verify(ec2, never()).modifyInstanceGroups(anyString(), anyString(), anyList());
     }
 
     @Test

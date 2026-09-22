@@ -266,7 +266,7 @@ public class WafV2Service {
                 .anyMatch(a -> a.getArn().equals(webAclArn));
         if (!known) {
             throw new AwsException("WAFNonexistentItemException",
-                    "AWS WAF couldn't perform the operation because your resource doesn't exist.", 404);
+                    "AWS WAF couldn't perform the operation because your resource doesn't exist.", 400);
         }
         associationStore.put(resourceArn, webAclArn);
     }
@@ -304,7 +304,7 @@ public class WafV2Service {
 
     public String getLoggingConfiguration(String resourceArn) {
         return loggingStore.get(resourceArn).orElseThrow(() -> new AwsException(
-                "WAFNonexistentItemException", "No logging configuration for: " + resourceArn, 404));
+                "WAFNonexistentItemException", "No logging configuration for: " + resourceArn, 400));
     }
 
     public void deleteLoggingConfiguration(String resourceArn) {
@@ -323,7 +323,7 @@ public class WafV2Service {
 
     public String getPermissionPolicy(String resourceArn) {
         return policyStore.get(resourceArn).orElseThrow(() -> new AwsException(
-                "WAFNonexistentItemException", "No policy for: " + resourceArn, 404));
+                "WAFNonexistentItemException", "No policy for: " + resourceArn, 400));
     }
 
     public void deletePermissionPolicy(String resourceArn) {
@@ -370,7 +370,7 @@ public class WafV2Service {
         if (rg != null) {
             return rg;
         }
-        throw new AwsException("WAFNonexistentItemException", "Resource not found: " + resourceArn, 404);
+        throw new AwsException("WAFNonexistentItemException", "Resource not found: " + resourceArn, 400);
     }
 
     private Map<String, String> tagsOf(Object resource) {
@@ -383,7 +383,7 @@ public class WafV2Service {
         } else if (resource instanceof RuleGroup g) {
             return g.getTags();
         }
-        throw new AwsException("WAFNonexistentItemException", "Resource not found.", 404);
+        throw new AwsException("WAFNonexistentItemException", "Resource not found.", 400);
     }
 
     private void persistTagged(Object resource) {
@@ -422,10 +422,10 @@ public class WafV2Service {
         }
         V resource = store.get(key(scope, id)).orElseThrow(() -> new AwsException(
                 "WAFNonexistentItemException",
-                "AWS WAF couldn't perform the operation because your resource doesn't exist.", 404));
+                "AWS WAF couldn't perform the operation because your resource doesn't exist.", 400));
         if (!name.equals(nameOf(resource))) {
             throw new AwsException("WAFNonexistentItemException",
-                    "AWS WAF couldn't perform the operation because your resource doesn't exist.", 404);
+                    "AWS WAF couldn't perform the operation because your resource doesn't exist.", 400);
         }
         return resource;
     }

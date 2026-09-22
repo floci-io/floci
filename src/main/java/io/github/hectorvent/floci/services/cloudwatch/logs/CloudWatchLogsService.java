@@ -614,6 +614,7 @@ public class CloudWatchLogsService implements ResourceProvider {
         Long minTs = null;
         Long maxTs = null;
         List<LogEvent> stored = new ArrayList<>(events.size());
+        Map<String, LogEvent> logEvents = new LinkedHashMap<>();
 
         for (Map<String, Object> evt : events) {
             long ts = toLong(evt.get("timestamp"), now);
@@ -627,13 +628,14 @@ public class CloudWatchLogsService implements ResourceProvider {
             logEvent.setSequence(ingestionSequence.incrementAndGet());
 
             String eventKey = eventKey(region, groupName, streamName, ts, logEvent.getEventId());
-            putForAccount(eventStore, accountId, eventKey, logEvent);
+            logEvents.put(eventKey, logEvent);
             stored.add(logEvent);
 
             totalBytes += msg.getBytes().length + 26; // approx overhead
             if (minTs == null || ts < minTs) { minTs = ts; }
             if (maxTs == null || ts > maxTs) { maxTs = ts; }
         }
+        putAllForAccount(eventStore, accountId, logEvents);
 
         evictEventsPastRetention(accountId, region, groupName, now);
         evictEventsBeyondCapacity(accountId);
@@ -732,6 +734,17 @@ public class CloudWatchLogsService implements ResourceProvider {
             return;
         }
         store.put(key, value);
+    }
+
+    private <V> void putAllForAccount(
+            StorageBackend<String, V> store, String accountId, Map<String, V> entries) {
+        if (accountId != null && store instanceof AccountAwareStorageBackend<?> rawAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<V> aware = (AccountAwareStorageBackend<V>) rawAware;
+            aware.putAllForAccount(accountId, entries);
+            return;
+        }
+        store.putAll(entries);
     }
 
     private <V> Set<String> keysForAccount(StorageBackend<String, V> store, String accountId) {

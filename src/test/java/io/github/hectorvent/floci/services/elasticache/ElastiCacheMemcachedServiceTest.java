@@ -12,12 +12,16 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.Collection;
+import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -143,5 +147,95 @@ class ElastiCacheMemcachedServiceTest {
         // Delete must not reach for a container that was never created.
         service.deleteCacheCluster("no-docker-cluster");
         verify(containerManager, never()).stop(any());
+    }
+
+    @Test
+    void restorePersistedRuntimeRestartsTheContainerAndRepointsTheEndpoint() {
+        StorageFactory storageFactory = sharedStorageFactory();
+        ElastiCacheMemcachedContainerManager beforeRestart = mock(ElastiCacheMemcachedContainerManager.class);
+        when(beforeRestart.tryStart(anyString(), anyString()))
+                .thenReturn(new ElastiCacheContainerHandle("cid", "my-cluster", "localhost", 32770));
+        serviceWith(storageFactory, beforeRestart).createCacheCluster("my-cluster");
+
+        ElastiCacheMemcachedContainerManager restarted = mock(ElastiCacheMemcachedContainerManager.class);
+        when(restarted.tryStart(anyString(), anyString()))
+                .thenReturn(new ElastiCacheContainerHandle("cid2", "my-cluster", "localhost", 32771));
+        ElastiCacheMemcachedService restartedService = serviceWith(storageFactory, restarted);
+
+        restartedService.restorePersistedRuntime().join();
+
+        verify(restarted).tryStart(eq("my-cluster"), anyString());
+        CacheCluster cluster = restartedService.getCacheCluster("my-cluster");
+        assertEquals(CacheClusterStatus.AVAILABLE, cluster.getCacheClusterStatus());
+        assertEquals(32771, cluster.getConfigurationEndpoint().port(),
+                "Docker publishes a fresh host port per run, so the endpoint must follow it");
+    }
+
+    @Test
+    void memcachedRestoreFailureReportsRestoreFailed() {
+        StorageFactory storageFactory = sharedStorageFactory();
+        ElastiCacheMemcachedContainerManager beforeRestart = mock(ElastiCacheMemcachedContainerManager.class);
+        when(beforeRestart.tryStart(anyString(), anyString()))
+                .thenReturn(new ElastiCacheContainerHandle("cid", "my-cluster", "localhost", 11211));
+        serviceWith(storageFactory, beforeRestart).createCacheCluster("my-cluster");
+
+        ElastiCacheMemcachedContainerManager restarted = mock(ElastiCacheMemcachedContainerManager.class);
+        when(restarted.tryStart(anyString(), anyString()))
+                .thenThrow(new RuntimeException("container failed"));
+        ElastiCacheMemcachedService restartedService = serviceWith(storageFactory, restarted);
+
+        restartedService.restorePersistedRuntime().join();
+
+        CacheCluster cluster = restartedService.getCacheCluster("my-cluster");
+        assertEquals(CacheClusterStatus.RESTORE_FAILED, cluster.getCacheClusterStatus());
+        assertNull(cluster.getConfigurationEndpoint(),
+                "A cluster whose container is gone must not advertise an endpoint");
+    }
+
+    @Test
+    void restoreDoesNotResurrectAClusterDeletedWhileItWasRestoring() {
+        StorageFactory storageFactory = sharedStorageFactory();
+        ElastiCacheMemcachedContainerManager beforeRestart = mock(ElastiCacheMemcachedContainerManager.class);
+        when(beforeRestart.tryStart(anyString(), anyString()))
+                .thenReturn(new ElastiCacheContainerHandle("cid", "my-cluster", "localhost", 32770));
+        serviceWith(storageFactory, beforeRestart).createCacheCluster("my-cluster");
+
+        ElastiCacheMemcachedContainerManager restarted = mock(ElastiCacheMemcachedContainerManager.class);
+        ElastiCacheMemcachedService restartedService = serviceWith(storageFactory, restarted);
+        ElastiCacheContainerHandle restoredHandle =
+                new ElastiCacheContainerHandle("cid2", "my-cluster", "localhost", 32771);
+        // The delete lands in the window the cluster's monitor closes: the container is up, the
+        // record has not been written back yet.
+        when(restarted.tryStart(anyString(), anyString())).thenAnswer(inv -> {
+            restartedService.deleteCacheCluster("my-cluster");
+            return restoredHandle;
+        });
+
+        restartedService.restorePersistedRuntime().join();
+
+        assertThrows(AwsException.class, () -> restartedService.getCacheCluster("my-cluster"),
+                "A cluster deleted while it was restoring must stay deleted");
+        verify(restarted).stop(restoredHandle);
+    }
+
+    private static StorageFactory sharedStorageFactory() {
+        StorageFactory storageFactory = mock(StorageFactory.class);
+        Map<String, Object> backends = new ConcurrentHashMap<>();
+        when(storageFactory.create(anyString(), anyString(), any())).thenAnswer(inv ->
+                backends.computeIfAbsent(inv.getArgument(1, String.class),
+                        key -> AccountAwareStorageBackend.inMemory("000000000000")));
+        return storageFactory;
+    }
+
+    private static ElastiCacheMemcachedService serviceWith(StorageFactory storageFactory,
+                                                           ElastiCacheMemcachedContainerManager containerManager) {
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        EmulatorConfig.ServicesConfig servicesConfig = mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.ElastiCacheServiceConfig ecConfig = mock(EmulatorConfig.ElastiCacheServiceConfig.class);
+        when(config.services()).thenReturn(servicesConfig);
+        when(servicesConfig.elasticache()).thenReturn(ecConfig);
+        when(ecConfig.defaultMemcachedImage()).thenReturn("memcached:1.6");
+        when(config.hostname()).thenReturn(Optional.of("localhost"));
+        return new ElastiCacheMemcachedService(containerManager, storageFactory, config);
     }
 }

@@ -448,7 +448,7 @@ class WebSocketConnectionLifecycleTest {
 
     @Test
     @Order(999)
-    void cleanup() {
+    void cleanup() throws Exception {
         // Delete routes if they still exist
         if (connectRouteId != null) {
             given().when().delete("/v2/apis/" + wsApiId + "/routes/" + connectRouteId)
@@ -468,10 +468,8 @@ class WebSocketConnectionLifecycleTest {
         }
 
         // Delete Lambda functions
-        given().when().delete("/2015-03-31/functions/" + allowFunctionName);
-        given().when().delete("/2015-03-31/functions/" + denyFunctionName);
-        given().when().delete("/2015-03-31/functions/" + errorFunctionName);
-        given().when().delete("/2015-03-31/functions/" + disconnectFunctionName);
+        WebSocketTestSupport.deleteFunctions(allowFunctionName, denyFunctionName, errorFunctionName,
+                disconnectFunctionName);
     }
 
     // ──────────────────────────── Helpers ────────────────────────────

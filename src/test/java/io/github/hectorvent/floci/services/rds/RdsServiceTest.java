@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.ec2.model.Vpc;
 import io.github.hectorvent.floci.services.ec2.model.VpcIpv6CidrBlockAssociation;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
+import io.github.hectorvent.floci.services.rds.model.DbClusterSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerHandle;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
@@ -1755,12 +1756,12 @@ class RdsServiceTest {
         DbInstance instance = rdsService.createDbInstance("probe-db", "postgres", "16.3",
                 "probeadmin", "ProbePassw0rd!", "dbname", "db.t3.micro",
                 20, false, null, null, null, false, null,
-                Map.of("tofu-estate", "probe1"));
+                Map.of("team", "probe1"));
 
         assertEquals(DbInstanceStatus.AVAILABLE, instance.getStatus());
         assertEquals("arn:aws:rds:us-east-1:123456789012:db:probe-db", instance.getDbInstanceArn());
         assertNotNull(instance.getEndpoint());
-        assertEquals("probe1", instance.getTags().get("tofu-estate"));
+        assertEquals("probe1", instance.getTags().get("team"));
         // Nothing was started, so no runtime is claimed; the storage identity is kept for the retry.
         assertNull(instance.getContainerId());
         assertNull(instance.getContainerHost());
@@ -1778,10 +1779,10 @@ class RdsServiceTest {
         DbInstance created = rdsService.createDbInstance("probe-db", "postgres", "16.3",
                 "probeadmin", "ProbePassw0rd!", "dbname", "db.t3.micro",
                 20, false, null, null, null, false, null,
-                Map.of("tofu-estate", "probe1"));
+                Map.of("team", "probe1"));
 
         assertEquals(1, rdsService.listDbInstances("probe-db").size());
-        assertEquals("probe1", rdsService.listTagsForResource(created.getDbInstanceArn()).get("tofu-estate"));
+        assertEquals("probe1", rdsService.listTagsForResource(created.getDbInstanceArn()).get("team"));
 
         rdsService.addTagsToResource(created.getDbInstanceArn(), Map.of("Name", "probe-db"), "us-east-1");
         assertEquals("probe-db", rdsService.listTagsForResource(created.getDbInstanceArn()).get("Name"));
@@ -2069,6 +2070,142 @@ class RdsServiceTest {
                 "admin", "password", "dbname", false, null);
 
         assertNotEquals(a.getEndpoint().port(), b.getEndpoint().port());
+    }
+
+    @Test
+    void stopAndStartDbInstanceReleaseAndRestoreTheContainerOnTheSameVolume() {
+        DbInstance created = rdsService.createDbInstance("standalone", "postgres", "16",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null);
+        String volume = created.getDockerVolumeName();
+        int port = created.getEndpoint().port();
+
+        DbInstance stopping = rdsService.stopDbInstance("standalone", null);
+        assertEquals(DbInstanceStatus.STOPPING, stopping.getStatus());
+        DbInstance stopped = rdsService.getDbInstance("standalone");
+        assertEquals(DbInstanceStatus.STOPPED, stopped.getStatus());
+        assertNull(stopped.getContainerId());
+        assertEquals(volume, stopped.getDockerVolumeName());
+        assertEquals(port, stopped.getEndpoint().port());
+        verify(containerManager).stop(any());
+        verify(proxyManager).stopProxy(any());
+
+        assertEquals("InvalidDBInstanceState", assertThrows(AwsException.class,
+                () -> rdsService.stopDbInstance("standalone", null)).getErrorCode());
+        assertEquals("InvalidDBInstanceState", assertThrows(AwsException.class,
+                () -> rdsService.modifyDbInstance("standalone", "new-password", null, null, null, null, null)).getErrorCode());
+
+        DbInstance starting = rdsService.startDbInstance("standalone");
+        assertEquals(DbInstanceStatus.STARTING, starting.getStatus());
+        DbInstance started = rdsService.getDbInstance("standalone");
+        assertEquals(DbInstanceStatus.AVAILABLE, started.getStatus());
+        assertEquals("cont-id", started.getContainerId());
+        assertEquals(port, started.getEndpoint().port());
+        verify(containerManager, times(2)).tryStart(any(), any(), any(), eq(volume), any(), any(), any(), any(), any());
+        verify(proxyManager, times(2)).startProxy(any(), any(), anyBoolean(), eq(port), any(), anyInt(),
+                any(), any(), any(), any(), any(), any());
+        assertEquals("InvalidDBInstanceState", assertThrows(AwsException.class,
+                () -> rdsService.startDbInstance("standalone")).getErrorCode());
+    }
+
+    @Test
+    void stopDbInstanceTakesTheRequestedSnapshotFirst() {
+        rdsService.createDbInstance("standalone", "postgres", "16",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null);
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("DUMP");
+
+        rdsService.stopDbInstance("standalone", "before-stop");
+
+        assertEquals("available", rdsService.describeDbSnapshots("before-stop", null).iterator().next().getStatus());
+        assertEquals(DbInstanceStatus.STOPPED, rdsService.getDbInstance("standalone").getStatus());
+    }
+
+    @Test
+    void stopDbInstanceRefusesClusterMembersAndReplicas() {
+        rdsService.createDbCluster("aurora-cluster", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null);
+        rdsService.createDbInstance("aurora-member", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", "db.r6g.large",
+                20, false, null, null, "aurora-cluster", null, false, false, null,
+                Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults());
+        AwsException member = assertThrows(AwsException.class, () -> rdsService.stopDbInstance("aurora-member", null));
+        assertEquals("InvalidDBClusterStateFault", member.getErrorCode());
+        assertTrue(member.getMessage().contains("StopDBCluster"));
+        // A stopped cluster's member cannot be started on its own either.
+        rdsService.stopDbCluster("aurora-cluster", "us-east-1");
+        AwsException startMember = assertThrows(AwsException.class, () -> rdsService.startDbInstance("aurora-member"));
+        assertEquals("InvalidDBClusterStateFault", startMember.getErrorCode());
+        assertTrue(startMember.getMessage().contains("StartDBCluster"));
+        assertEquals(DbInstanceStatus.STOPPED, rdsService.getDbInstance("aurora-member").getStatus());
+        rdsService.startDbCluster("aurora-cluster", "us-east-1");
+
+        when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenAnswer(invocation -> new RdsContainerHandle(
+                        "cont-" + invocation.getArgument(1), invocation.getArgument(1), "localhost", 5432));
+        createPostgresSource("primary");
+        when(containerManager.createPostgresSnapshot("cont-primary", "admin")).thenReturn("DUMP");
+        rdsService.createDbInstanceReadReplica(replicaRequest("primary-replica", "primary"), null);
+        assertEquals("InvalidDBInstanceState", assertThrows(AwsException.class,
+                () -> rdsService.stopDbInstance("primary", null)).getErrorCode());
+        assertEquals("InvalidDBInstanceState", assertThrows(AwsException.class,
+                () -> rdsService.stopDbInstance("primary-replica", null)).getErrorCode());
+    }
+
+    @Test
+    void stopStartAndRebootDbClusterCarryTheMembersAlong() {
+        DbCluster created = rdsService.createDbCluster("aurora-cluster", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null);
+        rdsService.createDbInstance("aurora-member", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", "db.r6g.large",
+                20, false, null, null, "aurora-cluster", null, false, false, null,
+                Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults());
+        int port = created.getEndpoint().port();
+
+        DbCluster stopping = rdsService.stopDbCluster("aurora-cluster", "us-east-1");
+        assertEquals(DbInstanceStatus.STOPPING, stopping.getStatus());
+        assertEquals(DbInstanceStatus.STOPPED, rdsService.getDbCluster("aurora-cluster").getStatus());
+        assertEquals(DbInstanceStatus.STOPPED, rdsService.getDbInstance("aurora-member").getStatus());
+        assertNull(rdsService.getDbCluster("aurora-cluster").getContainerId());
+        assertEquals("InvalidDBClusterStateFault", assertThrows(AwsException.class,
+                () -> rdsService.stopDbCluster("aurora-cluster", "us-east-1")).getErrorCode());
+        assertEquals("InvalidDBClusterStateFault", assertThrows(AwsException.class,
+                () -> rdsService.rebootDbCluster("aurora-cluster", "us-east-1")).getErrorCode());
+
+        DbCluster starting = rdsService.startDbCluster("aurora-cluster", "us-east-1");
+        assertEquals(DbInstanceStatus.STARTING, starting.getStatus());
+        DbCluster started = rdsService.getDbCluster("aurora-cluster");
+        assertEquals(DbInstanceStatus.AVAILABLE, started.getStatus());
+        assertEquals(port, started.getEndpoint().port());
+        assertEquals("cont-id", started.getContainerId());
+        assertEquals(DbInstanceStatus.AVAILABLE, rdsService.getDbInstance("aurora-member").getStatus());
+        assertEquals("InvalidDBClusterStateFault", assertThrows(AwsException.class,
+                () -> rdsService.startDbCluster("aurora-cluster", "us-east-1")).getErrorCode());
+
+        DbCluster rebooting = rdsService.rebootDbCluster("aurora-cluster", "us-east-1");
+        assertEquals(DbInstanceStatus.REBOOTING, rebooting.getStatus());
+        assertEquals(DbInstanceStatus.AVAILABLE, rdsService.getDbCluster("aurora-cluster").getStatus());
+        assertEquals(DbInstanceStatus.AVAILABLE, rdsService.getDbInstance("aurora-member").getStatus());
+        // create, start and reboot each brought the cluster container up once.
+        verify(containerManager, times(3)).tryStart(eq(created.getDbClusterArn()), any(), any(), any(), any(), any(), any(), any(), any());
+        assertEquals("DBClusterNotFoundFault", assertThrows(AwsException.class,
+                () -> rdsService.stopDbCluster("absent", "us-east-1")).getErrorCode());
+    }
+
+    @Test
+    void mockModeStopAndStartTouchNoContainerOrProxy() {
+        when(config.services().rds().mock()).thenReturn(true);
+        rdsService.createDbInstance("standalone", "postgres", "16",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null);
+
+        rdsService.stopDbInstance("standalone", null);
+        assertEquals(DbInstanceStatus.STOPPED, rdsService.getDbInstance("standalone").getStatus());
+        rdsService.startDbInstance("standalone");
+        assertEquals(DbInstanceStatus.AVAILABLE, rdsService.getDbInstance("standalone").getStatus());
+        verify(containerManager, never()).stop(any());
+        verify(containerManager, never()).tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any());
+        verify(proxyManager, never()).stopProxy(any());
     }
 
     @Test
@@ -3000,6 +3137,102 @@ class RdsServiceTest {
         assertEquals(Map.of("owner", "platform"), snapshot.getTags());
         assertEquals(Map.of("owner", "platform"),
                 rdsService.listTagsForResource(snapshot.getDbSnapshotArn()));
+    }
+
+    private DbClusterSnapshot clusterSnapshotOfNewCluster(String snapshotId) {
+        rdsService.createDbCluster("aurora-cluster", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null);
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("CLUSTER_DUMP");
+        return rdsService.createDbClusterSnapshot(snapshotId, "aurora-cluster", Map.of("owner", "platform"));
+    }
+
+    @Test
+    void createDbClusterSnapshotRecordsTheClusterAndItsData() {
+        DbClusterSnapshot snapshot = clusterSnapshotOfNewCluster("csnap");
+
+        assertEquals("csnap", snapshot.getDbClusterSnapshotIdentifier());
+        assertEquals("aurora-cluster", snapshot.getDbClusterIdentifier());
+        assertEquals("available", snapshot.getStatus());
+        assertEquals("manual", snapshot.getSnapshotType());
+        assertEquals(100, snapshot.getPercentProgress());
+        assertEquals("aurora-postgresql", snapshot.getEngineIdentifier());
+        assertEquals("16.3", snapshot.getEngineVersion());
+        assertEquals("admin", snapshot.getMasterUsername());
+        assertEquals("dbname", snapshot.getDatabaseName());
+        assertEquals("arn:aws:rds:us-east-1:123456789012:cluster-snapshot:csnap", snapshot.getDbClusterSnapshotArn());
+        assertEquals(Map.of("owner", "platform"), snapshot.getTags());
+        assertEquals(Map.of("owner", "platform"), rdsService.listTagsForResource(snapshot.getDbClusterSnapshotArn()));
+        verify(containerManager).createPostgresSnapshot(any(), eq("admin"));
+
+        assertEquals(1, rdsService.describeDbClusterSnapshots(null, null, null).size());
+        assertEquals(1, rdsService.describeDbClusterSnapshots(null, "aurora-cluster", "manual").size());
+        assertTrue(rdsService.describeDbClusterSnapshots(null, "other-cluster", null).isEmpty());
+        assertTrue(rdsService.describeDbClusterSnapshots(null, null, "automated").isEmpty());
+
+        assertEquals("DBClusterSnapshotAlreadyExistsFault", assertThrows(AwsException.class,
+                () -> rdsService.createDbClusterSnapshot("csnap", "aurora-cluster", null)).getErrorCode());
+        assertEquals("DBClusterNotFoundFault", assertThrows(AwsException.class,
+                () -> rdsService.createDbClusterSnapshot("other", "absent-cluster", null)).getErrorCode());
+        assertEquals("DBClusterSnapshotNotFoundFault", assertThrows(AwsException.class,
+                () -> rdsService.describeDbClusterSnapshots("absent", null, null)).getErrorCode());
+    }
+
+    @Test
+    void clusterSnapshotCanBeCopiedRestoredAndDeleted() {
+        DbClusterSnapshot source = clusterSnapshotOfNewCluster("csnap");
+
+        DbClusterSnapshot copy =
+                rdsService.copyDbClusterSnapshot(source.getDbClusterSnapshotArn(), "csnap-copy", true, Map.of("stage", "test"));
+        assertEquals("csnap-copy", copy.getDbClusterSnapshotIdentifier());
+        assertEquals(source.getDbClusterSnapshotArn(), copy.getSourceDbClusterSnapshotArn());
+        assertEquals(Map.of("owner", "platform", "stage", "test"), copy.getTags());
+        assertEquals("DBClusterSnapshotAlreadyExistsFault", assertThrows(AwsException.class,
+                () -> rdsService.copyDbClusterSnapshot("csnap", "csnap-copy", false, null)).getErrorCode());
+
+        // SnapshotIdentifier takes the ARN as well as the name, as aws_rds_cluster commonly passes it.
+        DbCluster restored = rdsService.restoreDbClusterFromSnapshot("restored-cluster", copy.getDbClusterSnapshotArn(),
+                "aurora-postgresql", null, null, null, null, null, null, null, null, Map.of("env", "restore"), "us-east-1");
+        assertEquals("restored-cluster", restored.getDbClusterIdentifier());
+        assertEquals("admin", restored.getMasterUsername());
+        assertEquals("dbname", restored.getDatabaseName());
+        assertEquals("16.3", restored.getEngineVersion());
+        assertEquals("restore", restored.getTags().get("env"));
+        verify(containerManager).restorePostgresSnapshot(any(), eq("admin"), eq("CLUSTER_DUMP"));
+
+        assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
+                () -> rdsService.restoreDbClusterFromSnapshot("mysql-cluster", "csnap", "aurora-mysql",
+                        null, null, null, null, null, null, null, null, null, "us-east-1")).getErrorCode());
+        assertEquals("DBClusterSnapshotNotFoundFault", assertThrows(AwsException.class,
+                () -> rdsService.restoreDbClusterFromSnapshot("other-cluster",
+                        "arn:aws:rds:us-east-1:123456789012:cluster-snapshot:absent", "aurora-postgresql",
+                        null, null, null, null, null, null, null, null, null, "us-east-1")).getErrorCode());
+
+        DbClusterSnapshot deleted = rdsService.deleteDbClusterSnapshot("csnap");
+        assertEquals("deleted", deleted.getStatus());
+        assertEquals("DBClusterSnapshotNotFoundFault", assertThrows(AwsException.class,
+                () -> rdsService.deleteDbClusterSnapshot("csnap")).getErrorCode());
+        assertEquals(1, rdsService.describeDbClusterSnapshots(null, null, null).size());
+
+        source.setStatus("creating");
+        copy.setStatus("copying");
+        assertEquals("InvalidDBClusterSnapshotStateFault", assertThrows(AwsException.class,
+                () -> rdsService.deleteDbClusterSnapshot("csnap-copy")).getErrorCode());
+    }
+
+    @Test
+    void clusterSnapshotRestoreAttributeIsSharedLikeAnInstanceSnapshots() {
+        clusterSnapshotOfNewCluster("csnap");
+
+        DbClusterSnapshot shared = rdsService.modifyDbClusterSnapshotAttribute(
+                "csnap", "restore", List.of("111122223333", "all"), null, "us-east-1");
+        assertEquals(List.of("111122223333", "all"), shared.getRestoreAccountIds());
+        DbClusterSnapshot narrowed = rdsService.modifyDbClusterSnapshotAttribute(
+                "csnap", "restore", null, List.of("all"), "us-east-1");
+        assertEquals(List.of("111122223333"), narrowed.getRestoreAccountIds());
+        assertEquals(List.of("111122223333"),
+                rdsService.describeDbClusterSnapshotAttributes("csnap", "us-east-1").getRestoreAccountIds());
+        assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
+                () -> rdsService.modifyDbClusterSnapshotAttribute("csnap", "engine", List.of("x"), null, "us-east-1")).getErrorCode());
     }
 
     @Test

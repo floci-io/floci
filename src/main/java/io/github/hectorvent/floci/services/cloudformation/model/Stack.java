@@ -14,7 +14,15 @@ public class Stack {
     /** AWS account that owns this stack; absent only on legacy records. */
     private String accountId;
     private String region;
-    private String status = "CREATE_IN_PROGRESS";
+    /**
+     * ExecuteChangeSet hands deployment to a background executor and returns without waiting for
+     * it, so a caller (DescribeStacks) observes this field from a different thread than the one
+     * that sets it. It is always the last field a deploy writes, after resources, exports and
+     * outputs; {@code volatile} gives that ordering a happens-before edge, so a reader that
+     * observes a terminal status is guaranteed to also see every write that preceded it, such as a
+     * nested stack's resolved {@code Outputs.*} attributes.
+     */
+    private volatile String status = "CREATE_IN_PROGRESS";
     private String statusReason;
     private Instant creationTime = Instant.now();
     private Instant lastUpdatedTime;

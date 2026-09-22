@@ -60,14 +60,34 @@ case — the shipped `docker-compose.yml` uses `localhost.floci.io`, which publi
 Floci's embedded DNS resolve it to the Floci container from inside Docker. Cluster-mode groups
 then announce that name and report it as their `ConfigurationEndpoint`.
 
-With `persistent`, `hybrid` or `wal` storage, cluster-mode groups are re-provisioned from their
-persisted topology on startup: containers are restarted, the cluster is re-formed (caches restart
-empty, as on any Floci restart) and each node's proxy port is re-reserved. Ports are re-reserved
-and groups marked `creating` before Floci reports ready; the container restarts and cluster
-formation run in the background so a slow Docker daemon cannot delay readiness, and each group
-flips to `available` once its data plane is back. A group whose data plane cannot be brought back
-is reported with status `create-failed` instead of `available`, and its member clusters answer
-`DescribeCacheClusters` with `restore-failed` (`CacheClusterStatus` has no `create-failed` value).
+With `persistent`, `hybrid` or `wal` storage, every replication group and Memcached cluster is
+re-provisioned from its persisted record on startup: containers are restarted, cluster-mode groups
+are re-formed, and proxy ports are re-reserved. Caches restart empty, as on any Floci restart:
+only the topology is persisted, never the keyspace.
+
+Ports are re-reserved and records marked `creating` before Floci reports ready; the container
+restarts and cluster formation run in the background so a slow Docker daemon cannot delay
+readiness, and each record flips to `available` once its data plane is back. A replication group
+whose data plane cannot be brought back is reported with status `create-failed` instead of
+`available`, and its member clusters answer `DescribeCacheClusters` with `restore-failed`
+(`CacheClusterStatus` has no `create-failed` value). A Memcached cluster that cannot be brought
+back reports `restore-failed` directly.
+
+Reporting a failed record as failed matters more than it looks. A record that is left unreconciled
+keeps its `available` status with nothing behind the endpoint, so the control plane answers healthy
+while every connection fails, and the proxy port it still advertises is free for the next create to
+take: the old endpoint then reaches an unrelated cache rather than failing cleanly.
+
+A Memcached cluster's endpoint follows its new container. Outside Docker, Floci publishes the
+backend on a host port Docker picks per run, so a restored cluster's `ConfigurationEndpoint` port
+can differ from the one it had before the restart. Replication groups keep their port: it is a
+proxy port Floci owns and re-reserves.
+
+A delete that arrives while a record is still `creating` wins. The restore takes the same
+per-record monitor `DeleteReplicationGroup` and `DeleteCacheCluster` take, and skips its write-back
+when the record is gone, so a group or cluster deleted in the first seconds after boot stays
+deleted rather than coming back `available`. Any container the abandoned restore had already
+started is stopped.
 
 `DescribeReplicationGroups` reports the topology honestly: `ClusterEnabled`, one `NodeGroup` per
 shard with its `Slots`, `NodeGroupMembers`, and `MemberClusters`. Each member also answers

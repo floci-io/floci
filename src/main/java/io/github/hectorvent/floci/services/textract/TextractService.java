@@ -10,6 +10,12 @@ import io.github.hectorvent.floci.core.common.Resettable;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -32,18 +38,29 @@ import java.util.concurrent.ConcurrentHashMap;
 public class TextractService implements Resettable {
     static final String MODEL_VERSION = "1.0";
     private static final String SERVICE_KEY = "textract";
+    /** AWS retains asynchronous results for about 7 days; an expired job reads as an invalid job. */
+    static final Duration RESULT_RETENTION = Duration.ofDays(7);
+    /** Hard cap so a producer that never reads its results cannot grow the store without bound. */
+    static final int MAX_RETAINED_JOBS = 10_000;
     private final ObjectMapper objectMapper;
     private final AiMockConfigLoader mockConfigLoader;
-    /** In-memory async job store: jobId to jobType ("TEXT_DETECTION" or "DOCUMENT_ANALYSIS"). */
-    private final ConcurrentHashMap<String, String> asyncJobs = new ConcurrentHashMap<>();
+    private final Clock clock;
+    /** In-memory async job store: jobId to the job's type, creation time, and stable result. */
+    private final ConcurrentHashMap<String, AsyncJob> asyncJobs = new ConcurrentHashMap<>();
     @Inject
     public TextractService(ObjectMapper objectMapper, AiMockConfigLoader mockConfigLoader) {
+        this(objectMapper, mockConfigLoader, Clock.systemUTC());
+    }
+    TextractService(ObjectMapper objectMapper, AiMockConfigLoader mockConfigLoader, Clock clock) {
         this.objectMapper = objectMapper;
         this.mockConfigLoader = mockConfigLoader;
+        this.clock = clock;
     }
     public void clear() {
         asyncJobs.clear();
     }
+    /** A completed async job, retained until {@link #RESULT_RETENTION} elapses. */
+    record AsyncJob(String jobType, Instant createdAt, ObjectNode result) {}
     /**
      * DetectDocumentText — returns a stub PAGE + LINE + WORD block hierarchy.
      * Response shape: https://docs.aws.amazon.com/textract/latest/dg/API_DetectDocumentText.html
@@ -80,25 +97,17 @@ public class TextractService implements Resettable {
      */
     public Response startDocumentTextDetection() {
         String jobId = UUID.randomUUID().toString();
-        asyncJobs.put(jobId, "TEXT_DETECTION");
+        storeJob(jobId, "TEXT_DETECTION", buildTextDetectionResult());
         ObjectNode root = objectMapper.createObjectNode();
         root.put("JobId", jobId);
         return Response.ok(root).build();
     }
     /**
-     * GetDocumentTextDetection — returns SUCCEEDED + stub blocks for any known JobId.
+     * GetDocumentTextDetection — returns the job's stable SUCCEEDED result until it expires.
      * Response shape: https://docs.aws.amazon.com/textract/latest/dg/API_GetDocumentTextDetection.html
      */
     public Response getDocumentTextDetection(String jobId) {
-        requireKnownJob(jobId, "TEXT_DETECTION");
-        ObjectNode root = objectMapper.createObjectNode();
-        root.put("JobStatus", "SUCCEEDED");
-        root.set("DocumentMetadata", buildDocumentMetadata(1));
-        root.set("Blocks", buildStubBlocks());
-        root.put("DetectDocumentTextModelVersion", MODEL_VERSION);
-        //after a successful job, we remove it to avoid memory growth
-        asyncJobs.remove(jobId);
-        return Response.ok(root).build();
+        return Response.ok(requireJobResult(jobId, "TEXT_DETECTION")).build();
     }
     /**
      * StartDocumentAnalysis — enqueues a fake async job and immediately marks it SUCCEEDED.
@@ -106,42 +115,76 @@ public class TextractService implements Resettable {
      */
     public Response startDocumentAnalysis() {
         String jobId = UUID.randomUUID().toString();
-        asyncJobs.put(jobId, "DOCUMENT_ANALYSIS");
+        storeJob(jobId, "DOCUMENT_ANALYSIS", buildDocumentAnalysisResult());
         ObjectNode root = objectMapper.createObjectNode();
         root.put("JobId", jobId);
         return Response.ok(root).build();
     }
     /**
-     * GetDocumentAnalysis — returns SUCCEEDED + stub blocks for any known JobId.
+     * GetDocumentAnalysis — returns the job's stable SUCCEEDED result until it expires.
      * Response shape: https://docs.aws.amazon.com/textract/latest/dg/API_GetDocumentAnalysis.html
      */
     public Response getDocumentAnalysis(String jobId) {
-        requireKnownJob(jobId, "DOCUMENT_ANALYSIS");
+        return Response.ok(requireJobResult(jobId, "DOCUMENT_ANALYSIS")).build();
+    }
+    private ObjectNode buildTextDetectionResult() {
+        ObjectNode root = objectMapper.createObjectNode();
+        root.put("JobStatus", "SUCCEEDED");
+        root.set("DocumentMetadata", buildDocumentMetadata(1));
+        root.set("Blocks", buildStubBlocks());
+        root.put("DetectDocumentTextModelVersion", MODEL_VERSION);
+        return root;
+    }
+    private ObjectNode buildDocumentAnalysisResult() {
         ObjectNode root = objectMapper.createObjectNode();
         root.put("JobStatus", "SUCCEEDED");
         root.set("DocumentMetadata", buildDocumentMetadata(1));
         root.set("Blocks", buildStubBlocks());
         root.put("AnalyzeDocumentModelVersion", MODEL_VERSION);
-
-        //after a successful job, we remove it to avoid memory growth
-        asyncJobs.remove(jobId);
-
-        return Response.ok(root).build();
+        return root;
+    }
+    private void storeJob(String jobId, String jobType, ObjectNode result) {
+        sweepExpired();
+        asyncJobs.put(jobId, new AsyncJob(jobType, clock.instant(), result));
+        enforceCapacity();
     }
     // Private helpers
-    private void requireKnownJob(String jobId, String expectedType) {
+    private ObjectNode requireJobResult(String jobId, String expectedType) {
         if (jobId == null || jobId.isBlank()) {
             throw new AwsException("ValidationException", "JobId is required.", 400);
         }
-        String type = asyncJobs.get(jobId);
-        if (type == null) {
-            throw new AwsException("InvalidJobIdException",
-                    "An invalid job identifier was passed to an Amazon Textract operation.", 400);
+        AsyncJob job = asyncJobs.get(jobId);
+        if (job == null) {
+            throw invalidJobId();
         }
-        if (!expectedType.equals(type)) {
+        if (job.createdAt().isBefore(clock.instant().minus(RESULT_RETENTION))) {
+            asyncJobs.remove(jobId);
+            throw invalidJobId();
+        }
+        if (!expectedType.equals(job.jobType())) {
             throw new AwsException("InvalidJobIdException",
                     "Job was not started by the correct operation.", 400);
         }
+        return job.result();
+    }
+    private static AwsException invalidJobId() {
+        return new AwsException("InvalidJobIdException",
+                "An invalid job identifier was passed to an Amazon Textract operation.", 400);
+    }
+    private void sweepExpired() {
+        Instant cutoff = clock.instant().minus(RESULT_RETENTION);
+        asyncJobs.entrySet().removeIf(entry -> entry.getValue().createdAt().isBefore(cutoff));
+    }
+    private void enforceCapacity() {
+        int excess = asyncJobs.size() - MAX_RETAINED_JOBS;
+        if (excess <= 0) {
+            return;
+        }
+        List<Map.Entry<String, AsyncJob>> oldest = asyncJobs.entrySet().stream()
+                .sorted(Map.Entry.comparingByValue(Comparator.comparing(AsyncJob::createdAt)))
+                .limit(excess)
+                .toList();
+        oldest.forEach(entry -> asyncJobs.remove(entry.getKey(), entry.getValue()));
     }
     private ObjectNode buildDocumentMetadata(int pages) {
         ObjectNode meta = objectMapper.createObjectNode();

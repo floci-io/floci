@@ -792,6 +792,12 @@ public interface EmulatorConfig {
         CodeGuruReviewerServiceConfig codegurureviewer();
         CodeArtifactServiceConfig codeartifact();
         MarketplaceServiceConfig marketplace();
+        DmsServiceConfig dms();
+    }
+
+    interface DmsServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
     }
 
     interface CodeArtifactServiceConfig {
@@ -2807,6 +2813,13 @@ public interface EmulatorConfig {
         @WithDefault("rancher/k3s:latest")
         String defaultImage();
 
+        /**
+         * Optional image template for k3s images when version is specified.
+         * For example: "custom-registry.internal/k3s:v%s".
+         * If omitted, Floci maps supported Kubernetes versions to stable upstream k3s images.
+         */
+        Optional<String> imageTemplate();
+
         @WithDefault("6500")
         int apiServerBasePort();
 
@@ -2872,11 +2885,30 @@ public interface EmulatorConfig {
         boolean imds();
 
         /**
+         * When true, routes link-local IMDS traffic from ordinary pod network namespaces to the node's
+         * link-local listener. Requires {@code imds()} to be enabled.
+         */
+        @WithDefault("false")
+        boolean imdsPodNetwork();
+
+        /**
          * When true, configures k3s with the cluster's per-cluster OIDC signing keypair and
          * advertises Floci's OIDC issuer URL, enabling in-cluster IAM Roles for Service Accounts (IRSA).
          */
         @WithDefault("true")
         boolean irsaSigningKey();
+
+        /**
+         * When true, registers a {@code MutatingWebhookConfiguration} in each new cluster so pods
+         * whose service account has an EKS Pod Identity association are mutated at admission with a
+         * projected pod identity token and the container credentials environment variables.
+         *
+         * <p>Requires {@link EmulatorConfig#tls()} to be enabled: Kubernetes rejects an admission
+         * webhook URL that is not {@code https}. With TLS off the webhook is skipped with a warning
+         * and pods start unmutated.
+         */
+        @WithDefault("true")
+        boolean podIdentityWebhook();
     }
 
     /**

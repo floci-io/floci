@@ -10,6 +10,8 @@ import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.firehose.FirehoseService;
+import io.github.hectorvent.floci.services.firehose.model.Record;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
@@ -100,6 +102,7 @@ public class SnsService implements Resettable, ResourceProvider {
     private final RegionResolver regionResolver;
     private final SqsService sqsService;
     private final LambdaService lambdaService;
+    private final FirehoseService firehoseService;
     private final String baseUrl;
     private final ObjectMapper objectMapper;
     private final HttpClient httpClient;
@@ -109,7 +112,8 @@ public class SnsService implements Resettable, ResourceProvider {
     @Inject
     public SnsService(StorageFactory storageFactory, EmulatorConfig config,
                       RegionResolver regionResolver, SqsService sqsService,
-                      LambdaService lambdaService, ObjectMapper objectMapper) {
+                      LambdaService lambdaService, FirehoseService firehoseService,
+                      ObjectMapper objectMapper) {
         this(
                 storageFactory.create("sns", "sns-topics.json",
                         new TypeReference<Map<String, Topic>>() {
@@ -129,6 +133,7 @@ public class SnsService implements Resettable, ResourceProvider {
                 regionResolver,
                 sqsService,
                 lambdaService,
+                firehoseService,
                 config.effectiveBaseUrl(),
                 objectMapper
         );
@@ -141,10 +146,18 @@ public class SnsService implements Resettable, ResourceProvider {
                StorageBackend<String, Subscription> subscriptionStore,
                RegionResolver regionResolver, SqsService sqsService,
                LambdaService lambdaService) {
+        this(topicStore, subscriptionStore, regionResolver, sqsService, lambdaService, null);
+    }
+
+    SnsService(StorageBackend<String, Topic> topicStore,
+               StorageBackend<String, Subscription> subscriptionStore,
+               RegionResolver regionResolver, SqsService sqsService,
+               LambdaService lambdaService,
+               FirehoseService firehoseService) {
         this(topicStore, subscriptionStore,
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
-                regionResolver, sqsService, lambdaService);
+                regionResolver, sqsService, lambdaService, firehoseService);
     }
 
     SnsService(StorageBackend<String, Topic> topicStore,
@@ -153,6 +166,17 @@ public class SnsService implements Resettable, ResourceProvider {
                StorageBackend<String, PlatformEndpoint> platformEndpointStore,
                RegionResolver regionResolver, SqsService sqsService,
                LambdaService lambdaService) {
+        this(topicStore, subscriptionStore, platformAppStore, platformEndpointStore,
+                regionResolver, sqsService, lambdaService, null);
+    }
+
+    SnsService(StorageBackend<String, Topic> topicStore,
+               StorageBackend<String, Subscription> subscriptionStore,
+               StorageBackend<String, PlatformApplication> platformAppStore,
+               StorageBackend<String, PlatformEndpoint> platformEndpointStore,
+               RegionResolver regionResolver, SqsService sqsService,
+               LambdaService lambdaService,
+               FirehoseService firehoseService) {
         this.topicStore = topicStore;
         this.subscriptionStore = subscriptionStore;
         this.platformAppStore = platformAppStore;
@@ -161,6 +185,7 @@ public class SnsService implements Resettable, ResourceProvider {
         this.regionResolver = regionResolver;
         this.sqsService = sqsService;
         this.lambdaService = lambdaService;
+        this.firehoseService = firehoseService;
         this.baseUrl = "http://localhost:4566";
         this.objectMapper = new ObjectMapper();
         this.httpClient = null;
@@ -173,6 +198,18 @@ public class SnsService implements Resettable, ResourceProvider {
                StorageBackend<String, SentSms> smsStore,
                RegionResolver regionResolver, SqsService sqsService,
                LambdaService lambdaService, String baseUrl, ObjectMapper objectMapper) {
+        this(topicStore, subscriptionStore, platformAppStore, platformEndpointStore,
+                smsStore, regionResolver, sqsService, lambdaService, null, baseUrl, objectMapper);
+    }
+
+    SnsService(StorageBackend<String, Topic> topicStore,
+               StorageBackend<String, Subscription> subscriptionStore,
+               StorageBackend<String, PlatformApplication> platformAppStore,
+               StorageBackend<String, PlatformEndpoint> platformEndpointStore,
+               StorageBackend<String, SentSms> smsStore,
+               RegionResolver regionResolver, SqsService sqsService,
+               LambdaService lambdaService, FirehoseService firehoseService,
+               String baseUrl, ObjectMapper objectMapper) {
         this.topicStore = topicStore;
         this.subscriptionStore = subscriptionStore;
         this.platformAppStore = platformAppStore;
@@ -181,6 +218,7 @@ public class SnsService implements Resettable, ResourceProvider {
         this.regionResolver = regionResolver;
         this.sqsService = sqsService;
         this.lambdaService = lambdaService;
+        this.firehoseService = firehoseService;
         this.baseUrl = baseUrl;
         this.objectMapper = objectMapper;
         this.httpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
@@ -1699,6 +1737,41 @@ public class SnsService implements Resettable, ResourceProvider {
                     }
                     capturePushForEndpoint(endpoint, app, message, subject, messageStructure, messageAttributes);
                     LOG.debugv("Delivered SNS message to platform endpoint: {0}", endpointArn);
+                }
+                case "firehose" -> {
+                    if (firehoseService == null) {
+                        break;
+                    }
+                    String streamName;
+                    String region;
+                    String accountId;
+                    if (AwsArnUtils.isArn(sub.getEndpoint())) {
+                        AwsArnUtils.Arn arn = AwsArnUtils.parse(sub.getEndpoint());
+                        region = arn.region().isEmpty() ? extractRegionFromArn(topicArn) : arn.region();
+                        accountId = arn.accountId().isEmpty() ? regionResolver.getAccountId() : arn.accountId();
+                        String resource = arn.resource();
+                        streamName = resource.startsWith("deliverystream/")
+                                ? resource.substring("deliverystream/".length())
+                                : resource;
+                    } else {
+                        streamName = sub.getEndpoint();
+                        region = extractRegionFromArn(topicArn);
+                        accountId = regionResolver.getAccountId();
+                    }
+                    if (region == null || region.isEmpty()) {
+                        region = regionResolver.getDefaultRegion();
+                    }
+                    if (accountId == null || accountId.isEmpty()) {
+                        accountId = regionResolver.getAccountId();
+                    }
+                    boolean rawDelivery = sub.getAttributes() != null
+                            && "true".equalsIgnoreCase(sub.getAttributes().get("RawMessageDelivery"));
+                    String body = rawDelivery
+                            ? protocolMessage
+                            : buildSnsEnvelope(protocolMessage, subject, messageAttributes, topicArn, messageId);
+                    byte[] data = body.getBytes(StandardCharsets.UTF_8);
+                    firehoseService.putRecord(accountId, region, streamName, new Record(data));
+                    LOG.debugv("Delivered SNS message to Firehose: {0} ({1}) raw={2}", sub.getEndpoint(), streamName, rawDelivery);
                 }
                 case "email", "email-json" -> LOG.infov("SNS email delivery (stub): to={0}, subject={1}, message={2}",
                         sub.getEndpoint(), subject, protocolMessage);

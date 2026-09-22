@@ -54,7 +54,6 @@ public class CloudFormationResourceProvisioner {
      */
     static final Set<String> LEGACY_SWITCH_TYPES = Set.of();
 
-
     private final ObjectMapper objectMapper;
     // Item 15 decomposition: every resource type now has a per-service provisioner reached through
     // the registry, so the switch below serves no type and only stubs or rejects the unknown. The
@@ -131,7 +130,7 @@ public class CloudFormationResourceProvisioner {
                         // provisioner). Stubbing it would report CREATE_COMPLETE with a fake ARN and
                         // hide the mistake, so fail instead.
                         throw new IllegalStateException("No switch arm for declared legacy type "
-                                + resourceType + " — remove its LEGACY_SWITCH_TYPES entry when it "
+                                + resourceType + ", remove its LEGACY_SWITCH_TYPES entry when it "
                                 + "moves to a per-service provisioner.");
                     } else if (!stubUnsupportedResourceTypesAllowed()) {
                         // Before the physical id below is assigned, so the Cloud Control path sees
@@ -182,7 +181,7 @@ public class CloudFormationResourceProvisioner {
     }
 
     /**
-     * Provision a single resource with no enclosing CloudFormation stack — the Cloud Control
+     * Provision a single resource with no enclosing CloudFormation stack, the Cloud Control
      * {@code CreateResource} path. Cloud Control DesiredState carries resolved values (no
      * intrinsics), so a minimal template engine suffices. Reuses the same 114-type provisioning
      * that CloudFormation stacks use, so any type a stack can create, Cloud Control can too.
@@ -195,7 +194,7 @@ public class CloudFormationResourceProvisioner {
         return provision("resource", resourceType, properties, engine, region, accountId, "cloudcontrol");
     }
 
-    /** Delete a resource by type + physical id — the Cloud Control {@code DeleteResource} path. */
+    /** Delete a resource by type + physical id, the Cloud Control {@code DeleteResource} path. */
     public void deleteStandalone(String resourceType, String identifier, String region) {
         deleteStandalone(resourceType, identifier, region, Map.of());
     }
@@ -247,7 +246,7 @@ public class CloudFormationResourceProvisioner {
     /**
      * Deletes a single resource by type + physical id. Failures propagate to the caller
      * (CloudFormationService#deleteStackResources) so the stack transitions to DELETE_FAILED,
-     * matching AWS — e.g. deleting a non-empty S3 bucket raises BucketNotEmpty and must not be
+     * matching AWS, e.g. deleting a non-empty S3 bucket raises BucketNotEmpty and must not be
      * silently reported as a successful stack deletion. Resource types that AWS itself treats
      * leniently keep their dedicated handling: the {@code *Safe} helpers below swallow expected
      * conflicts, and KMS keys are intentionally left for scheduled deletion.
@@ -268,14 +267,6 @@ public class CloudFormationResourceProvisioner {
                     + "here.", resourceType, physicalId);
         }
     }
-
-    // ── CloudWatch Logs ─────────────────────────────────────────────────────────
-
-    // ── Auto Scaling ────────────────────────────────────────────────────────────
-
-    // ── EKS ─────────────────────────────────────────────────────────────────────
-
-    // ── Pipes ──────────────────────────────────────────────────────────────────
 
     /**
      * One attempt at deleting what this update's replacement displaced, delegated to the
@@ -344,10 +335,6 @@ public class CloudFormationResourceProvisioner {
                 .orElse(false);
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
-
-    // ── ApiGateway (V1) ──────────────────────────────────────────────────────
-
     /**
      * Carries ownership discovered by a failed update onto the last known-good resource metadata
      * that CloudFormation restores. Only additive cleanup tracking belongs here; normal attempted
@@ -366,11 +353,11 @@ public class CloudFormationResourceProvisioner {
                 .ifPresent(owner -> owner.mergeFailedUpdateResourceTracking(previous, attempted));
     }
 
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
     private static String textOrNull(JsonNode node, String field) {
         return node != null && node.hasNonNull(field) ? node.path(field).asText() : null;
     }
-
-    // ── CloudFront ────────────────────────────────────────────────────────────
 
     private String resolveOptional(JsonNode props, String name, CloudFormationTemplateEngine engine) {
         if (props == null || !props.has(name) || props.get(name).isNull()) {
@@ -411,7 +398,7 @@ public class CloudFormationResourceProvisioner {
         if (maxLength > 0 && name.length() > maxLength) {
             // Truncate the descriptive prefix but always keep the trailing uniqueness token. When a
             // stack's name approaches the length limit, distinct logical resources still get distinct
-            // physical names — CloudFormation preserves the random suffix when it shortens a generated
+            // physical names, CloudFormation preserves the random suffix when it shortens a generated
             // name. Truncating the whole string (suffix included) would collapse every such resource
             // onto one name and break Ref/GetAtt-based lookup (e.g. a custom resource's ServiceToken
             // resolving to the wrong Lambda).

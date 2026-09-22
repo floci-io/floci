@@ -81,7 +81,8 @@ class SesContactServiceTest {
                 new ListManagementOptions(LIST, "Sports"), REGION,
                 address -> address.substring(address.indexOf('<') + 1, address.indexOf('>')));
         // The ORIGINAL envelope strings key the result; the extractor only feeds the contact lookup.
-        assertEquals(Map.of("Alice <alice@example.com>", "BOUNCE", "Bob <bob@example.com>", "BOUNCE"),
+        assertEquals(Map.of("Alice <alice@example.com>", SesRecipientEvents.REASON_LIST_OPT_OUT,
+                        "Bob <bob@example.com>", SesRecipientEvents.REASON_LIST_OPT_OUT),
                 optOuts);
 
         AwsException e = assertThrows(AwsException.class, () -> service.collectListManagementOptOuts(

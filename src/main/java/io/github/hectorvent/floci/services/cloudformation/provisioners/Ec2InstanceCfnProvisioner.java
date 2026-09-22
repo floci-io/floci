@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InstanceState;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
@@ -15,6 +16,7 @@ import jakarta.inject.Inject;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -28,6 +30,12 @@ import java.util.Set;
 public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
 
     private static final String INSTANCE = "AWS::EC2::Instance";
+
+    // Declared values of createOnly properties the launch does not apply to the instance, recorded
+    // so a later update can tell a genuine change from the instance's auto-assigned value. The
+    // __Floci prefix keeps them off the published Fn::GetAtt attributes.
+    private static final String DECLARED_PRIVATE_IP_ATTR = "__FlociDeclaredPrivateIpAddress";
+    private static final String DECLARED_AZ_ATTR = "__FlociDeclaredAvailabilityZone";
 
     private final Ec2Service ec2Service;
 
@@ -77,28 +85,34 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
             instanceType = "t3.micro";
         }
         String subnetId = ctx.resolveOptional(props, "SubnetId");
+        List<String> securityGroupIds = resolveSecurityGroupIds(props, engine);
+        String privateIpAddress = ctx.resolveOptional(props, "PrivateIpAddress");
+        String availabilityZone = ctx.resolveOptional(props, "AvailabilityZone");
 
-        // On update, keep the existing instance unless a createOnly property changed: only a
-        // changed ImageId, SubnetId or KeyName replaces it, a mutable-only change (tags, and the
-        // like) reuses it. Launching unconditionally would leak the prior instance every update.
+        // On update, keep the existing instance unless a createOnly property changed: a changed
+        // ImageId, SubnetId or KeyName replaces it (compared against the instance, which carries
+        // them), as does a changed PrivateIpAddress or AvailabilityZone (compared against the value
+        // declared last time, since the launch does not apply those to the instance). A mutable-only
+        // change (tags, and the like) reuses it. Launching unconditionally would leak the prior
+        // instance every update.
         Instance prior = ctx.isUpdate() ? findInstance(region, ctx.priorPhysicalId()) : null;
-        if (prior != null && !createOnlyChanged(prior, imageId, subnetId, keyName)) {
-            r.setPhysicalId(prior.getInstanceId());
-            publishInstanceAttributes(r, prior);
-            Ec2Tags.reconcile(ec2Service, region, prior.getInstanceId(), ctx.resolveTags(props, "Tags"));
+        if (prior != null && !createOnlyChanged(prior, imageId, subnetId, keyName)
+                && !declaredCreateOnlyChanged(attributesBefore, privateIpAddress, availabilityZone)) {
+            // A reused instance still has its mutable properties reconciled to the template rather
+            // than left at their prior values; re-read it so the published attributes reflect them.
+            reconcileMutableProperties(region, prior, instanceType, securityGroupIds);
+            Instance reconciled = findInstance(region, prior.getInstanceId());
+            Instance current = reconciled != null ? reconciled : prior;
+            r.setPhysicalId(current.getInstanceId());
+            publishInstanceAttributes(r, current);
+            storeDeclaredCreateOnly(r, privateIpAddress, availabilityZone);
+            Ec2Tags.reconcile(ec2Service, region, current.getInstanceId(), ctx.resolveTags(props, "Tags"));
             ReplacementCleanup.record(r, ctx, attributesBefore);
             return;
         }
 
         String userData = ctx.resolveOptional(props, "UserData");
         String iamInstanceProfile = ctx.resolveOptional(props, "IamInstanceProfile");
-
-        List<String> securityGroupIds = new ArrayList<>();
-        if (props != null && props.has("SecurityGroupIds") && props.get("SecurityGroupIds").isArray()) {
-            for (JsonNode sg : props.get("SecurityGroupIds")) {
-                securityGroupIds.add(engine.resolve(sg));
-            }
-        }
 
         List<Tag> tags = new ArrayList<>();
         JsonNode tagsNode = props != null ? engine.resolveNode(props.get("Tags")) : null;
@@ -134,6 +148,7 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
         ec2Service.awaitContainerLaunch(instance);
         r.getAttributes().remove(CfnRollback.ROLLBACK_OWNED_ATTR);
         publishInstanceAttributes(r, instance);
+        storeDeclaredCreateOnly(r, privateIpAddress, availabilityZone);
         // A createOnly change that landed a new instance id replaced the prior one: record it so
         // the stack cleans the displaced instance up after the update commits.
         ReplacementCleanup.record(r, ctx, attributesBefore);
@@ -177,6 +192,80 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
     /** A property forces replacement only when the template declares a value that differs. */
     private static boolean changed(String declared, String actual) {
         return declared != null && !declared.equals(actual);
+    }
+
+    private List<String> resolveSecurityGroupIds(JsonNode props, CloudFormationTemplateEngine engine) {
+        List<String> securityGroupIds = new ArrayList<>();
+        if (props != null && props.has("SecurityGroupIds") && props.get("SecurityGroupIds").isArray()) {
+            for (JsonNode sg : props.get("SecurityGroupIds")) {
+                securityGroupIds.add(engine.resolve(sg));
+            }
+        }
+        return securityGroupIds;
+    }
+
+    /**
+     * Applies the mutable properties CloudFormation allows to change without replacing the instance:
+     * a changed InstanceType is resized in place and a changed SecurityGroupIds set is reattached,
+     * through the same Ec2Service calls the ModifyInstanceAttribute API uses. Only a declared
+     * SecurityGroupIds is reconciled, so a template that omits it does not strip the groups the
+     * instance already has. UserData and IamInstanceProfile have no in-place Ec2Service path yet, so
+     * they stay a follow-up: an instance kept on update still carries their prior values.
+     */
+    private void reconcileMutableProperties(String region, Instance prior, String instanceType,
+                                            List<String> securityGroupIds) {
+        if (instanceType != null && !instanceType.isBlank()
+                && !instanceType.equals(prior.getInstanceType())) {
+            ec2Service.modifyInstanceAttribute(region, prior.getInstanceId(), "instanceType", instanceType);
+        }
+        if (!securityGroupIds.isEmpty() && !sameSecurityGroups(prior, securityGroupIds)) {
+            ec2Service.modifyInstanceGroups(region, prior.getInstanceId(), securityGroupIds);
+        }
+    }
+
+    private static boolean sameSecurityGroups(Instance prior, List<String> desired) {
+        List<GroupIdentifier> current = prior.getSecurityGroups();
+        if (current == null) {
+            return desired.isEmpty();
+        }
+        Set<String> currentIds = new HashSet<>();
+        for (GroupIdentifier group : current) {
+            currentIds.add(group.getGroupId());
+        }
+        return currentIds.equals(new HashSet<>(desired));
+    }
+
+    /**
+     * Whether a createOnly property the launch does not apply to the instance (PrivateIpAddress,
+     * AvailabilityZone) changed since the last provision. It is compared against the value declared
+     * then and recorded on the resource, not the instance's auto-assigned value, which never matches
+     * a declared one. A property with no recorded prior value is not treated as changed, so adopting
+     * this behavior does not replace instances whose template did not actually change; the value is
+     * recorded from this provision on, and a later change to it then forces replacement.
+     */
+    private static boolean declaredCreateOnlyChanged(Map<String, String> priorAttributes,
+                                                     String privateIpAddress, String availabilityZone) {
+        return recordedValueChanged(priorAttributes.get(DECLARED_PRIVATE_IP_ATTR), privateIpAddress)
+                || recordedValueChanged(priorAttributes.get(DECLARED_AZ_ATTR), availabilityZone);
+    }
+
+    private static boolean recordedValueChanged(String priorDeclared, String nowDeclared) {
+        String now = (nowDeclared == null || nowDeclared.isBlank()) ? null : nowDeclared;
+        return priorDeclared != null && !priorDeclared.equals(now);
+    }
+
+    private static void storeDeclaredCreateOnly(StackResource r, String privateIpAddress,
+                                                String availabilityZone) {
+        putOrRemove(r, DECLARED_PRIVATE_IP_ATTR, privateIpAddress);
+        putOrRemove(r, DECLARED_AZ_ATTR, availabilityZone);
+    }
+
+    private static void putOrRemove(StackResource r, String key, String value) {
+        if (value != null && !value.isBlank()) {
+            r.getAttributes().put(key, value);
+        } else {
+            r.getAttributes().remove(key);
+        }
     }
 
     private void publishInstanceAttributes(StackResource r, Instance instance) {

@@ -58,7 +58,12 @@ class CodeArtifactIntegrationTest {
 
         given().header("Authorization", AUTH)
                 .delete("/v1/domain?domain=lifecycle-domain")
-                .then().statusCode(200);
+                .then().statusCode(200).body("domain.name", equalTo("lifecycle-domain"));
+
+        // AWS returns ResourceNotFoundException here although the API reference does not list it on DeleteDomain.
+        given().header("Authorization", AUTH)
+                .delete("/v1/domain?domain=lifecycle-domain")
+                .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
     }
 
     @Test

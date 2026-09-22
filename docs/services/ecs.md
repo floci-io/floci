@@ -24,6 +24,33 @@ what the caller asked for nor what AWS answers.
 | `PutClusterCapacityProviders` | Associate capacity providers with a cluster |
 | `DeleteCluster` | Delete an empty cluster |
 
+A cluster round-trips what it was created with: `settings`, `tags`, `configuration`,
+`serviceConnectDefaults`, `capacityProviders` and `defaultCapacityProviderStrategy` are all
+accepted on `CreateCluster` and returned as sent. `UpdateCluster` replaces only the members the
+request named, leaving the ones it omits alone; `UpdateClusterSettings` replaces `settings`
+outright.
+
+`DescribeClusters` returns `settings`, `tags`, `statistics`, `attachments` and `configuration`
+only when `include` asks for them, one of `SETTINGS`, `TAGS`, `STATISTICS`, `ATTACHMENTS` and
+`CONFIGURATIONS`; any other value is rejected. A member that was asked for is returned even when
+it is empty, so a client can tell an empty answer from a withheld one. `STATISTICS` reports the
+eight documented counts split by launch type (`runningEC2TasksCount`, `runningFargateTasksCount`,
+`pendingEC2TasksCount`, `pendingFargateTasksCount`, `activeEC2ServiceCount`,
+`activeFargateServiceCount`, `drainingEC2ServiceCount`, `drainingFargateServiceCount`) as
+name/value strings. The API reference spells one of those names `RunningFargateTasksCount`; Floci
+follows the wire, which is lower camel case like the other seven. `ATTACHMENTS` is always an empty
+list, because Floci creates no managed scaling policies to attach.
+
+`DescribeClusters` reports a cluster it cannot resolve as a `MISSING` entry in `failures` rather
+than dropping it, as `DescribeServices` and `DescribeTasks` do. `ListClusters` pages with
+`maxResults` (1 to 100) and `nextToken`, returning up to 100 ARNs when the request names neither.
+
+`DeleteCluster` only deletes an empty cluster, and says which way it is not empty:
+`ClusterContainsServicesException` while a service is still `ACTIVE`,
+`ClusterContainsContainerInstancesException` while a container instance is still registered, and
+`ClusterContainsTasksException` while a task is still running. Delete the services, deregister the
+instances and stop the tasks first, as on AWS.
+
 ### Task Definitions
 
 | Operation | Description |
@@ -77,6 +104,15 @@ reference that names only the family: `DeleteTaskDefinitions` takes a revision, 
 call. A deleted revision is not dropped, because AWS keeps describing it and the tasks already on
 it keep running; it just cannot start anything new, so `RunTask`, `CreateService` and
 `UpdateService` refuse it.
+
+`ListTaskDefinitions` lists only `ACTIVE` revisions unless another `status` is asked for, orders
+them lexicographically by family and then numerically by revision (`sort: DESC` reverses it, so
+revision 11 sorts after revision 2 rather than before it), and pages with `maxResults` and
+`nextToken`.
+
+`ListTaskDefinitionFamilies` filters on `familyPrefix` and on `status`, where `ACTIVE` keeps the
+families with at least one ACTIVE revision, `INACTIVE` the families with none, and `ALL` (the
+default) keeps both. It pages with `maxResults` and `nextToken` the same way.
 
 At launch, a container's `dependsOn` decides the start order, and a `COMPLETE`, `SUCCESS` or
 `HEALTHY` condition holds the dependent container until the dependency gets there. The wait is
@@ -199,9 +235,25 @@ A created service reports the documented defaults: `propagateTags` is `NONE` and
 a load-balanced service whose task definition does not use `awsvpc`, which is the only case AWS
 permits it in.
 
+A described service always carries `events` and `taskSets`, empty list and all, so a client can
+tell an empty answer from a member Floci never wrote. `taskSets` holds the service's task sets, the
+same ones `DescribeTaskSets` returns, which is where a blue/green deploy tool reads them from.
+`events` is derived from the service's current state rather than replayed from a rollout, the same
+way `deployments` is: a service that has converged reports the one event tools poll for,
+`(service <name>) has reached a steady state.`, with an id stable across calls; one still
+converging reports none. Each `deployments` entry carries the placement it runs under, its
+`launchType` or `capacityProviderStrategy`, `platformVersion`, `platformFamily` and
+`networkConfiguration`, not only its id and counts.
+
 `RunTask` places at most 10 tasks per call and rejects `propagateTags: SERVICE`, which is a
 service-only option; `TASK_DEFINITION` copies the task definition's tags onto each task.
 `StartTask` requires the `containerInstances` it places onto, at most 10 of them.
+
+`ListTasks` filters by `cluster`, `family`, `desiredStatus`, `launchType`, `containerInstance`,
+`serviceName` and `startedBy`, and pages with `maxResults` and `nextToken` (100 per page by
+default). The default filter is a desired status of `RUNNING`, so a listing that has not asked for
+stopped tasks does not get them, `PENDING` matches nothing (ECS never sets that desired status),
+and `startedBy` has to be the only filter in the request.
 
 On `UpdateService`, the changes that start new tasks roll the deployment: the task definition, the
 network configuration, the load balancers, the service registries, the Service Connect
@@ -256,6 +308,10 @@ local cluster has no container instances, so an EC2 default would have nowhere t
 | `ListServices` | List service ARNs in a cluster |
 | `ListServicesByNamespace` | List services filtered by Cloud Map namespace |
 
+`ListServices` filters on `launchType` and `schedulingStrategy` as well as `cluster`, and pages
+with `maxResults` and `nextToken`. Unlike every other ECS listing, which pages a hundred at a
+time, a request that names no `maxResults` gets ten ARNs and a `nextToken`.
+
 #### Service deployments
 
 An `ACTIVE` service reports exactly one `PRIMARY` entry in `services[].deployments`,
@@ -297,6 +353,7 @@ Known differences from AWS:
   given, so a client that reads them back sees no drift, but the reconciler does not act on them:
   it converges to `desiredCount` without a maximum or minimum percent, registers nothing in Cloud
   Map, and places tasks without evaluating constraints.
+- `StopServiceDeployment` is not implemented.
 
 #### ECS EventBridge events
 
@@ -342,6 +399,30 @@ unchanged.
 | `DescribeTaskSets` | Describe task sets for a service |
 | `UpdateServicePrimaryTaskSet` | Promote a task set to primary |
 
+A task set can only be created in a service whose deployment controller is `EXTERNAL` or
+`CODE_DEPLOY`; a rolling service runs its own deployments, and AWS refuses the call rather than
+creating a task set nothing will place. `launchType` and `capacityProviderStrategy` are mutually
+exclusive, and a request naming neither takes the cluster's `defaultCapacityProviderStrategy`,
+falling back to `EC2`. `scale` accepts only the `PERCENT` unit.
+
+The task set round-trips `networkConfiguration` (defaulting to the service's), `loadBalancers`,
+`serviceRegistries`, `platformVersion` and `tags`, and reports `platformFamily`, `startedBy`
+(`CODE_DEPLOY` for a task set Floci's CodeDeploy created, unset for an external one) and
+`stabilityStatusAt`. `computedDesiredCount` is the service's `desiredCount` times the task set's
+scale percentage, always rounded up: 3 desired at 50 percent is 2 tasks, not 1. `UpdateTaskSet`
+recomputes it.
+
+Floci places no tasks for a task set, so `runningCount` and `pendingCount` stay at 0 and
+`stabilityStatus` is always `STEADY_STATE`. On AWS the status reaches `STEADY_STATE` once the
+running count matches the computed one; reporting `STABILIZING` here would hang anything that
+waits for the set to stabilise, since no count ever moves.
+
+`DeleteTaskSet` refuses a task set that has not been scaled down to zero unless `force` is set.
+`DescribeTaskSets` returns tags only for `include: ["TAGS"]` and reports a reference naming no
+task set of that service as a `MISSING` failure. A task set reference that resolves to nothing is
+a `TaskSetNotFoundException`, and task sets are scoped to one cluster and service: another
+service's task set is not visible through this one.
+
 ### Container Instances
 
 | Operation | Description |
@@ -352,6 +433,32 @@ unchanged.
 | `ListContainerInstances` | List container instance ARNs |
 | `UpdateContainerAgent` | Trigger agent update (stub) |
 | `UpdateContainerInstancesState` | Drain or activate container instances |
+
+`RegisterContainerInstance` keeps what the agent sent: `totalResources` comes back as both
+`registeredResources` and `remainingResources`, and `versionInfo`, `attributes`, `tags` and a
+re-registered `containerInstanceArn` all round-trip. The agent version is reported inside
+`versionInfo`, which is where the `ContainerInstance` shape puts it, not as a top-level
+`agentVersion`. An instance also reports `registeredAt` and a `version` counter that each state
+change increments.
+
+`DeregisterContainerInstance` leaves the instance in the cluster as `INACTIVE` rather than
+dropping it, so a later `DescribeContainerInstances` still answers for it, as on AWS. A cluster's
+`registeredContainerInstancesCount` counts only the `ACTIVE` and `DRAINING` instances.
+
+`ListContainerInstances` defaults to every instance other than the `INACTIVE` ones, validates
+`status` against the five documented values, and pages with `maxResults` (1 to 100) and
+`nextToken`. The cluster query language `filter` is accepted and ignored.
+
+`UpdateContainerInstancesState` sets only `ACTIVE` or `DRAINING`, takes at most 10 instances per
+call, and refuses to drain an instance that is not `ACTIVE` first. It and
+`DescribeContainerInstances` report an instance the cluster does not have as a `MISSING` failure
+rather than dropping it.
+
+`DescribeContainerInstances` withholds two members until the request asks for them, and rejects an
+`include` value that is neither: `TAGS` for the instance's tags, and `CONTAINER_INSTANCE_HEALTH`
+for its `healthStatus`. Floci runs no agent health checks of its own, so the one check it reports
+is `AGENT_CONNECTIVITY`, taken from the registration state the instance already tracks, and
+`overallStatus` follows it.
 
 ### Capacity Providers
 
@@ -388,6 +495,23 @@ one of the four values `CapacityProviderStatus` takes.
 | `ListServiceDeployments` | List service deployment ARNs |
 | `DescribeServiceRevisions` | Describe service revisions |
 
+A deployment is recorded on `CreateService` and on every `UpdateService` that rolls one, together
+with the service revision it targets. The two are linked the way AWS links them: a deployment
+reports `targetServiceRevision` (its ARN and the task counts) and `sourceServiceRevisions`, and
+the service itself reports `currentServiceDeployment` and `currentServiceRevisions`, so a caller
+gets from `DescribeServices` to the deployment without listing first. A service deployment carries
+no `taskDefinition` member, because AWS's `ServiceDeployment` shape has none: the revision names
+it.
+
+A service revision is the snapshot of the service's configuration at that moment, copied rather
+than referenced, so it keeps reporting what the service looked like then: `taskDefinition`, the
+`launchType` or `capacityProviderStrategy`, `platformVersion`, `platformFamily`,
+`networkConfiguration`, `loadBalancers`, `serviceRegistries`, `serviceConnectConfiguration` and
+one `containerImages` entry per container definition. `guardDutyEnabled` is always `false`: Floci
+runs no runtime monitoring. Floci applies a change in place rather than rolling it, so a
+deployment is `SUCCESSFUL` with the same `startedAt` and `finishedAt` from the moment it is
+recorded. Both describes report an ARN that resolves to nothing as a `MISSING` failure.
+
 ### Tags
 
 | Operation | Description |
@@ -411,6 +535,32 @@ parsed map, so 51 entries that collapse to fewer distinct keys are still rejecte
 | `PutAttributes` | Set custom key-value attributes on resources |
 | `DeleteAttributes` | Remove attributes from resources |
 | `ListAttributes` | List resources with a given attribute |
+
+An account setting name must be one of the eleven ECS accepts, and its value is checked against
+what that name allows: `0`, `7` or `14` for `fargateTaskRetirementWaitPeriod`, `blocking` or
+`non-blocking` for `defaultLogDriverMode`, `enhanced` on top of the usual flags for
+`containerInsights`, and `enabled`/`disabled`/`on`/`off` for the rest. A `Setting` reports its
+`principalArn` and its `type`, which is `user` except for `guardDutyActivate`, the setting
+GuardDuty owns on the account's behalf.
+
+A request that names no `principalArn` acts for the account root, since Floci does not
+authenticate a separate user, and `PutAccountSettingDefault` writes that same root row: AWS
+describes the effective value as "the account settings for the root user or the default setting".
+`ListAccountSettings` returns only the settings the principal explicitly set, which is why an
+untouched account lists nothing; with `effectiveSettings: true` it returns all eleven at the value
+that principal actually reads, falling back from its own setting to the root default to the
+setting's built-in default. It pages with `maxResults` (1 to 10) and `nextToken`, ten at a time.
+
+A setting is persisted under `<principalArn>::<name>` rather than the name alone, so settings
+written by an earlier Floci version are ignored after upgrading: delete
+`ecs-account-settings.json` from the persistence directory, or write the settings again.
+
+Attributes belong to a cluster, not to a target id alone, so the same container instance id in two
+clusters is two targets. An attribute must name a container instance the cluster has, or the call
+is a `TargetNotFoundException`, and a target holds at most 10 custom attributes
+(`AttributeLimitExceededException` past that, and for a single call carrying more than 10).
+`ListAttributes` requires `targetType`, whose only valid value is `container-instance`, and pages
+with `maxResults` (1 to 100) and `nextToken`.
 
 ### Agent / State Change Stubs
 

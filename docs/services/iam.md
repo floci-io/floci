@@ -138,6 +138,8 @@ type.
 | AddRoleToInstanceProfile | Adds a role to an instance profile. |
 | RemoveRoleFromInstanceProfile | Removes a role from an instance profile. |
 | ListInstanceProfilesForRole | Lists instance profiles associated with a role. |
+| TagInstanceProfile | Adds tags to an instance profile. |
+| UntagInstanceProfile | Removes tags from an instance profile. |
 
 ### Access Keys
 
@@ -235,6 +237,23 @@ was never added, both succeed and change nothing, as they do on AWS.
 Thumbprints are stored and echoed back but never validated against the remote endpoint, since
 nothing here performs the TLS handshake they describe.
 
+### SAML Identity Providers
+
+| Action | Description |
+|--------|-------------|
+| CreateSAMLProvider | Creates a SAML identity provider from a metadata document. |
+| GetSAMLProvider | Returns a provider's creation date and a metadata document rebuilt from its stored entity ID and signing certificate. |
+| ListSAMLProviders | Lists the stored SAML providers of the calling account. |
+
+A provider is identified by name, giving an ARN of the form `arn:aws:iam::<account>:saml-provider/<name>`.
+The name must match `[A-Za-z0-9+=,.@_-]{1,128}`, and creating the same name twice returns
+`EntityAlreadyExists`. An empty or unparseable metadata document returns `InvalidInput`.
+
+Floci stores only the entity ID and signing certificate parsed from the metadata, so `GetSAMLProvider`
+returns a minimal rebuilt document rather than the one that was uploaded. `UpdateSAMLProvider`,
+`DeleteSAMLProvider` and the SAML provider tag operations are not implemented. Providers created here
+are used by `AssumeRoleWithSAML` for trust-policy and assertion validation.
+
 ### Login Profiles
 
 | Action | Description |
@@ -277,7 +296,30 @@ name still refers to it after a rename.
 
 | Action | Description |
 |--------|-------------|
-| GetAccountSummary | Returns entity counts (users, groups, roles, customer-managed policies, instance profiles) and IAM quota values. Resources Floci does not track (MFA devices, SAML/OIDC providers, server certificates) are reported as zero rather than omitted. |
+| GetAccountSummary | Returns entity counts (users, groups, roles, customer-managed policies, instance profiles) and IAM quota values. `Providers` counts OIDC providers only; SAML providers are not included. Resources Floci does not track (MFA devices, server certificates) are reported as zero rather than omitted. |
+
+### Organizations Root Access
+
+| Action | Description |
+|--------|-------------|
+| ListOrganizationsFeatures | Lists the centralized root access features that are currently enabled. |
+| EnableOrganizationsRootCredentialsManagement | Enables the `RootCredentialsManagement` feature. |
+| DisableOrganizationsRootCredentialsManagement | Disables the `RootCredentialsManagement` feature. |
+| EnableOrganizationsRootSessions | Enables the `RootSessions` feature. |
+| DisableOrganizationsRootSessions | Disables the `RootSessions` feature. |
+
+Only the set of enabled features is stored, and enabling a feature twice is idempotent. Floci does not
+model root credentials or root sessions themselves, so the flags change what `ListOrganizationsFeatures`
+returns and nothing else.
+
+### Unmodeled Lists
+
+| Action | Description |
+|--------|-------------|
+| ListMFADevices | Always returns an empty list. It does not check that the user exists, where AWS returns `NoSuchEntity` for an unknown user. |
+| ListServerCertificates | Always returns an empty list. |
+
+MFA devices and server certificates are not stored, and no action creates them.
 
 ## AWS Managed Policies
 
@@ -468,6 +510,21 @@ floci populates:
   `ResourceId.N` or `InstanceId.N`), and for `s3:GetBucketTagging`, `s3:DeleteBucketTagging`
   and `s3:DeleteBucket` (the bucket). A request naming several EC2 resources is evaluated
   once per resource and denied when any of them fails the condition, as on AWS.
+- `s3:ExistingObjectTag/<key>`: the tags already on the target object version, for
+  `s3:GetObject`, `s3:GetObjectTagging`, `s3:GetObjectAcl`, `s3:PutObjectAcl`,
+  `s3:DeleteObjectTagging` and `s3:PutObjectTagging`. A `versionId` in the request selects the
+  version whose tags are read. **`s3:DeleteObject` and `s3:PutObject` do not receive this key**, as measured on AWS.
+  An allow conditioned on it denies the delete of a correctly tagged object, and a create cannot
+  be gated on tags an object does not have yet.
+- `s3:RequestObjectTag/<key>`: a tag the request asks to attach. `s3:PutObject` reads these
+  from the `x-amz-tagging` header and `s3:PutObjectTagging` from the `<Tagging>` body. Any pair
+  that does not decode is dropped, so a policy conditioned on the key denies such a request. Where
+  enforcement lets it through, the handler still answers a malformed header with
+  `400 InvalidTag`. `s3:RequestObjectTagKeys` is **not** populated, so a condition on it never
+  matches.
+- A `PutObject` carrying `If-Match` is authorized as `s3:GetObject` as well, and that second
+  check is made without the object's tags in the context, as measured on AWS. `If-None-Match`
+  needs no such permission.
 - `aws:PrincipalArn`: the caller's ARN, resolved from the signing access key. It is the
   IAM-user ARN for a user access key, the assumed-role ARN for an STS session, and
   `arn:aws:iam::<account>:root` for the bare account-id key (floci's account-root principal),
