@@ -4,7 +4,12 @@ import javax.crypto.Cipher;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.OAEPParameterSpec;
 import javax.crypto.spec.PSource;
-import java.security.*;
+import java.security.GeneralSecurityException;
+import java.security.InvalidKeyException;
+import java.security.Key;
+import java.security.KeyFactory;
+import java.security.PrivateKey;
+import java.security.PublicKey;
 import java.security.interfaces.RSAPrivateCrtKey;
 import java.security.interfaces.RSAPrivateKey;
 import java.security.spec.MGF1ParameterSpec;
@@ -23,9 +28,9 @@ public final class CipherUtils {
                 .generatePublic(publicKeySpec);
     }
 
-    public static byte[] encryptRsaOaep(PublicKey key, String digest, byte[] ciphertext) throws GeneralSecurityException {
+    public static byte[] encryptRsaOaep(PublicKey key, String digest, byte[] plaintext) throws GeneralSecurityException {
         return rsaOaepCipher(Cipher.ENCRYPT_MODE, key, digest)
-                .doFinal(ciphertext);
+                .doFinal(plaintext);
     }
 
     public static byte[] decryptRsaOaep(PrivateKey key, String digest, byte[] ciphertext) throws GeneralSecurityException {
@@ -46,6 +51,10 @@ public final class CipherUtils {
         byte[] wrappedMaterial = Arrays.copyOfRange(encryptedKeyMaterial, wrappedAesKeyLength, encryptedKeyMaterial.length);
 
         SecretKey aesKey = (SecretKey) CipherUtils.rsaOaepUnwrapAesKey(rsaPrivateKey, digest, Cipher.SECRET_KEY, wrappedAesKey);
+        byte[] aesKeyBytes = aesKey.getEncoded();
+        if (aesKeyBytes == null || aesKeyBytes.length != 32) {
+            throw new InvalidKeyException("RSA_AES_KEY_WRAP_* requires a 256-bit AES key.");
+        }
         return CipherUtils.aesKwpDecrypt(aesKey, wrappedMaterial);
     }
 
