@@ -441,18 +441,23 @@ public class SesService {
 
         // One event per (type, cause): a message that bounces both at the simulator and on the
         // suppression list publishes two BOUNCE events, each naming only its own recipients.
+        // A rejected message publishes none of the scanned content: its Send and Reject events
+        // carry the envelope but no subject and no headers, where SES would include them, so the
+        // string reaches no event destination either.
+        String publishedSubject = contentRejected ? null : subject;
+        List<MessageHeader> publishedHeaders = contentRejected ? List.of() : additionalHeaders;
         for (SesRecipientEvent event : SesRecipientEvents.classify(envelope, suppressedReasons,
                 contentRejected)) {
             if (configSetActive) {
                 eventPublisher.publish(cs, event, messageId, source, sourceArn, sendingAccountId,
-                        subject, toAddresses, ccAddresses, bccAddresses, envelope,
-                        emailTags, additionalHeaders, timestamp, region);
+                        publishedSubject, toAddresses, ccAddresses, bccAddresses, envelope,
+                        emailTags, publishedHeaders, timestamp, region);
             }
             IdentityNotificationTarget target = identityTargets.get(event.eventType());
             if (target != null) {
                 eventPublisher.publishIdentityNotification(target.topicArn(), target.includeHeaders(),
-                        event, messageId, source, sourceArn, sendingAccountId, subject,
-                        toAddresses, ccAddresses, bccAddresses, envelope, additionalHeaders,
+                        event, messageId, source, sourceArn, sendingAccountId, publishedSubject,
+                        toAddresses, ccAddresses, bccAddresses, envelope, publishedHeaders,
                         timestamp, region);
             }
         }

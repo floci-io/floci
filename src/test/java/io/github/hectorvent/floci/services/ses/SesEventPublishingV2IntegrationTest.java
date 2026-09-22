@@ -1708,6 +1708,17 @@ class SesEventPublishingV2IntegrationTest {
             assertTrue(events.stream().anyMatch(e -> "Reject".equals(e.path("eventType").asText())),
                     "expected a Reject for: " + content.substring(0, 30));
             assertTrue(events.stream().noneMatch(e -> "Delivery".equals(e.path("eventType").asText())));
+            // Neither the Send nor the Reject event carries the scanned subject or headers.
+            for (JsonNode event : events) {
+                JsonNode mail = event.path("mail");
+                assertTrue(mail.path("commonHeaders").path("subject").isMissingNode(),
+                        event.path("eventType").asText() + " must not carry the subject");
+                for (JsonNode header : mail.path("headers")) {
+                    String name = header.path("name").asText();
+                    assertTrue(name.equals("From") || name.equals("To") || name.equals("Cc"),
+                            event.path("eventType").asText() + " must not carry header " + name);
+                }
+            }
 
             given().header("Authorization", SES_AUTH)
             .when().get("/_aws/ses?id=" + messageId).then().statusCode(200)
