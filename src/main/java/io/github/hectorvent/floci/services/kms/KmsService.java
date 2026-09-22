@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.kms.keytype.KmsKeyType;
 import io.github.hectorvent.floci.services.kms.keytype.KmsKeyTypes;
 import io.github.hectorvent.floci.services.kms.model.KmsAlias;
 import io.github.hectorvent.floci.services.kms.model.KmsGrant;
@@ -797,11 +798,12 @@ public class KmsService implements ResourceProvider {
 
         byte[] material = KmsKeyImport.unwrap(parameters.getWrappingPrivateKeyEncoded(),
                 parameters.getWrappingAlgorithm(), encryptedKeyMaterial);
-        validateMaterialLength(key, material);
         String keyMaterialId = keyMaterialId(key.getKeyId(), material);
         requireSameMaterialAsFirstImport(key, keyMaterialId);
 
-        key.setPrivateKeyEncoded(Base64.getEncoder().encodeToString(material));
+        KmsKeyType keyType = keyTypes.of(key.getKeySpec());
+        keyType.importKeyMaterial(key, material);
+
         if (KmsKeySpec.SYMMETRIC_DEFAULT == key.getKeySpec()) {
             installImportedBackingKey(key, keyMaterialId, material);
         }
@@ -972,15 +974,6 @@ public class KmsService implements ResourceProvider {
                     "1 validation error detected: Value '" + importType + "' at 'importType' failed to "
                             + "satisfy constraint: Member must satisfy enum value set: "
                             + "[NEW_KEY_MATERIAL, EXISTING_KEY_MATERIAL]", 400);
-        }
-    }
-
-    private static void validateMaterialLength(KmsKey key, byte[] material) {
-        int expected = key.getKeySpec().materialByteLength();
-        if (material.length != expected) {
-            throw new AwsException("IncorrectKeyMaterialException",
-                    "Key material for key spec " + key.getKeySpec() + " must be " + expected
-                            + " bytes but was " + material.length + " bytes.", 400);
         }
     }
 

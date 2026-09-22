@@ -43,4 +43,19 @@ final class HmacKeyType implements KmsKeyType {
             default -> throw new AwsException("InvalidMacAlgorithmException", "Unsupported MAC algorithm: " + awsAlgo, 400);
         };
     }
+
+    @Override
+    public void importKeyMaterial(KmsKey key, byte[] material) {
+        validateKeyMaterialLength(key, material);
+        key.setPrivateKeyEncoded(Base64.getEncoder().encodeToString(material));
+    }
+
+    private static void validateKeyMaterialLength(KmsKey key, byte[] material) {
+        int expected = key.getKeySpec().materialByteLength();
+        if (material.length != expected) {
+            throw new AwsException("IncorrectKeyMaterialException",
+                    "Key material for key spec " + key.getKeySpec() + " must be " + expected
+                            + " bytes but was " + material.length + " bytes.", 400);
+        }
+    }
 }

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.kms.keytype;
 
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.kms.model.KmsKey;
 import io.github.hectorvent.floci.services.kms.model.KmsKeySpec;
 
@@ -30,5 +31,20 @@ public final class SymmetricKeyType implements KmsKeyType {
         }
         key.getBackingKeys().put(backingKeyId, Base64.getEncoder().encodeToString(material));
         key.setCurrentBackingKeyId(backingKeyId);
+    }
+
+    @Override
+    public void importKeyMaterial(KmsKey key, byte[] material) {
+        validateKeyMaterialLength(key, material);
+        key.setPrivateKeyEncoded(Base64.getEncoder().encodeToString(material));
+    }
+
+    private static void validateKeyMaterialLength(KmsKey key, byte[] material) {
+        int expected = key.getKeySpec().materialByteLength();
+        if (material.length != expected) {
+            throw new AwsException("IncorrectKeyMaterialException",
+                    "Key material for key spec " + key.getKeySpec() + " must be " + expected
+                            + " bytes but was " + material.length + " bytes.", 400);
+        }
     }
 }
