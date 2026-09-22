@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.core.sync.RequestBody;
+import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.iam.IamClient;
 import software.amazon.awssdk.services.iam.model.CreateAccessKeyResponse;
@@ -96,6 +97,34 @@ class S3PresignedUrlSigV4VerificationTest {
         var t = httpGet(transplanted);
         assertThat(t.statusCode()).isEqualTo(403);
         assertThat(t.body()).contains("SignatureDoesNotMatch");
+    }
+
+    @Test
+    @DisplayName("SDK signed requests preserve leading and repeated slashes in object keys")
+    void sdkSignedRequestsPreserveObjectKeyPaths() throws Exception {
+        assumeEnforcementEnabled();
+
+        String[] keys = {"email.txt", "/email.txt", "//email.txt", "folder//email.txt", "/email +?%2F.txt"};
+        // Apache5 rewrites consecutive slashes as /%2F after signing; exercise the raw path here.
+        try (S3Client client = S3Client.builder()
+                .endpointOverride(TestFixtures.endpoint())
+                .region(Region.US_EAST_1)
+                .credentialsProvider(CREDENTIALS)
+                .forcePathStyle(true)
+                .httpClientBuilder(UrlConnectionHttpClient.builder())
+                .build()) {
+            for (String key : keys) {
+                client.putObject(PutObjectRequest.builder().bucket(BUCKET).key(key).build(), RequestBody.fromString(key));
+            }
+            for (String key : keys) {
+                assertThat(client.getObjectAsBytes(GetObjectRequest.builder().bucket(BUCKET).key(key).build())
+                        .asUtf8String()).isEqualTo(key);
+
+                HttpResponse<String> response = httpGet(presignGet(key));
+                assertThat(response.statusCode()).isEqualTo(200);
+                assertThat(response.body()).isEqualTo(key);
+            }
+        }
     }
 
     @Test

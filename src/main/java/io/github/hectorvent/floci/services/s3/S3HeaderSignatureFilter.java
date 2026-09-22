@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.s3;
 
 import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
 import jakarta.annotation.Priority;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Priorities;
@@ -75,14 +76,17 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
 
     private final S3Service s3Service;
     private final IamService iamService;
+    private final CurrentVertxRequest currentVertxRequest;
 
     @Context
     ResourceInfo resourceInfo;
 
     @Inject
-    public S3HeaderSignatureFilter(S3Service s3Service, IamService iamService) {
+    public S3HeaderSignatureFilter(S3Service s3Service, IamService iamService,
+                                   CurrentVertxRequest currentVertxRequest) {
         this.s3Service = s3Service;
         this.iamService = iamService;
+        this.currentVertxRequest = currentVertxRequest;
     }
 
     @Override
@@ -195,8 +199,10 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
                     .append(PreSignedUrlFilter.canonicalizeHeaderValue(value)).append('\n');
         }
 
+        // S3 signs the unnormalized path; UriInfo.getRequestUri() collapses repeated slashes.
+        String path = currentVertxRequest.getCurrent().request().path();
         String canonicalRequest = ctx.getMethod() + "\n"
-                + requestUri.getRawPath() + "\n"
+                + path + "\n"
                 + PreSignedUrlFilter.buildCanonicalQueryString(ctx.getUriInfo().getQueryParameters()) + "\n"
                 + canonicalHeaders + "\n"
                 + signedHeaders + "\n"
