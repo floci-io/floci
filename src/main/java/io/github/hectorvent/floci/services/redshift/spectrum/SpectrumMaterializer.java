@@ -24,7 +24,11 @@ public final class SpectrumMaterializer {
 
     public Materialization materialize(Socket backend, SpectrumExternalTable table,
                                        SpectrumExternalSchema schema, SpectrumS3Reader reader) {
-        String identifier = "spectrum_tmp_" + HexFormat.of().formatHex(randomBytes(12));
+        return materialize(backend, table, schema, reader, nextIdentifier());
+    }
+
+    public Materialization materialize(Socket backend, SpectrumExternalTable table,
+                                       SpectrumExternalSchema schema, SpectrumS3Reader reader, String identifier) {
         Materialization materialization = new Materialization(identifier, table.columns());
         OutputStream output = null;
         boolean tableCreated = false;
@@ -56,6 +60,10 @@ public final class SpectrumMaterializer {
             recoverFromFailure(backend, materialization, output, tableCreated, copyInProgress, readException);
             throw readException;
         }
+    }
+
+    public String nextIdentifier() {
+        return "spectrum_tmp_" + HexFormat.of().formatHex(randomBytes(12));
     }
 
     public void cleanup(Socket backend, Materialization materialization) {

@@ -1,8 +1,9 @@
 package io.github.hectorvent.floci.services.redshift.spectrum;
 
+import jakarta.enterprise.context.ApplicationScoped;
+
 import java.net.Socket;
 import java.util.Optional;
-import jakarta.enterprise.context.ApplicationScoped;
 
 @ApplicationScoped
 public final class SpectrumInterceptor {
@@ -26,10 +27,35 @@ public final class SpectrumInterceptor {
     }
 
     public Decision intercept(String sql, String accountId, String databaseName, Socket backend) {
+        Plan plan = plan(sql, accountId, databaseName);
+        return execute(plan, accountId, databaseName, backend);
+    }
+
+    public Plan plan(String sql, String accountId, String databaseName) {
         Optional<SpectrumStatement> statement = statementParser.parse(sql);
         if (statement.isPresent()) {
-            SpectrumStatement parsed = statement.get();
-            switch (parsed) {
+            return new Plan.Ddl(statement.get());
+        }
+
+        Optional<SpectrumQuery> query = queryClassifier.classify(sql, 0);
+        if (query.isEmpty() || query.get().schemaName() == null) {
+            return new Plan.Forward();
+        }
+        SpectrumQuery externalQuery = query.get();
+        Optional<SpectrumExternalTable> table = catalog.table(
+                accountId, databaseName, externalQuery.schemaName(), externalQuery.tableName());
+        if (table.isEmpty()) {
+            return new Plan.Forward();
+        }
+        SpectrumExternalSchema schema = catalog.schema(accountId, databaseName, externalQuery.schemaName())
+                .orElseThrow(() -> new SpectrumSqlException("0A000", "External schema is not defined"));
+        return new Plan.Query(externalQuery, table.get(), schema, materializer.nextIdentifier());
+    }
+
+    public Decision execute(Plan plan, String accountId, String databaseName, Socket backend) {
+        switch (plan) {
+            case Plan.Ddl(SpectrumStatement parsed) -> {
+                switch (parsed) {
                 case SpectrumStatement.CreateSchema schema -> catalog.createSchema(new SpectrumExternalSchema(
                         accountId, schema.databaseName(), schema.schemaName(),
                         "s3://spectrum/" + schema.schemaName() + "/", schema.iamRoleArn()));
@@ -37,25 +63,35 @@ public final class SpectrumInterceptor {
                         accountId, databaseName, table.schemaName(), table.tableName(), table.columns(),
                         table.location(), table.delimiter(), table.quote(), table.escape(), table.nullValue(),
                         table.headerLines()));
+                }
+                return new Decision.Handled();
             }
-            return new Decision.Handled();
+            case Plan.Query(SpectrumQuery query, SpectrumExternalTable table, SpectrumExternalSchema schema, String identifier) -> {
+                SpectrumMaterializer.Materialization materialized = materializer.materialize(backend, table, schema, reader, identifier);
+                return new Decision.Rewritten(queryRewriter.rewrite(query, materialized.identifier()), materialized);
+            }
+            case Plan.Forward ignored -> {
+                return new Decision.Forward();
+            }
+        }
+    }
+
+    /** Drops the temp table a {@link Decision.Rewritten} materialized, once the client has finished
+     * reading its rows (or failed while doing so). Every {@link Decision.Rewritten} must be cleaned up. */
+    public void cleanup(Socket backend, SpectrumMaterializer.Materialization materialization) {
+        materializer.cleanup(backend, materialization);
+    }
+
+    public sealed interface Plan permits Plan.Ddl, Plan.Forward, Plan.Query {
+        record Ddl(SpectrumStatement statement) implements Plan {
         }
 
-        Optional<SpectrumQuery> query = queryClassifier.classify(sql, 0);
-        if (query.isEmpty() || query.get().schemaName() == null) {
-            return new Decision.Forward();
+        record Forward() implements Plan {
         }
-        SpectrumQuery externalQuery = query.get();
-        Optional<SpectrumExternalTable> table = catalog.table(
-                accountId, databaseName, externalQuery.schemaName(), externalQuery.tableName());
-        if (table.isEmpty()) {
-            return new Decision.Forward();
+
+        record Query(SpectrumQuery query, SpectrumExternalTable table, SpectrumExternalSchema schema,
+                     String identifier) implements Plan {
         }
-        SpectrumExternalSchema schema = catalog.schema(accountId, databaseName, externalQuery.schemaName())
-                .orElseThrow(() -> new SpectrumSqlException("0A000", "External schema is not defined"));
-        SpectrumMaterializer.Materialization materialized = materializer.materialize(
-                backend, table.get(), schema, reader);
-        return new Decision.Rewritten(queryRewriter.rewrite(externalQuery, materialized.identifier()), materialized);
     }
 
     public sealed interface Decision permits Decision.Handled, Decision.Forward, Decision.Rewritten {

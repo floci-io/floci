@@ -1,11 +1,10 @@
 package io.github.hectorvent.floci.services.redshift.spectrum;
 
-import jakarta.enterprise.context.ApplicationScoped;
-
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
+import jakarta.enterprise.context.ApplicationScoped;
 
 import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
@@ -47,9 +46,15 @@ public final class SpectrumS3Reader {
         Location location = Location.parse(table.location());
         try {
             s3Service.authorizeAnonymousListBucket(location.bucket());
-            S3Service.ListObjectsResult result = s3Service.listObjectsWithPrefixes(
-                    location.bucket(), location.key(), "", 1000);
-            List<String> keys = result.objects().stream()
+            List<S3Object> objects = new ArrayList<>();
+            String continuationToken = null;
+            do {
+                S3Service.ListObjectsResult result = s3Service.listObjectsWithPrefixes(
+                        location.bucket(), location.key(), "", 1000, continuationToken, null);
+                objects.addAll(result.objects());
+                continuationToken = result.isTruncated() ? result.nextContinuationToken() : null;
+            } while (continuationToken != null);
+            List<String> keys = objects.stream()
                     .map(S3Object::getKey)
                     .sorted(Comparator.naturalOrder())
                     .toList();
@@ -76,6 +81,7 @@ public final class SpectrumS3Reader {
         private BufferedReader reader;
         private SpectrumRow next;
         private boolean finished;
+        private String currentKey;
 
         private RowIterator(String bucket, Iterator<String> keys, SpectrumExternalTable table) {
             this.bucket = bucket;
@@ -109,9 +115,9 @@ public final class SpectrumS3Reader {
                             finished = true;
                             return;
                         }
-                        String key = keys.next();
-                        s3Service.authorizeAnonymousGetObject(bucket, key);
-                        S3Object object = s3Service.getObject(bucket, key);
+                        currentKey = keys.next();
+                        s3Service.authorizeAnonymousGetObject(bucket, currentKey);
+                        S3Object object = s3Service.getObject(bucket, currentKey);
                         reader = new BufferedReader(new InputStreamReader(
                                 new ByteArrayInputStream(object.getData()), StandardCharsets.UTF_8));
                         skipHeaders();
@@ -129,7 +135,7 @@ public final class SpectrumS3Reader {
                     return;
                 }
             } catch (AwsException exception) {
-                throw new SpectrumReadException(SQLSTATE_INTERNAL, "Unable to read Spectrum object", exception);
+                throw mapAwsException(new Location(bucket, currentKey), exception);
             } catch (IOException exception) {
                 throw new SpectrumReadException(SQLSTATE_INTERNAL, "Unable to close Spectrum object", exception);
             }

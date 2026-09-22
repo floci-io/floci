@@ -56,5 +56,33 @@ public record SpectrumColumn(String name, Type type) {
                 case TIMESTAMP -> "TIMESTAMP";
             };
         }
+
+        /**
+         * The well-known PostgreSQL {@code pg_type} OID for this column's Postgres type, needed to
+         * synthesize a wire-accurate {@code RowDescription} for an Extended Query Describe response
+         * without a backend round trip.
+         */
+        public int postgresTypeOid() {
+            return switch (this) {
+                case VARCHAR -> 1043;
+                case CHAR -> 1042;
+                case INTEGER -> 23;
+                case BIGINT -> 20;
+                case DECIMAL -> 1700;
+                case BOOLEAN -> 16;
+                case DATE -> 1082;
+                case TIMESTAMP -> 1114;
+            };
+        }
+
+        /** The fixed on-wire type length for this Postgres type, or {@code -1} for a variable-length type. */
+        public short postgresTypeLength() {
+            return switch (this) {
+                case VARCHAR, CHAR, DECIMAL -> -1;
+                case INTEGER, DATE -> 4;
+                case BIGINT, TIMESTAMP -> 8;
+                case BOOLEAN -> 1;
+            };
+        }
     }
 }
