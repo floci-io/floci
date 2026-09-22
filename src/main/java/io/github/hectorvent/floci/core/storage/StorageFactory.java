@@ -63,6 +63,24 @@ public class StorageFactory {
      */
     public synchronized <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
                                                  TypeReference<Map<String, V>> typeReference) {
+        return create(serviceName, fileName, typeReference, WriteProfile.DEFAULT);
+    }
+
+    /**
+     * Create an account-aware storage backend for the given service with a write profile.
+     * The profile only matters under {@code persistent} mode: an {@link WriteProfile#APPEND_HEAVY}
+     * store is journaled to {@code <file>.wal} and its JSON file becomes the snapshot that
+     * compaction rewrites, instead of the file being rewritten on every mutation. The first
+     * {@code create()} for a path decides the profile; repeat calls reuse that backend.
+     *
+     * @param serviceName   the service name (ssm, sqs, s3, …)
+     * @param fileName      the JSON file name for persistent storage
+     * @param typeReference Jackson type reference for deserialization
+     * @param profile       how the store is written
+     */
+    public synchronized <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
+                                                 TypeReference<Map<String, V>> typeReference,
+                                                 WriteProfile profile) {
         String mode = resolveMode(serviceName);
         long flushInterval = resolveFlushInterval(serviceName);
         Path basePath = Path.of(config.storage().persistentPath());
@@ -83,7 +101,21 @@ public class StorageFactory {
 
         StorageBackend<String, V> inner = switch (mode) {
             case "memory" -> new InMemoryStorage<>();
-            case "persistent" -> new PersistentStorage<>(filePath, typeReference);
+            case "persistent" -> {
+                if (profile != WriteProfile.APPEND_HEAVY) {
+                    yield new PersistentStorage<>(filePath, typeReference);
+                }
+                // The store file doubles as the WAL snapshot: a file written by the plain
+                // persistent backend is the first snapshot, and after a clean shutdown the file
+                // is current again. Only the .wal file next to it is new.
+                Path walFilePath = basePath.resolve(fileName.replace(".json", ".wal"));
+                WalStorage<String, V> wal = new WalStorage<>(filePath, walFilePath, typeReference,
+                        config.storage().wal().compactionIntervalMs());
+                walBackends.add(wal);
+                LOG.infov("Journaling {0} for service {1} to {2}; the store file is rewritten on the WAL compaction interval",
+                        filePath, serviceName, walFilePath);
+                yield wal;
+            }
             case "hybrid" -> {
                 var hybrid = new HybridStorage<>(filePath, typeReference, flushInterval);
                 hybridBackends.add(hybrid);
