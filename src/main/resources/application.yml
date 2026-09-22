@@ -402,7 +402,7 @@ floci:
       proxy-base-port: 7001
       proxy-max-port: 7099
       # endpoint-host: localhost                 # Hostname clients use; enables published-port translation in Docker
-      # iam-token-endpoint-binding: false        # FLOCI_SERVICES_RDS_IAM_TOKEN_ENDPOINT_BINDING; PostgreSQL IAM tokens must name the published endpoint, as on RDS
+      # iam-token-endpoint-binding: true         # FLOCI_SERVICES_RDS_IAM_TOKEN_ENDPOINT_BINDING; false accepts PostgreSQL IAM tokens generated for another hostname or port
       # Omit image overrides to adapt Floci's built-in images to EngineVersion.
       # Uncomment an override to pin that engine to an exact image.
       # default-postgres-image: "registry.example.com/postgres:16-alpine"

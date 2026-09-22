@@ -11,9 +11,9 @@ package io.github.hectorvent.floci.services.rds.proxy;
  *                   {@code prx-} id of an RDS Proxy
  * @param tokensBoundToEndpoint whether a token has to name this endpoint (see
  *                              {@link #acceptsHost}), its port and its region to be accepted.
- *                              MySQL endpoints always require that; PostgreSQL endpoints only
- *                              when {@code services.rds.iam-token-endpoint-binding} is on, so
- *                              tokens generated for another name keep working until it is.
+ *                              MySQL endpoints always require that; PostgreSQL endpoints unless
+ *                              {@code services.rds.iam-token-endpoint-binding} is turned off for
+ *                              tokens generated for a name the endpoint does not publish.
  */
 public record RdsProxyBinding(String advertisedHost, int publishedPort, String region,
                               String accountId, String resourceId, boolean tokensBoundToEndpoint) {

@@ -144,6 +144,7 @@ class RdsServiceTest {
         when(servicesConfig.rds()).thenReturn(rdsConfig);
         when(rdsConfig.proxyBasePort()).thenReturn(7000);
         when(rdsConfig.proxyMaxPort()).thenReturn(7099);
+        when(rdsConfig.iamTokenEndpointBinding()).thenReturn(true);
         when(rdsConfig.defaultPostgresImage()).thenReturn(Optional.empty());
         when(rdsConfig.defaultMysqlImage()).thenReturn(Optional.empty());
         when(rdsConfig.defaultMariadbImage()).thenReturn(Optional.empty());
@@ -240,13 +241,13 @@ class RdsServiceTest {
         verify(proxyManager).startProxy(any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
                 any(), any(), any(), any(), any(), binding.capture());
         assertEquals(new RdsProxyBinding(instance.getEndpoint().address(), instance.getProxyPort(),
-                        "us-east-1", "123456789012", instance.getDbiResourceId(), false),
+                        "us-east-1", "123456789012", instance.getDbiResourceId(), true),
                 binding.getValue());
     }
 
     @Test
-    void createDbInstanceBindsPostgresIamTokensToTheEndpointOnlyWhenConfigured() {
-        when(rdsConfig.iamTokenEndpointBinding()).thenReturn(true);
+    void createDbInstanceLeavesPostgresIamTokensUnboundWhenTheBindingIsTurnedOff() {
+        when(rdsConfig.iamTokenEndpointBinding()).thenReturn(false);
 
         rdsService.createDbInstance("mypostgres", "postgres", "13",
                 "admin", "secret123", null, "db.t3.micro",
@@ -255,11 +256,13 @@ class RdsServiceTest {
         ArgumentCaptor<RdsProxyBinding> binding = ArgumentCaptor.forClass(RdsProxyBinding.class);
         verify(proxyManager).startProxy(any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
                 any(), any(), any(), any(), any(), binding.capture());
-        assertTrue(binding.getValue().tokensBoundToEndpoint());
+        assertFalse(binding.getValue().tokensBoundToEndpoint());
     }
 
     @Test
     void createDbInstanceAlwaysBindsMysqlIamTokensToTheEndpoint() {
+        when(rdsConfig.iamTokenEndpointBinding()).thenReturn(false);
+
         rdsService.createDbInstance("mymysql", "mysql", "8.0",
                 "admin", "secret123", null, "db.t3.micro",
                 20, false, null, null, null, null, false);

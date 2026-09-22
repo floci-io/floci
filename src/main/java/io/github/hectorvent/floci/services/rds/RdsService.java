@@ -3017,8 +3017,8 @@ public class RdsService implements Resettable, ResourceProvider {
     /**
      * The binding the proxy validates IAM auth tokens against. As on RDS a token is good for the
      * endpoint it was generated for (hostname, port and region); MySQL and MariaDB proxies always
-     * require that, PostgreSQL proxies only when {@code services.rds.iam-token-endpoint-binding}
-     * is on, so PostgreSQL tokens generated for another name keep working until it is turned on.
+     * require that, PostgreSQL proxies unless {@code services.rds.iam-token-endpoint-binding} is
+     * turned off for clients that generate tokens for a name the endpoint does not publish.
      */
     private RdsProxyBinding proxyBinding(DatabaseEngine engine, String advertisedHost, int publishedPort,
                                          String region, String accountId, String resourceId) {

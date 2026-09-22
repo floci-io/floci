@@ -1513,10 +1513,11 @@ public interface EmulatorConfig {
         Optional<String> endpointHost();
 
         /** Whether a PostgreSQL IAM auth token must have been generated for the endpoint the
-         *  instance publishes (hostname, port and region), as on RDS. Off by default so tokens
-         *  generated for another name keep working; MySQL and MariaDB always require it.
+         *  instance publishes (hostname, port and region), as on RDS. On by default; turn it off
+         *  when clients generate tokens for a container name or DNS alias the endpoint does not
+         *  publish. MySQL and MariaDB always require it.
          *  Env: FLOCI_SERVICES_RDS_IAM_TOKEN_ENDPOINT_BINDING */
-        @WithDefault("false")
+        @WithDefault("true")
         boolean iamTokenEndpointBinding();
 
         /** Docker network to attach DB containers to. Empty = default bridge. */

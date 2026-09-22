@@ -30,8 +30,9 @@ class RdsSigV4ValidatorTest {
     }
 
     /**
-     * What a PostgreSQL proxy publishes while {@code services.rds.iam-token-endpoint-binding} is
-     * off: the token's signature and DBUser are checked, the endpoint it was generated for is not.
+     * What a PostgreSQL proxy publishes when {@code services.rds.iam-token-endpoint-binding} is
+     * turned off: the token's signature and DBUser are checked, the endpoint it was generated for
+     * is not.
      */
     private static RdsProxyBinding unboundBinding() {
         return new RdsProxyBinding("db.example.local", 5432, "us-east-1", "123456789012", "db-ABCDEFGHIJKL01234", false);
@@ -370,8 +371,8 @@ class RdsSigV4ValidatorTest {
     }
 
     /**
-     * PostgreSQL endpoints publish their binding with the endpoint check off unless
-     * {@code services.rds.iam-token-endpoint-binding} is turned on: a well-signed token for any
+     * PostgreSQL endpoints publish their binding with the endpoint check off when
+     * {@code services.rds.iam-token-endpoint-binding} is turned off: a well-signed token for any
      * host, port and region is accepted, as it was before the check existed.
      */
     @Test
