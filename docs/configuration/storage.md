@@ -25,8 +25,8 @@ Floci supports four storage backends. You can set a global default and override 
 ### Journaled stores under `persistent` mode
 
 Most stores under `persistent` mode are rewritten in full on every change, which keeps the file
-current after every call but makes the cost of one write grow with the size of the store. Stores
-that only ever grow are journaled instead: a change is appended to a `.wal` file next to the
+current after every call but makes the cost of one write grow with the size of the store.
+Append-heavy stores are journaled instead: a change is appended to a `.wal` file next to the
 store, and the store's JSON file is rewritten from memory on the `FLOCI_STORAGE_WAL_COMPACTION_INTERVAL_MS`
 cadence and at shutdown, and only when something changed. Today this applies to CloudWatch Logs
 events (`cwlogs-events.json` with `cwlogs-events.wal`). After a clean shutdown the JSON file holds

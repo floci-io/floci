@@ -246,7 +246,7 @@ given rather than by omitting it, which is what its SDK paginators expect.
 ### Storage
 
 Log groups, streams, filters and resource policies follow the configured storage mode as every
-other service does. The event store is the one CloudWatch Logs store that only ever grows, so
+other service does. The event store is the one CloudWatch Logs store under steady append load, so
 under `persistent` mode it is journaled instead of rewritten on every `PutLogEvents` call: a
 batch is appended to `cwlogs-events.wal`, and `cwlogs-events.json` is rewritten from memory on
 the `FLOCI_STORAGE_WAL_COMPACTION_INTERVAL_MS` cadence and at shutdown. The store keeps at most
