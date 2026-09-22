@@ -98,14 +98,17 @@ aws ssm send-command --endpoint-url $AWS_ENDPOINT_URL \
 
 ## Public AMI Parameters
 
-AWS publishes AMI id lookup parameters under `/aws/service/ami-amazon-linux-latest/` in every
-account, and Terraform modules read them without any setup. Floci answers the documented Amazon
-Linux 2 and Amazon Linux 2023 names from its EC2 image catalog, so `GetParameter`, `GetParameters`
-and `GetParametersByPath` resolve them to the catalog's AMI ids. As on AWS they are read-only and
-belong to no account, so they do not appear in `DescribeParameters`.
+AWS publishes AMI id lookup parameters under `/aws/service/ami-amazon-linux-latest/` and EKS
+optimized node AMI lookup parameters under `/aws/service/eks/optimized-ami/` in every account,
+and tools such as Terraform, Karpenter and eksctl read them without any setup. Floci answers the
+documented Amazon Linux 2 and Amazon Linux 2023 names from its EC2 image catalog across supported
+architectures and Kubernetes versions, so `GetParameter`, `GetParameters` and `GetParametersByPath`
+resolve them to the catalog's AMI ids. As on AWS they are read-only and belong to no account,
+so they do not appear in `DescribeParameters`.
 
 ```bash
 aws ssm get-parameter --name /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+aws ssm get-parameter --name /aws/service/eks/optimized-ami/1.31/amazon-linux-2023/x86_64/standard/recommended/image_id
 ```
 
 ## Parameter Types

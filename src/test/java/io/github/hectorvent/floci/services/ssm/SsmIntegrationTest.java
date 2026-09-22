@@ -1338,6 +1338,24 @@ class SsmIntegrationTest {
             .body("Parameters.Name", contains(al2023))
             .body("InvalidParameters", contains("/aws/service/ami-amazon-linux-latest/no-such-variant"));
 
+        String eksOptimizedAmi = "/aws/service/eks/optimized-ami/1.31/amazon-linux-2023/x86_64/standard/recommended/image_id";
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.GetParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "Name": "%s" }
+                """.formatted(eksOptimizedAmi))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Parameter.Name", equalTo(eksOptimizedAmi))
+            .body("Parameter.Value", equalTo("ami-0abcdef1234567891"))
+            .body("Parameter.Type", equalTo("String"))
+            .body("Parameter.Version", equalTo(1))
+            .body("Parameter.ARN", equalTo("arn:aws:ssm:us-east-1::parameter" + eksOptimizedAmi));
+
         given()
             .header("X-Amz-Target", "AmazonSSM.GetParametersByPath")
             .contentType(SSM_CONTENT_TYPE)

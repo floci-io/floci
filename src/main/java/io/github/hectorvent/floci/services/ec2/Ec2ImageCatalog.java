@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.ec2.model.Image;
+import io.github.hectorvent.floci.services.eks.EksClusterManager;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -25,6 +26,8 @@ public class Ec2ImageCatalog {
 
     private static final String CATALOG_RESOURCE_NAME = "ec2/image-catalog.yaml";
     private static final ObjectMapper YAML_MAPPER = new ObjectMapper(new YAMLFactory());
+    private static final String K8S_VERSION_PLACEHOLDER = "{k8s-version}";
+    private static final String EKS_AL2_MAX_K8S_VERSION = "1.32";
 
     private final Path catalogPath;
     private volatile Loaded loaded;
@@ -221,9 +224,51 @@ public class Ec2ImageCatalog {
         /**
          * The public SSM parameter names AWS publishes this image under. AWS seeds them in every
          * account with no setup, so SSM answers a read of one of these names from the catalog.
+         * Parameter templates containing {@code {k8s-version}} are expanded for each supported
+         * Kubernetes version in {@link EksClusterManager#SUPPORTED_K8S_VERSIONS}. AL2 is capped
+         * at Kubernetes 1.32, matching AWS's deprecation cutoff.
          */
         public List<String> publicParameterNames() {
-            return publicParameterNames == null ? List.of() : List.copyOf(publicParameterNames);
+            return expandPublicParameterNames(publicParameterNames);
+        }
+
+        private static List<String> expandPublicParameterNames(List<String> templates) {
+            if (templates == null || templates.isEmpty()) {
+                return List.of();
+            }
+            List<String> expanded = new ArrayList<>();
+            for (String template : templates) {
+                if (template != null && template.contains(K8S_VERSION_PLACEHOLDER)) {
+                    for (String version : EksClusterManager.SUPPORTED_K8S_VERSIONS.keySet().stream().sorted().toList()) {
+                        if (isSupportedK8sVersionForTemplate(template, version)) {
+                            expanded.add(template.replace(K8S_VERSION_PLACEHOLDER, version));
+                        }
+                    }
+                } else if (template != null) {
+                    expanded.add(template);
+                }
+            }
+            return Collections.unmodifiableList(expanded);
+        }
+
+        private static boolean isSupportedK8sVersionForTemplate(String template, String version) {
+            if (template.contains("/amazon-linux-2/")) {
+                return compareK8sVersions(version, EKS_AL2_MAX_K8S_VERSION) <= 0;
+            }
+            return true;
+        }
+
+        private static int compareK8sVersions(String v1, String v2) {
+            String[] parts1 = v1.split("\\.");
+            String[] parts2 = v2.split("\\.");
+            int major1 = Integer.parseInt(parts1[0]);
+            int major2 = Integer.parseInt(parts2[0]);
+            if (major1 != major2) {
+                return Integer.compare(major1, major2);
+            }
+            int minor1 = parts1.length > 1 ? Integer.parseInt(parts1[1]) : 0;
+            int minor2 = parts2.length > 1 ? Integer.parseInt(parts2[1]) : 0;
+            return Integer.compare(minor1, minor2);
         }
 
         public List<String> idsAndAliases() {

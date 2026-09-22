@@ -8,6 +8,7 @@ images:
       - /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
       - /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-ebs
       - /aws/service/ami-amazon-linux-latest/amzn2-ami-kernel-5.10-hvm-x86_64-gp2
+      - /aws/service/eks/optimized-ami/{k8s-version}/amazon-linux-2/recommended/image_id
     dockerImage: public.ecr.aws/amazonlinux/amazonlinux:2
     name: amzn2-ami-hvm-2.0.20230404.0-x86_64-gp2
     description: Amazon Linux 2 AMI
@@ -23,6 +24,7 @@ images:
       - /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
       - /aws/service/ami-amazon-linux-latest/al2023-ami-minimal-kernel-default-x86_64
       - /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+      - /aws/service/eks/optimized-ami/{k8s-version}/amazon-linux-2023/x86_64/standard/recommended/image_id
     dockerImage: public.ecr.aws/amazonlinux/amazonlinux:2023
     name: al2023-ami-2023.0.20230315.0-kernel-6.1-x86_64
     description: Amazon Linux 2023 AMI
@@ -36,6 +38,7 @@ images:
       - /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
       - /aws/service/ami-amazon-linux-latest/al2023-ami-minimal-kernel-default-arm64
       - /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-arm64
+      - /aws/service/eks/optimized-ami/{k8s-version}/amazon-linux-2023/arm64/standard/recommended/image_id
     dockerImage: public.ecr.aws/amazonlinux/amazonlinux:2023
     name: al2023-ami-2023.0.20230315.0-kernel-6.1-arm64
     description: Amazon Linux 2023 AMI

@@ -59,7 +59,16 @@ class Ec2ImageCatalogTest {
         assertEquals(List.of(
                 "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64",
                 "/aws/service/ami-amazon-linux-latest/al2023-ami-minimal-kernel-default-x86_64",
-                "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64"),
+                "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64",
+                "/aws/service/eks/optimized-ami/1.28/amazon-linux-2023/x86_64/standard/recommended/image_id",
+                "/aws/service/eks/optimized-ami/1.29/amazon-linux-2023/x86_64/standard/recommended/image_id",
+                "/aws/service/eks/optimized-ami/1.30/amazon-linux-2023/x86_64/standard/recommended/image_id",
+                "/aws/service/eks/optimized-ami/1.31/amazon-linux-2023/x86_64/standard/recommended/image_id",
+                "/aws/service/eks/optimized-ami/1.32/amazon-linux-2023/x86_64/standard/recommended/image_id",
+                "/aws/service/eks/optimized-ami/1.33/amazon-linux-2023/x86_64/standard/recommended/image_id",
+                "/aws/service/eks/optimized-ami/1.34/amazon-linux-2023/x86_64/standard/recommended/image_id",
+                "/aws/service/eks/optimized-ami/1.35/amazon-linux-2023/x86_64/standard/recommended/image_id",
+                "/aws/service/eks/optimized-ami/1.36/amazon-linux-2023/x86_64/standard/recommended/image_id"),
                 x86.publicParameterNames());
 
         Ec2ImageCatalog.CatalogImage arm64 = imageCatalog.findByIdOrAlias("ami-amazonlinux2023-arm64").orElseThrow();
@@ -68,8 +77,33 @@ class Ec2ImageCatalogTest {
         assertEquals(List.of(
                 "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64",
                 "/aws/service/ami-amazon-linux-latest/al2023-ami-minimal-kernel-default-arm64",
-                "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-arm64"),
+                "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-arm64",
+                "/aws/service/eks/optimized-ami/1.28/amazon-linux-2023/arm64/standard/recommended/image_id",
+                "/aws/service/eks/optimized-ami/1.29/amazon-linux-2023/arm64/standard/recommended/image_id",
+                "/aws/service/eks/optimized-ami/1.30/amazon-linux-2023/arm64/standard/recommended/image_id",
+                "/aws/service/eks/optimized-ami/1.31/amazon-linux-2023/arm64/standard/recommended/image_id",
+                "/aws/service/eks/optimized-ami/1.32/amazon-linux-2023/arm64/standard/recommended/image_id",
+                "/aws/service/eks/optimized-ami/1.33/amazon-linux-2023/arm64/standard/recommended/image_id",
+                "/aws/service/eks/optimized-ami/1.34/amazon-linux-2023/arm64/standard/recommended/image_id",
+                "/aws/service/eks/optimized-ami/1.35/amazon-linux-2023/arm64/standard/recommended/image_id",
+                "/aws/service/eks/optimized-ami/1.36/amazon-linux-2023/arm64/standard/recommended/image_id"),
                 arm64.publicParameterNames());
+    }
+
+    @Test
+    void amazonLinux2EntriesCapEksOptimizedAmiAt1_32() {
+        Ec2ImageCatalog.CatalogImage amzn2 = imageCatalog.findByIdOrAlias("ami-0abcdef1234567890").orElseThrow();
+        assertEquals("x86_64", amzn2.architecture);
+        assertEquals(List.of(
+                "/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2",
+                "/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-ebs",
+                "/aws/service/ami-amazon-linux-latest/amzn2-ami-kernel-5.10-hvm-x86_64-gp2",
+                "/aws/service/eks/optimized-ami/1.28/amazon-linux-2/recommended/image_id",
+                "/aws/service/eks/optimized-ami/1.29/amazon-linux-2/recommended/image_id",
+                "/aws/service/eks/optimized-ami/1.30/amazon-linux-2/recommended/image_id",
+                "/aws/service/eks/optimized-ami/1.31/amazon-linux-2/recommended/image_id",
+                "/aws/service/eks/optimized-ami/1.32/amazon-linux-2/recommended/image_id"),
+                amzn2.publicParameterNames());
     }
 
     @Test
