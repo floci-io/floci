@@ -18,6 +18,7 @@ import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
+import java.security.SecureRandom;
 import java.security.interfaces.RSAPublicKey;
 import java.time.Duration;
 import java.time.Instant;
@@ -39,6 +40,9 @@ public class EksPodIdentityCredentialsController {
     private static final String SERVICE_ACCOUNT_PREFIX = "system:serviceaccount:";
     private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     private static final String ALPHANUMERIC = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+
+    /** CSPRNG for session secret keys and session tokens; ordinary IDs keep using {@link ThreadLocalRandom}. */
+    private final SecureRandom secureRandom = new SecureRandom();
 
     private final EksService eksService;
     private final EksOidcService oidcService;
@@ -161,7 +165,7 @@ public class EksPodIdentityCredentialsController {
     private String randomSecret(int length) {
         StringBuilder sb = new StringBuilder(length);
         for (int i = 0; i < length; i++) {
-            sb.append(CHARS.charAt(ThreadLocalRandom.current().nextInt(CHARS.length())));
+            sb.append(CHARS.charAt(secureRandom.nextInt(CHARS.length())));
         }
         return sb.toString();
     }

@@ -46,7 +46,10 @@ class EksPodIdentityDockerIntegrationTest {
         public Map<String, String> getConfigOverrides() {
             return Map.of(
                     "floci.services.eks.pod-identity-webhook", "true",
-                    "quarkus.http.test-port", "4595",
+                    "floci.tls.enabled", "true",
+                    "floci.tls.aws-https-port", "0",
+                    "quarkus.http.test-port", "4510",
+                    "quarkus.http.test-ssl-port", "4511",
                     "floci.port", "4595",
                     "floci.base-url", "http://localhost:4595");
         }

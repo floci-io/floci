@@ -815,6 +815,8 @@ class EksClusterManagerTest {
             assertTrue(capturedCmds.get(2)[2].contains("FLOCI-LINK-LOCAL"));
             assertTrue(capturedCmds.get(2)[2].contains("10.42.0.0/16"));
             assertTrue(capturedCmds.get(2)[2].contains("169.254.169.254"));
+            assertFalse(capturedCmds.get(2)[2].contains("169.254.170.23"),
+                    "IMDS pod routing must not route Pod Identity traffic");
 
             assertNotNull(manager.getRegisteredClusterNodeInstance(cluster));
         }
@@ -885,6 +887,7 @@ class EksClusterManagerTest {
 
         private EmulatorConfig config;
         private EmulatorConfig.EksServiceConfig eks;
+        private EmulatorConfig.TlsConfig tls;
         private ContainerLifecycleManager lifecycleManager;
         private DockerClient dockerClient;
         private DockerHostResolver dockerHostResolver;
@@ -896,9 +899,12 @@ class EksClusterManagerTest {
             config = Mockito.mock(EmulatorConfig.class);
             EmulatorConfig.ServicesConfig services = Mockito.mock(EmulatorConfig.ServicesConfig.class);
             eks = Mockito.mock(EmulatorConfig.EksServiceConfig.class);
+            tls = Mockito.mock(EmulatorConfig.TlsConfig.class);
             when(config.services()).thenReturn(services);
             when(services.eks()).thenReturn(eks);
             when(eks.podIdentityWebhook()).thenReturn(true);
+            when(config.tls()).thenReturn(tls);
+            when(tls.enabled()).thenReturn(true);
             when(config.port()).thenReturn(4566);
 
             lifecycleManager = Mockito.mock(ContainerLifecycleManager.class);
@@ -959,11 +965,25 @@ class EksClusterManagerTest {
             assertTrue(capturedCmds.get(1)[2].contains("floci-pod-identity-proxy.pid"));
             assertTrue(capturedCmds.get(2)[2].contains("FLOCI-LINK-LOCAL"));
             assertTrue(capturedCmds.get(2)[2].contains("169.254.170.23"));
+            assertFalse(capturedCmds.get(2)[2].contains("169.254.169.254"),
+                    "Pod identity relay must not route IMDS traffic");
         }
 
         @Test
         void skipsRelayWhenPodIdentityDisabled() {
             when(eks.podIdentityWebhook()).thenReturn(false);
+
+            Cluster cluster = new Cluster();
+            cluster.setName("test-cluster");
+
+            manager.configurePodIdentityRelay(cluster, "cid-1");
+
+            assertTrue(capturedCmds.isEmpty());
+        }
+
+        @Test
+        void skipsRelayWhenTlsDisabled() {
+            when(tls.enabled()).thenReturn(false);
 
             Cluster cluster = new Cluster();
             cluster.setName("test-cluster");
@@ -1575,6 +1595,7 @@ class EksClusterManagerTest {
             assertTrue(manifest.contains("caBundle: \""
                     + Base64.getEncoder().encodeToString(CA_PEM.getBytes(StandardCharsets.UTF_8)) + "\""));
             assertTrue(manifest.contains("failurePolicy: Ignore"));
+            assertTrue(manifest.contains("timeoutSeconds: 3"));
             assertTrue(manifest.contains("operations: [\"CREATE\"]"));
             assertTrue(manifest.contains("resources: [\"pods\"]"));
             assertFalse(manifest.contains("url: \"http://"), "Kubernetes rejects a non-https webhook URL");
