@@ -127,7 +127,7 @@ public class RdsSigV4Validator {
                             + "assumed by the caller ''{1}'' is not authorized to perform rds-db:connect on {2}",
                     sanitizeForLog(dbUser),
                     iamService.resolveCallerArn(accessKeyId).orElse(sanitizeForLog(accessKeyId)),
-                    resource);
+                    sanitizeForLog(resource));
             return false;
         }
         return true;

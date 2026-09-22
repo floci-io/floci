@@ -8,7 +8,13 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.lang.reflect.Method;
+import java.text.MessageFormat;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.logging.Handler;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -605,6 +611,69 @@ class RdsSigV4ValidatorTest {
 
         assertTrue(validator.validate(token, "admin", unboundBinding()),
                 "The well-known \"test\"/\"test\" local-dev credential pair must still validate");
+    }
+
+    /**
+     * The database user comes straight from the client's startup message and ends up in the
+     * {@code rds-db} resource the refusal names, so one carrying line breaks must not be able
+     * to forge extra log lines through that warning.
+     */
+    @Test
+    void refusedConnectWarningStripsControlCharactersFromTheDbUser() throws Exception {
+        IamService iamService = IamServiceTestHelper.iamServiceWithUserPolicy(
+                "AKIDRDS", "secret-rds", "jane", S3_ONLY_POLICY);
+        RdsSigV4Validator validator = new RdsSigV4Validator(iamService, () -> true);
+        String dbUser = "jane\r\nINJECTED";
+        String token = SigV4TokenTestHelper.createRdsToken(
+                "db.example.local", 3307, dbUser, "AKIDRDS", "secret-rds",
+                Instant.now().minusSeconds(60), 900);
+
+        List<LogRecord> records = captureLogs(
+                () -> assertFalse(validator.validate(token, dbUser, exampleBinding())));
+
+        List<String> refusals = records.stream()
+                .map(RdsSigV4ValidatorTest::render)
+                .filter(message -> message.contains("rds-db:connect"))
+                .toList();
+        assertEquals(1, refusals.size(), "expected one refusal warning, got: " + records);
+        assertTrue(refusals.get(0).contains("INJECTED"));
+        assertFalse(refusals.get(0).contains("\r") || refusals.get(0).contains("\n"),
+                "control characters must be stripped from the warning: " + refusals.get(0));
+    }
+
+    private static String render(LogRecord record) {
+        return record.getParameters() == null
+                ? record.getMessage()
+                : MessageFormat.format(record.getMessage(), record.getParameters());
+    }
+
+    private static List<LogRecord> captureLogs(Runnable action) {
+        java.util.logging.Logger julLogger =
+                java.util.logging.Logger.getLogger(RdsSigV4Validator.class.getName());
+        julLogger.setLevel(Level.ALL);
+        List<LogRecord> records = new ArrayList<>();
+        Handler handler = new Handler() {
+            @Override
+            public void publish(LogRecord record) {
+                records.add(record);
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        handler.setLevel(Level.ALL);
+        julLogger.addHandler(handler);
+        try {
+            action.run();
+        } finally {
+            julLogger.removeHandler(handler);
+        }
+        return records;
     }
 
     @Test
