@@ -230,6 +230,36 @@ Floci's Redshift auth proxy inspects frontend queries on the PostgreSQL wire pro
 - The rewrite only runs when the statement's first keyword is `CREATE TABLE` or `ALTER TABLE`. A `SELECT`, `INSERT`, function body, or string literal that merely contains one of these keywords is forwarded byte-for-byte. Single-quoted and dollar-quoted string literals are masked before the rewrite, so a keyword inside a quoted value (including in a later statement of a multi-statement query) is preserved.
 - Columns legitimately named `distkey`, `sortkey`, or `encode` survive.
 
+### Redshift Spectrum Phase 1
+
+The PostgreSQL wire proxy supports a bounded Spectrum subset for CSV data in S3. The supported
+statements are:
+
+```sql
+CREATE EXTERNAL SCHEMA <schema>
+  FROM DATA CATALOG DATABASE '<database>' IAM_ROLE '<role>';
+
+CREATE EXTERNAL TABLE <schema>.<table> (<name> <type>, ...)
+  STORED AS TEXTFILE LOCATION 's3://<bucket>/<prefix>/'
+  TBLPROPERTIES ('skip.header.line.count'='<n>');
+```
+
+Supported column types are `VARCHAR`, `CHAR`, `INTEGER`, `BIGINT`, `DECIMAL`, `BOOLEAN`, `DATE`,
+and `TIMESTAMP`. CSV reads support `DELIMITER`, `QUOTE`, `ESCAPE`, `NULL AS`, and
+`skip.header.line.count`. Objects under the location are read in lexicographic key order.
+
+The query path supports `SELECT *`, explicit column projections, and simple `WHERE` predicates
+over one external table. Queries with joins, grouping, ordering, subqueries, parameters, or
+multiple statements are outside Phase 1 and are forwarded to PostgreSQL, which returns its own
+error. Rows are materialized into a connection-local temporary table before the rewritten query
+is sent to PostgreSQL. The temporary table is not visible to another connection.
+
+`IAM_ROLE` is parsed and retained in the external schema metadata. Phase 1 does not yet assume
+the role or evaluate its IAM policy for Spectrum reads. S3 authorization therefore follows the
+current S3 emulator authorization mode, and role-specific Spectrum access enforcement is a
+future phase. Parquet, JSON, Avro, ORC, partition discovery, `ALTER`, and `DROP` lifecycle
+operations are not supported in Phase 1.
+
 ### COPY from S3
 
 `COPY <table> [(<columns>)] FROM 's3://<bucket>/<keyOrPrefix>' [options]` sent over the Simple
