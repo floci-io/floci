@@ -25,6 +25,8 @@ public class SessionCredential {
     private boolean lambdaExecutionRole;
     private String ec2InstanceId;
     private String ec2RoleId;
+    /** Exact ECS task ARN this session was minted for, when this is a task-role session. */
+    private String ecsTaskArn;
 
     public SessionCredential() {}
 
@@ -98,6 +100,9 @@ public class SessionCredential {
 
     public String getEc2InstanceId() { return ec2InstanceId; }
     public void setEc2InstanceId(String ec2InstanceId) { this.ec2InstanceId = ec2InstanceId; }
+
+    public String getEcsTaskArn() { return ecsTaskArn; }
+    public void setEcsTaskArn(String ecsTaskArn) { this.ecsTaskArn = ecsTaskArn; }
 
     public boolean isLambdaExecutionRole() { return lambdaExecutionRole; }
     public void setLambdaExecutionRole(boolean lambdaExecutionRole) { this.lambdaExecutionRole = lambdaExecutionRole; }

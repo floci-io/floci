@@ -2207,6 +2207,33 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return removed;
     }
 
+    /** Registers an ECS task-role session, outside request scope. */
+    public void registerEcsTaskRoleSession(SessionCredential session) {
+        if (session.getOriginAccountId() == null || session.getOriginAccountId().isBlank()
+                || session.getEcsTaskArn() == null || session.getEcsTaskArn().isBlank()) {
+            throw new IllegalArgumentException("ECS task session account and task ARN must not be blank");
+        }
+        if (sessions instanceof AccountAwareStorageBackend<SessionCredential> aware) {
+            aware.putForAccount(session.getOriginAccountId(), session.getAccessKeyId(), session);
+        } else {
+            sessions.put(session.getAccessKeyId(), session);
+        }
+    }
+
+    /** No ECS task survives a Floci restart; discard credentials from the previous process. */
+    public int sweepOrphanedEcsTaskRoleSessions() {
+        List<SessionCredential> stored = sessions instanceof AccountAwareStorageBackend<SessionCredential> aware
+                ? aware.scanAllAccounts() : sessions.scan(key -> true);
+        int removed = 0;
+        for (SessionCredential session : stored) {
+            if (session.getEcsTaskArn() != null) {
+                deleteSession(session.getAccessKeyId(), session);
+                removed++;
+            }
+        }
+        return removed;
+    }
+
     /** Removes a session from an explicit account namespace. */
     public void unregisterSession(String accountId, String sessionAccessKeyId) {
         if (sessionAccessKeyId == null || sessionAccessKeyId.isBlank()) {
