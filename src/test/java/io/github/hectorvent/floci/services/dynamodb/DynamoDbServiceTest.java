@@ -30,11 +30,18 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.zip.GZIPOutputStream;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -3738,6 +3745,70 @@ class DynamoDbServiceTest {
 
         JsonNode stored = service.getItem("Users", item("userId", "u1"), "us-east-1");
         assertEquals("2", stored.get("counter").get("N").asText());
+    }
+
+    @Test
+    void transactWriteItemsReplayDuringTheFirstCallWaitsForItsCapacity() throws Exception {
+        @SuppressWarnings("unchecked")
+        StorageBackend<String, Map<String, JsonNode>> itemStore = mock(StorageBackend.class);
+        DynamoDbService svc = new DynamoDbService(
+                new InMemoryStorage<>(), itemStore, new RegionResolver("us-east-1", "000000000000"));
+        svc.createTable("Users",
+                List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")),
+                5L, 5L, "us-east-1");
+        CountDownLatch committing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            committing.countDown();
+            release.await();
+            return null;
+        }).when(itemStore).put(any(), any());
+        JsonNode put = mapper.readTree("""
+                {"Put":{"TableName":"Users","Item":{"userId":{"S":"u1"}}}}
+                """);
+        JsonNode rawRequest = mapper.readTree("""
+                {"ClientRequestToken":"tok-wait","TransactItems":[{"Put":{"TableName":"Users","Item":{"userId":{"S":"u1"}}}}]}
+                """);
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<DynamoDbService.TransactWriteResult> first = executor.submit(() ->
+                    svc.transactWriteItems(List.of(put), "us-east-1", "tok-wait", rawRequest));
+            assertTrue(committing.await(5, TimeUnit.SECONDS));
+            Future<DynamoDbService.TransactWriteResult> replay = executor.submit(() ->
+                    svc.transactWriteItems(List.of(put), "us-east-1", "tok-wait", rawRequest));
+            assertThrows(TimeoutException.class, () -> replay.get(200, TimeUnit.MILLISECONDS));
+            release.countDown();
+
+            assertFalse(first.get(5, TimeUnit.SECONDS).replayed());
+            DynamoDbService.TransactWriteResult replayed = replay.get(5, TimeUnit.SECONDS);
+            assertTrue(replayed.replayed());
+            assertEquals(2.0, replayed.capacity().get("Users").table());
+        } finally {
+            release.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void transactWriteItemsCancelledCallDoesNotKeepItsToken() throws Exception {
+        createUsersTable("us-east-1");
+        JsonNode put = mapper.readTree("""
+                {"Put":{"TableName":"Users","Item":{"userId":{"S":"u1"}},"ConditionExpression":"attribute_exists(userId)"}}
+                """);
+        ObjectNode rawRequest = mapper.createObjectNode();
+        rawRequest.putArray("TransactItems").add(put);
+        rawRequest.put("ClientRequestToken", "tok-cancel");
+
+        assertThrows(TransactionCanceledException.class, () ->
+                service.transactWriteItems(List.of(put), "us-east-1", "tok-cancel", rawRequest));
+        assertThrows(TransactionCanceledException.class, () ->
+                service.transactWriteItems(List.of(put), "us-east-1", "tok-cancel", rawRequest));
+
+        service.putItem("Users", item("userId", "u1"), "us-east-1");
+        assertFalse(service.transactWriteItems(List.of(put), "us-east-1", "tok-cancel", rawRequest).replayed());
+        assertTrue(service.transactWriteItems(List.of(put), "us-east-1", "tok-cancel", rawRequest).replayed());
     }
 
     @Test

@@ -57,6 +57,8 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.locks.ReentrantLock;
@@ -113,7 +115,7 @@ public class DynamoDbService implements ResourceProvider {
     private static final int MAX_MULTI_ATTRIBUTE_KEY_PART_SIZE = 4;
 
     private record IdempotencyEntry(String requestHash, long insertedAtNanos,
-                                    Map<String, DynamoDbWriteCapacity.Cost> replayCapacity) {}
+                                    CompletableFuture<Map<String, DynamoDbWriteCapacity.Cost>> replayCapacity) {}
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
     private DynamoDbStreamService streamService;
@@ -1408,50 +1410,51 @@ public class DynamoDbService implements ResourceProvider {
         //   * Same token + identical request body  → no-op success (silently dedupe).
         //   * Same token + different request body  → IdempotentParameterMismatchException.
         //   * No token, or expired token           → proceed normally.
-        String idempotencyKey = null;
-        IdempotencyEntry idempotencyEntry = null;
-        if (clientRequestToken != null && !clientRequestToken.isEmpty() && rawRequest != null) {
-            String cacheKey = regionResolver.getAccountId() + "::" + region + "::" + clientRequestToken;
-            String requestHash = sha256(rawRequest.toString());
+        if (clientRequestToken == null || clientRequestToken.isEmpty() || rawRequest == null) {
+            return new TransactWriteResult(applyTransactWrite(transactItems, region).writeCapacity(), false);
+        }
+        String cacheKey = regionResolver.getAccountId() + "::" + region + "::" + clientRequestToken;
+        String requestHash = sha256(rawRequest.toString());
+        for (;;) {
             long nowNanos = System.nanoTime();
-
-            IdempotencyEntry existing = txIdempotency.get(cacheKey);
-            if (existing != null && nowNanos - existing.insertedAtNanos() <= TX_IDEMPOTENCY_TTL_NANOS) {
-                if (existing.requestHash().equals(requestHash)) {
-                    LOG.debugv("transactWriteItems: idempotent replay for token={0}", clientRequestToken);
-                    return TransactWriteResult.replayOf(existing);
-                }
-                throw new AwsException("IdempotentParameterMismatchException",
-                        "Request parameters do not match those of an in-flight or recent transaction using the same ClientRequestToken",
-                        400);
-            }
-
-            // Register the token. compute() is used so a concurrent replay with the same body
-            // collapses onto the same entry without double-applying writes.
-            IdempotencyEntry registered = txIdempotency.compute(cacheKey, (k, v) -> {
-                if (v != null && nowNanos - v.insertedAtNanos() <= TX_IDEMPOTENCY_TTL_NANOS) {
-                    return v;
-                }
-                return new IdempotencyEntry(requestHash, nowNanos, null);
-            });
+            IdempotencyEntry fresh = new IdempotencyEntry(requestHash, nowNanos, new CompletableFuture<>());
+            // compute() is used so a concurrent replay with the same body collapses onto the
+            // same entry without double-applying writes.
+            IdempotencyEntry registered = txIdempotency.compute(cacheKey, (k, v) ->
+                    v != null && nowNanos - v.insertedAtNanos() <= TX_IDEMPOTENCY_TTL_NANOS ? v : fresh);
             if (!registered.requestHash().equals(requestHash)) {
                 throw new AwsException("IdempotentParameterMismatchException",
                         "Request parameters do not match those of an in-flight or recent transaction using the same ClientRequestToken",
                         400);
             }
-            if (registered.insertedAtNanos() != nowNanos) {
-                // Lost the race to a concurrent identical request — treat as a replay.
-                LOG.debugv("transactWriteItems: concurrent identical replay for token={0}", clientRequestToken);
-                return TransactWriteResult.replayOf(registered);
+            if (registered == fresh) {
+                // Best-effort eviction of stale entries.
+                txIdempotency.entrySet().removeIf(e -> nowNanos - e.getValue().insertedAtNanos() > TX_IDEMPOTENCY_TTL_NANOS);
+                try {
+                    AppliedTransactWrite applied = applyTransactWrite(transactItems, region);
+                    fresh.replayCapacity().complete(applied.replayCapacity());
+                    return new TransactWriteResult(applied.writeCapacity(), false);
+                } catch (RuntimeException e) {
+                    // AWS keeps no token for a call that fails, so a retry runs the transaction again.
+                    txIdempotency.remove(cacheKey, fresh);
+                    fresh.replayCapacity().completeExceptionally(e);
+                    throw e;
+                }
             }
-
-            // Best-effort eviction of stale entries.
-            txIdempotency.entrySet().removeIf(e -> nowNanos - e.getValue().insertedAtNanos() > TX_IDEMPOTENCY_TTL_NANOS);
-            idempotencyKey = cacheKey;
-            idempotencyEntry = registered;
+            // A replay that arrives while the first call is still running waits for its result.
+            LOG.debugv("transactWriteItems: idempotent replay for token={0}", clientRequestToken);
+            try {
+                return new TransactWriteResult(registered.replayCapacity().join(), true);
+            } catch (CompletionException e) {
+                LOG.debugv("transactWriteItems: first call for token={0} failed, running it again", clientRequestToken);
+            }
         }
+    }
 
+    private record AppliedTransactWrite(Map<String, DynamoDbWriteCapacity.Cost> writeCapacity,
+                                        Map<String, DynamoDbWriteCapacity.Cost> replayCapacity) {}
 
+    private AppliedTransactWrite applyTransactWrite(List<JsonNode> transactItems, String region) {
         // Acquire every participant's item lock in a deterministic (storageKey, itemKey)
         // order before evaluating conditions or applying writes. Total-ordered acquisition
         // prevents deadlock across concurrent transactions; ReentrantLock lets the inner
@@ -1576,11 +1579,7 @@ public class DynamoDbService implements ResourceProvider {
             for (Runnable streamEvent : pendingStreamEvents) {
                 streamEvent.run();
             }
-            if (idempotencyKey != null) {
-                txIdempotency.replace(idempotencyKey, idempotencyEntry, new IdempotencyEntry(
-                        idempotencyEntry.requestHash(), idempotencyEntry.insertedAtNanos(), replayCapacity));
-            }
-            return new TransactWriteResult(writeCapacity, false);
+            return new AppliedTransactWrite(writeCapacity, replayCapacity);
         } finally {
             for (int i = acquired.size() - 1; i >= 0; i--) {
                 acquired.get(i).unlock();
@@ -3879,12 +3878,7 @@ public class DynamoDbService implements ResourceProvider {
     // One path the update expression acted on, with the value there before and after.
     public record TouchedPath(List<Object> tokens, JsonNode oldValue, JsonNode newValue) {}
 
-    public record TransactWriteResult(Map<String, DynamoDbWriteCapacity.Cost> capacity, boolean replayed) {
-
-        private static TransactWriteResult replayOf(IdempotencyEntry entry) {
-            return new TransactWriteResult(entry.replayCapacity() != null ? entry.replayCapacity() : Map.of(), true);
-        }
-    }
+    public record TransactWriteResult(Map<String, DynamoDbWriteCapacity.Cost> capacity, boolean replayed) {}
 
     public record TransactGetResult(List<JsonNode> items, Map<String, DynamoDbWriteCapacity.Cost> capacity) {}
 
