@@ -1655,9 +1655,10 @@ public interface EmulatorConfig {
         int maxEventsPerQuery();
 
         /**
-         * Upper bound on log events kept across all groups. The store is one JSON document rewritten
-         * in full on every flush, so an unbounded store turns a chatty or retrying Lambda into a
-         * sustained multi-hundred-MB/s disk writer. Oldest events are evicted first once exceeded.
+         * Upper bound on log events kept across all groups. The store is compacted into one JSON
+         * document on every flush (under persistent mode it is journaled in between), so an
+         * unbounded store turns a chatty or retrying Lambda into a sustained multi-hundred-MB/s
+         * disk writer. Oldest events are evicted first once exceeded.
          */
         @WithDefault("20000")
         int maxStoredEvents();

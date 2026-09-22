@@ -243,6 +243,18 @@ given rather than by omitting it, which is what its SDK paginators expect.
 | `FLOCI_SERVICES_CLOUDWATCHLOGS_MAX_EVENTS_PER_QUERY` | `10000` | Maximum events returned per `FilterLogEvents` / `GetLogEvents` call, and the upper bound for a Logs Insights `limit` |
 | `FLOCI_SERVICES_CLOUDWATCHLOGS_QUERY_COMPLETION_DELAY_MS` | `0` | Artificial Logs Insights query delay. With `0` a query completes immediately. A positive value emulates the real asynchronous lifecycle (`Running` → `Complete` after the delay), which also makes `StopQuery` on a still-running query return `success=true` |
 
+### Storage
+
+Log groups, streams, filters and resource policies follow the configured storage mode as every
+other service does. The event store is the one CloudWatch Logs store that only ever grows, so
+under `persistent` mode it is journaled instead of rewritten on every `PutLogEvents` call: a
+batch is appended to `cwlogs-events.wal`, and `cwlogs-events.json` is rewritten from memory on
+the `FLOCI_STORAGE_WAL_COMPACTION_INTERVAL_MS` cadence and at shutdown. The store keeps at most
+20,000 events per account (`FLOCI_SERVICES_CLOUDWATCHLOGS_MAX_STORED_EVENTS`), which bounds both
+the memory footprint and the size of each snapshot. `hybrid` remains the alternative when a
+bounded delay for every CloudWatch Logs store is acceptable. See
+[Storage Modes](../configuration/storage.md#journaled-stores-under-persistent-mode).
+
 ### Examples
 
 ```bash
