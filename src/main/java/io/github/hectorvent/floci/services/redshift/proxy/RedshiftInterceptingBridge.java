@@ -222,6 +222,27 @@ public class RedshiftInterceptingBridge {
     private void handleParse(PostgresWireDecoder decoder, PostgresWireDecoder.FrontendMessage message,
             OutputStream backendOut) throws IOException {
         PostgresWireDecoder.ParseMessage parse = decoder.decodeParse(message);
+        if (spectrumInterceptor != null && parse.parameterTypeOids().isEmpty()) {
+            SpectrumInterceptor.Decision[] decision = new SpectrumInterceptor.Decision[1];
+            try {
+                boolean intercepted = runWithBackendOwned(() -> {
+                    decision[0] = spectrumInterceptor.intercept(parse.sql(), clusterAccountId, "dev", backend);
+                    return true;
+                });
+                if (intercepted && decision[0] instanceof SpectrumInterceptor.Decision.Handled) {
+                    coordinator.register(BackendResponseCoordinator.Operation.PARSE, session.stageParse(parse.statementName(), null));
+                    write(backendOut, PostgresWireDecoder.encodeParse(parse, "DO $$ BEGIN END $$"));
+                    return;
+                }
+                if (intercepted && decision[0] instanceof SpectrumInterceptor.Decision.Rewritten rewritten) {
+                    coordinator.register(BackendResponseCoordinator.Operation.PARSE, session.stageParse(parse.statementName(), null));
+                    write(backendOut, PostgresWireDecoder.encodeParse(parse, rewritten.sql()));
+                    return;
+                }
+            } catch (SpectrumSqlException exception) {
+                LOG.warnv("Spectrum Parse interception failed, forwarding original Parse: {0}", exception.getMessage());
+            }
+        }
         CopyStatementParser.S3Statement statement = parse.parameterTypeOids().isEmpty()
                 ? parseS3Statement(parse.sql()) : null;
         ExtendedQuerySession.Mutation mutation = session.stageParse(parse.statementName(), statement);
