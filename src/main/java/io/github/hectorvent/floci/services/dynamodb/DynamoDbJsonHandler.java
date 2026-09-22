@@ -2273,7 +2273,7 @@ public class DynamoDbJsonHandler {
      * Half a read unit per 4KB read, doubled for a strongly consistent read, with the
      * half-unit minimum DynamoDB charges even when nothing is found.
      */
-    private static double readCapacityUnits(long bytes, boolean consistentRead) {
+    static double readCapacityUnits(long bytes, boolean consistentRead) {
         var units = Math.max(1, (bytes + 4095) / 4096) * 0.5;
         return consistentRead ? units * 2 : units;
     }
@@ -2715,8 +2715,14 @@ public class DynamoDbJsonHandler {
                 .nextToken(request.has("NextToken") ? request.get("NextToken").asText() : null)
                 .consistentRead(request.path("ConsistentRead").asBoolean(false))
                 .tokenBinding(partiQLHandler.tokenBinding(statement, parameters));
-        JsonNode result = partiQLHandler.execute(stmt, ctx, region);
-        return Response.ok(result).build();
+        DynamoDbPartiQLHandler.Result result = partiQLHandler.execute(stmt, ctx, region);
+        ObjectNode response = result.body();
+        String returnCC = request.path("ReturnConsumedCapacity").asText("NONE");
+        if (!"NONE".equals(returnCC)) {
+            response.set("ConsumedCapacity",
+                    writeCapacityNode(stmt.table(), result.capacity(), "INDEXES".equals(returnCC)));
+        }
+        return Response.ok(response).build();
     }
 
     private Response handleExecuteTransaction(JsonNode request, String region) {
@@ -2851,15 +2857,18 @@ public class DynamoDbJsonHandler {
             throw new AwsException("ValidationException", "Statements must not be empty", 400);
         }
         ArrayNode responses = objectMapper.createArrayNode();
+        Map<String, DynamoDbWriteCapacity.Cost> capacity = new LinkedHashMap<>();
         for (JsonNode s : stmts) {
-            responses.add(batchMemberResponse(s, region));
+            responses.add(batchMemberResponse(s, region, capacity));
         }
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("Responses", responses);
+        addPerTableConsumedCapacity(resp, request, capacity, null);
         return Response.ok(resp).build();
     }
 
-    private ObjectNode batchMemberResponse(JsonNode statement, String region) {
+    private ObjectNode batchMemberResponse(JsonNode statement, String region,
+                                           Map<String, DynamoDbWriteCapacity.Cost> capacity) {
         ObjectNode slot = objectMapper.createObjectNode();
         String tableName = null;
         try {
@@ -2868,13 +2877,14 @@ public class DynamoDbJsonHandler {
             if (stmt instanceof DynamoDbPartiQLParser.Stmt.Select select) {
                 requireBatchSelectReadsByKey(select, region);
             }
-            JsonNode result = partiQLHandler.execute(stmt, PartiQLExecuteContext.builder()
+            DynamoDbPartiQLHandler.Result result = partiQLHandler.execute(stmt, PartiQLExecuteContext.builder()
                     .consistentRead(statement.path("ConsistentRead").asBoolean(false)), region);
-            JsonNode firstItem = result.path("Items").path(0);
+            JsonNode firstItem = result.body().path("Items").path(0);
             if (!firstItem.isMissingNode()) {
                 slot.set("Item", firstItem);
             }
             slot.put("TableName", tableName);
+            capacity.merge(tableName, result.capacity(), DynamoDbWriteCapacity.Cost::plus);
         } catch (AwsException e) {
             ObjectNode err = objectMapper.createObjectNode();
             err.put("Code", batchMemberErrorCode(e.getErrorCode()));

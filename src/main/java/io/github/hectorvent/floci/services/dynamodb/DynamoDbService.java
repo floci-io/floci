@@ -1035,7 +1035,7 @@ public class DynamoDbService implements ResourceProvider {
         List<String> sortKeyNames = accessPath.sortKeyNames();
 
         var items = itemsByTable.get(scopedItemsKey(storageKey));
-        if (items == null) return new QueryResult(List.of(), 0, 0, null);
+        if (items == null) return new QueryResult(List.of(), 0, 0, null, List.of());
 
         List<JsonNode> results = new ArrayList<>();
 
@@ -1154,6 +1154,7 @@ public class DynamoDbService implements ResourceProvider {
         }
 
         int scannedCount = evaluatedItems.size();
+        List<JsonNode> scannedItems = evaluatedItems;
 
         if (filterExpression != null) {
             evaluatedItems = evaluatedItems.stream()
@@ -1164,7 +1165,7 @@ public class DynamoDbService implements ResourceProvider {
 
         LOG.tracev("Query on {0}: returned={1} scanned={2}",
                 canonicalTableName, evaluatedItems.size(), scannedCount);
-        return new QueryResult(evaluatedItems, scannedCount, accSize, lastEvaluatedKey);
+        return new QueryResult(evaluatedItems, scannedCount, accSize, lastEvaluatedKey, scannedItems);
     }
 
     public ScanResult scan(String tableName, String filterExpression,
@@ -3885,7 +3886,8 @@ public class DynamoDbService implements ResourceProvider {
     // scannedBytes carries the pre-filter size of the read items: DynamoDB bills a
     // Query or Scan on what it read, not on what survived the filter or projection.
     public record ScanResult(List<JsonNode> items, int scannedCount, long scannedBytes, JsonNode lastEvaluatedKey) {}
-    public record QueryResult(List<JsonNode> items, int scannedCount, long scannedBytes, JsonNode lastEvaluatedKey) {}
+    public record QueryResult(List<JsonNode> items, int scannedCount, long scannedBytes, JsonNode lastEvaluatedKey,
+                              List<JsonNode> scannedItems) {}
 
     // --- Export Operations ---
 
