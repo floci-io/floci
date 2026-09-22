@@ -42,6 +42,87 @@ class KmsIntegrationTest {
     }
 
     @Test
+    void replicateKeyReturnsMultiRegionMetadataThroughJsonHandler() {
+        String keyId = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("""
+                    {
+                        "Description": "multi-region-primary",
+                        "MultiRegion": true
+                    }
+                    """)
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .body("KeyMetadata.MultiRegion", equalTo(true))
+                .body("KeyMetadata.KeyId", matchesPattern("mrk-[0-9a-f]{32}"))
+                .body("KeyMetadata.MultiRegionConfiguration.MultiRegionKeyType", equalTo("PRIMARY"))
+                .extract().path("KeyMetadata.KeyId");
+
+        String replicaKeyArn = given()
+                .header("X-Amz-Target", "TrentService.ReplicateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("""
+                    {
+                        "KeyId": "%s",
+                        "ReplicaRegion": "us-west-2",
+                        "Description": "multi-region-replica",
+                        "Tags": [{"TagKey":"environment","TagValue":"test"}]
+                    }
+                    """.formatted(keyId))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .body("ReplicaKeyMetadata.KeyId", equalTo(keyId))
+                .body("ReplicaKeyMetadata.MultiRegion", equalTo(true))
+                .body("ReplicaKeyMetadata.MultiRegionConfiguration.MultiRegionKeyType", equalTo("REPLICA"))
+                .body("ReplicaKeyMetadata.MultiRegionConfiguration.PrimaryKey.Region", equalTo("us-east-1"))
+                .body("ReplicaKeyMetadata.MultiRegionConfiguration.ReplicaKeys[0].Region", equalTo("us-west-2"))
+                .body("ReplicaPolicy", notNullValue())
+                .body("ReplicaTags[0].TagKey", equalTo("environment"))
+                .body("ReplicaTags[0].TagValue", equalTo("test"))
+                .extract().path("ReplicaKeyMetadata.Arn");
+
+        String plaintext = Base64.getEncoder().encodeToString(
+                "multi-region payload".getBytes(StandardCharsets.UTF_8));
+        String ciphertext = given()
+                .header("X-Amz-Target", "TrentService.Encrypt")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("""
+                    {
+                        "KeyId": "%s",
+                        "Plaintext": "%s"
+                    }
+                    """.formatted(keyId, plaintext))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .extract().path("CiphertextBlob");
+
+        given()
+                .header("Authorization",
+                        "AWS4-HMAC-SHA256 Credential=AKID/20260922/us-west-2/kms/aws4_request")
+                .header("X-Amz-Target", "TrentService.Decrypt")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("""
+                    {
+                        "KeyId": "%s",
+                        "CiphertextBlob": "%s"
+                    }
+                    """.formatted(keyId, ciphertext))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .body("Plaintext", equalTo(plaintext))
+                .body("KeyId", equalTo(replicaKeyArn));
+    }
+
+    @Test
     void updateKeyDescriptionRoundTripThroughJsonHandler() {
         var key = given()
             .header("X-Amz-Target", "TrentService.CreateKey")

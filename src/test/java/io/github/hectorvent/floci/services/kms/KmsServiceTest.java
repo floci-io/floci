@@ -1,5 +1,8 @@
 package io.github.hectorvent.floci.services.kms;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
@@ -10,6 +13,7 @@ import io.github.hectorvent.floci.services.kms.model.KmsKey;
 import io.github.hectorvent.floci.services.kms.model.KmsKeySpec;
 import io.github.hectorvent.floci.services.kms.model.KmsKeyUsage;
 import io.github.hectorvent.floci.services.kms.model.KmsMessageType;
+import jakarta.ws.rs.core.Response;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -101,6 +105,170 @@ class KmsServiceTest {
         assertTrue(key.getArn().contains("key/"));
         assertEquals("my test key", key.getDescription());
         assertEquals("Enabled", key.getKeyState());
+    }
+
+    @Test
+    void createMultiRegionKeyUsesMrkIdAndPrimaryMetadata() {
+        KmsKey key = kmsService.createKey("multi-region key", "ENCRYPT_DECRYPT", "SYMMETRIC_DEFAULT",
+                null, Map.of(), null, true, REGION);
+
+        assertTrue(key.isMultiRegion());
+        assertTrue(key.getKeyId().startsWith("mrk-"));
+        assertEquals("PRIMARY", key.getMultiRegionKeyType());
+        assertEquals(REGION, key.getMultiRegionPrimaryRegion());
+    }
+
+    @Test
+    void replicateMultiRegionKeySharesKeyMaterialAndIdentity() {
+        KmsKey primary = kmsService.createKey("primary", "ENCRYPT_DECRYPT", "SYMMETRIC_DEFAULT",
+                null, Map.of(), null, true, REGION);
+
+        KmsKey replica = kmsService.replicateKey(primary.getKeyId(), "replica", null,
+                Map.of("environment", "test"), "us-west-2", REGION);
+
+        assertEquals(primary.getKeyId(), replica.getKeyId());
+        assertEquals("us-west-2", replica.getArn().split(":", 6)[3]);
+        assertEquals("REPLICA", replica.getMultiRegionKeyType());
+        assertEquals(REGION, replica.getMultiRegionPrimaryRegion());
+        assertEquals(primary.getBackingKeys(), replica.getBackingKeys());
+        assertEquals(replica, kmsService.describeKey(primary.getKeyId(), "us-west-2"));
+    }
+
+    @Test
+    void replicaDecryptsCiphertextCreatedByPrimary() {
+        KmsKey primary = kmsService.createKey("primary", "ENCRYPT_DECRYPT", "SYMMETRIC_DEFAULT",
+                null, Map.of(), null, true, REGION);
+        kmsService.replicateKey(primary.getKeyId(), "replica", null, Map.of(), "us-west-2", REGION);
+        byte[] plaintext = "multi-region payload".getBytes(StandardCharsets.UTF_8);
+
+        byte[] ciphertext = kmsService.encrypt(primary.getKeyId(), plaintext, REGION);
+        KmsService.DecryptResult result = kmsService.decryptAndResolveKey(
+                ciphertext, Map.of(), "us-west-2", primary.getKeyId());
+
+        assertArrayEquals(plaintext, result.plaintext());
+        assertEquals("arn:aws:kms:us-west-2:000000000000:key/" + primary.getKeyId(), result.keyArn());
+    }
+
+    @Test
+    void rotatingPrimarySynchronizesBackingMaterialToReplica() {
+        KmsKey primary = kmsService.createKey("primary", "ENCRYPT_DECRYPT", "SYMMETRIC_DEFAULT",
+                null, Map.of(), null, true, REGION);
+        kmsService.replicateKey(primary.getKeyId(), "replica", null, Map.of(), "us-west-2", REGION);
+
+        byte[] beforePlaintext = "before".getBytes(StandardCharsets.UTF_8);
+        byte[] afterPlaintext = "after".getBytes(StandardCharsets.UTF_8);
+        byte[] beforeRotation = kmsService.encrypt(primary.getKeyId(), beforePlaintext, REGION);
+        kmsService.rotateKeyOnDemand(primary.getKeyId(), REGION);
+        byte[] afterRotation = kmsService.encrypt(primary.getKeyId(), afterPlaintext, REGION);
+
+        assertArrayEquals(beforePlaintext, kmsService.decrypt(beforeRotation, "us-west-2"));
+        assertArrayEquals(afterPlaintext, kmsService.decrypt(afterRotation, "us-west-2"));
+
+        KmsKey storedPrimary = keyStore.get(REGION + "::" + primary.getKeyId()).orElseThrow();
+        KmsKey storedReplica = keyStore.get("us-west-2::" + primary.getKeyId()).orElseThrow();
+        assertEquals(storedPrimary.getBackingKeys(), storedReplica.getBackingKeys());
+        assertEquals(storedPrimary.getCurrentBackingKeyId(), storedReplica.getCurrentBackingKeyId());
+    }
+
+    @Test
+    void rotatingMultiRegionReplicaIsRejected() {
+        KmsKey primary = kmsService.createKey("primary", "ENCRYPT_DECRYPT", "SYMMETRIC_DEFAULT",
+                null, Map.of(), null, true, REGION);
+        KmsKey replica = kmsService.replicateKey(primary.getKeyId(), "replica", null, Map.of(), "us-west-2", REGION);
+
+        AwsException exception = assertThrows(AwsException.class,
+                () -> kmsService.rotateKeyOnDemand(replica.getKeyId(), "us-west-2"));
+
+        assertEquals("UnsupportedOperationException", exception.getErrorCode());
+    }
+
+    @Test
+    void missingPrimaryUsesFallbackArnInThePrimaryRegion() {
+        KmsKey primary = kmsService.createKey("primary", "ENCRYPT_DECRYPT", "SYMMETRIC_DEFAULT",
+                null, Map.of(), null, true, REGION);
+        KmsKey replica = kmsService.replicateKey(primary.getKeyId(), "replica", null, Map.of(), "us-west-2", REGION);
+        keyStore.delete(REGION + "::" + primary.getKeyId());
+
+        ObjectMapper objectMapper = new ObjectMapper();
+        KmsJsonHandler handler = new KmsJsonHandler(kmsService, objectMapper,
+                new RegionResolver("us-east-1", "000000000000"));
+        ObjectNode request = objectMapper.createObjectNode();
+        request.put("KeyId", replica.getKeyId());
+
+        Response response = handler.handle("DescribeKey", request, "us-west-2");
+        JsonNode body = (JsonNode) response.getEntity();
+        JsonNode primaryKey = body.path("KeyMetadata").path("MultiRegionConfiguration").path("PrimaryKey");
+
+        assertEquals("us-east-1", primaryKey.path("Region").asText());
+        assertEquals("arn:aws:kms:us-east-1:000000000000:key/" + primary.getKeyId(),
+                primaryKey.path("Arn").asText());
+    }
+
+    @Test
+    void replicateNonMultiRegionKeyIsRejected() {
+        KmsKey key = kmsService.createKey("regional", REGION);
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                kmsService.replicateKey(key.getKeyId(), null, null, Map.of(), "us-west-2", REGION));
+
+        assertEquals("UnsupportedOperationException", exception.getErrorCode());
+    }
+
+    @Test
+    void replicateDisabledMultiRegionKeyIsRejected() {
+        KmsKey primary = kmsService.createKey("primary", "ENCRYPT_DECRYPT", "SYMMETRIC_DEFAULT",
+                null, Map.of(), null, true, REGION);
+        kmsService.disableKey(primary.getKeyId(), REGION);
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                kmsService.replicateKey(primary.getKeyId(), null, null, Map.of(), "us-west-2", REGION));
+
+        assertEquals("DisabledException", exception.getErrorCode());
+    }
+
+    @Test
+    void replicateMultiRegionKeyPendingDeletionIsRejected() {
+        KmsKey primary = kmsService.createKey("primary", "ENCRYPT_DECRYPT", "SYMMETRIC_DEFAULT",
+                null, Map.of(), null, true, REGION);
+        kmsService.scheduleKeyDeletion(primary.getKeyId(), 7, REGION);
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                kmsService.replicateKey(primary.getKeyId(), null, null, Map.of(), "us-west-2", REGION));
+
+        assertEquals("KMSInvalidStateException", exception.getErrorCode());
+    }
+
+    @Test
+    void replicateMultiRegionKeyPendingImportIsRejected() {
+        KmsKey primary = kmsService.createKey("imported primary", "ENCRYPT_DECRYPT", "SYMMETRIC_DEFAULT",
+                null, Map.of(), "EXTERNAL", true, REGION);
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                kmsService.replicateKey(primary.getKeyId(), null, null, Map.of(), "us-west-2", REGION));
+
+        assertEquals("KMSInvalidStateException", exception.getErrorCode());
+    }
+
+    @Test
+    void replicateToPrimaryRegionIsReportedAsAlreadyExisting() {
+        KmsKey primary = kmsService.createKey("primary", "ENCRYPT_DECRYPT", "SYMMETRIC_DEFAULT",
+                null, Map.of(), null, true, REGION);
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                kmsService.replicateKey(primary.getKeyId(), null, null, Map.of(), REGION, REGION));
+
+        assertEquals("AlreadyExistsException", exception.getErrorCode());
+    }
+
+    @Test
+    void replicateAcrossPartitionsIsRejectedAsUnsupported() {
+        KmsKey primary = kmsService.createKey("primary", "ENCRYPT_DECRYPT", "SYMMETRIC_DEFAULT",
+                null, Map.of(), null, true, REGION);
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                kmsService.replicateKey(primary.getKeyId(), null, null, Map.of(), "cn-north-1", REGION));
+
+        assertEquals("UnsupportedOperationException", exception.getErrorCode());
     }
 
     @ParameterizedTest
@@ -2282,6 +2450,24 @@ class KmsServiceTest {
             assertEquals("PendingImport", key.getKeyState());
             assertFalse(key.isEnabled());
             assertNull(key.getPrivateKeyEncoded());
+        }
+
+        @Test
+        void replicatedExternalKeyStartsPendingImportWithoutExpiration() throws Exception {
+            KmsKey primary = kmsService.createKey("external primary", "ENCRYPT_DECRYPT", "SYMMETRIC_DEFAULT",
+                    null, Map.of(), "EXTERNAL", true, REGION);
+            importInto(primary, material(32, (byte) 0x5A), OAEP_SHA_256);
+
+            KmsKey replica = kmsService.replicateKey(
+                    primary.getKeyId(), null, null, Map.of(), "us-west-2", REGION);
+
+            assertEquals("EXTERNAL", replica.getOrigin());
+            assertEquals("PendingImport", replica.getKeyState());
+            assertFalse(replica.isEnabled());
+            assertTrue(replica.getBackingKeys().isEmpty());
+            assertEquals(primary.getKeyMaterialId(), replica.getKeyMaterialId());
+            assertNull(replica.getExpirationModel());
+            assertEquals(0, replica.getValidTo());
         }
 
         @Test

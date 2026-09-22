@@ -12,6 +12,7 @@
 | `GenerateRandom` | Generate random bytes |
 | `GetPublicKey` | Get public key material for asymmetric keys |
 | `DescribeKey` | Get key metadata |
+| `ReplicateKey` | Create a multi-Region replica of a primary key |
 | `ListKeys` | List all keys |
 | `CreateGrant` | Create a grant for a KMS key |
 | `ListGrants` | List grants for a KMS key |

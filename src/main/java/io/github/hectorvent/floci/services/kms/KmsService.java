@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.kms;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
@@ -44,6 +45,8 @@ public class KmsService implements ResourceProvider {
     private static final String EXTERNAL_ORIGIN = "EXTERNAL";
     private static final String PENDING_IMPORT = "PendingImport";
     private static final String PENDING_DELETION = "PendingDeletion";
+    private static final String MULTI_REGION_PRIMARY = "PRIMARY";
+    private static final String MULTI_REGION_REPLICA = "REPLICA";
     private static final String KEY_MATERIAL_EXPIRES = "KEY_MATERIAL_EXPIRES";
     private static final String KEY_MATERIAL_DOES_NOT_EXPIRE = "KEY_MATERIAL_DOES_NOT_EXPIRE";
     private static final Duration IMPORT_PARAMETERS_VALIDITY = Duration.ofHours(24);
@@ -126,7 +129,12 @@ public class KmsService implements ResourceProvider {
 
     public KmsKey createKey(String description, String keyUsage, String keySpec, String policy,
                             Map<String, String> tags, String origin, String region) {
-        String keyId = resolveKeyId(tags);
+        return createKey(description, keyUsage, keySpec, policy, tags, origin, false, region);
+    }
+
+    public KmsKey createKey(String description, String keyUsage, String keySpec, String policy,
+                            Map<String, String> tags, String origin, boolean multiRegion, String region) {
+        String keyId = resolveKeyId(tags, multiRegion);
         if (keyStore.get(region + "::" + keyId).isPresent()) {
             throw new AwsException("AlreadyExistsException", "Key already exists", 400);
         }
@@ -149,6 +157,11 @@ public class KmsService implements ResourceProvider {
         key.setPolicy(policy != null ? policy : buildDefaultKeyPolicy());
         key.getTags().putAll(ReservedTags.stripReservedTags(tags));
         key.setOrigin(resolveOrigin(origin, effectiveSpec));
+        key.setMultiRegion(multiRegion);
+        if (multiRegion) {
+            key.setMultiRegionKeyType(MULTI_REGION_PRIMARY);
+            key.setMultiRegionPrimaryRegion(region);
+        }
 
         if (EXTERNAL_ORIGIN.equals(key.getOrigin())) {
             key.setKeyState(PENDING_IMPORT);
@@ -163,10 +176,11 @@ public class KmsService implements ResourceProvider {
         return key;
     }
 
-    private String resolveKeyId(Map<String, String> tags) {
+    private String resolveKeyId(Map<String, String> tags, boolean multiRegion) {
         String overrideId = ReservedTags.extractOverrideKeyId(tags);
         if (overrideId == null) {
-            return UUID.randomUUID().toString();
+            String generatedId = UUID.randomUUID().toString();
+            return multiRegion ? "mrk-" + generatedId.replace("-", "") : generatedId;
         }
 
         String normalized = overrideId.trim();
@@ -175,6 +189,9 @@ public class KmsService implements ResourceProvider {
         }
         if (normalized.length() > 256) {
             throw new AwsException("TagException", "Override resource ID must be 256 characters or fewer.", 400);
+        }
+        if (multiRegion && !normalized.startsWith("mrk-")) {
+            throw new AwsException("TagException", "Multi-Region key IDs must start with 'mrk-'.", 400);
         }
         return normalized;
     }
@@ -284,9 +301,79 @@ public class KmsService implements ResourceProvider {
         return resolveKey(keyId, region);
     }
 
+    public KmsKey replicateKey(String keyId, String description, String policy,
+                               Map<String, String> tags, String replicaRegion, String primaryRegion) {
+        if (replicaRegion == null || replicaRegion.isBlank()) {
+            throw new AwsException("ValidationException", "ReplicaRegion is required.", 400);
+        }
+
+        KmsKey primary = resolveKey(keyId, primaryRegion);
+        if (!primary.isMultiRegion() || !MULTI_REGION_PRIMARY.equals(primary.getMultiRegionKeyType())) {
+            throw new AwsException("UnsupportedOperationException",
+                    primary.getArn() + " is not a multi-Region primary key.", 400);
+        }
+        requireKeyCanBeReplicated(primary);
+        if (!AwsRegions.partitionFor(primaryRegion).equals(AwsRegions.partitionFor(replicaRegion))) {
+            throw new AwsException("UnsupportedOperationException",
+                    "The replica region must be in the same AWS partition as the primary key.", 400);
+        }
+
+        String storageKey = replicaRegion + "::" + primary.getKeyId();
+        if (keyStore.get(storageKey).isPresent()) {
+            throw new AwsException("AlreadyExistsException",
+                    "A replica for this multi-Region key already exists in " + replicaRegion + ".", 400);
+        }
+
+        KmsKey replica = new KmsKey();
+        replica.setKeyId(primary.getKeyId());
+        replica.setArn(regionResolver.buildArn("kms", replicaRegion, "key/" + primary.getKeyId()));
+        replica.setDescription(description == null ? "" : description);
+        replica.setKeyUsage(primary.getKeyUsage());
+        replica.setKeySpec(primary.getKeySpec());
+        replica.setPolicy(policy == null ? buildDefaultKeyPolicy() : policy);
+        replica.getTags().putAll(ReservedTags.stripReservedTags(tags));
+        replica.setOrigin(primary.getOrigin());
+        replica.setKeyRotationEnabled(primary.isKeyRotationEnabled());
+        replica.setMultiRegion(true);
+        replica.setMultiRegionKeyType(MULTI_REGION_REPLICA);
+        replica.setMultiRegionPrimaryRegion(primaryRegion);
+        replica.setKeyMaterialId(primary.getKeyMaterialId());
+        if (EXTERNAL_ORIGIN.equals(primary.getOrigin())) {
+            replica.setEnabled(false);
+            replica.setKeyState(PENDING_IMPORT);
+            replica.setBackingKeys(new HashMap<>());
+        } else {
+            replica.setEnabled(primary.isEnabled());
+            replica.setKeyState(primary.getKeyState());
+            replica.setPrivateKeyEncoded(primary.getPrivateKeyEncoded());
+            replica.setPublicKeyEncoded(primary.getPublicKeyEncoded());
+            replica.setBackingKeys(new HashMap<>(primary.getBackingKeys()));
+            replica.setCurrentBackingKeyId(primary.getCurrentBackingKeyId());
+        }
+        keyStore.put(storageKey, replica);
+
+        LOG.infov("Replicated KMS key {0} from {1} to {2}", primary.getKeyId(), primaryRegion, replicaRegion);
+        return replica;
+    }
+
+    private static void requireKeyCanBeReplicated(KmsKey key) {
+        requireNotPendingDeletion(key);
+        requireImportedKeyMaterial(key);
+        if (!key.isEnabled()) {
+            throw new AwsException("DisabledException", key.getArn() + " is disabled.", 400);
+        }
+    }
+
     public List<KmsKey> listKeys(String region) {
         String prefix = region + "::";
         return keyStore.scan(k -> k.startsWith(prefix));
+    }
+
+    public List<KmsKey> listAllMultiRegionKeys(String keyId) {
+        String suffix = "::" + keyId;
+        return keyStore.scan(key -> key.endsWith(suffix)).stream()
+                .filter(KmsKey::isMultiRegion)
+                .toList();
     }
 
     /** GrantOperation enum from the KMS model (kms/2014-11-01/service-2.json). */
@@ -719,6 +806,10 @@ public class KmsService implements ResourceProvider {
         synchronized (backingKeyMaterialLock) {
             KmsKey key = resolveKey(keyId, region);
             validateKeyIsUsableForCryptoOperations(key);
+            if (MULTI_REGION_REPLICA.equals(key.getMultiRegionKeyType())) {
+                throw new AwsException("UnsupportedOperationException",
+                        "On-demand rotation is only supported for the multi-Region primary key.", 400);
+            }
             validateRotationKeySpec(key);
             if (EXTERNAL_ORIGIN.equals(key.getOrigin())) {
                 throw new AwsException("KMSInvalidStateException",
@@ -733,7 +824,22 @@ public class KmsService implements ResourceProvider {
             // decrypting.
             keyTypes.symmetric().addBackingKey(key);
             keyStore.put(region + "::" + key.getKeyId(), key);
+            if (MULTI_REGION_PRIMARY.equals(key.getMultiRegionKeyType())) {
+                synchronizeMultiRegionReplicas(key);
+            }
             return key.getKeyId();
+        }
+    }
+
+    private void synchronizeMultiRegionReplicas(KmsKey primary) {
+        for (KmsKey candidate : listAllMultiRegionKeys(primary.getKeyId())) {
+            if (!MULTI_REGION_REPLICA.equals(candidate.getMultiRegionKeyType())) {
+                continue;
+            }
+            candidate.setBackingKeys(new HashMap<>(primary.getBackingKeys()));
+            candidate.setCurrentBackingKeyId(primary.getCurrentBackingKeyId());
+            String replicaRegion = AwsArnUtils.parse(candidate.getArn()).region();
+            keyStore.put(replicaRegion + "::" + candidate.getKeyId(), candidate);
         }
     }
 
