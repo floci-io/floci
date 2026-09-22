@@ -645,6 +645,207 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
         assertEquals("Scheduler.SerializationException", result.path("caughtError").asText());
     }
 
+    @Test
+    @Order(23)
+    void createScheduleSerializesStructuredTargetInputFromJsonata() throws Exception {
+        String targetStateMachineArn = createStateMachine("aws-sdk-structured-input-target", """
+                {
+                  "StartAt": "Done",
+                  "States": {"Done": {"Type": "Pass", "End": true}}
+                }
+                """);
+        String stateMachineArn = createStateMachine("aws-sdk-create-schedule-structured-input", """
+                {
+                  "QueryLanguage": "JSONata",
+                  "StartAt": "Schedule",
+                  "States": {
+                    "Schedule": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::aws-sdk:scheduler:createSchedule",
+                      "Arguments": {
+                        "Name": "payout-structured-input",
+                        "ScheduleExpression": "rate(1 day)",
+                        "FlexibleTimeWindow": {"Mode": "OFF"},
+                        "Target": {
+                          "Arn": "TARGET_ARN",
+                          "RoleArn": "ROLE",
+                          "Input": {
+                            "scheduleId": "schedule-123",
+                            "nested": {
+                              "items": [1, true, "a\\\"b"]
+                            }
+                          }
+                        }
+                      },
+                      "End": true
+                    }
+                  }
+                }
+                """.replace("TARGET_ARN", targetStateMachineArn).replace("ROLE", ROLE_ARN));
+
+        succeedingOutputOf(stateMachineArn, "{}");
+
+        JsonNode schedule = mapper.readTree(given().when().get("/schedules/payout-structured-input")
+                .then().statusCode(200).extract().body().asString());
+        JsonNode expectedInput = mapper.readTree("""
+                {"scheduleId":"schedule-123","nested":{"items":[1,true,"a\\\"b"]}}
+                """);
+        assertEquals(expectedInput, mapper.readTree(schedule.path("Target").path("Input").asText()));
+    }
+
+    @Test
+    @Order(24)
+    void updateScheduleSerializesStructuredTargetInputFromJsonPath() throws Exception {
+        String scheduleName = "payout-structured-input-update";
+        String targetStateMachineArn = createStateMachine("aws-sdk-structured-update-target", """
+                {
+                  "StartAt": "Done",
+                  "States": {"Done": {"Type": "Pass", "End": true}}
+                }
+                """);
+        given()
+                .contentType("application/json")
+                .body("""
+                        {
+                          "ScheduleExpression": "rate(1 day)",
+                          "FlexibleTimeWindow": {"Mode": "OFF"},
+                          "Target": {"Arn": "TARGET_ARN", "RoleArn": "ROLE", "Input": "{}"}
+                        }
+                        """.replace("TARGET_ARN", targetStateMachineArn).replace("ROLE", ROLE_ARN))
+                .when().post("/schedules/" + scheduleName)
+                .then().statusCode(200);
+        String stateMachineArn = createStateMachine("aws-sdk-update-schedule-structured-input", """
+                {
+                  "StartAt": "Schedule",
+                  "States": {
+                    "Schedule": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::aws-sdk:scheduler:updateSchedule",
+                      "Parameters": {
+                        "Name": "SCHEDULE_NAME",
+                        "ScheduleExpression": "rate(2 days)",
+                        "FlexibleTimeWindow": {"Mode": "OFF"},
+                        "Target": {
+                          "Arn": "TARGET_ARN",
+                          "RoleArn": "ROLE",
+                          "Input": {"enabled": true, "retries": 3, "tags": ["a", "b"]}
+                        }
+                      },
+                      "End": true
+                    }
+                  }
+                }
+                """
+                .replace("SCHEDULE_NAME", scheduleName)
+                .replace("TARGET_ARN", targetStateMachineArn)
+                .replace("ROLE", ROLE_ARN));
+
+        succeedingOutputOf(stateMachineArn, "{}");
+
+        JsonNode schedule = mapper.readTree(given().when().get("/schedules/" + scheduleName)
+                .then().statusCode(200).extract().body().asString());
+        JsonNode expectedInput = mapper.readTree("""
+                {"enabled":true,"retries":3,"tags":["a","b"]}
+                """);
+        assertEquals(expectedInput, mapper.readTree(schedule.path("Target").path("Input").asText()));
+    }
+
+    @Test
+    @Order(25)
+    void createScheduleSerializesJsonScalarsAndPreservesTextualJson() {
+        String targetStateMachineArn = createStateMachine("aws-sdk-scalar-input-target", """
+                {
+                  "StartAt": "Done",
+                  "States": {"Done": {"Type": "Pass", "End": true}}
+                }
+                """);
+        String[][] cases = {
+                {"array", "[1,false,{\"key\":\"value\"}]", "[1,false,{\"key\":\"value\"}]"},
+                {"number", "42.5", "42.5"},
+                {"boolean", "true", "true"},
+                {"text", "\"{\\\"already\\\":true}\"", "{\"already\":true}"}
+        };
+        for (String[] inputCase : cases) {
+            String scheduleName = "payout-input-" + inputCase[0];
+            String stateMachineArn = createStateMachine("aws-sdk-create-input-" + inputCase[0], """
+                    {
+                      "QueryLanguage": "JSONata",
+                      "StartAt": "Schedule",
+                      "States": {
+                        "Schedule": {
+                          "Type": "Task",
+                          "Resource": "arn:aws:states:::aws-sdk:scheduler:createSchedule",
+                          "Arguments": {
+                            "Name": "SCHEDULE_NAME",
+                            "ScheduleExpression": "rate(1 day)",
+                            "FlexibleTimeWindow": {"Mode": "OFF"},
+                            "Target": {
+                              "Arn": "TARGET_ARN",
+                              "RoleArn": "ROLE",
+                              "Input": INPUT_VALUE
+                            }
+                          },
+                          "End": true
+                        }
+                      }
+                    }
+                    """
+                    .replace("SCHEDULE_NAME", scheduleName)
+                    .replace("TARGET_ARN", targetStateMachineArn)
+                    .replace("ROLE", ROLE_ARN)
+                    .replace("INPUT_VALUE", inputCase[1]));
+
+            succeedingOutputOf(stateMachineArn, "{}");
+
+            Response schedule = given().when().get("/schedules/" + scheduleName);
+            schedule.then().statusCode(200);
+            assertEquals(inputCase[2], schedule.jsonPath().getString("Target.Input"), inputCase[0]);
+        }
+    }
+
+    @Test
+    @Order(26)
+    void createScheduleRejectsMalformedTextualTargetInput() throws Exception {
+        String targetStateMachineArn = createStateMachine("aws-sdk-malformed-input-target", """
+                {
+                  "StartAt": "Done",
+                  "States": {"Done": {"Type": "Pass", "End": true}}
+                }
+                """);
+        String stateMachineArn = createStateMachine("aws-sdk-create-malformed-input", """
+                {
+                  "QueryLanguage": "JSONata",
+                  "StartAt": "Schedule",
+                  "States": {
+                    "Schedule": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::aws-sdk:scheduler:createSchedule",
+                      "Arguments": {
+                        "Name": "payout-malformed-input",
+                        "ScheduleExpression": "rate(1 day)",
+                        "FlexibleTimeWindow": {"Mode": "OFF"},
+                        "Target": {
+                          "Arn": "TARGET_ARN",
+                          "RoleArn": "ROLE",
+                          "Input": "{not-json"
+                        }
+                      },
+                      "Catch": [{
+                        "ErrorEquals": ["Scheduler.ValidationException"],
+                        "Next": "Recovered",
+                        "Output": {"caughtError": "{% $states.errorOutput.Error %}"}
+                      }],
+                      "End": true
+                    },
+                    "Recovered": {"Type": "Pass", "End": true}
+                  }
+                }
+                """.replace("TARGET_ARN", targetStateMachineArn).replace("ROLE", ROLE_ARN));
+
+        JsonNode result = mapper.readTree(succeedingOutputOf(stateMachineArn, "{}"));
+        assertEquals("Scheduler.ValidationException", result.path("caughtError").asText());
+    }
+
     private static String deleteScheduleTask(String scheduleName, String groupName) {
         String groupArgument = groupName == null ? "" : ", \"GroupName\": \"" + groupName + "\"";
         return """

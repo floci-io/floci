@@ -1407,14 +1407,27 @@ public class AslExecutor {
         }
     }
 
-    /** Converts the SDK's RFC 3339 timestamps to the epoch-second values used by the wire parser. */
+    /** Converts SDK task values to the representations used by the Scheduler wire parser. */
     private JsonNode normalizeAwsSdkSchedulerInput(JsonNode input) {
         JsonNode normalized = input.deepCopy();
         if (normalized instanceof ObjectNode object) {
             normalizeAwsSdkSchedulerTimestamp(object, "StartDate");
             normalizeAwsSdkSchedulerTimestamp(object, "EndDate");
+            normalizeAwsSdkSchedulerTargetInput(object);
         }
         return normalized;
+    }
+
+    private void normalizeAwsSdkSchedulerTargetInput(ObjectNode input) {
+        JsonNode target = input.get("Target");
+        if (!(target instanceof ObjectNode targetObject)) {
+            return;
+        }
+        JsonNode value = targetObject.get("Input");
+        if (value == null || value.isNull() || value.isTextual()) {
+            return;
+        }
+        targetObject.put("Input", value.toString());
     }
 
     private void normalizeAwsSdkSchedulerTimestamp(ObjectNode input, String field) {

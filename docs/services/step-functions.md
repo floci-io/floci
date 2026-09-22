@@ -431,6 +431,8 @@ the wire and the task fails with `Sfn.StateMachineDoesNotExistException`.
 
 Scheduler create and update tasks accept `StartDate` and `EndDate` as RFC 3339 strings, including
 offsets and fractional seconds. The direct Scheduler API continues to use numeric epoch seconds.
+Structured JSON values supplied as `Target.Input` are serialized once to the Scheduler API's string
+field. Textual JSON remains unchanged, and malformed text reaches the existing Scheduler validation.
 
 `sendTaskSuccess` and `sendTaskFailure` resolve a token a `.waitForTaskToken` task is parked on. A
 token nobody is waiting for fails the calling task rather than reporting a delivery that never
