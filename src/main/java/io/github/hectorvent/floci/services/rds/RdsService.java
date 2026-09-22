@@ -745,7 +745,7 @@ public class RdsService implements Resettable, ResourceProvider {
                         masterUsername, masterPassword, dbName,
                         (user, pw) -> validateDbPasswordForScope(
                                 accountId, instanceRegion, id, user, pw),
-                        new RdsProxyBinding(instance.getEndpoint().address(), proxyPort,
+                        proxyBinding(engine, instance.getEndpoint().address(), proxyPort,
                                 instanceRegion, accountId, instance.getDbiResourceId()));
             } catch (RuntimeException | Error e) {
                 try {
@@ -2291,8 +2291,8 @@ public class RdsService implements Resettable, ResourceProvider {
                         effectiveMasterUser, instance.getMasterPassword(), instance.getDbName(),
                         (user, pw) -> validateDbPasswordForScope(
                                 accountId, instanceRegion, id, user, pw),
-                        new RdsProxyBinding(instance.getEndpoint().address(), instance.getProxyPort(),
-                                instanceRegion, accountId, instance.getDbiResourceId()));
+                        proxyBinding(instance.getEngine(), instance.getEndpoint().address(),
+                                instance.getProxyPort(), instanceRegion, accountId, instance.getDbiResourceId()));
             } else {
                 // No backing container: created or last rebooted while no daemon was reachable.
                 instance = ensureInstanceBackend(id, effectiveRegion);
@@ -2301,6 +2301,20 @@ public class RdsService implements Resettable, ResourceProvider {
 
         LOG.infov("DB instance {0} rebooted", id);
         return instance;
+    }
+
+    /**
+     * The binding the proxy validates IAM auth tokens against. As on RDS a token is good for the
+     * endpoint it was generated for (hostname, port and region); MySQL and MariaDB proxies always
+     * require that, PostgreSQL proxies only when {@code services.rds.iam-token-endpoint-binding}
+     * is on, so PostgreSQL tokens generated for another name keep working until it is turned on.
+     */
+    private RdsProxyBinding proxyBinding(DatabaseEngine engine, String advertisedHost, int publishedPort,
+                                         String region, String accountId, String resourceId) {
+        boolean tokensBoundToEndpoint = engine != DatabaseEngine.POSTGRES
+                || config.services().rds().iamTokenEndpointBinding();
+        return new RdsProxyBinding(advertisedHost, publishedPort, region, accountId, resourceId,
+                tokensBoundToEndpoint);
     }
 
     private static boolean hasBackend(String host, int port) {
@@ -2376,8 +2390,8 @@ public class RdsService implements Resettable, ResourceProvider {
                     effectiveMasterUser, instance.getMasterPassword(), instance.getDbName(),
                     (user, pw) -> validateDbPasswordForScope(
                             accountId, instanceRegion, id, user, pw),
-                    new RdsProxyBinding(instance.getEndpoint().address(), instance.getProxyPort(),
-                            instanceRegion, accountId, instance.getDbiResourceId()));
+                    proxyBinding(instance.getEngine(), instance.getEndpoint().address(),
+                            instance.getProxyPort(), instanceRegion, accountId, instance.getDbiResourceId()));
         } catch (RuntimeException e) {
             stopStartedBackend(started, e);
             throw e;
@@ -2430,8 +2444,8 @@ public class RdsService implements Resettable, ResourceProvider {
                     effectiveMasterUser, cluster.getMasterPassword(), cluster.getDatabaseName(),
                     (user, pw) -> validateDbClusterPasswordForScope(
                             accountId, clusterRegion, id, user, pw),
-                    new RdsProxyBinding(cluster.getEndpoint().address(), cluster.getProxyPort(),
-                            clusterRegion, accountId, cluster.getDbClusterResourceId()));
+                    proxyBinding(cluster.getEngine(), cluster.getEndpoint().address(),
+                            cluster.getProxyPort(), clusterRegion, accountId, cluster.getDbClusterResourceId()));
         } catch (RuntimeException e) {
             stopStartedBackend(started, e);
             throw e;
@@ -2712,7 +2726,7 @@ public class RdsService implements Resettable, ResourceProvider {
                         effectiveMasterUser, masterPassword, databaseName,
                         (user, pw) -> validateDbClusterPasswordForScope(
                                 accountId, clusterRegion, id, user, pw),
-                        new RdsProxyBinding(cluster.getEndpoint().address(), proxyPort,
+                        proxyBinding(engine, cluster.getEndpoint().address(), proxyPort,
                                 clusterRegion, accountId, cluster.getDbClusterResourceId()));
             }
 
@@ -3957,7 +3971,7 @@ public class RdsService implements Resettable, ResourceProvider {
                                         proxyAccountId, targetRegion, targetId, user, pw)
                                 : validateDbPasswordForScope(
                                         proxyAccountId, targetRegion, targetId, user, pw),
-                        new RdsProxyBinding(proxy.getEndpointHost(), proxy.getProxyPort(),
+                        proxyBinding(engine, proxy.getEndpointHost(), proxy.getProxyPort(),
                                 targetRegion, proxyAccountId, proxy.getDbProxyResourceId()));
             }
             putTargetGroupForAccount(proxyAccountId, proxyKey, updatedTargetGroup);
@@ -5985,7 +5999,7 @@ public class RdsService implements Resettable, ResourceProvider {
                                 accountId, proxyRegion, targetId, user, password)
                         : validateDbPasswordForScope(
                                 accountId, proxyRegion, targetId, user, password),
-                new RdsProxyBinding(proxy.getEndpointHost(), proxy.getProxyPort(),
+                proxyBinding(engine, proxy.getEndpointHost(), proxy.getProxyPort(),
                         proxyRegion, accountId, proxy.getDbProxyResourceId()));
     }
 
@@ -6077,7 +6091,7 @@ public class RdsService implements Resettable, ResourceProvider {
                             (user, pw) -> validateDbClusterPasswordForScope(
                                     accountId, clusterRegion,
                                     cluster.getDbClusterIdentifier(), user, pw),
-                            new RdsProxyBinding(cluster.getEndpoint().address(), proxyPort,
+                            proxyBinding(cluster.getEngine(), cluster.getEndpoint().address(), proxyPort,
                                     clusterRegion, accountId, cluster.getDbClusterResourceId()));
                 }
                 cluster.setStatus(DbInstanceStatus.AVAILABLE);
@@ -6205,7 +6219,7 @@ public class RdsService implements Resettable, ResourceProvider {
                             (user, pw) -> validateDbPasswordForScope(
                                     accountId, instanceRegion,
                                     instance.getDbInstanceIdentifier(), user, pw),
-                            new RdsProxyBinding(instance.getEndpoint().address(), proxyPort,
+                            proxyBinding(instance.getEngine(), instance.getEndpoint().address(), proxyPort,
                                     instanceRegion, accountId, instance.getDbiResourceId()));
                 }
                 instance.setStatus(DbInstanceStatus.AVAILABLE);

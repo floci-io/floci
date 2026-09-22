@@ -6,11 +6,17 @@ package io.github.hectorvent.floci.services.rds.proxy;
  * the {@code rds-db:connect} permission the token's principal needs
  * ({@code arn:aws:rds-db:<region>:<accountId>:dbuser:<resourceId>/<DBUser>}).
  *
- * @param resourceId the instance's {@code DbiResourceId}, or the cluster's
- *                   {@code DbClusterResourceId} for an Aurora cluster endpoint
+ * @param resourceId the instance's {@code DbiResourceId}, the cluster's
+ *                   {@code DbClusterResourceId} for an Aurora cluster endpoint, or the
+ *                   {@code prx-} id of an RDS Proxy
+ * @param tokensBoundToEndpoint whether a token has to name this endpoint (see
+ *                              {@link #acceptsHost}), its port and its region to be accepted.
+ *                              MySQL endpoints always require that; PostgreSQL endpoints only
+ *                              when {@code services.rds.iam-token-endpoint-binding} is on, so
+ *                              tokens generated for another name keep working until it is.
  */
 public record RdsProxyBinding(String advertisedHost, int publishedPort, String region,
-                              String accountId, String resourceId) {
+                              String accountId, String resourceId, boolean tokensBoundToEndpoint) {
 
     /**
      * Whether a token generated for {@code host} names this endpoint. Besides the advertised

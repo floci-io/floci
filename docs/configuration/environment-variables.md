@@ -1,3 +1,4 @@
+| `FLOCI_SERVICES_RDS_IAM_TOKEN_ENDPOINT_BINDING` | `false` | Refuse a PostgreSQL IAM auth token generated for another hostname, port or region than the endpoint publishes, as RDS does; MySQL and MariaDB always refuse such tokens |
 # Environment Variables Reference
 
 Floci is configured exclusively through environment variables. Every option below maps directly to a `FLOCI_*` variable — no YAML file is needed when running the published Docker image.

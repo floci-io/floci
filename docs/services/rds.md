@@ -117,6 +117,7 @@ checked against the instance's other window. Modifications apply immediately —
 | `FLOCI_SERVICES_RDS_PROXY_BASE_PORT` | `7001` | First host port in the RDS proxy range |
 | `FLOCI_SERVICES_RDS_PROXY_MAX_PORT` | `7099` | Last host port in the RDS proxy range |
 | `FLOCI_SERVICES_RDS_ENDPOINT_HOST` | _(auto-detected)_ | Hostname advertised in RDS endpoints; when set in Docker, Floci advertises each proxy's published host port |
+| `FLOCI_SERVICES_RDS_IAM_TOKEN_ENDPOINT_BINDING` | `false` | Refuse a PostgreSQL IAM auth token generated for another hostname, port or region than the endpoint publishes, as RDS does; MySQL and MariaDB always refuse such tokens |
 | `FLOCI_SERVICES_RDS_DEFAULT_POSTGRES_IMAGE` | `postgres:16-alpine` | Docker image for PostgreSQL instances |
 | `FLOCI_SERVICES_RDS_DEFAULT_MYSQL_IMAGE` | `mysql:8.0` | Docker image for MySQL instances |
 | `FLOCI_SERVICES_RDS_DEFAULT_MARIADB_IMAGE` | `mariadb:11` | Docker image for MariaDB instances |
@@ -427,7 +428,7 @@ The RDS auth proxy validates the master username and password at the proxy layer
 
 IAM database authentication is also supported. Set `--enable-iam-database-authentication` at instance creation time and use `aws rds generate-db-auth-token` to obtain a token.
 
-As on RDS, a token is only good for the endpoint it was generated for: the hostname, port and region passed to `generate-db-auth-token` must be the ones the instance (or cluster, or RDS Proxy) publishes, and the username must match the `DBUser` in the token exactly. Because clients on the host reach the same proxy over the loopback interface, a token generated for `localhost` or `127.0.0.1` on the published port is accepted as well. Clients on a Docker network connect by Floci's container name, so set `FLOCI_SERVICES_RDS_ENDPOINT_HOST` to that name (see [Docker Compose](#docker-compose)) so it is what the endpoint publishes and tokens are generated for. With [IAM enforcement](iam.md#iam-enforcement-mode) turned on, the token's principal must also be allowed `rds-db:connect` on the database user, scoped the way AWS scopes it:
+On RDS, a token is only good for the endpoint it was generated for: the hostname, port and region passed to `generate-db-auth-token` are the ones the instance (or cluster, or RDS Proxy) publishes. MySQL and MariaDB endpoints in Floci always refuse a token generated for another endpoint. PostgreSQL endpoints accept any token with a valid signature by default; set `FLOCI_SERVICES_RDS_IAM_TOKEN_ENDPOINT_BINDING=true` to have them refuse such tokens too. Either way, the username must match the `DBUser` in the token exactly. Because clients on the host reach the same proxy over the loopback interface, a token generated for `localhost` or `127.0.0.1` on the published port is accepted as well. Clients on a Docker network connect by Floci's container name, so set `FLOCI_SERVICES_RDS_ENDPOINT_HOST` to that name (see [Docker Compose](#docker-compose)) so it is what the endpoint publishes and tokens are generated for. With [IAM enforcement](iam.md#iam-enforcement-mode) turned on, the token's principal must also be allowed `rds-db:connect` on the database user, scoped the way AWS scopes it:
 
 ```
 arn:aws:rds-db:<region>:<account-id>:dbuser:<DbiResourceId>/<db-user-name>

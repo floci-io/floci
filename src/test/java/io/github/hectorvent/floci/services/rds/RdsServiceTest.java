@@ -239,8 +239,35 @@ class RdsServiceTest {
         verify(proxyManager).startProxy(any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
                 any(), any(), any(), any(), any(), binding.capture());
         assertEquals(new RdsProxyBinding(instance.getEndpoint().address(), instance.getProxyPort(),
-                        "us-east-1", "123456789012", instance.getDbiResourceId()),
+                        "us-east-1", "123456789012", instance.getDbiResourceId(), false),
                 binding.getValue());
+    }
+
+    @Test
+    void createDbInstanceBindsPostgresIamTokensToTheEndpointOnlyWhenConfigured() {
+        when(rdsConfig.iamTokenEndpointBinding()).thenReturn(true);
+
+        rdsService.createDbInstance("mypostgres", "postgres", "13",
+                "admin", "secret123", null, "db.t3.micro",
+                20, false, null, null, null, null, false);
+
+        ArgumentCaptor<RdsProxyBinding> binding = ArgumentCaptor.forClass(RdsProxyBinding.class);
+        verify(proxyManager).startProxy(any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
+                any(), any(), any(), any(), any(), binding.capture());
+        assertTrue(binding.getValue().tokensBoundToEndpoint());
+    }
+
+    @Test
+    void createDbInstanceAlwaysBindsMysqlIamTokensToTheEndpoint() {
+        rdsService.createDbInstance("mymysql", "mysql", "8.0",
+                "admin", "secret123", null, "db.t3.micro",
+                20, false, null, null, null, null, false);
+
+        ArgumentCaptor<RdsProxyBinding> binding = ArgumentCaptor.forClass(RdsProxyBinding.class);
+        verify(proxyManager).startProxy(any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
+                any(), any(), any(), any(), any(), binding.capture());
+        assertTrue(binding.getValue().tokensBoundToEndpoint(),
+                "MySQL bound tokens to the endpoint before the setting existed and keeps doing so");
     }
 
     @Test

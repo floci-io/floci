@@ -1137,7 +1137,7 @@ class PostgresProtocolHandlerTest {
 
     /** The endpoint the test proxy publishes; {@link #rdsToken} signs tokens for exactly this endpoint. */
     private static RdsProxyBinding testBinding() {
-        return new RdsProxyBinding("localhost", 7001, "us-east-1", "123456789012", "db-ABCDEFGHIJKL01234");
+        return new RdsProxyBinding("localhost", 7001, "us-east-1", "123456789012", "db-ABCDEFGHIJKL01234", true);
     }
 
     private static RdsSigV4Validator testSigV4Validator() {

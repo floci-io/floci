@@ -20,7 +20,7 @@ class RdsSigV4ValidatorTest {
             + "\"Action\":[\"s3:GetObject\"],\"Resource\":[\"*\"]}]}";
 
     private static RdsProxyBinding exampleBinding() {
-        return new RdsProxyBinding("db.example.local", 3307, "us-east-1", "123456789012", "db-ABCDEFGHIJKL01234");
+        return new RdsProxyBinding("db.example.local", 3307, "us-east-1", "123456789012", "db-ABCDEFGHIJKL01234", true);
     }
 
     @Test
@@ -268,9 +268,9 @@ class RdsSigV4ValidatorTest {
                 Instant.now().minusSeconds(60), 900);
 
         assertTrue(validator.validate(token, "admin",
-                new RdsProxyBinding("db.example.local", 3307, "us-east-1", "123456789012", "db-ABCDEFGHIJKL01234")));
+                new RdsProxyBinding("db.example.local", 3307, "us-east-1", "123456789012", "db-ABCDEFGHIJKL01234", true)));
         assertFalse(validator.validate(token, "admin",
-                new RdsProxyBinding("db.example.local", 3306, "us-east-1", "123456789012", "db-ABCDEFGHIJKL01234")));
+                new RdsProxyBinding("db.example.local", 3306, "us-east-1", "123456789012", "db-ABCDEFGHIJKL01234", true)));
     }
 
     @Test
@@ -282,7 +282,7 @@ class RdsSigV4ValidatorTest {
                 Instant.now().minusSeconds(60), 900);
 
         assertFalse(validator.validate(token, "admin",
-                new RdsProxyBinding("other.example.local", 3307, "us-east-1", "123456789012", "db-ABCDEFGHIJKL01234")));
+                new RdsProxyBinding("other.example.local", 3307, "us-east-1", "123456789012", "db-ABCDEFGHIJKL01234", true)));
     }
 
     /**
@@ -301,7 +301,7 @@ class RdsSigV4ValidatorTest {
                 Instant.now().minusSeconds(60), 900);
 
         assertTrue(validator.validate(token, "admin",
-                new RdsProxyBinding("host.docker.internal", 3307, "us-east-1", "123456789012", "db-ABCDEFGHIJKL01234")));
+                new RdsProxyBinding("host.docker.internal", 3307, "us-east-1", "123456789012", "db-ABCDEFGHIJKL01234", true)));
     }
 
     @Test
@@ -313,7 +313,7 @@ class RdsSigV4ValidatorTest {
                 Instant.now().minusSeconds(60), 900);
 
         assertFalse(validator.validate(token, "admin",
-                new RdsProxyBinding("host.docker.internal", 3307, "us-east-1", "123456789012", "db-ABCDEFGHIJKL01234")));
+                new RdsProxyBinding("host.docker.internal", 3307, "us-east-1", "123456789012", "db-ABCDEFGHIJKL01234", true)));
     }
 
     @Test
@@ -325,7 +325,7 @@ class RdsSigV4ValidatorTest {
                 Instant.now().minusSeconds(60), 900);
 
         assertFalse(validator.validate(token, "admin",
-                new RdsProxyBinding("db.example.local", 3307, "eu-west-1", "123456789012", "db-ABCDEFGHIJKL01234")));
+                new RdsProxyBinding("db.example.local", 3307, "eu-west-1", "123456789012", "db-ABCDEFGHIJKL01234", true)));
     }
 
     @Test
@@ -337,7 +337,38 @@ class RdsSigV4ValidatorTest {
                 "us-east-1", "s3", Instant.now().minusSeconds(60), 900);
 
         assertFalse(validator.validate(token, "admin",
-                new RdsProxyBinding("db.example.local", 3307, "us-east-1", "123456789012", "db-ABCDEFGHIJKL01234")));
+                new RdsProxyBinding("db.example.local", 3307, "us-east-1", "123456789012", "db-ABCDEFGHIJKL01234", true)));
+    }
+
+    /**
+     * PostgreSQL endpoints publish their binding with the endpoint check off unless
+     * {@code services.rds.iam-token-endpoint-binding} is turned on: a well-signed token for any
+     * host, port and region is accepted, as it was before the check existed.
+     */
+    @Test
+    void validateSkipsTheEndpointCheckWhenTokensAreNotBoundToTheEndpoint() throws Exception {
+        IamService iamService = IamServiceTestHelper.iamServiceWithAccessKey("AKIDRDS", "secret-rds");
+        RdsSigV4Validator validator = new RdsSigV4Validator(iamService);
+        String token = SigV4TokenTestHelper.createRdsTokenWithScope(
+                "other.example.local", 3308, "admin", "AKIDRDS", "secret-rds",
+                "eu-west-1", "rds-db", Instant.now().minusSeconds(60), 900);
+
+        assertTrue(validator.validate(token, "admin", new RdsProxyBinding(
+                "db.example.local", 3307, "us-east-1", "123456789012", "db-ABCDEFGHIJKL01234", false)));
+    }
+
+    @Test
+    void validateStillRequiresRdsDbConnectWhenTokensAreNotBoundToTheEndpoint() throws Exception {
+        IamService iamService = IamServiceTestHelper.iamServiceWithUserPolicy(
+                "AKIDRDS", "secret-rds", "jane", S3_ONLY_POLICY);
+        RdsSigV4Validator validator = new RdsSigV4Validator(iamService, () -> true);
+        String token = SigV4TokenTestHelper.createRdsToken(
+                "db.example.local", 3307, "jane_doe", "AKIDRDS", "secret-rds",
+                Instant.now().minusSeconds(60), 900);
+
+        assertFalse(validator.validate(token, "jane_doe", new RdsProxyBinding(
+                        "db.example.local", 3307, "us-east-1", "123456789012", "db-ABCDEFGHIJKL01234", false)),
+                "the endpoint check being off does not turn off the rds-db:connect check");
     }
 
     @Test

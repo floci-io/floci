@@ -82,9 +82,12 @@ public class RdsSigV4Validator {
             String authority = (port > 0) ? host + ":" + port : host;
 
             String[] credential = credentialScope(rawQuery);
-            if (binding != null && (!binding.acceptsHost(host)
+            if (credential == null) {
+                LOG.debugv("RDS IAM token missing its credential scope");
+                return false;
+            }
+            if (binding != null && binding.tokensBoundToEndpoint() && (!binding.acceptsHost(host)
                     || binding.publishedPort() != port
-                    || credential == null
                     || !binding.region().equals(credential[2])
                     || !"rds-db".equals(credential[3]))) {
                 return false;
