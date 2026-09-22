@@ -434,7 +434,7 @@ On RDS, a token is only good for the endpoint it was generated for: the hostname
 arn:aws:rds-db:<region>:<account-id>:dbuser:<DbiResourceId>/<db-user-name>
 ```
 
-Aurora clusters use the `DbClusterResourceId`, and connections through an RDS Proxy use the proxy's `prx-…` resource id. A token that fails any of these checks is refused with the engine's ordinary authentication error (`password authentication failed` on PostgreSQL); the reason is written to Floci's log.
+Aurora clusters use the `DbClusterResourceId`, and connections through an RDS Proxy use the proxy's `prx-…` resource id. A token that fails any of these checks is refused with the engine's ordinary authentication failure; the reason is written to Floci's log.
 
 On PostgreSQL, the token names a database role (`DBUser`) and the session runs as that role: `current_user` and `session_user` both report it, objects it creates are owned by it, and a token naming a role the database does not have is refused with `FATAL: role "..." does not exist`. Create the role first with `CREATE ROLE <name> WITH LOGIN` as the master user, and grant it whatever the application needs.
 
