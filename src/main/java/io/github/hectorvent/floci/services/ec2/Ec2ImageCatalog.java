@@ -1,7 +1,18 @@
 package io.github.hectorvent.floci.services.ec2;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
+import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.services.ec2.model.Image;
+import io.quarkus.runtime.annotations.RegisterForReflection;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
+
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -9,29 +20,33 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
-import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
-
-import io.github.hectorvent.floci.services.ec2.model.Image;
-import io.quarkus.runtime.annotations.RegisterForReflection;
-import jakarta.enterprise.context.ApplicationScoped;
-
 @ApplicationScoped
 public class Ec2ImageCatalog {
 
     private static final String CATALOG_RESOURCE_NAME = "ec2/image-catalog.yaml";
     private static final ObjectMapper YAML_MAPPER = new ObjectMapper(new YAMLFactory());
 
+    private final Path catalogPath;
     private volatile Loaded loaded;
 
+    @Inject
+    public Ec2ImageCatalog(EmulatorConfig config) {
+        this.catalogPath = config.services().ec2().imageCatalogPath().filter(path -> !path.isBlank()).map(Path::of).orElse(null);
+    }
+
     public Ec2ImageCatalog() {
+        this.catalogPath = null;
         // The catalog is parsed lazily on first access rather than at bean
         // construction. Mock mode never reads it, so eager loading would fail
         // EC2 bean creation needlessly when the resource is unavailable.
     }
 
+    Ec2ImageCatalog(Path catalogPath) {
+        this.catalogPath = catalogPath;
+    }
+
     Ec2ImageCatalog(Catalog catalog) {
+        this.catalogPath = null;
         this.loaded = new Loaded(catalog);
     }
 
@@ -72,7 +87,8 @@ public class Ec2ImageCatalog {
             synchronized (this) {
                 result = loaded;
                 if (result == null) {
-                    result = new Loaded(readResource(CATALOG_RESOURCE_NAME, Catalog.class));
+                    result = new Loaded(catalogPath == null
+                            ? readResource(CATALOG_RESOURCE_NAME, Catalog.class) : readFile(catalogPath));
                     loaded = result;
                 }
             }
@@ -94,6 +110,14 @@ public class Ec2ImageCatalog {
             }
             this.imagesByIdOrAlias = indexImages(this.images);
             this.imagesByPublicParameterName = indexPublicParameterNames(this.images);
+        }
+    }
+
+    private static Catalog readFile(Path path) {
+        try (InputStream input = Files.newInputStream(path)) {
+            return YAML_MAPPER.readValue(input, Catalog.class);
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to load EC2 image catalog file: " + path, e);
         }
     }
 
