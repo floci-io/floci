@@ -93,30 +93,6 @@ public class MySqlProtocolHandler {
                                   boolean iamEnabled, RdsSigV4Validator sigV4,
                                   RdsProxyTlsCertificates tlsCertificates,
                                   PasswordValidator passwordValidator,
-                                  int handshakeTimeoutMillis) throws IOException {
-        handleAuth(client, backend, backendConnector, masterUsername, masterPassword,
-                iamEnabled, sigV4, tlsCertificates, passwordValidator, handshakeTimeoutMillis,
-                username -> true, null);
-    }
-
-    public static void handleAuth(Socket client, Socket backend,
-                                  PostgresProtocolHandler.BackendConnector backendConnector,
-                                  String masterUsername, String masterPassword,
-                                  boolean iamEnabled, RdsSigV4Validator sigV4,
-                                  RdsProxyTlsCertificates tlsCertificates,
-                                  PasswordValidator passwordValidator,
-                                  int handshakeTimeoutMillis,
-                                  IamUserChecker iamUserChecker) throws IOException {
-        handleAuth(client, backend, backendConnector, masterUsername, masterPassword, iamEnabled,
-                sigV4, tlsCertificates, passwordValidator, handshakeTimeoutMillis, iamUserChecker, null);
-    }
-
-    public static void handleAuth(Socket client, Socket backend,
-                                  PostgresProtocolHandler.BackendConnector backendConnector,
-                                  String masterUsername, String masterPassword,
-                                  boolean iamEnabled, RdsSigV4Validator sigV4,
-                                  RdsProxyTlsCertificates tlsCertificates,
-                                  PasswordValidator passwordValidator,
                                   int handshakeTimeoutMillis,
                                   IamUserChecker iamUserChecker,
                                   RdsProxyBinding binding) throws IOException {

@@ -58,15 +58,19 @@ public class RdsSigV4Validator {
      * {@code hostname:port/?Action=connect&DBUser=admin&X-Amz-Signature=...}
      *
      * @param token the presigned URL token
-     * @param clientUsername the username from the PostgreSQL startup message;
+     * @param clientUsername the username from the client's startup or handshake message;
      *                       must match the {@code DBUser} in the token
-     * @return true if the token signature is valid, the DBUser matches, and the token is not expired
+     * @param binding what the proxy the token arrived at publishes; a token without one is
+     *                refused, since there is nothing to check it against
+     * @return true if the token signature is valid, the DBUser matches, the token is not expired,
+     *         it names the bound endpoint when the binding requires that, and with IAM
+     *         enforcement on its principal is allowed {@code rds-db:connect} on the DBUser
      */
-    public boolean validate(String token, String clientUsername) {
-        return validate(token, clientUsername, null);
-    }
-
     public boolean validate(String token, String clientUsername, RdsProxyBinding binding) {
+        if (binding == null) {
+            LOG.warn("Refusing an RDS IAM token that arrived without a proxy binding to validate it against");
+            return false;
+        }
         try {
             URI uri = URI.create("http://" + token);
             String host = uri.getHost();
@@ -86,7 +90,7 @@ public class RdsSigV4Validator {
                 LOG.debugv("RDS IAM token missing its credential scope");
                 return false;
             }
-            if (binding != null && binding.tokensBoundToEndpoint() && (!binding.acceptsHost(host)
+            if (binding.tokensBoundToEndpoint() && (!binding.acceptsHost(host)
                     || binding.publishedPort() != port
                     || !binding.region().equals(credential[2])
                     || !"rds-db".equals(credential[3]))) {
@@ -96,7 +100,7 @@ public class RdsSigV4Validator {
             if (!requestValidator.validate(rawQuery, authority, "DBUser", true, clientUsername, "RDS IAM token")) {
                 return false;
             }
-            return binding == null || !enforcementEnabled.getAsBoolean()
+            return !enforcementEnabled.getAsBoolean()
                     || isAllowedToConnect(credential[0], clientUsername, binding);
         } catch (Exception e) {
             LOG.debugv("RDS IAM token validation error: {0}", e.getMessage());

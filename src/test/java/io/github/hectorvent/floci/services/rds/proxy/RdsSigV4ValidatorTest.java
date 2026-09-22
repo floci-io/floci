@@ -23,6 +23,29 @@ class RdsSigV4ValidatorTest {
         return new RdsProxyBinding("db.example.local", 3307, "us-east-1", "123456789012", "db-ABCDEFGHIJKL01234", true);
     }
 
+    /**
+     * What a PostgreSQL proxy publishes while {@code services.rds.iam-token-endpoint-binding} is
+     * off: the token's signature and DBUser are checked, the endpoint it was generated for is not.
+     */
+    private static RdsProxyBinding unboundBinding() {
+        return new RdsProxyBinding("db.example.local", 5432, "us-east-1", "123456789012", "db-ABCDEFGHIJKL01234", false);
+    }
+
+    /**
+     * Every proxy publishes a binding; a token that shows up without one has nothing to be
+     * checked against and is refused rather than waved through on its signature alone.
+     */
+    @Test
+    void validateRefusesTokenWithoutBinding() throws Exception {
+        IamService iamService = IamServiceTestHelper.iamServiceWithAccessKey("AKIDRDS", "secret-rds");
+        RdsSigV4Validator validator = new RdsSigV4Validator(iamService);
+        String token = SigV4TokenTestHelper.createRdsToken(
+                "db.example.local", 3307, "admin", "AKIDRDS", "secret-rds",
+                Instant.now().minusSeconds(60), 900);
+
+        assertFalse(validator.validate(token, "admin", null));
+    }
+
     @Test
     void validateRejectsCallerWithoutRdsDbConnectWhenEnforcementIsOn() throws Exception {
         IamService iamService = IamServiceTestHelper.iamServiceWithUserPolicy(
@@ -100,7 +123,7 @@ class RdsSigV4ValidatorTest {
                 900
         );
 
-        assertTrue(validator.validate(token, "testuser"),
+        assertTrue(validator.validate(token, "testuser", unboundBinding()),
                 "Validator must accept a well-formed SigV4 RDS authentication token");
     }
 
@@ -119,7 +142,7 @@ class RdsSigV4ValidatorTest {
                 900
         );
 
-        assertTrue(validator.validate(token, "admin"));
+        assertTrue(validator.validate(token, "admin", unboundBinding()));
     }
 
     @Test
@@ -138,7 +161,7 @@ class RdsSigV4ValidatorTest {
         );
         String brokenToken = validToken.replace("db.example.local:5432/?", "db.example.local/?");
 
-        assertFalse(validator.validate(brokenToken, "admin"));
+        assertFalse(validator.validate(brokenToken, "admin", unboundBinding()));
     }
 
     @Test
@@ -156,7 +179,7 @@ class RdsSigV4ValidatorTest {
                 900
         );
 
-        assertFalse(validator.validate(token, "admin"));
+        assertFalse(validator.validate(token, "admin", unboundBinding()));
     }
 
     @Test
@@ -175,7 +198,7 @@ class RdsSigV4ValidatorTest {
         );
         String tamperedToken = validToken.replace("DBUser=admin", "DBUser=attacker");
 
-        assertFalse(validator.validate(tamperedToken, "admin"));
+        assertFalse(validator.validate(tamperedToken, "admin", unboundBinding()));
     }
 
     @Test
@@ -193,7 +216,7 @@ class RdsSigV4ValidatorTest {
                 900
         );
 
-        assertFalse(validator.validate(token, "admin"));
+        assertFalse(validator.validate(token, "admin", unboundBinding()));
     }
 
     /**
@@ -218,7 +241,7 @@ class RdsSigV4ValidatorTest {
                 900
         );
 
-        assertFalse(validator.validate(token, "admin"));
+        assertFalse(validator.validate(token, "admin", unboundBinding()));
     }
 
     @Test
@@ -237,7 +260,7 @@ class RdsSigV4ValidatorTest {
         );
         String withoutDbUser = validToken.replaceFirst("DBUser=admin&", "");
 
-        assertFalse(validator.validate(withoutDbUser, "admin"));
+        assertFalse(validator.validate(withoutDbUser, "admin", unboundBinding()));
     }
 
     @Test
@@ -255,7 +278,7 @@ class RdsSigV4ValidatorTest {
                 900
         );
 
-        assertFalse(validator.validate(token, "attacker"),
+        assertFalse(validator.validate(token, "attacker", unboundBinding()),
                 "Token signed for 'admin' must be rejected when client connects as 'attacker'");
     }
 
@@ -386,7 +409,7 @@ class RdsSigV4ValidatorTest {
                 900
         );
 
-        assertTrue(validator.validate(token, null),
+        assertTrue(validator.validate(token, null, unboundBinding()),
                 "Null clientUsername should skip the identity check (backwards compat)");
     }
 
@@ -407,7 +430,7 @@ class RdsSigV4ValidatorTest {
                 900
         );
 
-        assertTrue(validator.validate(token, "db+admin@example.com"));
+        assertTrue(validator.validate(token, "db+admin@example.com", unboundBinding()));
     }
 
     @Test
@@ -427,7 +450,7 @@ class RdsSigV4ValidatorTest {
         // Tampering with the region in the credential scope invalidates the signature
         String tamperedToken = token.replace("us-east-1", "eu-west-1");
 
-        assertFalse(validator.validate(tamperedToken, "admin"));
+        assertFalse(validator.validate(tamperedToken, "admin", unboundBinding()));
     }
 
     @Test
@@ -446,7 +469,7 @@ class RdsSigV4ValidatorTest {
         );
         String withoutSignature = validToken.replaceFirst("&X-Amz-Signature=[0-9a-f]+", "");
 
-        assertFalse(validator.validate(withoutSignature, "admin"));
+        assertFalse(validator.validate(withoutSignature, "admin", unboundBinding()));
     }
 
     @Test
@@ -467,7 +490,7 @@ class RdsSigV4ValidatorTest {
                 "session-token"
         );
 
-        assertTrue(validator.validate(token, "admin"),
+        assertTrue(validator.validate(token, "admin", unboundBinding()),
                 "Validator must accept RDS IAM tokens signed with STS session credentials (ASIA… keys)");
     }
 
@@ -482,7 +505,7 @@ class RdsSigV4ValidatorTest {
                 "db.example.local", 5432, "admin", accessKeyId, secretAccessKey,
                 Instant.now().minusSeconds(60), 900);
 
-        assertFalse(validator.validate(token, "admin"));
+        assertFalse(validator.validate(token, "admin", unboundBinding()));
     }
 
     @Test
@@ -496,7 +519,7 @@ class RdsSigV4ValidatorTest {
                 "db.example.local", 5432, "admin", accessKeyId, secretAccessKey,
                 Instant.now().minusSeconds(60), 900, "wrong-session-token");
 
-        assertFalse(validator.validate(token, "admin"));
+        assertFalse(validator.validate(token, "admin", unboundBinding()));
     }
 
     @Test
@@ -511,7 +534,7 @@ class RdsSigV4ValidatorTest {
                 "db.example.local", 5432, "admin", accessKeyId, secretAccessKey,
                 Instant.now().minusSeconds(60), 900, "session-token");
 
-        assertFalse(validator.validate(token, "admin"));
+        assertFalse(validator.validate(token, "admin", unboundBinding()));
     }
 
     @Test
@@ -530,7 +553,7 @@ class RdsSigV4ValidatorTest {
                 900
         );
 
-        assertFalse(validator.validate(token, "admin"),
+        assertFalse(validator.validate(token, "admin", unboundBinding()),
                 "Validator must reject STS token signed with wrong secret");
     }
 
@@ -554,7 +577,7 @@ class RdsSigV4ValidatorTest {
                 900
         );
 
-        assertFalse(validator.validate(token, "admin"),
+        assertFalse(validator.validate(token, "admin", unboundBinding()),
                 "A token self-signed with secret == accessKeyId for an unregistered access key "
                         + "must never validate; unregistered keys must fail closed");
     }
@@ -580,7 +603,7 @@ class RdsSigV4ValidatorTest {
                 900
         );
 
-        assertTrue(validator.validate(token, "admin"),
+        assertTrue(validator.validate(token, "admin", unboundBinding()),
                 "The well-known \"test\"/\"test\" local-dev credential pair must still validate");
     }
 
