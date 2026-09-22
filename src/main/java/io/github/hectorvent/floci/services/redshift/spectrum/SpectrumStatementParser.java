@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.redshift.spectrum;
 
+import jakarta.enterprise.context.ApplicationScoped;
+
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -8,6 +10,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
+@ApplicationScoped
 public final class SpectrumStatementParser {
 
     private static final String UNSUPPORTED = "0A000";

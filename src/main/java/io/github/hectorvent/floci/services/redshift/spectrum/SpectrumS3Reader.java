@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.redshift.spectrum;
 
+import jakarta.enterprise.context.ApplicationScoped;
+
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -24,6 +26,7 @@ import java.util.Spliterators;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
 
+@ApplicationScoped
 public final class SpectrumS3Reader {
 
     private static final String SQLSTATE_AUTHORIZATION = "42501";

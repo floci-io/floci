@@ -1,8 +1,11 @@
 package io.github.hectorvent.floci.services.redshift.spectrum;
 
+import jakarta.enterprise.context.ApplicationScoped;
+
 import java.util.Locale;
 import java.util.Optional;
 
+@ApplicationScoped
 public final class SpectrumQueryClassifier {
 
     public Optional<SpectrumQuery> classify(String sql, int parameterCount) {

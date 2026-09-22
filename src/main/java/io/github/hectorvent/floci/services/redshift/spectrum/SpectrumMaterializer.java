@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.redshift.spectrum;
 
+import jakarta.enterprise.context.ApplicationScoped;
+
 import io.github.hectorvent.floci.services.redshift.proxy.PostgresWireDecoder;
 
 import java.io.ByteArrayOutputStream;
@@ -13,6 +15,7 @@ import java.util.List;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+@ApplicationScoped
 public final class SpectrumMaterializer {
 
     private static final SecureRandom RANDOM = new SecureRandom();
