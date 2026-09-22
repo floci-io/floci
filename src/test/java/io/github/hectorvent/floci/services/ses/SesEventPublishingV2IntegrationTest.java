@@ -1682,12 +1682,14 @@ class SesEventPublishingV2IntegrationTest {
                 .filter(e -> "Reject".equals(e.path("eventType").asText()))
                 .findFirst().orElseThrow();
         assertEquals("Bad content", reject.path("reject").path("reason").asText());
-        // Nothing read off the message is published: neither the tags from its X-SES-MESSAGE-TAGS
-        // header nor the recipient lists from its To and Cc headers. Only the From the request
-        // supplied stays, and mail.destination still carries the envelope.
+        // Nothing read off the message is published: not the subject the parser found, not the tags
+        // from its X-SES-MESSAGE-TAGS header, not the recipient lists from its To and Cc headers.
+        // Only the From the request supplied stays, and mail.destination carries the envelope.
         for (JsonNode event : events) {
             JsonNode mail = event.path("mail");
             String type = event.path("eventType").asText();
+            assertTrue(mail.path("commonHeaders").path("subject").isMissingNode(),
+                    type + " must not carry the subject read off the message");
             assertTrue(mail.path("tags").path("probe").isMissingNode(),
                     type + " must not carry the raw header tag");
             assertEquals(0, mail.path("commonHeaders").path("to").size(),
