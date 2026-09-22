@@ -107,6 +107,14 @@ public class EksClusterManager {
     static final String SA_PUBLIC_KEY_CONTAINER_PATH = WEBHOOK_CONFIG_DIR + "/" + SA_PUBLIC_KEY_FILE;
     static final String KUBERNETES_DEFAULT_ISSUER = "https://kubernetes.default.svc.cluster.local";
 
+    static final String AUDIT_POLICY_FILE = "audit-policy.yaml";
+    static final String AUDIT_POLICY_DIR = "/etc";
+    static final String AUDIT_POLICY_CONTAINER_PATH = AUDIT_POLICY_DIR + "/" + AUDIT_POLICY_FILE;
+    static final String AUDIT_LOG_CONTAINER_PATH = "/var/log/audit.log";
+    static final String AUDIT_LOG_MAXAGE = "30";
+    static final String AUDIT_LOG_MAXBACKUP = "10";
+    static final String AUDIT_LOG_MAXSIZE = "100";
+
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
     private final ContainerDetector containerDetector;
@@ -357,6 +365,18 @@ public class EksClusterManager {
             }
         }
 
+        String auditPolicyLocalFile = null;
+        if (hasLoggingEnabled(cluster, "audit")) {
+            auditPolicyLocalFile = writeAuditPolicyFile(cluster);
+            if (auditPolicyLocalFile != null) {
+                serverArgs.add("--kube-apiserver-arg=audit-policy-file=" + AUDIT_POLICY_CONTAINER_PATH);
+                serverArgs.add("--kube-apiserver-arg=audit-log-path=" + AUDIT_LOG_CONTAINER_PATH);
+                serverArgs.add("--kube-apiserver-arg=audit-log-maxage=" + AUDIT_LOG_MAXAGE);
+                serverArgs.add("--kube-apiserver-arg=audit-log-maxbackup=" + AUDIT_LOG_MAXBACKUP);
+                serverArgs.add("--kube-apiserver-arg=audit-log-maxsize=" + AUDIT_LOG_MAXSIZE);
+            }
+        }
+
         if (config.services().eks().disableCni()) {
             // A container's /sys mount defaults to private propagation, which breaks
             // Cilium's BPF filesystem mount ("mounted on /sys but it is not a shared or
@@ -377,6 +397,9 @@ public class EksClusterManager {
         cluster.setContainerId(containerId);
         if (webhookLocalFile != null) {
             copyWebhookIntoContainer(containerId, webhookLocalFile, cluster.getName());
+        }
+        if (auditPolicyLocalFile != null) {
+            copyAuditPolicyIntoContainer(containerId, auditPolicyLocalFile, cluster.getName());
         }
         injectEcrRegistryMirror(containerId, cluster.getName());
         registerPodIdentityWebhook(containerId, cluster);
@@ -570,10 +593,10 @@ public class EksClusterManager {
     }
 
     /**
-     * Checks whether the cluster has API server control plane logging enabled.
+     * Checks whether the cluster has control plane logging enabled for either api or audit.
      */
     public static boolean hasLoggingEnabled(Cluster cluster) {
-        return hasLoggingEnabled(cluster, "api");
+        return hasLoggingEnabled(cluster, "api") || hasLoggingEnabled(cluster, "audit");
     }
 
     /**
@@ -623,24 +646,75 @@ public class EksClusterManager {
         if (clusterLogHandles.containsKey(resourceName)) {
             return;
         }
-        try {
-            String logGroup = "/aws/eks/" + cluster.getName() + "/cluster";
-            String hash = containerId.length() >= 32 ? containerId.substring(0, 32) : containerId;
-            String logStream = "kube-apiserver-" + hash;
-            String region = clusterRegion(cluster);
-            String accountId = resolveClusterAccountId(cluster);
-            Closeable handle = fromNow
-                    ? logStreamer.attachFromNowForAccount(
-                            accountId, containerId, logGroup, logStream, region, "eks:" + cluster.getName())
-                    : logStreamer.attachForAccount(
-                            accountId, containerId, logGroup, logStream, region, "eks:" + cluster.getName());
-            if (handle != null) {
-                clusterLogHandles.put(resourceName, handle);
+        String logGroup = "/aws/eks/" + cluster.getName() + "/cluster";
+        String hash = containerId.length() >= 32 ? containerId.substring(0, 32) : containerId;
+        String region = clusterRegion(cluster);
+        String accountId = resolveClusterAccountId(cluster);
+
+        List<Closeable> handles = new ArrayList<>();
+        if (hasLoggingEnabled(cluster, "api")) {
+            try {
+                String logStream = "kube-apiserver-" + hash;
+                Closeable handle = fromNow
+                        ? logStreamer.attachFromNowForAccount(
+                                accountId, containerId, logGroup, logStream, region, "eks:" + cluster.getName())
+                        : logStreamer.attachForAccount(
+                                accountId, containerId, logGroup, logStream, region, "eks:" + cluster.getName());
+                if (handle != null) {
+                    handles.add(handle);
+                }
+            } catch (Exception e) {
+                LOG.warnv("Could not attach control plane log stream for EKS cluster {0}: {1}",
+                        cluster.getName(), e.getMessage());
             }
-        } catch (Exception e) {
-            LOG.warnv("Could not attach control plane log stream for EKS cluster {0}: {1}",
-                    cluster.getName(), e.getMessage());
         }
+
+        if (hasLoggingEnabled(cluster, "audit")) {
+            try {
+                Closeable auditHandle = attachAuditLogFollower(
+                        containerId, accountId, logGroup, hash, region, cluster.getName(), fromNow);
+                if (auditHandle != null) {
+                    handles.add(auditHandle);
+                }
+            } catch (Exception e) {
+                LOG.warnv("Could not attach audit log follower for EKS cluster {0}: {1}",
+                        cluster.getName(), e.getMessage());
+            }
+        }
+
+        if (handles.size() == 1) {
+            clusterLogHandles.put(resourceName, handles.getFirst());
+        } else if (handles.size() > 1) {
+            clusterLogHandles.put(resourceName, () -> {
+                for (Closeable h : handles) {
+                    closeQuietly(h);
+                }
+            });
+        }
+    }
+
+    private Closeable attachAuditLogFollower(String containerId, String accountId, String logGroup,
+                                             String hash, String region, String clusterName, boolean fromNow) {
+        DockerClient dockerClient = lifecycleManager.getDockerClient();
+        if (dockerClient == null) {
+            return null;
+        }
+        String logStream = "kube-apiserver-audit-" + hash;
+        logStreamer.ensureLogGroupAndStreamForAccount(accountId, logGroup, logStream, region);
+        String tailLineArg = fromNow ? "0" : "+1";
+        String[] cmd = new String[] {
+                "sh", "-c", "touch " + AUDIT_LOG_CONTAINER_PATH + " && exec tail -n " + tailLineArg + " -F " + AUDIT_LOG_CONTAINER_PATH
+        };
+        ExecCreateCmdResponse execCreate = dockerClient
+                .execCreateCmd(containerId)
+                .withCmd(cmd)
+                .withAttachStdout(true)
+                .withAttachStderr(false)
+                .exec();
+        return dockerClient
+                .execStartCmd(execCreate.getId())
+                .exec(logStreamer.execLogCallbackForAccount(
+                        accountId, logGroup, logStream, region, "eks-audit:" + clusterName));
     }
 
     Closeable getLogHandle(Cluster cluster) {
@@ -874,6 +948,233 @@ public class EksClusterManager {
             LOG.warnv("EKS token-webhook may not authenticate for cluster {0}: could not copy kubeconfig "
                     + "into the k3s container: {1}", clusterName, e.getMessage());
         }
+    }
+
+    /**
+     * Writes the official Amazon EKS audit policy YAML to Floci's local data directory and
+     * returns its path, or {@code null} if writing failed.
+     */
+    String writeAuditPolicyFile(Cluster cluster) {
+        String clusterName = cluster.getName();
+        try {
+            String dataPath = config.services().eks().dataPath();
+            if (dataPath == null || dataPath.isBlank()) {
+                return null;
+            }
+            Path localFile = Paths.get(dataPath, "audit", clusterName, AUDIT_POLICY_FILE)
+                    .toAbsolutePath().normalize();
+            Files.createDirectories(localFile.getParent());
+            Files.writeString(localFile, buildAuditPolicy());
+            return localFile.toString();
+        } catch (Exception e) {
+            LOG.warnv("EKS audit logging disabled for cluster {0}: could not write audit policy file: {1}",
+                    clusterName, e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Streams the audit policy from Floci's filesystem into the (created, not-yet-started)
+     * k3s container at {@value #AUDIT_POLICY_CONTAINER_PATH}, using the Docker API.
+     */
+    void copyAuditPolicyIntoContainer(String containerId, String localFile, String clusterName) {
+        try {
+            DockerClient dockerClient = lifecycleManager.getDockerClient();
+            if (dockerClient != null) {
+                dockerClient.copyArchiveToContainerCmd(containerId)
+                        .withHostResource(localFile)
+                        .withRemotePath(AUDIT_POLICY_DIR)
+                        .exec();
+                LOG.debugv("Injected audit policy file into k3s container {0} for cluster {1}",
+                        containerId, clusterName);
+            }
+        } catch (Exception e) {
+            LOG.warnv("EKS audit logs may not be emitted for cluster {0}: could not copy "
+                    + "audit policy into the k3s container: {1}", clusterName, e.getMessage());
+        }
+    }
+
+    /**
+     * Official Amazon EKS control plane audit policy documented in the Amazon EKS Best Practices Guide.
+     */
+    public static String buildAuditPolicy() {
+        return """
+                apiVersion: audit.k8s.io/v1
+                kind: Policy
+                rules:
+                  # Log full request and response for changes to aws-auth ConfigMap in kube-system namespace
+                  - level: RequestResponse
+                    namespaces: ["kube-system"]
+                    verbs: ["update", "patch", "delete"]
+                    resources:
+                      - group: ""
+                        resources: ["configmaps"]
+                        resourceNames: ["aws-auth"]
+                    omitStages:
+                      - "RequestReceived"
+
+                  # Do not log watch operations performed by kube-proxy on endpoints and services
+                  - level: None
+                    users: ["system:kube-proxy"]
+                    verbs: ["watch"]
+                    resources:
+                      - group: ""
+                        resources: ["endpoints", "services", "services/status"]
+
+                  # Do not log get operations performed by kubelet on nodes and their statuses
+                  - level: None
+                    users: ["kubelet"]
+                    verbs: ["get"]
+                    resources:
+                      - group: ""
+                        resources: ["nodes", "nodes/status"]
+
+                  # Do not log get operations performed by the system:nodes group on nodes and their statuses
+                  - level: None
+                    userGroups: ["system:nodes"]
+                    verbs: ["get"]
+                    resources:
+                      - group: ""
+                        resources: ["nodes", "nodes/status"]
+
+                  # Do not log get and update operations performed by controller manager, scheduler, and endpoint-controller on endpoints in kube-system namespace
+                  - level: None
+                    users:
+                      - system:kube-controller-manager
+                      - system:kube-scheduler
+                      - system:serviceaccount:kube-system:endpoint-controller
+                    verbs: ["get", "update"]
+                    namespaces: ["kube-system"]
+                    resources:
+                      - group: ""
+                        resources: ["endpoints"]
+
+                  # Do not log get operations performed by apiserver on namespaces and their statuses/finalizations
+                  - level: None
+                    users: ["system:apiserver"]
+                    verbs: ["get"]
+                    resources:
+                      - group: ""
+                        resources: ["namespaces", "namespaces/status", "namespaces/finalize"]
+
+                  # Do not log get and list operations performed by controller manager on metrics.k8s.io resources
+                  - level: None
+                    users:
+                      - system:kube-controller-manager
+                    verbs: ["get", "list"]
+                    resources:
+                      - group: "metrics.k8s.io"
+
+                  # Do not log access to health, version, and swagger non-resource URLs
+                  - level: None
+                    nonResourceURLs:
+                      - /healthz*
+                      - /version
+                      - /swagger*
+
+                  # Do not log events resources
+                  - level: None
+                    resources:
+                      - group: ""
+                        resources: ["events"]
+
+                  # Log request for updates/patches to nodes and pods statuses by kubelet and node problem detector
+                  - level: Request
+                    users: ["kubelet", "system:node-problem-detector", "system:serviceaccount:kube-system:node-problem-detector"]
+                    verbs: ["update", "patch"]
+                    resources:
+                      - group: ""
+                        resources: ["nodes/status", "pods/status"]
+                    omitStages:
+                      - "RequestReceived"
+
+                  # Log request for updates/patches to nodes and pods statuses by system:nodes group
+                  - level: Request
+                    userGroups: ["system:nodes"]
+                    verbs: ["update", "patch"]
+                    resources:
+                      - group: ""
+                        resources: ["nodes/status", "pods/status"]
+                    omitStages:
+                      - "RequestReceived"
+
+                  # Log delete collection requests by namespace-controller in kube-system namespace
+                  - level: Request
+                    users: ["system:serviceaccount:kube-system:namespace-controller"]
+                    verbs: ["deletecollection"]
+                    omitStages:
+                      - "RequestReceived"
+
+                  # Log metadata for secrets, configmaps, and tokenreviews to protect sensitive data
+                  - level: Metadata
+                    resources:
+                      - group: ""
+                        resources: ["secrets", "configmaps"]
+                      - group: authentication.k8s.io
+                        resources: ["tokenreviews"]
+                    omitStages:
+                      - "RequestReceived"
+
+                  # Log requests for serviceaccounts/token resources
+                  - level: Request
+                    resources:
+                      - group: ""
+                        resources: ["serviceaccounts/token"]
+
+                  # Log get, list, and watch requests for various resource groups
+                  - level: Request
+                    verbs: ["get", "list", "watch"]
+                    resources:
+                      - group: ""
+                      - group: "admissionregistration.k8s.io"
+                      - group: "apiextensions.k8s.io"
+                      - group: "apiregistration.k8s.io"
+                      - group: "apps"
+                      - group: "authentication.k8s.io"
+                      - group: "authorization.k8s.io"
+                      - group: "autoscaling"
+                      - group: "batch"
+                      - group: "certificates.k8s.io"
+                      - group: "extensions"
+                      - group: "metrics.k8s.io"
+                      - group: "networking.k8s.io"
+                      - group: "policy"
+                      - group: "rbac.authorization.k8s.io"
+                      - group: "scheduling.k8s.io"
+                      - group: "settings.k8s.io"
+                      - group: "storage.k8s.io"
+                    omitStages:
+                      - "RequestReceived"
+
+                  # Default logging level for known APIs to log request and response
+                  - level: RequestResponse
+                    resources:
+                      - group: ""
+                      - group: "admissionregistration.k8s.io"
+                      - group: "apiextensions.k8s.io"
+                      - group: "apiregistration.k8s.io"
+                      - group: "apps"
+                      - group: "authentication.k8s.io"
+                      - group: "authorization.k8s.io"
+                      - group: "autoscaling"
+                      - group: "batch"
+                      - group: "certificates.k8s.io"
+                      - group: "extensions"
+                      - group: "metrics.k8s.io"
+                      - group: "networking.k8s.io"
+                      - group: "policy"
+                      - group: "rbac.authorization.k8s.io"
+                      - group: "scheduling.k8s.io"
+                      - group: "settings.k8s.io"
+                      - group: "storage.k8s.io"
+                    omitStages:
+                      - "RequestReceived"
+
+                  # Default logging level for all other requests to log metadata only
+                  - level: Metadata
+                    omitStages:
+                      - "RequestReceived"
+                """;
     }
 
     /**

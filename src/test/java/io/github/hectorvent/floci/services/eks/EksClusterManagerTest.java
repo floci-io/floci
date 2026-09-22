@@ -61,6 +61,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -72,6 +73,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -1523,6 +1525,7 @@ class EksClusterManagerTest {
         private ContainerLogStreamer logStreamer;
         private EksClusterManager manager;
         private Closeable mockHandle;
+        private ContainerBuilder.Builder builder;
 
         @BeforeEach
         void setUp() {
@@ -1556,7 +1559,7 @@ class EksClusterManagerTest {
                     new ContainerInfo("container-id-123456789012345678901234567890", Map.of()));
 
             ContainerBuilder containerBuilder = Mockito.mock(ContainerBuilder.class);
-            ContainerBuilder.Builder builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
+            builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
             when(containerBuilder.newContainer(anyString())).thenReturn(builder);
             when(builder.build()).thenReturn(Mockito.mock(ContainerSpec.class));
 
@@ -1741,6 +1744,127 @@ class EksClusterManagerTest {
                     new LogSetup(List.of("scheduler"), false)
             )));
             assertTrue(EksClusterManager.hasLoggingEnabled(cluster));
+
+            cluster.setLogging(new Logging(List.of(
+                    new LogSetup(List.of("audit"), true)
+            )));
+            assertTrue(EksClusterManager.hasLoggingEnabled(cluster));
+            assertTrue(EksClusterManager.hasLoggingEnabled(cluster, "audit"));
+            assertFalse(EksClusterManager.hasLoggingEnabled(cluster, "api"));
+        }
+
+        @Test
+        void clusterWithAuditLoggingAddsAuditArgsAndInjectsPolicyFile(@TempDir Path tempDir) {
+            when(eks.dataPath()).thenReturn(tempDir.toString());
+            DockerClient dockerClient = Mockito.mock(DockerClient.class);
+            CopyArchiveToContainerCmd copyCmd = Mockito.mock(CopyArchiveToContainerCmd.class, Mockito.RETURNS_SELF);
+            when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+            when(dockerClient.copyArchiveToContainerCmd(anyString())).thenReturn(copyCmd);
+
+            Cluster cluster = new Cluster();
+            cluster.setName("audit-cluster");
+            cluster.setLogging(new Logging(List.of(new LogSetup(List.of("audit"), true))));
+
+            manager.startCluster(cluster);
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+            List<String> cmd = cmdCaptor.getValue();
+
+            assertTrue(cmd.contains("--kube-apiserver-arg=audit-policy-file=/etc/audit-policy.yaml"));
+            assertTrue(cmd.contains("--kube-apiserver-arg=audit-log-path=/var/log/audit.log"));
+            assertTrue(cmd.contains("--kube-apiserver-arg=audit-log-maxage=30"));
+            assertTrue(cmd.contains("--kube-apiserver-arg=audit-log-maxbackup=10"));
+            assertTrue(cmd.contains("--kube-apiserver-arg=audit-log-maxsize=100"));
+
+            verify(dockerClient).copyArchiveToContainerCmd("container-id-123456789012345678901234567890");
+            verify(copyCmd).withRemotePath("/etc");
+        }
+
+        @Test
+        void clusterWithoutAuditLoggingDoesNotAddAuditArgsOrInjectPolicyFile(@TempDir Path tempDir) {
+            when(eks.dataPath()).thenReturn(tempDir.toString());
+            DockerClient dockerClient = Mockito.mock(DockerClient.class);
+            when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+
+            Cluster cluster = new Cluster();
+            cluster.setName("no-audit-cluster");
+            cluster.setLogging(new Logging(List.of(new LogSetup(List.of("api"), true))));
+
+            manager.startCluster(cluster);
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+            List<String> cmd = cmdCaptor.getValue();
+
+            assertFalse(cmd.stream().anyMatch(arg -> arg.contains("audit-policy-file")));
+            assertFalse(cmd.stream().anyMatch(arg -> arg.contains("audit-log-path")));
+
+            verify(dockerClient, never()).copyArchiveToContainerCmd(anyString());
+        }
+
+        @Test
+        void copyAuditPolicyFailureLogsWarningAndContinuesStartup(@TempDir Path tempDir) {
+            when(eks.dataPath()).thenReturn(tempDir.toString());
+            DockerClient dockerClient = Mockito.mock(DockerClient.class);
+            CopyArchiveToContainerCmd copyCmd = Mockito.mock(CopyArchiveToContainerCmd.class, Mockito.RETURNS_SELF);
+            when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+            when(dockerClient.copyArchiveToContainerCmd(anyString())).thenReturn(copyCmd);
+            doThrow(new RuntimeException("Docker copy failed")).when(copyCmd).exec();
+
+            Cluster cluster = new Cluster();
+            cluster.setName("audit-cluster");
+            cluster.setLogging(new Logging(List.of(new LogSetup(List.of("audit"), true))));
+
+            assertDoesNotThrow(() -> manager.startCluster(cluster));
+            assertEquals("container-id-123456789012345678901234567890", cluster.getContainerId());
+        }
+
+        @Test
+        void auditFollowerHandleIsReleasedOnClusterStop() throws Exception {
+            DockerClient dockerClient = Mockito.mock(DockerClient.class);
+            when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+            ExecCreateCmd execCreateCmd = Mockito.mock(ExecCreateCmd.class, Mockito.RETURNS_SELF);
+            ExecCreateCmdResponse execCreate = Mockito.mock(ExecCreateCmdResponse.class);
+            when(execCreate.getId()).thenReturn("exec-123");
+            when(dockerClient.execCreateCmd(anyString())).thenReturn(execCreateCmd);
+            when(execCreateCmd.exec()).thenReturn(execCreate);
+
+            ExecStartCmd execStartCmd = Mockito.mock(ExecStartCmd.class, Mockito.RETURNS_SELF);
+            when(dockerClient.execStartCmd("exec-123")).thenReturn(execStartCmd);
+            ResultCallback.Adapter<?> mockAuditHandle = Mockito.mock(ResultCallback.Adapter.class);
+            Mockito.doReturn(mockAuditHandle).when(execStartCmd).exec(any());
+
+            Cluster cluster = new Cluster();
+            cluster.setName("audit-cluster");
+            cluster.setLogging(new Logging(List.of(new LogSetup(List.of("audit"), true))));
+
+            manager.startCluster(cluster);
+            assertEquals(mockAuditHandle, manager.getLogHandle(cluster));
+
+            manager.stopCluster(cluster);
+            verify(lifecycleManager).stopAndRemove("container-id-123456789012345678901234567890", mockAuditHandle);
+            assertNull(manager.getLogHandle(cluster));
+        }
+
+        @Test
+        void auditPolicyMatchesExpectedAwsEksRules() {
+            String policy = EksClusterManager.buildAuditPolicy();
+            assertNotNull(policy);
+            assertTrue(policy.contains("apiVersion: audit.k8s.io/v1"));
+            assertTrue(policy.contains("kind: Policy"));
+            assertTrue(policy.contains("resourceNames: [\"aws-auth\"]"));
+            assertTrue(policy.contains("users: [\"system:kube-proxy\"]"));
+            assertTrue(policy.contains("userGroups: [\"system:nodes\"]"));
+            assertTrue(policy.contains("users: [\"kubelet\"]"));
+            assertTrue(policy.contains("resources: [\"secrets\", \"configmaps\"]"));
+            assertTrue(policy.contains("resources: [\"tokenreviews\"]"));
+            assertTrue(policy.contains("resources: [\"events\"]"));
+            assertTrue(policy.contains("nonResourceURLs:"));
+            assertTrue(policy.contains("/healthz*"));
+            assertTrue(policy.contains("/version"));
         }
     }
 }

@@ -239,6 +239,128 @@ class EksControlPlaneLogsDockerIntegrationTest {
         assertTrue(groupsResult.isEmpty(), "Log group should not exist when logging is disabled");
     }
 
+    @Test
+    void clusterWithAuditLoggingDeliversAuditEventsToCloudWatchLogs() throws Exception {
+        String clusterName = "audit-it-" + UUID.randomUUID().toString().substring(0, 8);
+        cluster = new Cluster();
+        cluster.setName(clusterName);
+        cluster.setAccountId(ACCOUNT);
+        cluster.setArn("arn:aws:eks:" + REGION + ":" + ACCOUNT + ":cluster/" + clusterName);
+        cluster.setLogging(new Logging(List.of(new LogSetup(List.of("audit"), true))));
+
+        String auditEventJson = "{\"kind\":\"Event\",\"apiVersion\":\"audit.k8s.io/v1\",\"level\":\"Metadata\",\"stage\":\"ResponseComplete\",\"verb\":\"get\",\"user\":{\"username\":\"test-admin\"}}";
+        ContainerSpec spec = containerBuilder.newContainer(TEST_IMAGE)
+                .withName("floci-eks-cp-test-" + clusterName)
+                .withCmd(List.of("sh", "-c", "mkdir -p /var/log && echo '" + auditEventJson + "' >> /var/log/audit.log; sleep 30"))
+                .build();
+
+        containerId = lifecycleManager.createAndStart(spec).containerId();
+        assertNotNull(containerId, "Container ID must not be null");
+        cluster.setContainerId(containerId);
+
+        eksClusterManager.attachClusterLogs(cluster);
+        assertNotNull(eksClusterManager.getLogHandle(cluster), "Log handle should be active after attach");
+
+        String logGroup = "/aws/eks/" + clusterName + "/cluster";
+        String streamPrefix = "kube-apiserver-audit-";
+
+        List<LogStream> streams = List.of();
+        long deadline = System.currentTimeMillis() + 10_000;
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                streams = cloudWatchLogsService.describeLogStreams(logGroup, streamPrefix, REGION);
+                if (!streams.isEmpty()) {
+                    break;
+                }
+            } catch (Exception ignored) {
+            }
+            Thread.sleep(100);
+        }
+        assertFalse(streams.isEmpty(), "Expected log stream starting with " + streamPrefix + " in group " + logGroup);
+
+        String streamName = streams.get(0).getLogStreamName();
+        assertTrue(streamName.startsWith(streamPrefix), "Stream name should start with prefix: " + streamName);
+
+        List<LogEvent> events = List.of();
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                LogEventsResult result = cloudWatchLogsService.getLogEvents(
+                        logGroup, streamName, null, null, 10, true, null, REGION);
+                if (!result.events().isEmpty()) {
+                    events = result.events();
+                    break;
+                }
+            } catch (Exception ignored) {
+            }
+            Thread.sleep(100);
+        }
+        assertFalse(events.isEmpty(), "Expected audit log events in stream " + streamName);
+        assertTrue(events.stream().anyMatch(e -> e.getMessage().contains("\"kind\":\"Event\"")
+                        && e.getMessage().contains("\"apiVersion\":\"audit.k8s.io/v1\"")),
+                "Expected audit event containing kind Event and apiVersion audit.k8s.io/v1");
+
+        eksClusterManager.stopCluster(cluster);
+        assertNull(eksClusterManager.getLogHandle(cluster), "Log handle should be removed after stop");
+    }
+
+    @Test
+    void clusterWithBothApiAndAuditLoggingDeliversToBothStreams() throws Exception {
+        String clusterName = "both-it-" + UUID.randomUUID().toString().substring(0, 8);
+        cluster = new Cluster();
+        cluster.setName(clusterName);
+        cluster.setAccountId(ACCOUNT);
+        cluster.setArn("arn:aws:eks:" + REGION + ":" + ACCOUNT + ":cluster/" + clusterName);
+        cluster.setLogging(new Logging(List.of(
+                new LogSetup(List.of("api", "audit"), true)
+        )));
+
+        String apiMsg = "api-msg-" + UUID.randomUUID();
+        String auditMsg = "{\"kind\":\"Event\",\"auditId\":\"" + UUID.randomUUID() + "\"}";
+
+        ContainerSpec spec = containerBuilder.newContainer(TEST_IMAGE)
+                .withName("floci-eks-cp-test-" + clusterName)
+                .withCmd(List.of("sh", "-c", "echo '" + apiMsg + "'; mkdir -p /var/log && echo '" + auditMsg + "' >> /var/log/audit.log; sleep 30"))
+                .build();
+
+        containerId = lifecycleManager.createAndStart(spec).containerId();
+        cluster.setContainerId(containerId);
+
+        eksClusterManager.attachClusterLogs(cluster);
+        assertNotNull(eksClusterManager.getLogHandle(cluster));
+
+        String logGroup = "/aws/eks/" + clusterName + "/cluster";
+        long deadline = System.currentTimeMillis() + 10_000;
+
+        List<LogStream> apiStreams = List.of();
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                apiStreams = cloudWatchLogsService.describeLogStreams(logGroup, "kube-apiserver-", REGION);
+                if (!apiStreams.isEmpty()) {
+                    break;
+                }
+            } catch (Exception ignored) {
+            }
+            Thread.sleep(100);
+        }
+        assertFalse(apiStreams.isEmpty(), "Expected kube-apiserver- stream");
+
+        List<LogStream> auditStreams = List.of();
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                auditStreams = cloudWatchLogsService.describeLogStreams(logGroup, "kube-apiserver-audit-", REGION);
+                if (!auditStreams.isEmpty()) {
+                    break;
+                }
+            } catch (Exception ignored) {
+            }
+            Thread.sleep(100);
+        }
+        assertFalse(auditStreams.isEmpty(), "Expected kube-apiserver-audit- stream");
+
+        eksClusterManager.stopCluster(cluster);
+        assertNull(eksClusterManager.getLogHandle(cluster));
+    }
+
     private boolean isDockerAvailable() {
         try {
             dockerClient.pingCmd().exec();
