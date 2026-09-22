@@ -62,6 +62,17 @@ public class Cluster {
     @JsonProperty("tags")
     private Map<String, String> tags;
 
+    /**
+     * Caller-supplied containerd registry host configuration (certs.d/hosts.toml), persisted so a
+     * recreated container (Floci restart with no surviving container) re-applies it. Never part of
+     * the AWS DescribeCluster/CreateCluster response shape: EksController#toClusterResponse strips
+     * it before returning a cluster over the wire. Read back via
+     * {@code _floci/eks/clusters/{name}/registry-hosts}.
+     */
+    @JsonProperty("registryHosts")
+    @JsonInclude(JsonInclude.Include.NON_EMPTY)
+    private List<RegistryHostConfig> registryHosts;
+
     @JsonIgnore
     private String containerId;
 
@@ -142,6 +153,9 @@ public class Cluster {
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags; }
 
+    public List<RegistryHostConfig> getRegistryHosts() { return registryHosts; }
+    public void setRegistryHosts(List<RegistryHostConfig> registryHosts) { this.registryHosts = registryHosts; }
+
     public String getContainerId() { return containerId; }
     public void setContainerId(String containerId) { this.containerId = containerId; }
 
@@ -186,6 +200,7 @@ public class Cluster {
         c.identity = this.identity;
         c.platformVersion = this.platformVersion;
         c.tags = this.tags;
+        c.registryHosts = this.registryHosts;
         c.containerId = this.containerId;
         c.accountId = this.accountId;
         c.internalEndpoint = this.internalEndpoint;

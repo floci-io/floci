@@ -92,11 +92,13 @@ public class EksController {
      * causes Jackson to omit the property due to @JsonInclude(NON_DEFAULT).
      */
     private Cluster toClusterResponse(Cluster cluster) {
-        if (cluster == null || !cluster.isExplicitVersion()) {
-            return cluster;
+        if (cluster == null) {
+            return null;
         }
         Cluster response = cluster.copy();
         response.setExplicitVersion(false);
+        // registryHosts is Floci plumbing (see Cluster#registryHosts), not part of the AWS shape.
+        response.setRegistryHosts(null);
         return response;
     }
 

@@ -38,6 +38,8 @@ import io.github.hectorvent.floci.services.eks.model.NodegroupScalingConfig;
 import io.github.hectorvent.floci.services.eks.model.NodegroupStatus;
 import io.github.hectorvent.floci.services.eks.model.OidcIdentity;
 import io.github.hectorvent.floci.services.eks.model.Provider;
+import io.github.hectorvent.floci.services.eks.model.RegistryEndpoint;
+import io.github.hectorvent.floci.services.eks.model.RegistryHostConfig;
 import io.github.hectorvent.floci.services.eks.model.ResourcesVpcConfig;
 import com.fasterxml.jackson.core.type.TypeReference;
 import jakarta.annotation.PostConstruct;
@@ -887,6 +889,64 @@ public class EksService implements TagHandler, ResourceProvider {
 
     public Map<String, String> listTagsForResource(String resourceArn) {
         return listTags(null, resourceArn);
+    }
+
+    /**
+     * Stores a caller's containerd registry host configuration for a cluster and, when its k3s
+     * container is already running, applies it immediately (see
+     * {@link EksClusterManager#injectRegistryHosts}). A container that does not exist yet (mock
+     * mode, or a cluster still starting) picks the stored configuration up the next time it starts.
+     */
+    public Cluster setRegistryHosts(String clusterName, List<RegistryHostConfig> hosts) {
+        Cluster cluster = storage.get(clusterName)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "No cluster found for name: " + clusterName, 404));
+        validateRegistryHosts(hosts);
+        cluster.setRegistryHosts(hosts);
+        storage.put(clusterName, cluster);
+        if (!config.services().eks().mock() && cluster.getContainerId() != null) {
+            clusterManager.injectRegistryHosts(cluster.getContainerId(), cluster);
+        }
+        return cluster;
+    }
+
+    public List<RegistryHostConfig> getRegistryHosts(String clusterName) {
+        Cluster cluster = storage.get(clusterName)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "No cluster found for name: " + clusterName, 404));
+        return cluster.getRegistryHosts();
+    }
+
+    private static final Pattern REGISTRY_HOST_PATTERN =
+            Pattern.compile("^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?$");
+
+    private static void validateRegistryHosts(List<RegistryHostConfig> hosts) {
+        if (hosts == null) {
+            return;
+        }
+        Set<String> seen = new HashSet<>();
+        for (RegistryHostConfig host : hosts) {
+            if (host.host() == null || host.host().isBlank()
+                    || !REGISTRY_HOST_PATTERN.matcher(host.host()).matches()) {
+                throw new AwsException("InvalidParameterException",
+                        "registry host '" + host.host() + "' is not a valid hostname[:port]", 400);
+            }
+            if (!seen.add(host.host())) {
+                throw new AwsException("InvalidParameterException",
+                        "registry host '" + host.host() + "' is configured more than once", 400);
+            }
+            if (host.endpoints() == null || host.endpoints().isEmpty()) {
+                throw new AwsException("InvalidParameterException",
+                        "registry host '" + host.host() + "' must specify at least one endpoint", 400);
+            }
+            for (RegistryEndpoint endpoint : host.endpoints()) {
+                if (endpoint.url() == null
+                        || !(endpoint.url().startsWith("http://") || endpoint.url().startsWith("https://"))) {
+                    throw new AwsException("InvalidParameterException",
+                            "registry host '" + host.host() + "' endpoint url must be an http(s) URL", 400);
+                }
+            }
+        }
     }
 
     private String extractClusterName(String resourceArn) {

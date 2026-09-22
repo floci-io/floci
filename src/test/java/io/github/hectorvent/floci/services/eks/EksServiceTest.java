@@ -37,6 +37,8 @@ import io.github.hectorvent.floci.services.eks.model.Nodegroup;
 import io.github.hectorvent.floci.services.eks.model.NodegroupScalingConfig;
 import io.github.hectorvent.floci.services.eks.model.NodegroupStatus;
 import io.github.hectorvent.floci.services.eks.model.Provider;
+import io.github.hectorvent.floci.services.eks.model.RegistryEndpoint;
+import io.github.hectorvent.floci.services.eks.model.RegistryHostConfig;
 import io.github.hectorvent.floci.services.eks.model.ResourcesVpcConfig;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -845,6 +847,69 @@ class EksServiceTest {
         tags = eksService.listTagsForResource(arn);
         assertFalse(tags.containsKey("env"));
         assertEquals("platform", tags.get("team"));
+    }
+
+    @Test
+    void setRegistryHostsStoresAndRoundTripsConfiguration() {
+        createTestCluster("registry-hosts-cluster");
+        RegistryHostConfig hostConfig = new RegistryHostConfig("mirror.internal",
+                List.of(new RegistryEndpoint("https://cache.internal:5000", Map.of("Authorization", "Bearer x"))),
+                null, null);
+
+        Cluster updated = eksService.setRegistryHosts("registry-hosts-cluster", List.of(hostConfig));
+
+        assertEquals(1, updated.getRegistryHosts().size());
+        assertEquals("mirror.internal", updated.getRegistryHosts().getFirst().host());
+        assertEquals(List.of(hostConfig), eksService.getRegistryHosts("registry-hosts-cluster"));
+    }
+
+    @Test
+    void setRegistryHostsIsOmittedFromTheAwsClusterResponseShape() {
+        createTestCluster("registry-hosts-hidden-cluster");
+        eksService.setRegistryHosts("registry-hosts-hidden-cluster", List.of(
+                new RegistryHostConfig("mirror.internal",
+                        List.of(new RegistryEndpoint("https://cache.internal:5000", null)), null, null)));
+
+        Cluster described = eksService.describeCluster("registry-hosts-hidden-cluster");
+        assertNotNull(described.getRegistryHosts(), "the internal field itself is still populated");
+    }
+
+    @Test
+    void setRegistryHostsRejectsAnInvalidHostname() {
+        createTestCluster("registry-hosts-invalid-cluster");
+        RegistryHostConfig hostConfig = new RegistryHostConfig("not a hostname",
+                List.of(new RegistryEndpoint("https://cache.internal:5000", null)), null, null);
+
+        assertThrows(AwsException.class,
+                () -> eksService.setRegistryHosts("registry-hosts-invalid-cluster", List.of(hostConfig)));
+    }
+
+    @Test
+    void setRegistryHostsRejectsAHostWithNoEndpoints() {
+        createTestCluster("registry-hosts-no-endpoints-cluster");
+        RegistryHostConfig hostConfig = new RegistryHostConfig("mirror.internal", List.of(), null, null);
+
+        assertThrows(AwsException.class,
+                () -> eksService.setRegistryHosts("registry-hosts-no-endpoints-cluster", List.of(hostConfig)));
+    }
+
+    @Test
+    void setRegistryHostsRejectsADuplicateHost() {
+        createTestCluster("registry-hosts-duplicate-cluster");
+        RegistryHostConfig hostConfig = new RegistryHostConfig("mirror.internal",
+                List.of(new RegistryEndpoint("https://cache.internal:5000", null)), null, null);
+
+        assertThrows(AwsException.class, () -> eksService.setRegistryHosts(
+                "registry-hosts-duplicate-cluster", List.of(hostConfig, hostConfig)));
+    }
+
+    @Test
+    void setRegistryHostsRejectsAnUnknownCluster() {
+        RegistryHostConfig hostConfig = new RegistryHostConfig("mirror.internal",
+                List.of(new RegistryEndpoint("https://cache.internal:5000", null)), null, null);
+
+        assertThrows(AwsException.class,
+                () -> eksService.setRegistryHosts("no-such-cluster", List.of(hostConfig)));
     }
 
     @Test
