@@ -761,7 +761,7 @@ public class KmsService implements ResourceProvider {
         KmsKey key = resolveKey(keyId, region);
         requireExternalOrigin(key);
         requireNotPendingDeletion(key);
-        KmsKeyImport.validateWrappingAlgorithm(wrappingAlgorithm);
+        KmsKeyImport.validateWrappingAlgorithm(key.getKeySpec(), wrappingAlgorithm);
 
         KmsKeyImport.WrappingKeyPair wrappingKeyPair = KmsKeyImport.generateWrappingKeyPair(wrappingKeySpec);
         KmsImportParameters parameters = new KmsImportParameters();
@@ -1021,9 +1021,12 @@ public class KmsService implements ResourceProvider {
      * beats accepting a key that could never sign or decrypt anything.
      */
     private static String requireImportableSpec(KmsKeySpec spec) {
-        if (spec != KmsKeySpec.SYMMETRIC_DEFAULT && spec.getKeyType() != KmsKeySpec.KeyType.HMAC) {
+        if (spec != KmsKeySpec.SYMMETRIC_DEFAULT
+                && spec.getKeyType() != KmsKeySpec.KeyType.HMAC
+                && spec.getKeyType() != KmsKeySpec.KeyType.RSA) {
+
             throw new AwsException("UnsupportedOperationException",
-                    "Origin EXTERNAL is only supported for SYMMETRIC_DEFAULT and HMAC key specs, not "
+                    "Origin EXTERNAL is only supported for SYMMETRIC_DEFAULT, HMAC and RSA key specs, not "
                             + spec + ".", 400);
         }
         return EXTERNAL_ORIGIN;

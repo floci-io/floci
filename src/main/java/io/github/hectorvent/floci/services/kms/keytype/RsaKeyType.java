@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.kms.keytype;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.kms.CipherUtils;
 import io.github.hectorvent.floci.services.kms.model.KmsKey;
 import io.github.hectorvent.floci.services.kms.model.KmsKeySpec;
 import io.github.hectorvent.floci.services.kms.model.KmsMessageType;
@@ -24,12 +25,10 @@ import javax.crypto.Cipher;
 import javax.crypto.spec.OAEPParameterSpec;
 import javax.crypto.spec.PSource;
 import java.io.IOException;
-import java.security.GeneralSecurityException;
-import java.security.KeyPairGenerator;
-import java.security.PrivateKey;
-import java.security.PublicKey;
-import java.security.SecureRandom;
+import java.security.*;
+import java.security.interfaces.RSAPrivateCrtKey;
 import java.security.spec.MGF1ParameterSpec;
+import java.util.Base64;
 
 import static io.github.hectorvent.floci.services.kms.model.KmsMessageType.RAW;
 
@@ -85,6 +84,52 @@ final class RsaKeyType implements KmsKeyType {
     @Override
     public byte[] decrypt(KmsKey key, KmsKeySpec.Algorithm algorithm, byte[] ciphertext) {
         return oaep(Cipher.DECRYPT_MODE, key, algorithm, ciphertext);
+    }
+
+    @Override
+    public void importKeyMaterial(KmsKey key, byte[] material) {
+        PrivateKey privateKey = parsePrivateKey(material);
+
+        if (!(privateKey instanceof RSAPrivateCrtKey rsaPrivateKey)) {
+            throw new AwsException("IncorrectKeyMaterialException",
+                    "Imported RSA key material must be a PKCS#8-encoded two-prime RSA private key.", 400);
+        }
+
+        requireExpectedModulusSize(key.getKeySpec(), rsaPrivateKey);
+
+        PublicKey publicKey = generatePublicKey(rsaPrivateKey);
+
+        Base64.Encoder encoder = Base64.getEncoder();
+        key.setPrivateKeyEncoded(encoder.encodeToString(material));
+        key.setPublicKeyEncoded(encoder.encodeToString(publicKey.getEncoded()));
+    }
+
+    private static PrivateKey parsePrivateKey(byte[] material) {
+        try {
+            return CipherUtils.generateRsaPrivateKey(material);
+        } catch (GeneralSecurityException e) {
+            throw new AwsException("IncorrectKeyMaterialException",
+                    "Imported RSA key material is not a valid PKCS#8 RSA private key.", 400);
+        }
+    }
+
+    private static PublicKey generatePublicKey(RSAPrivateCrtKey privateKey) {
+        try {
+            return CipherUtils.generateRsaPublicKey(privateKey);
+        } catch (GeneralSecurityException e) {
+            throw new AwsException("InternalFailure",
+                    "Failed to derive RSA public key: " + e.getMessage(), 500);
+        }
+    }
+
+    private static void requireExpectedModulusSize(KmsKeySpec spec, RSAPrivateCrtKey privateKey) {
+        int expectedBits = keySize(spec);
+        int actualBits = privateKey.getModulus().bitLength();
+        if (actualBits != expectedBits) {
+            throw new AwsException("IncorrectKeyMaterialException",
+                    "Key material for key spec " + spec + " must have a " + expectedBits
+                            + "-bit RSA modulus but was " + actualBits + " bits.", 400);
+        }
     }
 
     private static int keySize(KmsKeySpec spec) {
