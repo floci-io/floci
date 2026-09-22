@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.core.storage;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
@@ -8,9 +9,11 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import org.jboss.logging.Logger;
 
 import java.io.*;
+import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -154,7 +157,7 @@ public class WalStorage<K, V> implements StorageBackend<K, V> {
                 store.putAll(data);
                 LOG.infov("Loaded {0} entries from snapshot {1}", store.size(), snapshotPath);
             } catch (IOException e) {
-                LOG.errorv(e, "Failed to load snapshot from {0}", snapshotPath);
+                StorageQuarantine.quarantine(snapshotPath, e, LOG);
             }
         }
 
@@ -293,47 +296,94 @@ public class WalStorage<K, V> implements StorageBackend<K, V> {
         }
     }
 
+    /**
+     * Replays the log on top of the snapshot and returns the number of records applied.
+     * <p>
+     * Replay stops at the first record that cannot be framed or decoded: a tail torn by a crash,
+     * a length header that is negative or points past the end of the file, an unknown op byte, or
+     * a payload CBOR cannot read. The store is never failed by such a record; the bytes from that
+     * record onwards are cut off before the writer reopens, so records appended afterwards sit
+     * behind a valid record and are replayed on the next load instead of being lost behind the
+     * garbage. A read error that is not a framing problem leaves the file alone.
+     */
     @SuppressWarnings("unchecked")
     private int replayWal() {
         int replayed = 0;
+        long fileSize;
+        try {
+            fileSize = Files.size(walPath);
+        } catch (IOException e) {
+            LOG.errorv(e, "Failed to read the size of WAL {0}", walPath);
+            return 0;
+        }
+        long consumed = 0;
+        boolean cutTail = true;
         try (DataInputStream in = new DataInputStream(
                 new BufferedInputStream(Files.newInputStream(walPath)))) {
-            while (true) {
-                int op;
-                try {
-                    op = in.readByte();
-                } catch (EOFException e) {
+            while (consumed < fileSize) {
+                int op = in.readByte();
+                byte[] keyBytes = readFrame(in, fileSize - consumed - 1);
+                if (keyBytes == null) {
                     break;
                 }
-
-                int keyLen = in.readInt();
-                byte[] keyBytes = in.readNBytes(keyLen);
-                if (keyBytes.length < keyLen) break; // truncated entry
-
+                long recordLength = 1 + 4 + keyBytes.length;
                 if (op == OP_PUT) {
-                    int valueLen = in.readInt();
-                    byte[] valueBytes = in.readNBytes(valueLen);
-                    if (valueBytes.length < valueLen) break; // truncated entry
-
+                    byte[] valueBytes = readFrame(in, fileSize - consumed - recordLength);
+                    if (valueBytes == null) {
+                        break;
+                    }
+                    recordLength += 4 + valueBytes.length;
                     K key = (K) walMapper.readValue(keyBytes, Object.class);
                     V value = walMapper.readValue(valueBytes,
                             walMapper.constructType(typeReference.getType()).getContentType());
                     store.put(key, value);
-                    replayed++;
                 } else if (op == OP_DELETE) {
                     K key = (K) walMapper.readValue(keyBytes, Object.class);
                     store.remove(key);
-                    replayed++;
                 } else {
-                    LOG.errorv("Unknown WAL op byte: {0}, stopping replay", op);
+                    LOG.warnv("Unknown WAL op byte {0} at offset {1} in {2}, stopping replay",
+                            op, consumed, walPath);
                     break;
                 }
+                consumed += recordLength;
+                replayed++;
             }
+        } catch (EOFException | JsonProcessingException e) {
+            LOG.warnv("WAL {0} is unreadable from offset {1}: {2}", walPath, consumed, e.getMessage());
         } catch (IOException e) {
+            cutTail = false;
             LOG.errorv(e, "Failed to replay WAL from {0} (replayed {1} entries before error)",
                     walPath, replayed);
         }
+        if (cutTail && consumed < fileSize) {
+            cutWalTail(consumed, fileSize);
+        }
         return replayed;
+    }
+
+    /**
+     * Reads one length-prefixed frame, or returns {@code null} when the length is negative or
+     * larger than the bytes left in the file, which marks the record as torn or corrupt.
+     */
+    private static byte[] readFrame(DataInputStream in, long bytesLeft) throws IOException {
+        int length = in.readInt();
+        if (length < 0 || length > bytesLeft - 4) {
+            return null;
+        }
+        byte[] bytes = in.readNBytes(length);
+        return bytes.length == length ? bytes : null;
+    }
+
+    private void cutWalTail(long lastGoodOffset, long fileSize) {
+        try (FileChannel channel = FileChannel.open(walPath, StandardOpenOption.WRITE)) {
+            channel.truncate(lastGoodOffset);
+            LOG.warnv("Cut {0} unreadable bytes from the end of WAL {1} at offset {2}; "
+                    + "the entries in them are lost, entries appended from now on are replayed on the next load",
+                    fileSize - lastGoodOffset, walPath, lastGoodOffset);
+        } catch (IOException e) {
+            LOG.errorv(e, "Failed to cut the unreadable tail of WAL {0}; entries appended after it "
+                    + "will not be replayed until the next compaction", walPath);
+        }
     }
 
     private void openWalWriter() {
@@ -341,8 +391,7 @@ public class WalStorage<K, V> implements StorageBackend<K, V> {
             Files.createDirectories(walPath.getParent());
             walWriter = new DataOutputStream(
                     new BufferedOutputStream(Files.newOutputStream(walPath,
-                            java.nio.file.StandardOpenOption.CREATE,
-                            java.nio.file.StandardOpenOption.APPEND)));
+                            StandardOpenOption.CREATE, StandardOpenOption.APPEND)));
         } catch (IOException e) {
             LOG.errorv(e, "Failed to open WAL writer at {0}", walPath);
         }
