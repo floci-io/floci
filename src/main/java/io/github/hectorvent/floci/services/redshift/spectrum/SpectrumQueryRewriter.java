@@ -1,8 +1,11 @@
 package io.github.hectorvent.floci.services.redshift.spectrum;
 
+import jakarta.enterprise.context.ApplicationScoped;
+
+@ApplicationScoped
 public final class SpectrumQueryRewriter {
 
-    private SpectrumQueryRewriter() {
+    public SpectrumQueryRewriter() {
     }
 
     public static String rewrite(SpectrumQuery query, String materializedIdentifier) {

@@ -2,11 +2,14 @@ package io.github.hectorvent.floci.services.redshift.proxy;
 
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumInterceptor;
+import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumSqlException;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.ByteArrayOutputStream;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.util.List;
@@ -46,6 +49,7 @@ public class RedshiftInterceptingBridge {
     private final IamService iamService;
     private final String clusterAccountId;
     private final List<String> iamRoleArns;
+    private final SpectrumInterceptor spectrumInterceptor;
     private final ExtendedQuerySession session = new ExtendedQuerySession();
     private final BackendResponseCoordinator coordinator = new BackendResponseCoordinator(session);
 
@@ -63,13 +67,20 @@ public class RedshiftInterceptingBridge {
     }
 
     public RedshiftInterceptingBridge(Socket client, Socket backend, S3Service s3Service, IamService iamService,
-                                      String clusterAccountId, List<String> iamRoleArns) {
+                                       String clusterAccountId, List<String> iamRoleArns) {
+        this(client, backend, s3Service, iamService, clusterAccountId, iamRoleArns, null);
+    }
+
+    public RedshiftInterceptingBridge(Socket client, Socket backend, S3Service s3Service, IamService iamService,
+                                      String clusterAccountId, List<String> iamRoleArns,
+                                      SpectrumInterceptor spectrumInterceptor) {
         this.client = client;
         this.backend = backend;
         this.s3Service = s3Service;
         this.iamService = iamService;
         this.clusterAccountId = clusterAccountId;
         this.iamRoleArns = iamRoleArns == null ? List.of() : List.copyOf(iamRoleArns);
+        this.spectrumInterceptor = spectrumInterceptor;
     }
 
     @FunctionalInterface
@@ -151,6 +162,34 @@ public class RedshiftInterceptingBridge {
     private void handleSimpleQuery(PostgresWireDecoder.FrontendMessage message, OutputStream backendOut)
             throws IOException {
         String sql = message.getSql();
+        if (spectrumInterceptor != null) {
+            SpectrumInterceptor.Decision[] decision = new SpectrumInterceptor.Decision[1];
+            boolean intercepted;
+            try {
+                intercepted = runWithBackendOwned(() -> {
+                    decision[0] = spectrumInterceptor.intercept(sql, clusterAccountId, "dev", backend);
+                    return true;
+                });
+            } catch (SpectrumSqlException exception) {
+                coordinator.register(BackendResponseCoordinator.Operation.SIMPLE_QUERY, null);
+                write(client.getOutputStream(), errorResponse(exception.sqlState(), exception.getMessage()));
+                write(client.getOutputStream(), readyForQuery('I'));
+                coordinator.onBackendFrame('Z', new byte[]{'I'});
+                return;
+            }
+            if (intercepted && decision[0] instanceof SpectrumInterceptor.Decision.Handled) {
+                coordinator.register(BackendResponseCoordinator.Operation.SIMPLE_QUERY, null);
+                write(client.getOutputStream(), commandComplete("CREATE EXTERNAL\0"));
+                write(client.getOutputStream(), readyForQuery('I'));
+                coordinator.onBackendFrame('Z', new byte[]{'I'});
+                return;
+            }
+            if (intercepted && decision[0] instanceof SpectrumInterceptor.Decision.Rewritten rewritten) {
+                coordinator.register(BackendResponseCoordinator.Operation.SIMPLE_QUERY, null);
+                write(backendOut, PostgresWireDecoder.encodeQuery(rewritten.sql()));
+                return;
+            }
+        }
         CopyStatementParser.S3Statement parsed = parseS3Statement(sql);
         if (parsed != null) {
             CopyStatementParser.S3Statement statement = parsed;
@@ -309,6 +348,43 @@ public class RedshiftInterceptingBridge {
     private static void write(OutputStream out, byte[] packet) throws IOException {
         out.write(packet);
         out.flush();
+    }
+
+    private static byte[] commandComplete(String tag) {
+        return backendFrame('C', tag.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    private static byte[] readyForQuery(char status) {
+        return backendFrame('Z', new byte[]{(byte) status});
+    }
+
+    private static byte[] errorResponse(String sqlState, String message) {
+        ByteArrayOutputStream body = new ByteArrayOutputStream();
+        body.write('S');
+        writeCString(body, "ERROR");
+        body.write('C');
+        writeCString(body, sqlState);
+        body.write('M');
+        writeCString(body, message == null ? "Spectrum statement failed" : message);
+        body.write(0);
+        return backendFrame('E', body.toByteArray());
+    }
+
+    private static byte[] backendFrame(char type, byte[] body) {
+        int length = body.length + 4;
+        byte[] frame = new byte[body.length + 5];
+        frame[0] = (byte) type;
+        frame[1] = (byte) (length >>> 24);
+        frame[2] = (byte) (length >>> 16);
+        frame[3] = (byte) (length >>> 8);
+        frame[4] = (byte) length;
+        System.arraycopy(body, 0, frame, 5, body.length);
+        return frame;
+    }
+
+    private static void writeCString(ByteArrayOutputStream out, String value) {
+        out.writeBytes(value.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        out.write(0);
     }
 
     /**

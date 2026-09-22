@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyTlsCertificates;
 import io.github.hectorvent.floci.services.rds.proxy.RdsSigV4Validator;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumInterceptor;
 import io.quarkus.runtime.ShutdownEvent;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
@@ -30,6 +31,7 @@ public class RedshiftProxyManager {
     private final RdsProxyTlsCertificates tlsCertificates;
     private final S3Service s3Service;
     private final IamService iamService;
+    private final SpectrumInterceptor spectrumInterceptor;
     private final EmulatorConfig config;
     private final ConcurrentHashMap<String, RedshiftAuthProxy> proxies = new ConcurrentHashMap<>();
     /**
@@ -40,13 +42,20 @@ public class RedshiftProxyManager {
      */
     private final ConcurrentHashMap<String, RedshiftAuthProxy> unclosableProxies = new ConcurrentHashMap<>();
 
-    @Inject
     public RedshiftProxyManager(RdsSigV4Validator sigV4Validator, RdsProxyTlsCertificates tlsCertificates,
                                 S3Service s3Service, IamService iamService, EmulatorConfig config) {
+        this(sigV4Validator, tlsCertificates, s3Service, iamService, config, null);
+    }
+
+    @Inject
+    public RedshiftProxyManager(RdsSigV4Validator sigV4Validator, RdsProxyTlsCertificates tlsCertificates,
+                                S3Service s3Service, IamService iamService, EmulatorConfig config,
+                                SpectrumInterceptor spectrumInterceptor) {
         this.sigV4Validator = sigV4Validator;
         this.tlsCertificates = tlsCertificates;
         this.s3Service = s3Service;
         this.iamService = iamService;
+        this.spectrumInterceptor = spectrumInterceptor;
         this.config = config;
     }
 
@@ -75,7 +84,7 @@ public class RedshiftProxyManager {
                 clusterAccountId,
                 iamRoleArns,
                 redshiftConfig.proxyHandshakeTimeoutMillis(), redshiftConfig.proxyBackendConnectTimeoutMillis(),
-                redshiftConfig.proxyMaxConnections());
+                redshiftConfig.proxyMaxConnections(), spectrumInterceptor);
         try {
             proxy.start(proxyPort);
         } catch (IOException | RuntimeException e) {
