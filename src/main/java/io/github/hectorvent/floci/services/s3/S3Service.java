@@ -3312,8 +3312,9 @@ public class S3Service implements Resettable, ResourceProvider {
                         ? memoryMultipartStore.get(uploadId).get(num)
                         : Files.readAllBytes(dataRoot.resolve(".multipart").resolve(uploadId).resolve(String.valueOf(num)));
                 combined.write(partData);
-                // For composite ETag: hash each part's MD5
-                md.update(computeETagBytes(partData));
+                // A part ETag is the MD5 of that part, so the composite hashes it without rehashing the data
+                String partETag = stripSurroundingQuotes(upload.getParts().get(num).getETag());
+                md.update(HexFormat.of().parseHex(partETag));
             }
 
             byte[] allData = combined.toByteArray();
