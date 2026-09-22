@@ -2,17 +2,21 @@ package io.github.hectorvent.floci.services.s3;
 
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.testutil.S3RequestSigner;
-import io.restassured.specification.RequestSpecification;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.RestAssured;
+import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.URI;
+import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -29,9 +33,9 @@ import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
-import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.not;
 
 @QuarkusTest
@@ -2050,6 +2054,72 @@ class S3AuthEnforcementIntegrationTest {
         } finally {
             given().filter(LOCAL_SIGNER).when().delete(path);
             given().filter(LOCAL_SIGNER).when().delete("/" + bucket);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"/email.txt", "//email.txt", "folder//email.txt", "/email%20%2B%3F%252F.txt"})
+    @Order(55)
+    void headerSignaturesPreserveObjectKeyPath(String rawKey) throws Exception {
+        String bucket = "auth-header-path-bucket";
+        String path = "/" + bucket + "/" + rawKey;
+        byte[] body = rawKey.getBytes(StandardCharsets.UTF_8);
+        given().filter(LOCAL_SIGNER).put("/" + bucket).then().statusCode(200);
+
+        HttpResponse<String> put = putWithoutContentType(bucket + "/" + rawKey, body, LOCAL_SIGNER);
+        assertThat(put.body(), put.statusCode(), equalTo(200));
+
+        URI uri = URI.create("http://localhost:" + RestAssured.port + path + "?response-content-type=text%2Fplain");
+        HttpRequest.Builder get = HttpRequest.newBuilder(uri).GET();
+        LOCAL_SIGNER.headersFor("GET", uri, new byte[0]).forEach(get::header);
+        try (HttpClient client = HttpClient.newHttpClient()) {
+            HttpResponse<String> response = client.send(get.build(), HttpResponse.BodyHandlers.ofString());
+            assertThat(response.statusCode(), equalTo(200));
+            assertThat(response.body(), equalTo(rawKey));
+
+            HttpRequest.Builder tampered = HttpRequest.newBuilder(uri).GET();
+            LOCAL_SIGNER.headersFor("GET", uri.normalize(), new byte[0]).forEach(tampered::header);
+            HttpResponse<String> rejected = client.send(tampered.build(), HttpResponse.BodyHandlers.ofString());
+            assertThat(rejected.statusCode(), equalTo(403));
+            assertThat(rejected.body(), containsString("SignatureDoesNotMatch"));
+        }
+
+        given().filter(LOCAL_SIGNER).get("/" + bucket + "?list-type=2").then()
+                .statusCode(200)
+                .body(containsString("<Key>" + URLDecoder.decode(rawKey, StandardCharsets.UTF_8) + "</Key>"));
+    }
+
+    @Test
+    @Order(56)
+    void presignedSignaturesPreserveLeadingSlashInObjectKey() throws Exception {
+        String bucket = "auth-presigned-path-bucket";
+        String path = "/" + bucket + "//email.txt";
+        String baseUrl = "http://localhost:" + RestAssured.port;
+        String query = "?X-Amz-Algorithm=AWS4-HMAC-SHA256"
+                + "&X-Amz-Credential=" + URLEncoder.encode(credential("test"), StandardCharsets.UTF_8)
+                + "&X-Amz-Date=" + SIGNING_TIMESTAMP
+                + "&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=";
+        given().filter(LOCAL_SIGNER).put("/" + bucket).then().statusCode(200);
+
+        URI putUri = URI.create(baseUrl + path + query + presignedSignature("PUT", path, "test", "test", "3600"));
+        URI getUri = URI.create(baseUrl + path + query + presignedSignature("GET", path, "test", "test", "3600"));
+        URI tamperedUri = URI.create(baseUrl + path + query
+                + presignedSignature("GET", "/" + bucket + "/email.txt", "test", "test", "3600"));
+        try (HttpClient client = HttpClient.newHttpClient()) {
+            HttpResponse<String> put = client.send(HttpRequest.newBuilder(putUri)
+                    .PUT(HttpRequest.BodyPublishers.ofString("presigned body")).build(),
+                    HttpResponse.BodyHandlers.ofString());
+            assertThat(put.body(), put.statusCode(), equalTo(200));
+
+            HttpResponse<String> get = client.send(HttpRequest.newBuilder(getUri).GET().build(),
+                    HttpResponse.BodyHandlers.ofString());
+            assertThat(get.statusCode(), equalTo(200));
+            assertThat(get.body(), equalTo("presigned body"));
+
+            HttpResponse<String> rejected = client.send(HttpRequest.newBuilder(tamperedUri).GET().build(),
+                    HttpResponse.BodyHandlers.ofString());
+            assertThat(rejected.statusCode(), equalTo(403));
+            assertThat(rejected.body(), containsString("SignatureDoesNotMatch"));
         }
     }
 

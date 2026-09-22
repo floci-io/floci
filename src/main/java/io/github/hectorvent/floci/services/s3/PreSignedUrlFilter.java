@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.s3;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ContainerRequestFilter;
@@ -32,14 +33,17 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
     private final PreSignedUrlGenerator presignGenerator;
     private final S3Service s3Service;
     private final IamService iamService;
+    private final CurrentVertxRequest currentVertxRequest;
 
     @Inject
     public PreSignedUrlFilter(PreSignedUrlGenerator presignGenerator,
                               S3Service s3Service,
-                              IamService iamService) {
+                              IamService iamService,
+                              CurrentVertxRequest currentVertxRequest) {
         this.presignGenerator = presignGenerator;
         this.s3Service = s3Service;
         this.iamService = iamService;
+        this.currentVertxRequest = currentVertxRequest;
     }
 
     @Override
@@ -196,8 +200,8 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
                 }
             }
 
-            // Canonical request
-            String path = requestUri.getRawPath();
+            // S3 signs the unnormalized path; UriInfo.getRequestUri() collapses repeated slashes.
+            String path = currentVertxRequest.getCurrent().request().path();
             String canonicalQueryString = buildCanonicalQueryString(queryParams);
             String payloadHash = requestContext.getHeaderString("x-amz-content-sha256");
             if (payloadHash == null) {

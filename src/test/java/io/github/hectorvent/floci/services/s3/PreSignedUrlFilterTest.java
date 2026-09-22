@@ -38,7 +38,7 @@ class PreSignedUrlFilterTest {
     @Test
     void resolveSecretKeyRejectsUnregisteredNumericAccessKeyId() throws Exception {
         IamService iamService = IamServiceTestHelper.iamServiceWithAccessKey("AKIDUNRELATED", "unrelated-secret");
-        PreSignedUrlFilter filter = new PreSignedUrlFilter(null, null, iamService);
+        PreSignedUrlFilter filter = new PreSignedUrlFilter(null, null, iamService, null);
 
         assertNull(resolveSecretKey(filter, "123456789012"));
     }
@@ -47,7 +47,7 @@ class PreSignedUrlFilterTest {
     void temporaryCredentialRequiresMatchingSessionToken() throws Exception {
         IamService iamService = IamServiceTestHelper.iamServiceWithSessionCredential(
                 "ASIAS3EXAMPLE", "temporary-secret", "issued-token", java.time.Instant.now().plusSeconds(3600));
-        PreSignedUrlFilter filter = new PreSignedUrlFilter(null, null, iamService);
+        PreSignedUrlFilter filter = new PreSignedUrlFilter(null, null, iamService, null);
 
         assertEquals("temporary-secret", resolveSecretKey(filter, "ASIAS3EXAMPLE", "issued-token"));
         assertNull(resolveSecretKey(filter, "ASIAS3EXAMPLE", null));
@@ -58,7 +58,7 @@ class PreSignedUrlFilterTest {
     void temporaryCredentialIsRejectedAfterExpiration() throws Exception {
         IamService iamService = IamServiceTestHelper.iamServiceWithSessionCredential(
                 "ASIAS3EXPIRED", "temporary-secret", "issued-token", java.time.Instant.now().minusSeconds(1));
-        PreSignedUrlFilter filter = new PreSignedUrlFilter(null, null, iamService);
+        PreSignedUrlFilter filter = new PreSignedUrlFilter(null, null, iamService, null);
 
         assertNull(resolveSecretKey(filter, "ASIAS3EXPIRED", "issued-token"));
     }
