@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import static io.restassured.RestAssured.given;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.hamcrest.Matchers.*;
 
 /**
@@ -457,11 +458,17 @@ class S3VirtualHostIntegrationTest {
             .statusCode(200)
             .body(equalTo("sentinel"));
 
-        // And nothing was stored under the truncated key.
+        // And nothing was stored under the truncated key: what would remain if the "/<bucket>/"
+        // inside the key were mistaken for the path-style bucket prefix and stripped. Derived from
+        // the key rather than written out, so renaming the key cannot leave this asking for a
+        // third key that neither behaviour ever stores.
+        String truncated = key.substring(key.indexOf("/" + segmentBucket + "/")
+                + segmentBucket.length() + 2);
+        assertEquals(".sentinel", truncated, "the guard below must name the truncation, not a third key");
         given()
             .header("Host", segmentHost)
         .when()
-            .get("/.store-sentinel")
+            .get("/" + truncated)
         .then()
             .statusCode(404);
     }
