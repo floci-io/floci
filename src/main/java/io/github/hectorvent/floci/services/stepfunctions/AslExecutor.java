@@ -31,6 +31,7 @@ import io.github.hectorvent.floci.services.lambda.LambdaFunctionStore;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
+import io.github.hectorvent.floci.services.rdsdata.RdsDataService;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.services.sns.SnsJsonHandler;
 import io.github.hectorvent.floci.services.sqs.SqsJsonHandler;
@@ -182,6 +183,7 @@ public class AslExecutor {
             Set.of("MD5", "SHA-1", "SHA-256", "SHA-384", "SHA-512");
 
     private static final String QUERY_LANGUAGE_JSONATA = "JSONata";
+    private static final String AWS_SDK_RDS_DATA_PREFIX = "arn:aws:states:::aws-sdk:rdsdata:";
     private static final String AWS_SDK_SFN_PREFIX = "arn:aws:states:::aws-sdk:sfn:";
     private static final String AWS_SDK_SCHEDULER_PREFIX = "arn:aws:states:::aws-sdk:scheduler:";
 
@@ -243,6 +245,7 @@ public class AslExecutor {
     private final EventBridgeHandler eventBridgeHandler;
     private final SchedulerService schedulerService;
     private final SchedulerController schedulerController;
+    private final RdsDataService rdsDataService;
     private final ObjectMapper objectMapper;
     private final Configuration jsonPathConfiguration;
     private final JsonataEvaluator jsonataEvaluator;
@@ -269,14 +272,14 @@ public class AslExecutor {
                        Ec2Service ec2Service, S3Service s3Service,
                        EcsService ecsService, EcsJsonHandler ecsJsonHandler,
                        EventBridgeHandler eventBridgeHandler, SchedulerService schedulerService,
-                       SchedulerController schedulerController,
+                       SchedulerController schedulerController, RdsDataService rdsDataService,
                        ObjectMapper objectMapper, JsonataEvaluator jsonataEvaluator,
                        Instance<StepFunctionsService> sfnService, EmulatorConfig config, Vertx vertx,
                        CustomResourceLiveness customResourceLiveness) {
         this(lambdaExecutor, functionStore, dynamoDbService, dynamoDbJsonHandler,
                 sqsJsonHandler, snsJsonHandler, cloudFormationHandler,
                 ec2Service, s3Service, ecsService, ecsJsonHandler,
-                eventBridgeHandler, schedulerService, schedulerController,
+                eventBridgeHandler, schedulerService, schedulerController, rdsDataService,
                 objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
                 Clock.systemUTC(), TimeUnit.NANOSECONDS::sleep, null);
     }
@@ -288,7 +291,7 @@ public class AslExecutor {
                 Ec2Service ec2Service, S3Service s3Service,
                 EcsService ecsService, EcsJsonHandler ecsJsonHandler,
                 EventBridgeHandler eventBridgeHandler, SchedulerService schedulerService,
-                SchedulerController schedulerController,
+                SchedulerController schedulerController, RdsDataService rdsDataService,
                 ObjectMapper objectMapper, JsonataEvaluator jsonataEvaluator,
                 Instance<StepFunctionsService> sfnService, EmulatorConfig config, Vertx vertx,
                 CustomResourceLiveness customResourceLiveness,
@@ -308,6 +311,7 @@ public class AslExecutor {
         this.eventBridgeHandler = eventBridgeHandler;
         this.schedulerService = schedulerService;
         this.schedulerController = schedulerController;
+        this.rdsDataService = rdsDataService;
         this.objectMapper = objectMapper;
         this.jsonPathConfiguration = objectMapper == null
                 ? null
@@ -330,10 +334,47 @@ public class AslExecutor {
         }
     }
 
+    AslExecutor(LambdaExecutorService lambdaExecutor, LambdaFunctionStore functionStore,
+                DynamoDbService dynamoDbService, DynamoDbJsonHandler dynamoDbJsonHandler,
+                SqsJsonHandler sqsJsonHandler, SnsJsonHandler snsJsonHandler,
+                CloudFormationQueryHandler cloudFormationHandler,
+                Ec2Service ec2Service, S3Service s3Service,
+                EcsService ecsService, EcsJsonHandler ecsJsonHandler,
+                EventBridgeHandler eventBridgeHandler, SchedulerService schedulerService,
+                SchedulerController schedulerController,
+                ObjectMapper objectMapper, JsonataEvaluator jsonataEvaluator,
+                Instance<StepFunctionsService> sfnService, EmulatorConfig config, Vertx vertx,
+                CustomResourceLiveness customResourceLiveness,
+                Clock clock, Sleeper sleeper, Integer maxWaitSecondsOverride) {
+        this(lambdaExecutor, functionStore, dynamoDbService, dynamoDbJsonHandler,
+                sqsJsonHandler, snsJsonHandler, cloudFormationHandler, ec2Service, s3Service,
+                ecsService, ecsJsonHandler, eventBridgeHandler, schedulerService,
+                schedulerController, null, objectMapper, jsonataEvaluator, sfnService, config,
+                vertx, customResourceLiveness, clock, sleeper, maxWaitSecondsOverride);
+    }
+
     /** Test seam: lets Wait states be exercised without real time passing. */
     @FunctionalInterface
     interface Sleeper {
         void sleep(long nanos) throws InterruptedException;
+    }
+
+    AslExecutor(LambdaExecutorService lambdaExecutor, LambdaFunctionStore functionStore,
+                DynamoDbService dynamoDbService, DynamoDbJsonHandler dynamoDbJsonHandler,
+                SqsJsonHandler sqsJsonHandler, SnsJsonHandler snsJsonHandler,
+                CloudFormationQueryHandler cloudFormationHandler,
+                Ec2Service ec2Service, S3Service s3Service,
+                EcsService ecsService, EcsJsonHandler ecsJsonHandler,
+                EventBridgeHandler eventBridgeHandler, SchedulerService schedulerService,
+                SchedulerController schedulerController,
+                ObjectMapper objectMapper, JsonataEvaluator jsonataEvaluator,
+                Instance<StepFunctionsService> sfnService, EmulatorConfig config, Vertx vertx,
+                CustomResourceLiveness customResourceLiveness) {
+        this(lambdaExecutor, functionStore, dynamoDbService, dynamoDbJsonHandler,
+                sqsJsonHandler, snsJsonHandler, cloudFormationHandler, ec2Service, s3Service,
+                ecsService, ecsJsonHandler, eventBridgeHandler, schedulerService,
+                schedulerController, null, objectMapper, jsonataEvaluator, sfnService, config,
+                vertx, customResourceLiveness);
     }
 
     @PreDestroy
@@ -1072,6 +1113,13 @@ public class AslExecutor {
             String camelCaseAction = resource.substring("arn:aws:states:::aws-sdk:dynamodb:".length());
             String region = extractRegionFromArn(sm.getStateMachineArn());
             return invokeAwsSdkDynamoDb(camelCaseAction, input, region);
+        }
+
+        // AWS SDK service integration: RDS Data API ExecuteStatement
+        if (resource.startsWith(AWS_SDK_RDS_DATA_PREFIX)) {
+            String action = resource.substring(AWS_SDK_RDS_DATA_PREFIX.length());
+            String region = extractRegionFromArn(sm.getStateMachineArn());
+            return invokeAwsSdkRdsData(action, input, region);
         }
 
         // SQS optimized integration
@@ -2006,6 +2054,20 @@ public class AslExecutor {
             return jsonNode;
         }
         return objectMapper.createObjectNode();
+    }
+
+    private JsonNode invokeAwsSdkRdsData(String action, JsonNode input, String region) {
+        if (!"executeStatement".equals(action)) {
+            throw new FailStateException("States.TaskFailed",
+                    "Unsupported resource: " + AWS_SDK_RDS_DATA_PREFIX + action);
+        }
+        try {
+            JsonNode request = recaseKeys(objectMapper, input, false);
+            JsonNode response = rdsDataService.executeStatement(request, region);
+            return recaseKeys(objectMapper, response, true);
+        } catch (AwsException e) {
+            throw new FailStateException(sdkExceptionName("RdsData", e.getErrorCode()), e.getMessage());
+        }
     }
 
     private JsonNode invokeOptimizedSqsSendMessage(JsonNode input, String region) {

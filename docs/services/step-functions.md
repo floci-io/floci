@@ -435,6 +435,7 @@ the wire and the task fails with `Sfn.StateMachineDoesNotExistException`.
 | `arn:aws:states:::aws-sdk:sfn:startSyncExecution` | execution envelope | `Sfn.StateMachineTypeNotSupportedException` for a Standard child |
 | `arn:aws:states:::aws-sdk:sfn:sendTaskSuccess` | `{}` | `Sfn.InvalidTokenException` when no task is waiting on the token |
 | `arn:aws:states:::aws-sdk:sfn:sendTaskFailure` | `{}` | `Sfn.InvalidTokenException` |
+| `arn:aws:states:::aws-sdk:rdsdata:executeStatement` | RDS Data statement result | `RdsData.BadRequestException` for an invalid request |
 | `arn:aws:states:::aws-sdk:scheduler:createSchedule` | `{ScheduleArn}` | `Scheduler.ConflictException` when the name is taken |
 | `arn:aws:states:::aws-sdk:scheduler:updateSchedule` | `{ScheduleArn}` | `Scheduler.ResourceNotFoundException` |
 | `arn:aws:states:::aws-sdk:scheduler:deleteSchedule` | `{}` | `Scheduler.ResourceNotFoundException` |
@@ -448,6 +449,11 @@ field. Textual JSON remains unchanged, and malformed text reaches the existing S
 `sendTaskSuccess` and `sendTaskFailure` resolve a token a `.waitForTaskToken` task is parked on. A
 token nobody is waiting for fails the calling task rather than reporting a delivery that never
 happened.
+
+`rdsdata:executeStatement` uses the existing RDS Data API implementation. Task arguments use SDK
+PascalCase names such as `ResourceArn`, `SecretArn`, `Sql` and `Parameters`; the adapter translates
+them to the direct API shape and returns a recursively PascalCase result. Other RDS Data actions are
+not routed through Step Functions yet.
 
 ## Publishing to SNS
 
