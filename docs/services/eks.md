@@ -225,7 +225,9 @@ EKS clusters support configuring KMS envelope encryption for secrets and control
 - **Response normalization**: AWS EKS always returns the status of all five log types. Enabled types are returned first (`enabled: true`), followed by disabled types (`enabled: false`).
 - **Default logging**: When omitted or empty at creation time, Floci returns all five log types disabled in a single entry (`enabled: false`).
 - **Backfill**: Existing persisted clusters created before this feature was introduced are automatically backfilled on startup with default disabled logging.
-- **Scope**: Floci stores and returns control plane logging configuration. Shipping log streams to Amazon CloudWatch Logs log groups is out of scope.
+- **CloudWatch Logs delivery**: When the `api` log type is enabled on a cluster, Floci creates the CloudWatch Logs log group `/aws/eks/<cluster-name>/cluster` and streams control plane container output to a log stream named `kube-apiserver-<hash>`, where `<hash>` is the first 32 characters of the container ID. When `api` logging is disabled or omitted, no log group is created and container logs are not streamed.
+- **Single-stream deviation**: AWS EKS provisions separate log streams for each component (`kube-apiserver-*`, `kube-controller-manager-*`, `kube-scheduler-*`, `authenticator-*`). Because Floci runs clusters on k3s, which embeds the Kubernetes API server, controller manager, and scheduler within a single process, control plane container logs are delivered to the single `kube-apiserver-<hash>` stream when the `api` log type is enabled. Other control plane log types (`audit`, `authenticator`, `controllerManager`, `scheduler`) do not provision separate streams.
+- **Audit and authenticator logs**: Audit logging is not configured in k3s. Authenticator webhook authentication events are logged directly by Floci.
 
 ## Node group inputs
 

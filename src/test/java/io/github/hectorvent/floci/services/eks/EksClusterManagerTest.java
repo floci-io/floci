@@ -13,9 +13,12 @@ import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.eks.model.CertificateAuthority;
+import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
 import io.github.hectorvent.floci.services.eks.model.ClusterIdentity;
 import io.github.hectorvent.floci.services.eks.model.ClusterOidcKey;
+import io.github.hectorvent.floci.services.eks.model.LogSetup;
+import io.github.hectorvent.floci.services.eks.model.Logging;
 import io.github.hectorvent.floci.services.eks.model.OidcIdentity;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -43,6 +46,7 @@ import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
+import java.io.Closeable;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -66,6 +70,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -1506,6 +1511,236 @@ class EksClusterManagerTest {
             verify(copyCmd).exec();
             verify(lifecycleManager).startCreated(any(), any());
             assertEquals("container-1", cluster.getContainerId());
+        }
+    }
+
+    @Nested
+    class ControlPlaneLogs {
+
+        private EmulatorConfig config;
+        private EmulatorConfig.EksServiceConfig eks;
+        private ContainerLifecycleManager lifecycleManager;
+        private ContainerLogStreamer logStreamer;
+        private EksClusterManager manager;
+        private Closeable mockHandle;
+
+        @BeforeEach
+        void setUp() {
+            config = Mockito.mock(EmulatorConfig.class);
+            EmulatorConfig.ServicesConfig services = Mockito.mock(EmulatorConfig.ServicesConfig.class);
+            eks = Mockito.mock(EmulatorConfig.EksServiceConfig.class);
+            when(config.services()).thenReturn(services);
+            when(services.eks()).thenReturn(eks);
+            when(eks.defaultImage()).thenReturn("rancher/k3s:v1.30.0-k3s1");
+            when(eks.imageTemplate()).thenReturn(Optional.empty());
+            when(eks.apiServerBasePort()).thenReturn(6440);
+            when(eks.apiServerMaxPort()).thenReturn(6499);
+            when(eks.dockerNetwork()).thenReturn(Optional.empty());
+            when(eks.disableCni()).thenReturn(false);
+            when(eks.iamAuthWebhook()).thenReturn(false);
+            when(eks.ecrRegistryMirror()).thenReturn(false);
+            when(eks.imds()).thenReturn(false);
+            when(eks.endpointMode()).thenReturn("host");
+            when(eks.keepRunningOnShutdown()).thenReturn(false);
+            when(config.defaultAccountId()).thenReturn("000000000000");
+            when(config.defaultRegion()).thenReturn("us-east-1");
+
+            EmulatorConfig.StorageConfig storage = Mockito.mock(EmulatorConfig.StorageConfig.class);
+            when(config.storage()).thenReturn(storage);
+            when(storage.mode()).thenReturn("memory");
+            when(storage.pruneVolumesOnDelete()).thenReturn(false);
+
+            lifecycleManager = Mockito.mock(ContainerLifecycleManager.class);
+            when(lifecycleManager.create(any())).thenReturn("container-id-123456789012345678901234567890");
+            when(lifecycleManager.startCreated(any(), any())).thenReturn(
+                    new ContainerInfo("container-id-123456789012345678901234567890", Map.of()));
+
+            ContainerBuilder containerBuilder = Mockito.mock(ContainerBuilder.class);
+            ContainerBuilder.Builder builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
+            when(containerBuilder.newContainer(anyString())).thenReturn(builder);
+            when(builder.build()).thenReturn(Mockito.mock(ContainerSpec.class));
+
+            PortAllocator portAllocator = Mockito.mock(PortAllocator.class);
+            when(portAllocator.allocate(6440, 6499)).thenReturn(6443);
+
+            RegionResolver regionResolver = Mockito.mock(RegionResolver.class);
+            when(regionResolver.getAccountId()).thenReturn("000000000000");
+            when(regionResolver.getDefaultRegion()).thenReturn("us-east-1");
+
+            logStreamer = Mockito.mock(ContainerLogStreamer.class);
+            mockHandle = Mockito.mock(Closeable.class);
+            when(logStreamer.attachForAccount(anyString(), anyString(), anyString(), anyString(), anyString(), anyString()))
+                    .thenReturn(mockHandle);
+            when(logStreamer.attachFromNowForAccount(anyString(), anyString(), anyString(), anyString(), anyString(), anyString()))
+                    .thenReturn(mockHandle);
+
+            manager = new EksClusterManager(containerBuilder, lifecycleManager,
+                    Mockito.mock(ContainerDetector.class), portAllocator,
+                    Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
+                    config, regionResolver, null, null, logStreamer);
+        }
+
+        @Test
+        void clusterWithEnabledTypesCreatesLogGroupAndAttachesStream() {
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+            cluster.setLogging(new Logging(List.of(new LogSetup(List.of("api"), true))));
+
+            manager.startCluster(cluster);
+
+            verify(logStreamer).attachForAccount(
+                    eq("000000000000"),
+                    eq("container-id-123456789012345678901234567890"),
+                    eq("/aws/eks/prod-cluster/cluster"),
+                    eq("kube-apiserver-container-id-1234567890123456789"),
+                    eq("us-east-1"),
+                    eq("eks:prod-cluster")
+            );
+            assertEquals(mockHandle, manager.getLogHandle(cluster));
+        }
+
+        @Test
+        void clusterWithNoEnabledTypesDoesNeither() {
+            Cluster cluster = new Cluster();
+            cluster.setName("no-logs-cluster");
+            cluster.setLogging(new Logging(List.of(new LogSetup(List.of("api"), false))));
+
+            manager.startCluster(cluster);
+
+            verifyNoInteractions(logStreamer);
+            assertNull(manager.getLogHandle(cluster));
+        }
+
+        @Test
+        void clusterWithNonApiEnabledTypeDoesNeither() {
+            Cluster cluster = new Cluster();
+            cluster.setName("scheduler-only-cluster");
+            cluster.setLogging(new Logging(List.of(new LogSetup(List.of("scheduler"), true))));
+
+            manager.startCluster(cluster);
+
+            verifyNoInteractions(logStreamer);
+            assertNull(manager.getLogHandle(cluster));
+        }
+
+        @Test
+        void clusterWithNullLoggingDoesNeither() {
+            Cluster cluster = new Cluster();
+            cluster.setName("null-logs-cluster");
+            cluster.setLogging(null);
+
+            manager.startCluster(cluster);
+
+            verifyNoInteractions(logStreamer);
+            assertNull(manager.getLogHandle(cluster));
+        }
+
+        @Test
+        void attachmentFailureLogsWarningAndContinuesWithoutAborting() {
+            when(logStreamer.attachForAccount(anyString(), anyString(), anyString(), anyString(), anyString(), anyString()))
+                    .thenThrow(new RuntimeException("Docker attach connection failed"));
+
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+            cluster.setLogging(new Logging(List.of(new LogSetup(List.of("api", "audit"), true))));
+
+            manager.startCluster(cluster);
+
+            assertNull(manager.getLogHandle(cluster));
+            assertEquals("container-id-123456789012345678901234567890", cluster.getContainerId());
+        }
+
+        @Test
+        void logHandleIsReleasedOnClusterStop() {
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+            cluster.setLogging(new Logging(List.of(new LogSetup(List.of("api"), true))));
+
+            manager.startCluster(cluster);
+            assertEquals(mockHandle, manager.getLogHandle(cluster));
+
+            manager.stopCluster(cluster);
+
+            verify(lifecycleManager).stopAndRemove("container-id-123456789012345678901234567890", mockHandle);
+            assertNull(manager.getLogHandle(cluster));
+        }
+
+        @Test
+        void logHandleClosedWhenKeepRunningOnShutdownIsTrue() throws Exception {
+            when(eks.keepRunningOnShutdown()).thenReturn(true);
+
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+            cluster.setLogging(new Logging(List.of(new LogSetup(List.of("api"), true))));
+
+            manager.startCluster(cluster);
+            assertEquals(mockHandle, manager.getLogHandle(cluster));
+
+            manager.stopCluster(cluster);
+
+            verify(mockHandle).close();
+            verify(lifecycleManager, never()).stopAndRemove(anyString(), any());
+            assertNull(manager.getLogHandle(cluster));
+        }
+
+        @Test
+        void restoreClusterAttachesLogsForAdoptedContainer() {
+            Container container = Mockito.mock(Container.class);
+            when(container.getId()).thenReturn("adopted-container-id-12345678901234567890");
+            when(lifecycleManager.findByName("floci-eks-prod-cluster")).thenReturn(Optional.of(container));
+            when(lifecycleManager.adopt(anyString(), any())).thenReturn(
+                    new ContainerInfo("adopted-container-id-12345678901234567890",
+                            Map.of(6443, new ContainerLifecycleManager.EndpointInfo("localhost", 6500)),
+                            Map.of(6443, 6500)));
+
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+            cluster.setLogging(new Logging(List.of(new LogSetup(List.of("api"), true))));
+
+            manager.restoreCluster(cluster);
+
+            verify(logStreamer).attachFromNowForAccount(
+                    eq("000000000000"),
+                    eq("adopted-container-id-12345678901234567890"),
+                    eq("/aws/eks/prod-cluster/cluster"),
+                    eq("kube-apiserver-adopted-container-id-12345678901"),
+                    eq("us-east-1"),
+                    eq("eks:prod-cluster")
+            );
+            assertEquals(mockHandle, manager.getLogHandle(cluster));
+        }
+
+        @Test
+        void hasLoggingEnabledVerification() {
+            assertFalse(EksClusterManager.hasLoggingEnabled(null));
+
+            Cluster cluster = new Cluster();
+            assertFalse(EksClusterManager.hasLoggingEnabled(cluster));
+
+            cluster.setLogging(new Logging(List.of()));
+            assertFalse(EksClusterManager.hasLoggingEnabled(cluster));
+
+            cluster.setLogging(new Logging(List.of(new LogSetup(List.of("api"), false))));
+            assertFalse(EksClusterManager.hasLoggingEnabled(cluster));
+
+            cluster.setLogging(new Logging(List.of(new LogSetup(List.of(), true))));
+            assertFalse(EksClusterManager.hasLoggingEnabled(cluster));
+
+            cluster.setLogging(new Logging(List.of(new LogSetup(null, true))));
+            assertFalse(EksClusterManager.hasLoggingEnabled(cluster));
+
+            cluster.setLogging(new Logging(List.of(
+                    new LogSetup(List.of("api"), false),
+                    new LogSetup(List.of("scheduler"), true)
+            )));
+            assertFalse(EksClusterManager.hasLoggingEnabled(cluster));
+            assertTrue(EksClusterManager.hasLoggingEnabled(cluster, "scheduler"));
+
+            cluster.setLogging(new Logging(List.of(
+                    new LogSetup(List.of("api"), true),
+                    new LogSetup(List.of("scheduler"), false)
+            )));
+            assertTrue(EksClusterManager.hasLoggingEnabled(cluster));
         }
     }
 }

@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
+import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
@@ -17,6 +18,7 @@ import io.github.hectorvent.floci.services.eks.model.CertificateAuthority;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
 import io.github.hectorvent.floci.services.eks.model.ClusterIdentity;
 import io.github.hectorvent.floci.services.eks.model.ClusterOidcKey;
+import io.github.hectorvent.floci.services.eks.model.LogSetup;
 import io.github.hectorvent.floci.services.eks.model.OidcIdentity;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
@@ -37,6 +39,7 @@ import org.jboss.logging.Logger;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.Closeable;
 import java.io.File;
 import java.io.IOException;
 import java.net.HttpURLConnection;
@@ -115,7 +118,9 @@ public class EksClusterManager {
     private final Ec2MetadataServer metadataServer;
     private final EksOidcService oidcService;
     private final FlociCertificateAuthority certificateAuthority;
+    private final ContainerLogStreamer logStreamer;
     private final Map<String, Instance> clusterNodeInstances = new ConcurrentHashMap<>();
+    private final Map<String, Closeable> clusterLogHandles = new ConcurrentHashMap<>();
 
     public EksClusterManager(ContainerBuilder containerBuilder,
                              ContainerLifecycleManager lifecycleManager,
@@ -126,7 +131,7 @@ public class EksClusterManager {
                              EmulatorConfig config,
                              RegionResolver regionResolver) {
         this(containerBuilder, lifecycleManager, containerDetector, portAllocator,
-                dockerHostResolver, ecrRegistryManager, config, regionResolver, null, null, null);
+                dockerHostResolver, ecrRegistryManager, config, regionResolver, null, null, null, null);
     }
 
     public EksClusterManager(ContainerBuilder containerBuilder,
@@ -139,7 +144,7 @@ public class EksClusterManager {
                              RegionResolver regionResolver,
                              Ec2MetadataServer metadataServer) {
         this(containerBuilder, lifecycleManager, containerDetector, portAllocator,
-                dockerHostResolver, ecrRegistryManager, config, regionResolver, metadataServer, null, null);
+                dockerHostResolver, ecrRegistryManager, config, regionResolver, metadataServer, null, null, null);
     }
 
     public EksClusterManager(ContainerBuilder containerBuilder,
@@ -152,8 +157,40 @@ public class EksClusterManager {
                              RegionResolver regionResolver,
                              Ec2MetadataServer metadataServer,
                              EksOidcService oidcService) {
-        this(containerBuilder, lifecycleManager, containerDetector, portAllocator, dockerHostResolver,
-                ecrRegistryManager, config, regionResolver, metadataServer, oidcService, null);
+        this(containerBuilder, lifecycleManager, containerDetector, portAllocator,
+                dockerHostResolver, ecrRegistryManager, config, regionResolver, metadataServer, oidcService, null, null);
+    }
+
+    public EksClusterManager(ContainerBuilder containerBuilder,
+                             ContainerLifecycleManager lifecycleManager,
+                             ContainerDetector containerDetector,
+                             PortAllocator portAllocator,
+                             DockerHostResolver dockerHostResolver,
+                             EcrRegistryManager ecrRegistryManager,
+                             EmulatorConfig config,
+                             RegionResolver regionResolver,
+                             Ec2MetadataServer metadataServer,
+                             EksOidcService oidcService,
+                             FlociCertificateAuthority certificateAuthority) {
+        this(containerBuilder, lifecycleManager, containerDetector, portAllocator,
+                dockerHostResolver, ecrRegistryManager, config, regionResolver, metadataServer, oidcService,
+                certificateAuthority, null);
+    }
+
+    public EksClusterManager(ContainerBuilder containerBuilder,
+                             ContainerLifecycleManager lifecycleManager,
+                             ContainerDetector containerDetector,
+                             PortAllocator portAllocator,
+                             DockerHostResolver dockerHostResolver,
+                             EcrRegistryManager ecrRegistryManager,
+                             EmulatorConfig config,
+                             RegionResolver regionResolver,
+                             Ec2MetadataServer metadataServer,
+                             EksOidcService oidcService,
+                             ContainerLogStreamer logStreamer) {
+        this(containerBuilder, lifecycleManager, containerDetector, portAllocator,
+                dockerHostResolver, ecrRegistryManager, config, regionResolver, metadataServer, oidcService,
+                null, logStreamer);
     }
 
     @Inject
@@ -167,7 +204,8 @@ public class EksClusterManager {
                              RegionResolver regionResolver,
                              Ec2MetadataServer metadataServer,
                              EksOidcService oidcService,
-                             FlociCertificateAuthority certificateAuthority) {
+                             FlociCertificateAuthority certificateAuthority,
+                             ContainerLogStreamer logStreamer) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.containerDetector = containerDetector;
@@ -179,6 +217,7 @@ public class EksClusterManager {
         this.metadataServer = metadataServer;
         this.oidcService = oidcService;
         this.certificateAuthority = certificateAuthority;
+        this.logStreamer = logStreamer;
     }
 
     /**
@@ -354,6 +393,7 @@ public class EksClusterManager {
 
         applyEndpoints(cluster, containerName, hostPort, info);
         configureLinkLocalMetadataEndpoint(cluster, containerId);
+        attachClusterLogs(cluster);
 
         LOG.infov("k3s container {0} started for cluster {1} on port {2} (internal: {3})",
                 containerId, cluster.getName(), String.valueOf(hostPort), cluster.getInternalEndpoint());
@@ -361,7 +401,7 @@ public class EksClusterManager {
 
     /**
      * Re-latches a persisted cluster onto its k3s container after a Floci restart. A surviving
-     * container — running, or stopped by a Docker daemon reboot — is adopted (started if needed),
+     * container - running, or stopped by a Docker daemon reboot - is adopted (started if needed),
      * keeping its published API server port and data volume, so the cluster's workloads come back
      * as they were. When the container is gone, the cluster is recreated via {@link #startCluster};
      * the named k3s data volume is reused if it survived. Callers should put the cluster back into
@@ -409,6 +449,7 @@ public class EksClusterManager {
         cluster.setHostPort(hostPort);
         applyEndpoints(cluster, containerName, hostPort, info);
         configureLinkLocalMetadataEndpoint(cluster, info.containerId());
+        attachClusterLogsFromNow(cluster);
 
         LOG.infov("Adopted surviving k3s container {0} for EKS cluster {1} on port {2} (internal: {3})",
                 info.containerId(), cluster.getName(), String.valueOf(hostPort), cluster.getInternalEndpoint());
@@ -503,16 +544,107 @@ public class EksClusterManager {
      */
     public void stopCluster(Cluster cluster) {
         unregisterMetadataEndpoint(cluster);
+        Closeable logStream = clusterLogHandles.remove(clusterResourceName(cluster));
         if (cluster.getContainerId() == null) {
+            closeQuietly(logStream);
             return;
         }
         if (config.services().eks().keepRunningOnShutdown()) {
+            closeQuietly(logStream);
             LOG.infov("Leaving k3s container for cluster {0} running", cluster.getName());
             return;
         }
-        lifecycleManager.stopAndRemove(cluster.getContainerId(), null);
+        lifecycleManager.stopAndRemove(cluster.getContainerId(), logStream);
         ContainerStorageHelper.removeNamedVolume(config, lifecycleManager, clusterResourceName(cluster));
         LOG.infov("Stopped k3s container for cluster {0}", cluster.getName());
+    }
+
+    private static void closeQuietly(Closeable closeable) {
+        if (closeable != null) {
+            try {
+                closeable.close();
+            } catch (Exception ignored) {
+                // Swallowing is safe because closing an already closed or failed log stream during shutdown is best-effort.
+            }
+        }
+    }
+
+    /**
+     * Checks whether the cluster has API server control plane logging enabled.
+     */
+    public static boolean hasLoggingEnabled(Cluster cluster) {
+        return hasLoggingEnabled(cluster, "api");
+    }
+
+    /**
+     * Checks whether the cluster has the specified control plane log type enabled.
+     */
+    public static boolean hasLoggingEnabled(Cluster cluster, String logType) {
+        if (cluster == null || cluster.getLogging() == null || logType == null) {
+            return false;
+        }
+        List<LogSetup> clusterLogging = cluster.getLogging().getClusterLogging();
+        if (clusterLogging == null || clusterLogging.isEmpty()) {
+            return false;
+        }
+        for (LogSetup setup : clusterLogging) {
+            if (Boolean.TRUE.equals(setup.getEnabled()) && setup.getTypes() != null
+                    && setup.getTypes().contains(logType)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Attaches CloudWatch Logs delivery for the cluster container if logging is enabled.
+     */
+    public void attachClusterLogs(Cluster cluster) {
+        attachClusterLogs(cluster, false);
+    }
+
+    /**
+     * Attaches CloudWatch Logs delivery for an adopted cluster container, only forwarding lines
+     * emitted from now on.
+     */
+    public void attachClusterLogsFromNow(Cluster cluster) {
+        attachClusterLogs(cluster, true);
+    }
+
+    private void attachClusterLogs(Cluster cluster, boolean fromNow) {
+        if (logStreamer == null || cluster == null || !hasLoggingEnabled(cluster)) {
+            return;
+        }
+        String containerId = cluster.getContainerId();
+        if (containerId == null || containerId.isBlank()) {
+            return;
+        }
+        String resourceName = clusterResourceName(cluster);
+        if (clusterLogHandles.containsKey(resourceName)) {
+            return;
+        }
+        try {
+            String logGroup = "/aws/eks/" + cluster.getName() + "/cluster";
+            String hash = containerId.length() >= 32 ? containerId.substring(0, 32) : containerId;
+            String logStream = "kube-apiserver-" + hash;
+            String region = clusterRegion(cluster);
+            String accountId = resolveClusterAccountId(cluster);
+            Closeable handle = fromNow
+                    ? logStreamer.attachFromNowForAccount(
+                            accountId, containerId, logGroup, logStream, region, "eks:" + cluster.getName())
+                    : logStreamer.attachForAccount(
+                            accountId, containerId, logGroup, logStream, region, "eks:" + cluster.getName());
+            if (handle != null) {
+                clusterLogHandles.put(resourceName, handle);
+            }
+        } catch (Exception e) {
+            LOG.warnv("Could not attach control plane log stream for EKS cluster {0}: {1}",
+                    cluster.getName(), e.getMessage());
+        }
+    }
+
+    Closeable getLogHandle(Cluster cluster) {
+        return clusterLogHandles.get(clusterResourceName(cluster));
     }
 
     /**
