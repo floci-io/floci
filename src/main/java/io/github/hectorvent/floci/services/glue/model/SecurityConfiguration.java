@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.glue.model;
 
+import com.fasterxml.jackson.annotation.JsonFormat;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.quarkus.runtime.annotations.RegisterForReflection;
@@ -10,6 +11,7 @@ import java.time.Instant;
 public class SecurityConfiguration {
 
     private String name;
+    @JsonFormat(shape = JsonFormat.Shape.NUMBER)
     private Instant createdTimeStamp;
     private JsonNode encryptionConfiguration;
 

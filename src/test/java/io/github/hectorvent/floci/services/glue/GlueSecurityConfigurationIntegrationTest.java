@@ -17,8 +17,9 @@ import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
-import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.instanceOf;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -51,6 +52,7 @@ class GlueSecurityConfigurationIntegrationTest {
         .when().post("/")
         .then().statusCode(200)
                 .body("SecurityConfiguration.Name", equalTo(NAME))
+                .body("SecurityConfiguration.CreatedTimeStamp", instanceOf(Number.class))
                 .body("SecurityConfiguration.EncryptionConfiguration.S3Encryption[0].S3EncryptionMode",
                         equalTo("SSE-KMS"))
                 .body("SecurityConfiguration.EncryptionConfiguration.JobBookmarksEncryption.JobBookmarksEncryptionMode",
@@ -62,7 +64,8 @@ class GlueSecurityConfigurationIntegrationTest {
         .when().post("/")
         .then().statusCode(200)
                 .body("SecurityConfigurations", hasSize(1))
-                .body("SecurityConfigurations[0].Name", equalTo(NAME));
+                .body("SecurityConfigurations[0].Name", equalTo(NAME))
+                .body("SecurityConfigurations[0].CreatedTimeStamp", instanceOf(Number.class));
 
         given().contentType(CONTENT_TYPE)
                 .header("X-Amz-Target", "AWSGlue.DeleteSecurityConfiguration")
@@ -126,7 +129,8 @@ class GlueSecurityConfigurationIntegrationTest {
                 .body("{\"Name\":\"" + name + "\",\"EncryptionConfiguration\":" + ENCRYPTION + "}")
         .when().post("/")
         .then().statusCode(200)
-                .body("Name", equalTo(name));
+                .body("Name", equalTo(name))
+                .body("CreatedTimestamp", instanceOf(Number.class));
     }
 
     private static void delete(String name, String region, String account) {

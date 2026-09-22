@@ -333,7 +333,7 @@ public class GlueJsonHandler {
                         request.path("Name").asText(null), request.get("EncryptionConfiguration"), region);
                 yield Response.ok(Map.of(
                         "Name", configuration.getName(),
-                        "CreatedTimestamp", configuration.getCreatedTimeStamp())).build();
+                        "CreatedTimestamp", configuration.getCreatedTimeStamp().getEpochSecond())).build();
             }
             case "GetSecurityConfiguration" -> {
                 SecurityConfiguration configuration = glueService.getSecurityConfiguration(
@@ -342,7 +342,7 @@ public class GlueJsonHandler {
             }
             case "DeleteSecurityConfiguration" -> {
                 glueService.deleteSecurityConfiguration(request.path("Name").asText(null), region);
-                yield Response.ok().build();
+                yield Response.ok(Map.of()).build();
             }
             // Read-only Glue actions for resources the emulator does not model. The AWS SDK
             // expects each to return a 200 with its result key present (empty), so we emit the
