@@ -39,6 +39,8 @@ class SesMessageInsightsV2IntegrationTest {
             "AWS4-HMAC-SHA256 Credential=111122223333/20260101/eu-north-1/ses/aws4_request";
     private static final String ACCOUNT_B_AUTH =
             "AWS4-HMAC-SHA256 Credential=444455556666/20260101/eu-north-1/ses/aws4_request";
+    private static final String ACCOUNT_C_AUTH =
+            "AWS4-HMAC-SHA256 Credential=777788889999/20260101/eu-north-1/ses/aws4_request";
 
     private static String send(String destinationJson, String subject) {
         return send(AUTH, destinationJson, subject);
@@ -272,6 +274,17 @@ class SesMessageInsightsV2IntegrationTest {
 
     @Test
     @Order(11)
+    void getMessageInsights_vdmGateIsPerAccount() {
+        // Three accounts have VDM on in this region by now; one that never enabled it still meets
+        // the gate, so the setting is not shared across the region.
+        given().header("Authorization", ACCOUNT_C_AUTH)
+        .when().get("/v2/email/insights/not-even-an-id").then().statusCode(404)
+                .body("message", containsString(
+                        "To use this feature you must enable Virtual Deliverability Manager"));
+    }
+
+    @Test
+    @Order(12)
     void cleanUpVdmAndIdentities() {
         for (String auth : new String[] {AUTH, ACCOUNT_A_AUTH, ACCOUNT_B_AUTH}) {
             disableVdm(auth);
