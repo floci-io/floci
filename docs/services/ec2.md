@@ -16,6 +16,15 @@
 
 Terminated instances remain queryable for 1 hour (matching real EC2 tombstone behavior) before being pruned.
 
+## Instance Resource Limits
+
+By default, Docker containers launched for EC2 instances are bounded to the CPU and memory limits defined in the instance type catalog (`src/main/resources/ec2/instance-type-catalog.yaml`).
+
+- **CPU limit**: Each vCPU corresponds to 1024 CPU units (Docker nanoCPUs = `vcpu * 1_000_000_000`). If the host machine has fewer physical cores than requested, Floci clamps execution to available host CPUs and warns (since Docker refuses a nanoCPUs value exceeding the host CPU count).
+- **Memory limit**: Container memory is bounded to the exact MiB value specified for the instance type in the catalog.
+- **Unknown instance types**: If an instance type is not present in the catalog, the container launches unbounded without CPU or memory restrictions, avoiding launch failures for custom or unmodeled instance types.
+- **Configuration knob**: To disable container resource limits (for example, running a large instance type on a developer machine with limited resources), set `floci.services.ec2.instance-resource-limits: false` (or environment variable `FLOCI_SERVICES_EC2_INSTANCE_RESOURCE_LIMITS=false`).
+
 ## AMI to Docker Image Mapping
 
 Floci resolves AMI IDs to Docker images from the EC2 image catalog at

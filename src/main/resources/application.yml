@@ -522,6 +522,9 @@ floci:
       max-published-ports-per-instance: 20
       socat-image: alpine/socat
       mock: false
+      # Bound instance containers to their instance type's CPU and memory limits from the catalog.
+      # FLOCI_SERVICES_EC2_INSTANCE_RESOURCE_LIMITS
+      instance-resource-limits: true
       aws-faithful-private-ip: false
       # container-ips-routable: true  # Auto-detected by default (a throwaway TCP probe toward
                                        # the container network). Set explicitly when the probe

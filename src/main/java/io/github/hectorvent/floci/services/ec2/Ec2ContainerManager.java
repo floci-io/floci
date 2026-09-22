@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import io.github.hectorvent.floci.core.common.docker.UserDataPipeline;
+import io.github.hectorvent.floci.services.ec2.Ec2InstanceTypeCatalog.CatalogInstanceType;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InstanceNetworkInterface;
 import io.github.hectorvent.floci.services.ec2.model.InstanceState;
@@ -151,6 +152,7 @@ public class Ec2ContainerManager {
     private final ContainerNetworkReachability containerNetworkReachability;
     private final VpcNetworkManager vpcNetworkManager;
     private final ContainerReachableEndpoint reachableEndpoint;
+    private final Ec2InstanceTypeCatalog instanceTypeCatalog;
     private SecurityGroupFirewallManager firewallManager;
     private final ExecutorService executor;
     private final Duration userDataExecutionTimeout;
@@ -236,11 +238,54 @@ public class Ec2ContainerManager {
                                ContainerNetworkReachability containerNetworkReachability,
                                VpcNetworkManager vpcNetworkManager,
                                ContainerReachableEndpoint reachableEndpoint,
+                               SecurityGroupFirewallManager firewallManager,
+                               Ec2InstanceTypeCatalog instanceTypeCatalog) {
+        this(containerBuilder, lifecycleManager, logStreamer, containerDetector, dockerHostResolver,
+                dockerClient, portAllocator, config, metadataServer, portForwardManager, regionResolver,
+                containerNetworkReachability, vpcNetworkManager, reachableEndpoint, instanceTypeCatalog);
+        this.firewallManager = firewallManager;
+    }
+
+    public Ec2ContainerManager(ContainerBuilder containerBuilder,
+                               ContainerLifecycleManager lifecycleManager,
+                               ContainerLogStreamer logStreamer,
+                               ContainerDetector containerDetector,
+                               DockerHostResolver dockerHostResolver,
+                               DockerClient dockerClient,
+                               PortAllocator portAllocator,
+                               EmulatorConfig config,
+                               Ec2MetadataServer metadataServer,
+                               Ec2PortForwardManager portForwardManager,
+                               RegionResolver regionResolver,
+                               ContainerNetworkReachability containerNetworkReachability,
+                               VpcNetworkManager vpcNetworkManager,
+                               ContainerReachableEndpoint reachableEndpoint,
                                SecurityGroupFirewallManager firewallManager) {
         this(containerBuilder, lifecycleManager, logStreamer, containerDetector, dockerHostResolver,
                 dockerClient, portAllocator, config, metadataServer, portForwardManager, regionResolver,
-                containerNetworkReachability, vpcNetworkManager, reachableEndpoint);
-        this.firewallManager = firewallManager;
+                containerNetworkReachability, vpcNetworkManager, reachableEndpoint, firewallManager,
+                new Ec2InstanceTypeCatalog());
+    }
+
+    public Ec2ContainerManager(ContainerBuilder containerBuilder,
+                               ContainerLifecycleManager lifecycleManager,
+                               ContainerLogStreamer logStreamer,
+                               ContainerDetector containerDetector,
+                               DockerHostResolver dockerHostResolver,
+                               DockerClient dockerClient,
+                               PortAllocator portAllocator,
+                               EmulatorConfig config,
+                               Ec2MetadataServer metadataServer,
+                               Ec2PortForwardManager portForwardManager,
+                               RegionResolver regionResolver,
+                               ContainerNetworkReachability containerNetworkReachability,
+                               VpcNetworkManager vpcNetworkManager,
+                               ContainerReachableEndpoint reachableEndpoint,
+                               Ec2InstanceTypeCatalog instanceTypeCatalog) {
+        this(containerBuilder, lifecycleManager, logStreamer, containerDetector, dockerHostResolver, dockerClient,
+                portAllocator, config, metadataServer, portForwardManager, regionResolver,
+                containerNetworkReachability, vpcNetworkManager, reachableEndpoint, instanceTypeCatalog,
+                createLaunchExecutor(), Duration.ofMinutes(USER_DATA_EXECUTION_TIMEOUT_MINUTES));
     }
 
     public Ec2ContainerManager(ContainerBuilder containerBuilder,
@@ -259,8 +304,43 @@ public class Ec2ContainerManager {
                                ContainerReachableEndpoint reachableEndpoint) {
         this(containerBuilder, lifecycleManager, logStreamer, containerDetector, dockerHostResolver, dockerClient,
                 portAllocator, config, metadataServer, portForwardManager, regionResolver,
-                containerNetworkReachability, vpcNetworkManager, reachableEndpoint, createLaunchExecutor(),
-                Duration.ofMinutes(USER_DATA_EXECUTION_TIMEOUT_MINUTES));
+                containerNetworkReachability, vpcNetworkManager, reachableEndpoint, new Ec2InstanceTypeCatalog());
+    }
+
+    Ec2ContainerManager(ContainerBuilder containerBuilder,
+                        ContainerLifecycleManager lifecycleManager,
+                        ContainerLogStreamer logStreamer,
+                        ContainerDetector containerDetector,
+                        DockerHostResolver dockerHostResolver,
+                        DockerClient dockerClient,
+                        PortAllocator portAllocator,
+                        EmulatorConfig config,
+                        Ec2MetadataServer metadataServer,
+                        Ec2PortForwardManager portForwardManager,
+                        RegionResolver regionResolver,
+                        ContainerNetworkReachability containerNetworkReachability,
+                        VpcNetworkManager vpcNetworkManager,
+                        ContainerReachableEndpoint reachableEndpoint,
+                        Ec2InstanceTypeCatalog instanceTypeCatalog,
+                        ExecutorService executor,
+                        Duration userDataExecutionTimeout) {
+        this.containerBuilder = containerBuilder;
+        this.lifecycleManager = lifecycleManager;
+        this.logStreamer = logStreamer;
+        this.containerDetector = containerDetector;
+        this.dockerHostResolver = dockerHostResolver;
+        this.dockerClient = dockerClient;
+        this.portAllocator = portAllocator;
+        this.config = config;
+        this.regionResolver = regionResolver;
+        this.metadataServer = metadataServer;
+        this.portForwardManager = portForwardManager;
+        this.containerNetworkReachability = containerNetworkReachability;
+        this.vpcNetworkManager = vpcNetworkManager;
+        this.reachableEndpoint = reachableEndpoint;
+        this.instanceTypeCatalog = instanceTypeCatalog != null ? instanceTypeCatalog : new Ec2InstanceTypeCatalog();
+        this.executor = executor;
+        this.userDataExecutionTimeout = userDataExecutionTimeout;
     }
 
     Ec2ContainerManager(ContainerBuilder containerBuilder,
@@ -279,22 +359,10 @@ public class Ec2ContainerManager {
                         ContainerReachableEndpoint reachableEndpoint,
                         ExecutorService executor,
                         Duration userDataExecutionTimeout) {
-        this.containerBuilder = containerBuilder;
-        this.lifecycleManager = lifecycleManager;
-        this.logStreamer = logStreamer;
-        this.containerDetector = containerDetector;
-        this.dockerHostResolver = dockerHostResolver;
-        this.dockerClient = dockerClient;
-        this.portAllocator = portAllocator;
-        this.config = config;
-        this.regionResolver = regionResolver;
-        this.metadataServer = metadataServer;
-        this.portForwardManager = portForwardManager;
-        this.containerNetworkReachability = containerNetworkReachability;
-        this.vpcNetworkManager = vpcNetworkManager;
-        this.reachableEndpoint = reachableEndpoint;
-        this.executor = executor;
-        this.userDataExecutionTimeout = userDataExecutionTimeout;
+        this(containerBuilder, lifecycleManager, logStreamer, containerDetector, dockerHostResolver, dockerClient,
+                portAllocator, config, metadataServer, portForwardManager, regionResolver,
+                containerNetworkReachability, vpcNetworkManager, reachableEndpoint, new Ec2InstanceTypeCatalog(),
+                executor, userDataExecutionTimeout);
     }
 
     private static ExecutorService createLaunchExecutor() {
@@ -558,7 +626,8 @@ public class Ec2ContainerManager {
                             namespace.helperId(), prefixLists);
                 }
                 ContainerSpec spec = buildContainerSpec(containerName, image, region, serviceEndpoint, imdsEndpoint,
-                        instanceId, sshHostPort, namespace, instance.getIamInstanceProfileArn() != null);
+                        instanceId, sshHostPort, namespace, instance.getIamInstanceProfileArn() != null,
+                        instance.getInstanceType());
                 containerId = image.dockerPlatform() == null
                         ? lifecycleManager.create(spec)
                         : lifecycleManager.create(spec, image.dockerPlatform());
@@ -613,7 +682,7 @@ public class Ec2ContainerManager {
     private ContainerSpec buildContainerSpec(String containerName, ResolvedAmiImage image, String region,
                                              String serviceEndpoint, String imdsEndpoint, String instanceId,
                                              int sshHostPort, SecurityGroupFirewallManager.Namespace namespace,
-                                             boolean hasInstanceProfile) {
+                                             boolean hasInstanceProfile, String instanceType) {
         // Minimal images keep the historic tail command, while cloud-image AMI guests can boot their init.
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image.dockerImage())
                 .withName(containerName)
@@ -633,6 +702,17 @@ public class Ec2ContainerManager {
                 // privileges in the local container to attach that link-local address.
                 .withPrivileged(namespace == null)
                 .withCmd(image.systemd() ? List.of("/sbin/init") : List.of("tail", "-f", "/dev/null"));
+        if (config.services().ec2().instanceResourceLimits() && instanceType != null && !instanceType.isBlank()) {
+            Optional<CatalogInstanceType> catalogType = instanceTypeCatalog.find(instanceType);
+            if (catalogType.isPresent()) {
+                CatalogInstanceType type = catalogType.get();
+                specBuilder.withMemoryMb(type.memoryMib);
+                specBuilder.withCpuUnits(type.vcpu * 1024);
+            } else {
+                LOG.debugv("EC2 instance {0} has unknown instance type {1}; launching without resource limits",
+                        instanceId, instanceType);
+            }
+        }
         if (namespace == null) {
             specBuilder.withPortBinding(22, sshHostPort);
         } else {

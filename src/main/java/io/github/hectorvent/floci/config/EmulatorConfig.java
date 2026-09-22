@@ -2782,6 +2782,14 @@ public interface EmulatorConfig {
         @WithDefault("false")
         boolean mock();
 
+        /**
+         * When true, instance containers are bounded to the CPU and memory limits defined for
+         * their instance type in the instance type catalog. When false, containers are launched
+         * without CPU or memory limits.
+         */
+        @WithDefault("true")
+        boolean instanceResourceLimits();
+
         /** Docker-network backing for VPCs and subnets. */
         VpcNetworksConfig vpcNetworks();
     }

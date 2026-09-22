@@ -25,6 +25,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.ec2.net.VpcNetworkManager;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
@@ -37,6 +38,7 @@ import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InstanceNetworkInterface;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.io.InputStream;
 import java.io.Closeable;
@@ -1483,6 +1485,7 @@ class Ec2ContainerManagerTest {
         when(ec2.sshPortRangeStart()).thenReturn(2200);
         when(ec2.sshPortRangeEnd()).thenReturn(2299);
         when(ec2.imdsPort()).thenReturn(9169);
+        when(ec2.instanceResourceLimits()).thenReturn(true);
 
         DockerClient dockerClient = mock(DockerClient.class);
         stubDockerPing(dockerClient, true);
@@ -1797,6 +1800,183 @@ class Ec2ContainerManagerTest {
 
         harness.manager().terminate(instance);
         awaitUntil(() -> "terminated".equals(instance.getState().getName()), Duration.ofSeconds(2));
+    }
+
+    @Test
+    void launchKnownInstanceTypeAppliesResourceLimitsFromCatalog() throws Exception {
+        Ec2ContainerManager.containerBridgeIpAttempts = 1;
+        Ec2ContainerManager.containerBridgeIpPollMillis = 1;
+        LaunchHarness harness = launchHarness();
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
+        InspectContainerResponse inspectResponse = inspectResponse("172.18.0.12");
+        when(inspect.exec()).thenReturn(inspectResponse);
+        harness.stubSuccessfulExecs(new CountDownLatch(0), new CountDownLatch(0));
+
+        Instance instance = instance("i-limits-known");
+        instance.setInstanceType("t3.micro");
+
+        harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
+        awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(2));
+
+        verify(harness.builder).withMemoryMb(1024);
+        verify(harness.builder).withCpuUnits(2048);
+    }
+
+    @Test
+    void launchDifferentInstanceTypesProduceDifferentLimits() throws Exception {
+        Ec2ContainerManager.containerBridgeIpAttempts = 1;
+        Ec2ContainerManager.containerBridgeIpPollMillis = 1;
+        LaunchHarness harness = launchHarness();
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        when(harness.dockerClient.inspectContainerCmd(anyString())).thenReturn(inspect);
+        InspectContainerResponse inspectResponse = inspectResponse("172.18.0.12");
+        when(inspect.exec()).thenReturn(inspectResponse);
+        harness.stubSuccessfulExecs(new CountDownLatch(0), new CountDownLatch(0));
+
+        Instance inst1 = instance("i-t2-micro");
+        inst1.setInstanceType("t2.micro");
+        harness.manager.launch(inst1, "ubuntu:24.04", null, "us-west-2");
+        awaitUntil(() -> "running".equals(inst1.getState().getName()), Duration.ofSeconds(2));
+
+        verify(harness.builder).withMemoryMb(1024);
+        verify(harness.builder).withCpuUnits(1024);
+
+        Instance inst2 = instance("i-t3-small");
+        inst2.setInstanceType("t3.small");
+        harness.manager.launch(inst2, "ubuntu:24.04", null, "us-west-2");
+        awaitUntil(() -> "running".equals(inst2.getState().getName()), Duration.ofSeconds(2));
+
+        verify(harness.builder).withMemoryMb(2048);
+        verify(harness.builder).withCpuUnits(2048);
+    }
+
+    @Test
+    void launchUnknownInstanceTypeLaunchesUnboundedWithoutLimits() throws Exception {
+        Ec2ContainerManager.containerBridgeIpAttempts = 1;
+        Ec2ContainerManager.containerBridgeIpPollMillis = 1;
+        LaunchHarness harness = launchHarness();
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
+        InspectContainerResponse inspectResponse = inspectResponse("172.18.0.12");
+        when(inspect.exec()).thenReturn(inspectResponse);
+        harness.stubSuccessfulExecs(new CountDownLatch(0), new CountDownLatch(0));
+
+        Instance instance = instance("i-unknown-type");
+        instance.setInstanceType("custom.unknown.type");
+
+        harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
+        awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(2));
+
+        assertEquals("running", instance.getState().getName());
+        verify(harness.builder, never()).withMemoryMb(anyInt());
+        verify(harness.builder, never()).withCpuUnits(anyInt());
+    }
+
+    @Test
+    void launchWithResourceLimitsDisabledProducesNoLimits() throws Exception {
+        Ec2ContainerManager.containerBridgeIpAttempts = 1;
+        Ec2ContainerManager.containerBridgeIpPollMillis = 1;
+        LaunchHarness harness = launchHarness();
+        when(harness.config.services().ec2().instanceResourceLimits()).thenReturn(false);
+
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
+        InspectContainerResponse inspectResponse = inspectResponse("172.18.0.12");
+        when(inspect.exec()).thenReturn(inspectResponse);
+        harness.stubSuccessfulExecs(new CountDownLatch(0), new CountDownLatch(0));
+
+        Instance instance = instance("i-disabled-limits");
+        instance.setInstanceType("t3.micro");
+
+        harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
+        awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(2));
+
+        assertEquals("running", instance.getState().getName());
+        verify(harness.builder, never()).withMemoryMb(anyInt());
+        verify(harness.builder, never()).withCpuUnits(anyInt());
+    }
+
+    @Test
+    void launchProducesContainerSpecWithCatalogMemoryAndCpuLimits() throws Exception {
+        Ec2ContainerManager.containerBridgeIpAttempts = 1;
+        Ec2ContainerManager.containerBridgeIpPollMillis = 1;
+
+        DockerHostResolver dockerHostResolver = mock(DockerHostResolver.class);
+        when(dockerHostResolver.resolve()).thenReturn("floci");
+        ContainerReachableEndpoint reachableEndpoint = mock(ContainerReachableEndpoint.class);
+        when(reachableEndpoint.baseUrl()).thenReturn("http://localhost.floci.io:4680");
+        PortAllocator portAllocator = mock(PortAllocator.class);
+        when(portAllocator.allocate(anyInt(), anyInt())).thenReturn(2201);
+
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.Ec2ServiceConfig ec2 = mock(EmulatorConfig.Ec2ServiceConfig.class);
+        when(config.services()).thenReturn(services);
+        when(services.ec2()).thenReturn(ec2);
+        when(services.dockerNetwork()).thenReturn(Optional.empty());
+        when(ec2.sshPortRangeStart()).thenReturn(2200);
+        when(ec2.sshPortRangeEnd()).thenReturn(2299);
+        when(ec2.imdsPort()).thenReturn(9169);
+        when(ec2.instanceResourceLimits()).thenReturn(true);
+
+        EmulatorConfig.DockerConfig docker = mock(EmulatorConfig.DockerConfig.class);
+        when(docker.logMaxSize()).thenReturn("10m");
+        when(docker.logMaxFile()).thenReturn("3");
+        when(docker.extraLabels()).thenReturn(List.of());
+        when(docker.resourceNamespace()).thenReturn(Optional.empty());
+        when(docker.imageRegistryBase()).thenReturn(Optional.empty());
+        when(config.docker()).thenReturn(docker);
+
+        ContainerBuilder realBuilder = new ContainerBuilder(
+                config,
+                dockerHostResolver,
+                mock(EmbeddedDnsServer.class));
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        ArgumentCaptor<ContainerSpec> specCaptor = ArgumentCaptor.forClass(ContainerSpec.class);
+        when(lifecycleManager.create(specCaptor.capture())).thenReturn(TEST_CONTAINER_ID);
+        when(lifecycleManager.isContainerRunning(TEST_CONTAINER_ID)).thenReturn(true);
+
+        DockerClient dockerClient = mock(DockerClient.class);
+        stubDockerPing(dockerClient, true);
+        Ec2MetadataServer metadataServer = mock(Ec2MetadataServer.class);
+        ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
+        Ec2PortForwardManager portForwardManager = mock(Ec2PortForwardManager.class);
+        VpcNetworkManager vpcNetworkManager = mock(VpcNetworkManager.class);
+        RegionResolver regionResolver = mock(RegionResolver.class);
+        when(regionResolver.getAccountId()).thenReturn("000000000000");
+
+        Ec2ContainerManager manager = new Ec2ContainerManager(
+                realBuilder,
+                lifecycleManager,
+                logStreamer,
+                mock(ContainerDetector.class),
+                dockerHostResolver,
+                dockerClient,
+                portAllocator,
+                config,
+                metadataServer,
+                portForwardManager,
+                regionResolver,
+                mock(ContainerNetworkReachability.class),
+                vpcNetworkManager,
+                reachableEndpoint,
+                new Ec2InstanceTypeCatalog());
+
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        when(dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
+        InspectContainerResponse inspectResponse = inspectResponse("172.18.0.12");
+        when(inspect.exec()).thenReturn(inspectResponse);
+
+        Instance instance = instance("i-spec-limits");
+        instance.setInstanceType("t3.micro");
+
+        manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
+        awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(2));
+
+        ContainerSpec capturedSpec = specCaptor.getValue();
+        assertEquals(1024L * 1024 * 1024, capturedSpec.memoryBytes());
+        assertEquals(2_000_000_000L, capturedSpec.nanoCpus());
     }
 
     /** Stubs the daemon reachability probe every launch makes before touching Docker. */
