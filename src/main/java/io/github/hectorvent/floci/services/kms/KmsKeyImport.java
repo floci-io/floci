@@ -27,7 +27,8 @@ final class KmsKeyImport {
     private static final String RSAES_OAEP_SHA_1 = "RSAES_OAEP_SHA_1";
     private static final String RSAES_OAEP_SHA_256 = "RSAES_OAEP_SHA_256";
     private static final String RSA_AES_KEY_WRAP_SHA_1 = "RSA_AES_KEY_WRAP_SHA_1";
-    private static final String RSA_AES_KEY_WRAP_SHA_256 ="RSA_AES_KEY_WRAP_SHA_256";
+    private static final String RSA_AES_KEY_WRAP_SHA_256 = "RSA_AES_KEY_WRAP_SHA_256";
+    private static final String SM2PKE = "SM2PKE";
 
     private KmsKeyImport() {
     }
@@ -75,18 +76,7 @@ final class KmsKeyImport {
      */
     static void validateWrappingAlgorithm(KmsKeySpec keySpec, String wrappingAlgorithm) {
         String algorithm = wrappingAlgorithm == null ? "" : wrappingAlgorithm;
-
-        if (RSAES_PKCS1_V1_5.equals(algorithm)) {
-            throw new AwsException("UnsupportedOperationException",
-                    "AWS KMS stopped supporting the RSAES_PKCS1_V1_5 wrapping algorithm on October 10, 2023. "
-                            + "Use RSA_AES_KEY_WRAP_SHA_1, RSA_AES_KEY_WRAP_SHA_256, "
-                            + "RSAES_OAEP_SHA_1 or RSAES_OAEP_SHA_256.", 400);
-        }
-
-        if ("SM2PKE".equals(algorithm)) {
-            throw new AwsException("UnsupportedOperationException",
-                    "WrappingAlgorithm SM2PKE is not supported.", 400);
-        }
+        validateWrappingAlgorithmValue(algorithm, wrappingAlgorithm);
 
         switch (keySpec.getKeyType()) {
             case HMAC, SYMMETRIC -> {
@@ -105,6 +95,23 @@ final class KmsKeyImport {
             }
             default -> throw new AwsException("UnsupportedOperationException",
                     "Importing key material for key spec " + keySpec + " is not supported.", 400);
+        }
+    }
+
+    private static void validateWrappingAlgorithmValue(String algorithm, String wrappingAlgorithm) {
+        switch (algorithm) {
+            case RSAES_OAEP_SHA_1, RSAES_OAEP_SHA_256, RSA_AES_KEY_WRAP_SHA_1, RSA_AES_KEY_WRAP_SHA_256 -> { }
+            case SM2PKE -> throw new AwsException("UnsupportedOperationException",
+                    "WrappingAlgorithm SM2PKE is not supported.", 400);
+            case RSAES_PKCS1_V1_5 -> throw new AwsException("UnsupportedOperationException",
+                    "AWS KMS stopped supporting the RSAES_PKCS1_V1_5 wrapping algorithm on October 10, 2023. "
+                            + "Use RSA_AES_KEY_WRAP_SHA_1, RSA_AES_KEY_WRAP_SHA_256, "
+                            + "RSAES_OAEP_SHA_1 or RSAES_OAEP_SHA_256.", 400);
+            default -> throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + wrappingAlgorithm + "' at 'wrappingAlgorithm' failed "
+                            + "to satisfy constraint: Member must satisfy enum value set: "
+                            + "[RSAES_OAEP_SHA_256, RSAES_OAEP_SHA_1, RSA_AES_KEY_WRAP_SHA_256, "
+                            + "RSA_AES_KEY_WRAP_SHA_1, SM2PKE, RSAES_PKCS1_V1_5]", 400);
         }
     }
 
