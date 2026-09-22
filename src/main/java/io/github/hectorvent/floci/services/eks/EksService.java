@@ -627,7 +627,9 @@ public class EksService implements TagHandler, ResourceProvider {
                     "Nodegroup already exists: " + nodegroupName, 409);
         }
 
-        String region = config.defaultRegion();
+        String region = resolveClusterRegion(cluster);
+        validateLaunchTemplate(region, request.getLaunchTemplate());
+
         String accountId = regionResolver.getAccountId();
         String id = UUID.randomUUID().toString();
         String arn = AwsArnUtils.Arn.of("eks", region, accountId,
@@ -668,6 +670,43 @@ public class EksService implements TagHandler, ResourceProvider {
 
         nodeGroupStorage.put(storageKey, nodeGroup);
         return nodeGroup;
+    }
+
+    private void validateLaunchTemplate(String region, Object launchTemplateObj) {
+        if (!(launchTemplateObj instanceof Map<?, ?> map)) {
+            return;
+        }
+
+        String id = asNonBlankString(map.get("id"));
+        String name = asNonBlankString(map.get("name"));
+        String version = asNonBlankString(map.get("version"));
+
+        if ((id != null && name != null) || (id == null && name == null)) {
+            throw new AwsException("InvalidParameterException",
+                    "You must specify either the launch template ID or the launch template name in the request, but not both.",
+                    400);
+        }
+
+        try {
+            ec2Service.resolveLaunchTemplateData(region, id, name, version);
+        } catch (AwsException e) {
+            switch (e.getErrorCode()) {
+                case "InvalidLaunchTemplateId.NotFound", "InvalidLaunchTemplateName.NotFoundException" ->
+                    throw new AwsException("InvalidParameterException",
+                            "Launch template could not be found : " + e.getMessage(), 400);
+                case "InvalidLaunchTemplateVersion.NotFound", "InvalidLaunchTemplateVersion.Malformed" ->
+                    throw new AwsException("InvalidParameterException", e.getMessage(), 400);
+                default -> throw e;
+            }
+        }
+    }
+
+    private static String asNonBlankString(Object val) {
+        if (val == null) {
+            return null;
+        }
+        String s = val.toString().trim();
+        return s.isEmpty() ? null : s;
     }
 
     public Nodegroup describeNodeGroup(String clusterName, String nodegroupName) {
