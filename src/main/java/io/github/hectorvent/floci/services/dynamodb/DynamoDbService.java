@@ -2076,9 +2076,32 @@ public class DynamoDbService implements ResourceProvider {
             }
         }
         table.setReplicaRegions(replicas);
+        // Adding a replica turns the table into a global table, whose home region is the one the
+        // update runs in. Once set it stays, matching AWS keeping the table a global table. This is
+        // what lets DescribeTable list the home region as an ACTIVE replica alongside the others.
+        if (table.getGlobalTableHomeRegion() == null && !replicas.isEmpty()) {
+            table.setGlobalTableHomeRegion(region);
+        }
         String canonicalTableName = canonicalTableName(region, tableName);
         tableStore.put(regionKey(region, canonicalTableName), table);
         LOG.infov("Updated replicas for table {0} in region {1}: {2}", canonicalTableName, region, replicas);
+        return table;
+    }
+
+    /**
+     * Marks a table as a global table homed in {@code region} even when it has no other replica yet,
+     * so DescribeTable lists its home region as an ACTIVE replica. Used for a single-region
+     * {@code AWS::DynamoDB::GlobalTable}, which AWS still reports as a global table. Idempotent.
+     */
+    public TableDefinition ensureGlobalTable(String tableName, String region) {
+        String canonicalTableName = canonicalTableName(region, tableName);
+        String storageKey = regionKey(region, canonicalTableName);
+        TableDefinition table = tableStore.get(storageKey)
+                .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
+        if (table.getGlobalTableHomeRegion() == null) {
+            table.setGlobalTableHomeRegion(region);
+            tableStore.put(storageKey, table);
+        }
         return table;
     }
 

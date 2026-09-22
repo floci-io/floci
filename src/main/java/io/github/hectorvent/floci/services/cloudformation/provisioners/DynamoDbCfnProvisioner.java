@@ -245,9 +245,8 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
      * no longer declared are removed, so an UpdateStack that edits the Replicas list converges rather
      * than only ever growing. The deployment region is served by the table itself and the service
      * rejects a replica there (as the UpdateTable ReplicaUpdates API does), so it is filtered out of
-     * the reconcile. On AWS a global table also lists its stack region as an ACTIVE replica; surfacing
-     * that belongs in DescribeTable (it is a pre-existing gap on the {@code Custom::DynamoDBReplica}
-     * path too), not here.
+     * the reconcile. The table is still marked a global table homed in that region, so DescribeTable
+     * lists the deployment region as an ACTIVE replica alongside the others, as AWS does.
      */
     private void reconcileGlobalTableReplicas(String tableName, JsonNode props, ProvisionContext ctx) {
         CloudFormationTemplateEngine engine = ctx.engine();
@@ -265,6 +264,10 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
         }
 
         TableDefinition table = dynamoDbService.describeTable(tableName, localRegion);
+        // This resource is a global table, so mark it homed in the deployment region even when it
+        // declares no other replica: DescribeTable then lists the home region as an ACTIVE replica,
+        // the single-region global table AWS reports (and CDK TableV2 emits by default).
+        dynamoDbService.ensureGlobalTable(tableName, localRegion);
         List<String> existing = table.getReplicaRegions();
         List<String> toAdd = new ArrayList<>();
         for (String replicaRegion : declared) {

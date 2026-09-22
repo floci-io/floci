@@ -2448,11 +2448,18 @@ public class DynamoDbJsonHandler {
 
         // Global-table replicas. In a single-process emulator every region is served by this same
         // table, so a replica is metadata; AWS reports each as an ACTIVE Replica and marks the table
-        // a 2019.11.21 global table.
+        // a 2019.11.21 global table. A global table also lists its own home region as a replica, so it
+        // is appended (once) after the tracked ones; a plain table (no replicas, no home) has neither.
         List<String> replicaRegions = table.getReplicaRegions();
-        if (replicaRegions != null && !replicaRegions.isEmpty()) {
+        String homeRegion = table.getGlobalTableHomeRegion();
+        LinkedHashSet<String> regions = new LinkedHashSet<>(
+                replicaRegions != null ? replicaRegions : List.of());
+        if (homeRegion != null && !homeRegion.isBlank()) {
+            regions.add(homeRegion);
+        }
+        if (!regions.isEmpty()) {
             ArrayNode replicas = objectMapper.createArrayNode();
-            for (String replicaRegion : replicaRegions) {
+            for (String replicaRegion : regions) {
                 ObjectNode replica = objectMapper.createObjectNode();
                 replica.put("RegionName", replicaRegion);
                 replica.put("ReplicaStatus", "ACTIVE");

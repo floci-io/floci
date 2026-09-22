@@ -436,6 +436,30 @@ class DynamoDbServiceTest {
     }
 
     @Test
+    void addingAReplicaMarksTheTableGlobalHomedInTheUpdateRegion() {
+        createUsersTable("us-east-1");
+        assertNull(service.describeTable("Users", "us-east-1").getGlobalTableHomeRegion());
+
+        service.applyReplicaUpdates("Users", List.of("eu-west-1"), List.of(), "us-east-1");
+
+        assertEquals("us-east-1", service.describeTable("Users", "us-east-1").getGlobalTableHomeRegion());
+        // The home region stays a global table even after the last replica is removed.
+        service.applyReplicaUpdates("Users", List.of(), List.of("eu-west-1"), "us-east-1");
+        assertEquals("us-east-1", service.describeTable("Users", "us-east-1").getGlobalTableHomeRegion());
+    }
+
+    @Test
+    void ensureGlobalTableMarksTheHomeRegionAndIsIdempotent() {
+        createUsersTable("us-east-1");
+
+        service.ensureGlobalTable("Users", "us-east-1");
+        service.ensureGlobalTable("Users", "us-east-1");
+
+        assertEquals("us-east-1", service.describeTable("Users", "us-east-1").getGlobalTableHomeRegion());
+        assertTrue(service.describeTable("Users", "us-east-1").getReplicaRegions().isEmpty());
+    }
+
+    @Test
     void invalidReplicaUpdateLeavesExistingReplicasUnchanged() {
         createUsersTable("us-east-1");
         service.applyReplicaUpdates(
