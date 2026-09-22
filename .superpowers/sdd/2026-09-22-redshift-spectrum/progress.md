@@ -16,3 +16,5 @@ Task 1: Ruling: fix `SpectrumCatalog.table` to pass the account id required by `
 Task 1: complete (tests: `mvn -B -Dtest=SpectrumCatalogTest test` -> 5/5 passed)
 Task 2: Ruling: treat `CREATE EXTERNAL DATABASE IF NOT EXISTS` as the optional suffix after a supported external-schema statement, because the plan calls it a suffix and standalone external-database SQL is outside the Phase 1 grammar. Cost if wrong: clients using a standalone form would need a later parser extension.
 Task 2: complete (tests: `mvn -B -Dtest=SpectrumSqlParserTest test` -> 5/5 passed)
+Task 3: Ruling: use the existing `S3Service` object byte-array API and a lazy per-object iterator because this repository does not expose an object input stream; rows are still parsed one object at a time and are not concatenated across a prefix. Cost if wrong: a future S3 streaming API may require adapting the reader boundary.
+Task 3: complete (tests: `mvn -B -Dtest=SpectrumS3ReaderTest test` -> 3/3 passed)
