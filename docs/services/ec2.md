@@ -27,6 +27,7 @@ metadata.
 |---|---|---|
 | `ami-0abcdef1234567890` | `ami-amazonlinux2` | `public.ecr.aws/amazonlinux/amazonlinux:2` |
 | `ami-0abcdef1234567891` | `ami-amazonlinux2023` | `public.ecr.aws/amazonlinux/amazonlinux:2023` |
+| `ami-amazonlinux2023-arm64` | | `public.ecr.aws/amazonlinux/amazonlinux:2023` |
 | `ami-0abcdef1234567892` | `ami-ubuntu2004` | `public.ecr.aws/docker/library/ubuntu:20.04` |
 | `ami-ubuntu2204` | | `public.ecr.aws/docker/library/ubuntu:22.04` |
 | `ami-ubuntu2404-arm64` | `ami-ubuntu2404` | `public.ecr.aws/docker/library/ubuntu:24.04` |
