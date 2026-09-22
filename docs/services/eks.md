@@ -271,11 +271,23 @@ EKS clusters support configuring KMS envelope encryption for secrets and control
 - **Validation**: When `launchTemplate` is supplied, Floci validates it against EC2. Requests must specify either `id` or `name`, but not both; supplying neither or both is rejected with `InvalidParameterException` (HTTP 400). The template and requested version (defaulting to the template's default version when omitted) must exist in EC2, otherwise the request is rejected with `InvalidParameterException` (HTTP 400). The other structured inputs (`remoteAccess`, `taints`, `nodeRepairConfig`, `warmPoolConfig`) are not validated against external resources.
 - **No backfill**: Node groups created before this was supported genuinely had no launch template, taints, remote access, node repair config, or warm pool config, so there is nothing to reconstruct. They continue to omit those members, which is the correct answer for them.
 
-### Metadata only
+### Launch template user data execution
 
-**These inputs are recorded as metadata and have no effect on the cluster.** Floci does not act on any of them:
+When a node group specifies a `launchTemplate`, Floci resolves the launch template from EC2 (by ID or name, and version) and executes any provided user data inside the cluster's running k3s container. If the referenced launch template carries no user data, execution is skipped.
 
-- A `launchTemplate` association is stored and returned, but **its user data is never executed** and its AMI, instance type, block device mappings, and network settings are not applied to anything Floci runs.
+- **Execution target**: Floci runs one k3s container per cluster. Launch template user data executes inside this cluster container via `docker exec`.
+- **Single-container mapping rule**:
+  - The first node group specifying user data executes its scripts in the container.
+  - Subsequent node groups on the same cluster with identical user data skip execution as a no-op.
+  - Subsequent node groups on the same cluster with differing user data log a warning and skip execution without failing the node group.
+- **Timing and tradeoffs**: User data runs post-start when `CreateNodegroup` is invoked. Because the k3s process is already running, bootstrap configurations requiring pre-kubelet drop-ins (such as `/etc/rancher/k3s/config.yaml`) cannot be reloaded dynamically without restarting the container.
+- **Failure handling**: If any user data script exits with a non-zero status or times out (30-minute limit), the node group status is set to `CREATE_FAILED` and `health.issues` is populated with code `NodeCreationFailure`, the failure message, and the node group name in `resourceIds`.
+- **Differences from EC2**: Scripts run inside the existing shared k3s container rather than an isolated VM instance. Other launch template settings (AMI, instance type, block device mappings, network interfaces) remain metadata-only and do not alter container provisioning.
+
+### Metadata only inputs
+
+The remaining structured inputs are recorded as metadata:
+
 - `remoteAccess` does not open SSH access, and the referenced key pair and security groups are not wired up.
 - `taints` are not applied to Kubernetes nodes, so pods are not repelled from them.
 - `nodeRepairConfig` starts no repair loop, and `warmPoolConfig` pre-initializes no instances.

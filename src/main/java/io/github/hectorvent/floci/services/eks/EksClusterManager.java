@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
+import io.github.hectorvent.floci.core.common.docker.UserDataPipeline;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.eks.model.CertificateAuthority;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
@@ -51,6 +52,7 @@ import java.nio.file.Paths;
 import java.nio.file.attribute.PosixFileAttributeView;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -1793,6 +1795,38 @@ public class EksClusterManager {
             return output == null || output.isBlank() ? "(no output)" : output.trim();
         }
     }
+
+    /**
+     * Executes launch template UserData script(s) inside the running cluster container.
+     *
+     * @param cluster the cluster whose container will execute the user data
+     * @param nodegroupName the name of the nodegroup requesting execution
+     * @param userData raw UserData payload from the launch template
+     * @return result indicating success, failure, or skipped
+     */
+    public UserDataPipeline.ExecutionResult executeUserData(
+            Cluster cluster,
+            String nodegroupName,
+            String userData) {
+        if (cluster == null || cluster.getContainerId() == null || cluster.getContainerId().isBlank()) {
+            return UserDataPipeline.ExecutionResult.skipped("Cluster has no running container");
+        }
+        DockerClient dockerClient = lifecycleManager.getDockerClient();
+        if (dockerClient == null) {
+            return UserDataPipeline.ExecutionResult.skipped("No Docker daemon reachable");
+        }
+        String context = "EKS cluster " + cluster.getName() + " (nodegroup " + nodegroupName + ")";
+        return UserDataPipeline.executeUserData(
+                dockerClient,
+                cluster.getContainerId(),
+                context,
+                userData,
+                Duration.ofMinutes(30),
+                null,
+                null
+        );
+    }
+
 
     private String execInContainer(String containerId, String[] cmd) throws Exception {
         ContainerExecResult result = execInContainerForResult(containerId, cmd, 10);

@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.TagHandler;
+import io.github.hectorvent.floci.core.common.docker.UserDataPipeline;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -13,6 +14,7 @@ import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.Ipv4Cidrs;
 import io.github.hectorvent.floci.services.ec2.SecurityGroupPolicy;
 import io.github.hectorvent.floci.services.ec2.model.IpPermission;
+import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
@@ -56,6 +58,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadLocalRandom;
@@ -95,6 +98,7 @@ public class EksService implements TagHandler, ResourceProvider {
     private final EksPodIdentityAssociationService podIdentityAssociations;
     private final EksAddonService addons;
     private final ScheduledExecutorService poller = Executors.newSingleThreadScheduledExecutor();
+    private final Map<String, String> appliedClusterUserData = new ConcurrentHashMap<>();
 
     @Inject
     public EksService(StorageFactory storageFactory, EmulatorConfig config,
@@ -259,11 +263,34 @@ public class EksService implements TagHandler, ResourceProvider {
     }
 
     void deleteClusterForAccount(String accountId, String clusterName) {
+        Cluster cluster = (storage instanceof AccountAwareStorageBackend<Cluster> aware)
+                ? aware.getForAccount(accountId, clusterName).orElse(null)
+                : storage.get(clusterName).orElse(null);
+        clearAppliedClusterUserData(cluster, clusterName);
+        if (cluster == null || cluster.getArn() == null) {
+            String fallbackArn = AwsArnUtils.Arn.of("eks", config.defaultRegion(), accountId,
+                    "cluster/" + clusterName).toString();
+            appliedClusterUserData.remove(fallbackArn);
+        }
         if (storage instanceof AccountAwareStorageBackend<Cluster> aware) {
             aware.deleteForAccount(accountId, clusterName);
             return;
         }
         storage.delete(clusterName);
+    }
+
+    private void clearAppliedClusterUserData(Cluster cluster, String fallbackName) {
+        if (cluster != null) {
+            if (cluster.getArn() != null) {
+                appliedClusterUserData.remove(cluster.getArn());
+            }
+            if (cluster.getName() != null) {
+                appliedClusterUserData.remove(cluster.getName());
+            }
+        }
+        if (fallbackName != null) {
+            appliedClusterUserData.remove(fallbackName);
+        }
     }
 
     private SecurityGroup createClusterSecurityGroup(String region, String clusterName, String vpcId) {
@@ -579,6 +606,7 @@ public class EksService implements TagHandler, ResourceProvider {
             addons.deleteClusterAddons(cluster);
         }
         storage.delete(name);
+        clearAppliedClusterUserData(cluster, name);
         oidcService.deleteKey(name);
         return cluster;
     }
@@ -628,7 +656,7 @@ public class EksService implements TagHandler, ResourceProvider {
         }
 
         String region = resolveClusterRegion(cluster);
-        validateLaunchTemplate(region, request.getLaunchTemplate());
+        LaunchTemplateData launchTemplateData = validateLaunchTemplate(region, request.getLaunchTemplate());
 
         String accountId = regionResolver.getAccountId();
         String id = UUID.randomUUID().toString();
@@ -668,13 +696,18 @@ public class EksService implements TagHandler, ResourceProvider {
         nodeGroup.setLabels(request.getLabels() != null ? new HashMap<>(request.getLabels()) : null);
         nodeGroup.setTags(request.getTags() != null ? new HashMap<>(request.getTags()) : new HashMap<>());
 
+        if (launchTemplateData != null && launchTemplateData.getUserData() != null
+                && !launchTemplateData.getUserData().isBlank()) {
+            applyNodeGroupUserData(cluster, nodegroupName, launchTemplateData.getUserData(), nodeGroup);
+        }
+
         nodeGroupStorage.put(storageKey, nodeGroup);
         return nodeGroup;
     }
 
-    private void validateLaunchTemplate(String region, Object launchTemplateObj) {
+    private LaunchTemplateData validateLaunchTemplate(String region, Object launchTemplateObj) {
         if (!(launchTemplateObj instanceof Map<?, ?> map)) {
-            return;
+            return null;
         }
 
         String id = asNonBlankString(map.get("id"));
@@ -688,7 +721,7 @@ public class EksService implements TagHandler, ResourceProvider {
         }
 
         try {
-            ec2Service.resolveLaunchTemplateData(region, id, name, version);
+            return ec2Service.resolveLaunchTemplateData(region, id, name, version);
         } catch (AwsException e) {
             switch (e.getErrorCode()) {
                 case "InvalidLaunchTemplateId.NotFound", "InvalidLaunchTemplateName.NotFoundException" ->
@@ -1091,6 +1124,49 @@ public class EksService implements TagHandler, ResourceProvider {
         Map<String, List<Object>> health = new LinkedHashMap<>();
         health.put("issues", new ArrayList<>());
         return health;
+    }
+
+    private Map<String, List<Object>> failedNodeGroupHealth(String nodegroupName, String message) {
+        Map<String, List<Object>> health = new LinkedHashMap<>();
+        Map<String, Object> issue = new LinkedHashMap<>();
+        issue.put("code", "NodeCreationFailure");
+        issue.put("message", message);
+        issue.put("resourceIds", List.of(nodegroupName));
+        health.put("issues", List.of(issue));
+        return health;
+    }
+
+    private void applyNodeGroupUserData(Cluster cluster, String nodegroupName, String userData, Nodegroup nodeGroup) {
+        String clusterKey = cluster.getArn() != null ? cluster.getArn() : cluster.getName();
+        String previouslyApplied = appliedClusterUserData.get(clusterKey);
+        if (previouslyApplied != null) {
+            if (previouslyApplied.equals(userData)) {
+                LOG.infov("Nodegroup {0} specifies identical launch template user data already applied to cluster {1}; skipping",
+                        nodegroupName, cluster.getName());
+            } else {
+                LOG.warnv("Nodegroup {0} specifies launch template user data that differs from previously applied user data for cluster {1}; skipping execution because Floci runs a single shared container per cluster",
+                        nodegroupName, cluster.getName());
+            }
+            return;
+        }
+
+        if (clusterManager == null) {
+            appliedClusterUserData.put(clusterKey, userData);
+            return;
+        }
+
+        UserDataPipeline.ExecutionResult result = clusterManager.executeUserData(cluster, nodegroupName, userData);
+        if (result != null && !result.isSuccess()) {
+            nodeGroup.setStatus(NodegroupStatus.CREATE_FAILED);
+            String failureDetail = result.getFailureMessage() != null
+                    ? result.getFailureMessage()
+                    : "UserData execution failed for EKS cluster " + cluster.getName();
+            nodeGroup.setHealth(failedNodeGroupHealth(nodegroupName, failureDetail));
+            LOG.warnv("Nodegroup {0} failed to execute launch template user data: {1}",
+                    nodegroupName, failureDetail);
+        } else {
+            appliedClusterUserData.put(clusterKey, userData);
+        }
     }
 
     private FargateProfile.Health defaultFargateProfileHealth() {
