@@ -71,8 +71,7 @@ final class KmsKeyImport {
      * refuse.
      *
      * <p>RSAES_PKCS1_V1_5 stays in the modelled enum but AWS KMS stopped honouring it on
-     * October 10, 2023. The RSA_AES variants exist for material longer than an RSA modulus can
-     * hold; every spec that can be imported here carries at most 64 bytes.
+     * October 10, 2023.
      */
     static void validateWrappingAlgorithm(KmsKeySpec keySpec, String wrappingAlgorithm) {
         String algorithm = wrappingAlgorithm == null ? "" : wrappingAlgorithm;

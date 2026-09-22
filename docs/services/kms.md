@@ -115,11 +115,17 @@ which puts the key in state `Enabled`. Wrapping material against the wrong key, 
 different algorithm than the one requested, fails with `InvalidCiphertextException` the same way
 it does on AWS.
 
-Supported `WrappingAlgorithm` values are `RSAES_OAEP_SHA_256` and `RSAES_OAEP_SHA_1`, over
-`WrappingKeySpec` `RSA_2048`, `RSA_3072` or `RSA_4096`. `RSAES_PKCS1_V1_5` is rejected, matching
-AWS, which stopped supporting it on October 10, 2023. The `RSA_AES_KEY_WRAP_*` variants exist for
-material longer than an RSA modulus can hold and are also rejected: no importable key spec here
-carries more than 64 bytes.
+Supported wrapping algorithms depend on the type of imported key material. Floci supports the
+following combinations:
+
+| Key material | Supported wrapping algorithm and spec |
+| --- | --- |
+| Symmetric encryption key (`SYMMETRIC_DEFAULT`) | **Wrapping algorithms:** `RSAES_OAEP_SHA_256`, `RSAES_OAEP_SHA_1`<br>**Wrapping key specs:** `RSA_2048`, `RSA_3072`, `RSA_4096` |
+| HMAC key (`HMAC_*`) | **Wrapping algorithms:** `RSAES_OAEP_SHA_256`, `RSAES_OAEP_SHA_1`<br>**Wrapping key specs:** `RSA_2048`, `RSA_3072`, `RSA_4096` |
+| Asymmetric RSA private key (`RSA_*`) | **Wrapping algorithms:** `RSA_AES_KEY_WRAP_SHA_256`, `RSA_AES_KEY_WRAP_SHA_1`<br>**Wrapping key specs:** `RSA_2048`, `RSA_3072`, `RSA_4096` |
+
+The hybrid `RSA_AES_KEY_WRAP_*` algorithms require a 256-bit AES key. `RSAES_PKCS1_V1_5` is
+rejected, matching AWS, which stopped supporting it on October 10, 2023.
 
 An import token is scoped to one key and spent by the import that uses it, and a second
 `GetParametersForImport` call invalidates the token the previous one returned. Tokens expire 24
@@ -150,10 +156,8 @@ own the material and cannot rotate it.
 
 **Deviations:**
 
-- `Origin=EXTERNAL` is supported only for `SYMMETRIC_DEFAULT` and the `HMAC_*` key specs, whose
-  material is a raw byte string. Real AWS KMS also imports asymmetric material as a DER-encoded
-  key pair; here an asymmetric spec with `Origin=EXTERNAL` is rejected at `CreateKey` with
-  `UnsupportedOperationException` rather than creating a key that could never sign or decrypt.
+- `Origin=EXTERNAL` supports `SYMMETRIC_DEFAULT`, the `HMAC_*` key specs and the `RSA_*` key specs. 
+- Other asymmetric key specs are rejected at `CreateKey` with `UnsupportedOperationException`.
 - Holding several imported key materials on one symmetric key, which real KMS uses for on-demand
   rotation of imported material, is not emulated. `ImportType=NEW_KEY_MATERIAL` on a key that
   already has key material is rejected with `UnsupportedOperationException`, and

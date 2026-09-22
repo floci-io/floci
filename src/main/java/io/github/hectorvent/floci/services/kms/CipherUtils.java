@@ -18,10 +18,12 @@ import java.security.spec.RSAPublicKeySpec;
 import java.util.Arrays;
 
 public final class CipherUtils {
+    /** Decodes a PKCS#8-encoded RSA private key. */
     public static PrivateKey generateRsaPrivateKey(byte[] encodedKey) throws GeneralSecurityException {
         return KeyFactory.getInstance("RSA").generatePrivate(new PKCS8EncodedKeySpec(encodedKey));
     }
 
+    /** Derives the public key from the modulus and public exponent of an RSA CRT private key. */
     public static PublicKey generateRsaPublicKey(RSAPrivateCrtKey privateKey) throws GeneralSecurityException {
         RSAPublicKeySpec publicKeySpec = new RSAPublicKeySpec(privateKey.getModulus(), privateKey.getPublicExponent());
         return KeyFactory.getInstance("RSA")
@@ -38,6 +40,18 @@ public final class CipherUtils {
                 .doFinal(ciphertext);
     }
 
+    /**
+     * Unwraps key material encrypted with an {@code RSA_AES_KEY_WRAP_*} algorithm.
+     *
+     * <p>The input contains an RSA-OAEP-encrypted AES-256 wrapping key followed by key material
+     * encrypted with that key using AES-KWP.
+     *
+     * @param wrappingKey RSA private key issued for import
+     * @param digest digest used by RSA-OAEP
+     * @param encryptedKeyMaterial encrypted key material payload
+     * @return key material
+     * @throws GeneralSecurityException if the wrapping key or key material cannot be unwrapped
+     */
     public static byte[] unwrapRsaAes(PrivateKey wrappingKey, String digest, byte[] encryptedKeyMaterial) throws GeneralSecurityException {
         if (!(wrappingKey instanceof RSAPrivateKey rsaPrivateKey)) {
             throw new IllegalArgumentException("Wrapping key is not RSA private key.");

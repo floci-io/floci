@@ -1016,9 +1016,7 @@ public class KmsService implements ResourceProvider {
     }
 
     /**
-     * Imported material here is a raw byte string, which covers SYMMETRIC_DEFAULT and the HMAC
-     * specs. Real KMS also imports asymmetric material as a DER key pair; refusing it outright
-     * beats accepting a key that could never sign or decrypt anything.
+     * Allows imports for symmetric, HMAC and RSA key specs. Other key specs are not supported.
      */
     private static String requireImportableSpec(KmsKeySpec spec) {
         if (spec != KmsKeySpec.SYMMETRIC_DEFAULT
