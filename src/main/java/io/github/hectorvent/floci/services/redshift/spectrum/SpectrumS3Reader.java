@@ -34,6 +34,7 @@ public final class SpectrumS3Reader {
     private static final String SQLSTATE_INTERNAL = "XX000";
 
     private final S3Service s3Service;
+    // Stored in the schema now so role-aware Spectrum authorization can be added without changing metadata.
     @SuppressWarnings("unused")
     private final IamService iamService;
 

@@ -11,6 +11,7 @@ import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.util.HexFormat;
+import java.util.Iterator;
 import java.util.List;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -24,33 +25,36 @@ public final class SpectrumMaterializer {
     public Materialization materialize(Socket backend, SpectrumExternalTable table,
                                        SpectrumExternalSchema schema, SpectrumS3Reader reader) {
         String identifier = "spectrum_tmp_" + HexFormat.of().formatHex(randomBytes(12));
+        Materialization materialization = new Materialization(identifier, table.columns());
+        OutputStream output = null;
+        boolean tableCreated = false;
+        boolean copyInProgress = false;
         try {
-            OutputStream output = backend.getOutputStream();
+            output = backend.getOutputStream();
             sendQuery(output, createTableSql(identifier, table));
             awaitReady(backend);
+            tableCreated = true;
             sendQuery(output, copySql(identifier, table));
             awaitCopyIn(backend);
+            copyInProgress = true;
             try (Stream<SpectrumRow> rows = reader.read(schema, table)) {
-                rows.forEach(row -> {
-                    try {
-                        writeCopyData(output, encodeRow(row));
-                    } catch (IOException exception) {
-                        throw new SpectrumReadException(SQLSTATE_DATA, "Unable to stream Spectrum row", exception);
-                    }
-                });
+                Iterator<SpectrumRow> iterator = rows.iterator();
+                while (iterator.hasNext()) {
+                    writeCopyData(output, encodeRow(iterator.next()));
+                }
             }
             writeCopyDone(output);
+            copyInProgress = false;
             awaitReady(backend);
-            return new Materialization(identifier, table.columns());
+            return materialization;
         } catch (SpectrumReadException exception) {
-            try {
-                cleanup(backend, new Materialization(identifier, table.columns()));
-            } catch (RuntimeException ignored) {
-                // The original read failure is the useful client-facing error.
-            }
+            recoverFromFailure(backend, materialization, output, tableCreated, copyInProgress, exception);
             throw exception;
         } catch (IOException exception) {
-            throw new SpectrumReadException(SQLSTATE_DATA, "Unable to materialize Spectrum rows", exception);
+            SpectrumReadException readException = new SpectrumReadException(
+                    SQLSTATE_DATA, "Unable to materialize Spectrum rows", exception);
+            recoverFromFailure(backend, materialization, output, tableCreated, copyInProgress, readException);
+            throw readException;
         }
     }
 
@@ -119,6 +123,15 @@ public final class SpectrumMaterializer {
         output.flush();
     }
 
+    private static void writeCopyFail(OutputStream output, String reason) throws IOException {
+        byte[] body = (reason == null ? "Spectrum row conversion failed" : reason).getBytes(StandardCharsets.UTF_8);
+        output.write('f');
+        writeInt32(output, body.length + 5);
+        output.write(body);
+        output.write(0);
+        output.flush();
+    }
+
     private static void writeInt32(OutputStream output, int value) throws IOException {
         output.write((value >>> 24) & 0xFF);
         output.write((value >>> 16) & 0xFF);
@@ -129,12 +142,16 @@ public final class SpectrumMaterializer {
     private static void awaitCopyIn(Socket backend) throws IOException {
         PostgresWireDecoder decoder = new PostgresWireDecoder(backend.getInputStream());
         PostgresWireDecoder.FrontendMessage message;
+        SpectrumReadException backendFailure = null;
         while ((message = decoder.nextMessage()) != null) {
             if (message.type() == 'G') {
                 return;
             }
             if (message.type() == 'E') {
-                throw new SpectrumReadException(SQLSTATE_DATA, "PostgreSQL rejected Spectrum COPY");
+                backendFailure = new SpectrumReadException(SQLSTATE_DATA, "PostgreSQL rejected Spectrum COPY");
+            }
+            if (message.type() == 'Z' && backendFailure != null) {
+                throw backendFailure;
             }
         }
         throw new IOException("PostgreSQL closed before CopyInResponse");
@@ -143,15 +160,39 @@ public final class SpectrumMaterializer {
     private static void awaitReady(Socket backend) throws IOException {
         PostgresWireDecoder decoder = new PostgresWireDecoder(backend.getInputStream());
         PostgresWireDecoder.FrontendMessage message;
+        SpectrumReadException backendFailure = null;
         while ((message = decoder.nextMessage()) != null) {
             if (message.type() == 'Z') {
+                if (backendFailure != null) {
+                    throw backendFailure;
+                }
                 return;
             }
             if (message.type() == 'E') {
-                throw new SpectrumReadException(SQLSTATE_DATA, "PostgreSQL rejected Spectrum statement");
+                backendFailure = new SpectrumReadException(SQLSTATE_DATA, "PostgreSQL rejected Spectrum statement");
             }
         }
         throw new IOException("PostgreSQL closed before ReadyForQuery");
+    }
+
+    private void recoverFromFailure(Socket backend, Materialization materialization, OutputStream output,
+                                    boolean tableCreated, boolean copyInProgress,
+                                    SpectrumReadException original) {
+        if (copyInProgress && output != null) {
+            try {
+                writeCopyFail(output, original.getMessage());
+                awaitReady(backend);
+            } catch (IOException | SpectrumReadException cleanupFailure) {
+                original.addSuppressed(cleanupFailure);
+            }
+        }
+        if (tableCreated) {
+            try {
+                cleanup(backend, materialization);
+            } catch (RuntimeException cleanupFailure) {
+                original.addSuppressed(cleanupFailure);
+            }
+        }
     }
 
     private static String quoteIdentifier(String value) {

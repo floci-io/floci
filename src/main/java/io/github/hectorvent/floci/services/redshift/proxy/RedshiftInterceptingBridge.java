@@ -1,17 +1,19 @@
 package io.github.hectorvent.floci.services.redshift.proxy;
 
 import io.github.hectorvent.floci.services.iam.IamService;
-import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumInterceptor;
+import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumReadException;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumSqlException;
+import io.github.hectorvent.floci.services.s3.S3Service;
 import org.jboss.logging.Logger;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.io.ByteArrayOutputStream;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.LockSupport;
@@ -56,6 +58,7 @@ public class RedshiftInterceptingBridge {
     private final ReentrantLock backendLock = new ReentrantLock(true);
     private volatile boolean pumpBetweenMessages = true;
     private volatile boolean pumpFinished = false;
+    private boolean extendedSpectrumError;
 
     public RedshiftInterceptingBridge(Socket client, Socket backend, S3Service s3Service, IamService iamService) {
         this(client, backend, s3Service, iamService, null);
@@ -134,6 +137,9 @@ public class RedshiftInterceptingBridge {
                     }
                     continue;
                 }
+                if (extendedSpectrumError && msg.type() != 'S' && msg.type() != 'X') {
+                    continue;
+                }
                 switch (msg.type()) {
                     case 'Q' -> handleSimpleQuery(msg, backendOut);
                     case 'P' -> handleParse(decoder, msg, backendOut);
@@ -142,6 +148,7 @@ public class RedshiftInterceptingBridge {
                     case 'E' -> handleExecute(decoder, msg, backendOut);
                     case 'C' -> handleClose(decoder, msg, backendOut);
                     case 'S' -> {
+                        extendedSpectrumError = false;
                         coordinator.register(BackendResponseCoordinator.Operation.SYNC, null);
                         write(backendOut, msg.toPacketBytes());
                     }
@@ -170,11 +177,8 @@ public class RedshiftInterceptingBridge {
                     decision[0] = spectrumInterceptor.intercept(sql, clusterAccountId, "dev", backend);
                     return true;
                 });
-            } catch (SpectrumSqlException exception) {
-                coordinator.register(BackendResponseCoordinator.Operation.SIMPLE_QUERY, null);
-                write(client.getOutputStream(), errorResponse(exception.sqlState(), exception.getMessage()));
-                write(client.getOutputStream(), readyForQuery('I'));
-                coordinator.onBackendFrame('Z', new byte[]{'I'});
+            } catch (SpectrumSqlException | SpectrumReadException | IllegalArgumentException exception) {
+                writeSimpleSpectrumError(exception);
                 return;
             }
             if (intercepted && decision[0] instanceof SpectrumInterceptor.Decision.Handled) {
@@ -239,8 +243,9 @@ public class RedshiftInterceptingBridge {
                     write(backendOut, PostgresWireDecoder.encodeParse(parse, rewritten.sql()));
                     return;
                 }
-            } catch (SpectrumSqlException exception) {
-                LOG.warnv("Spectrum Parse interception failed, forwarding original Parse: {0}", exception.getMessage());
+            } catch (SpectrumSqlException | SpectrumReadException | IllegalArgumentException exception) {
+                writeParseSpectrumError(exception);
+                return;
             }
         }
         CopyStatementParser.S3Statement statement = parse.parameterTypeOids().isEmpty()
@@ -372,7 +377,7 @@ public class RedshiftInterceptingBridge {
     }
 
     private static byte[] commandComplete(String tag) {
-        return backendFrame('C', tag.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        return backendFrame('C', tag.getBytes(StandardCharsets.UTF_8));
     }
 
     private static byte[] readyForQuery(char status) {
@@ -404,8 +409,31 @@ public class RedshiftInterceptingBridge {
     }
 
     private static void writeCString(ByteArrayOutputStream out, String value) {
-        out.writeBytes(value.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        out.writeBytes(value.getBytes(StandardCharsets.UTF_8));
         out.write(0);
+    }
+
+    private void writeSimpleSpectrumError(RuntimeException exception) throws IOException {
+        coordinator.register(BackendResponseCoordinator.Operation.SIMPLE_QUERY, null);
+        write(client.getOutputStream(), errorResponse(spectrumSqlState(exception), exception.getMessage()));
+        write(client.getOutputStream(), readyForQuery('I'));
+        coordinator.onBackendFrame('Z', new byte[]{'I'});
+    }
+
+    private void writeParseSpectrumError(RuntimeException exception) throws IOException {
+        session.clear();
+        extendedSpectrumError = true;
+        write(client.getOutputStream(), errorResponse(spectrumSqlState(exception), exception.getMessage()));
+    }
+
+    private static String spectrumSqlState(RuntimeException exception) {
+        if (exception instanceof SpectrumSqlException spectrumSqlException) {
+            return spectrumSqlException.sqlState();
+        }
+        if (exception instanceof SpectrumReadException spectrumReadException) {
+            return spectrumReadException.sqlState();
+        }
+        return "22023";
     }
 
     /**

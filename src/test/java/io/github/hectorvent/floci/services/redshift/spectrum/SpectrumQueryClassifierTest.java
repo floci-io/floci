@@ -26,6 +26,7 @@ class SpectrumQueryClassifierTest {
         SpectrumQuery query = classifier.classify("SELECT * FROM events", 0).orElseThrow();
         assertTrue(query.selectStar());
         assertTrue(classifier.classify("SHOW TABLES", 0).isEmpty());
+        assertTrue(classifier.classify("SELECT 1", 0).isEmpty());
     }
 
     @Test

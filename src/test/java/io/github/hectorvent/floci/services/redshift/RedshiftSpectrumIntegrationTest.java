@@ -20,6 +20,7 @@ import java.time.Duration;
 import java.util.Objects;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
@@ -58,6 +59,7 @@ class RedshiftSpectrumIntegrationTest {
         }
         if (bucket != null) {
             s3Service.deleteObject(bucket, "events/part-1.csv");
+            s3Service.deleteObject(bucket, "invalid/part-1.csv");
             s3Service.deleteBucket(bucket);
         }
     }
@@ -74,6 +76,9 @@ class RedshiftSpectrumIntegrationTest {
         try (Connection connection = waitForConnection(cluster, "admin", "Secret123");
              Statement statement = connection.createStatement()) {
             statement.execute("CREATE EXTERNAL SCHEMA analytics FROM DATA CATALOG DATABASE 'dev' IAM_ROLE 'role'");
+            SQLException duplicateSchema = assertThrows(SQLException.class, () -> statement.execute(
+                    "CREATE EXTERNAL SCHEMA analytics FROM DATA CATALOG DATABASE 'dev' IAM_ROLE 'role'"));
+            assertEquals("42P06", duplicateSchema.getSQLState());
             statement.execute("CREATE EXTERNAL TABLE analytics.events (id INTEGER, name VARCHAR) "
                     + "STORED AS TEXTFILE LOCATION 's3://" + bucket + "/events/' "
                     + "TBLPROPERTIES ('skip.header.line.count'='1')");
@@ -85,6 +90,17 @@ class RedshiftSpectrumIntegrationTest {
                 assertEquals(2, rows.getInt("id"));
                 assertEquals("Bob", rows.getString("name"));
                 assertTrue(!rows.next());
+            }
+            s3Service.putObject(bucket, "invalid/part-1.csv", "invalid,Bad\n".getBytes(StandardCharsets.UTF_8),
+                    "text/csv", null);
+            statement.execute("CREATE EXTERNAL TABLE analytics.invalid_events (id INTEGER, name VARCHAR) "
+                    + "STORED AS TEXTFILE LOCATION 's3://" + bucket + "/invalid/'");
+            SQLException invalidRow = assertThrows(SQLException.class,
+                    () -> statement.executeQuery("SELECT * FROM analytics.invalid_events"));
+            assertEquals("22000", invalidRow.getSQLState());
+            try (ResultSet healthCheck = statement.executeQuery("SELECT 1")) {
+                assertTrue(healthCheck.next());
+                assertEquals(1, healthCheck.getInt(1));
             }
         }
     }

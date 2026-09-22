@@ -26,7 +26,7 @@ public class SpectrumCatalog implements Resettable {
     public synchronized void createSchema(SpectrumExternalSchema schema) {
         String key = schemaKey(schema.accountId(), schema.databaseName(), schema.schemaName());
         if (schemas.getForAccount(schema.accountId(), key).isPresent()) {
-            throw new IllegalArgumentException("Spectrum external schema already exists: " + schema.schemaName());
+            throw new SpectrumSqlException("42P06", "Spectrum external schema already exists: " + schema.schemaName());
         }
         schemas.putForAccount(schema.accountId(), key, schema);
         schemas.flush();
@@ -35,7 +35,7 @@ public class SpectrumCatalog implements Resettable {
     public synchronized void createTable(SpectrumExternalTable table) {
         String key = tableKey(table.accountId(), table.databaseName(), table.schemaName(), table.tableName());
         if (tables.getForAccount(table.accountId(), key).isPresent()) {
-            throw new IllegalArgumentException("Spectrum external table already exists: " + table.tableName());
+            throw new SpectrumSqlException("42P07", "Spectrum external table already exists: " + table.tableName());
         }
         tables.putForAccount(table.accountId(), key, table);
         tables.flush();

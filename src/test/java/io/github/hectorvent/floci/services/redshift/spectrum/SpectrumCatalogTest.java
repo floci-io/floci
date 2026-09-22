@@ -56,7 +56,9 @@ class SpectrumCatalogTest {
     void rejectsDuplicateTableAndDuplicateColumnNames() {
         catalog.createTable(table("events"));
 
-        assertThrows(IllegalArgumentException.class, () -> catalog.createTable(table("events")));
+        SpectrumSqlException duplicate = assertThrows(SpectrumSqlException.class,
+                () -> catalog.createTable(table("events")));
+        assertEquals("42P07", duplicate.sqlState());
         assertThrows(IllegalArgumentException.class, () -> new SpectrumExternalTable(
                 ACCOUNT, "dev", "analytics", "duplicate",
                 List.of(new SpectrumColumn("id", SpectrumColumn.Type.BIGINT),

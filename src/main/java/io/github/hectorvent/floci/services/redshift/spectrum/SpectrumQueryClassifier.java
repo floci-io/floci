@@ -29,7 +29,7 @@ public final class SpectrumQueryClassifier {
         }
         int from = keywordIndex(statement, "from", 6);
         if (from < 0) {
-            throw unsupported("Spectrum query requires a FROM clause");
+            return Optional.empty();
         }
         String projection = statement.substring(6, from).trim();
         if (projection.isEmpty() || projection.contains(",") && projection.contains("(")) {
