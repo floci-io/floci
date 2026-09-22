@@ -1138,9 +1138,13 @@ public class EksService implements TagHandler, ResourceProvider {
 
     private void applyNodeGroupUserData(Cluster cluster, String nodegroupName, String userData, Nodegroup nodeGroup) {
         String clusterKey = cluster.getArn() != null ? cluster.getArn() : cluster.getName();
-        String previouslyApplied = appliedClusterUserData.get(clusterKey);
-        if (previouslyApplied != null) {
-            if (previouslyApplied.equals(userData)) {
+        // putIfAbsent claims the slot with the user data itself, the same value a successful run
+        // would leave behind, so a racing caller sees the eventual "applied" state immediately and
+        // can still tell identical from differing user data. Losing the race never blocks on the
+        // exec below: only the winner runs it.
+        String claimedBy = appliedClusterUserData.putIfAbsent(clusterKey, userData);
+        if (claimedBy != null) {
+            if (claimedBy.equals(userData)) {
                 LOG.infov("Nodegroup {0} specifies identical launch template user data already applied to cluster {1}; skipping",
                         nodegroupName, cluster.getName());
             } else {
@@ -1151,12 +1155,22 @@ public class EksService implements TagHandler, ResourceProvider {
         }
 
         if (clusterManager == null) {
-            appliedClusterUserData.put(clusterKey, userData);
             return;
         }
 
-        UserDataPipeline.ExecutionResult result = clusterManager.executeUserData(cluster, nodegroupName, userData);
-        if (result != null && !result.isSuccess()) {
+        UserDataPipeline.ExecutionResult result = null;
+        try {
+            result = clusterManager.executeUserData(cluster, nodegroupName, userData);
+        } finally {
+            if (result == null || !result.isSuccess()) {
+                // Release the claim so a later node group can retry the bootstrap. The conditional
+                // remove only drops our own claim, not one a concurrent delete/recreate or a newer
+                // caller has since put in its place.
+                appliedClusterUserData.remove(clusterKey, userData);
+            }
+        }
+
+        if (!result.isSuccess()) {
             nodeGroup.setStatus(NodegroupStatus.CREATE_FAILED);
             String failureDetail = result.getFailureMessage() != null
                     ? result.getFailureMessage()
@@ -1164,8 +1178,6 @@ public class EksService implements TagHandler, ResourceProvider {
             nodeGroup.setHealth(failedNodeGroupHealth(nodegroupName, failureDetail));
             LOG.warnv("Nodegroup {0} failed to execute launch template user data: {1}",
                     nodegroupName, failureDetail);
-        } else {
-            appliedClusterUserData.put(clusterKey, userData);
         }
     }
 

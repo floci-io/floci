@@ -30,6 +30,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -201,6 +203,69 @@ class EksLaunchTemplateUserDataTest {
         assertEquals("NodeCreationFailure", issue.get("code"));
         assertTrue(issue.get("message").toString().contains("timed out after 30 minutes"));
         assertEquals(List.of("ng-timeout"), issue.get("resourceIds"));
+    }
+
+    @Test
+    void concurrentNodeGroupCreationExecutesUserDataExactlyOnce() throws InterruptedException {
+        String script = "#!/bin/bash\necho 'concurrent bootstrap'\n";
+        String encoded = Base64.getEncoder().encodeToString(script.getBytes(StandardCharsets.UTF_8));
+        String ltId = createLaunchTemplate("lt-concurrent", encoded);
+
+        CountDownLatch enteredExecution = new CountDownLatch(1);
+        CountDownLatch releaseExecution = new CountDownLatch(1);
+
+        when(clusterManager.executeUserData(any(Cluster.class), eq("ng-1"), eq(encoded)))
+                .thenAnswer(invocation -> {
+                    enteredExecution.countDown();
+                    assertTrue(releaseExecution.await(5, TimeUnit.SECONDS));
+                    return UserDataPipeline.ExecutionResult.success(0L, "ok");
+                });
+
+        CreateNodeGroupRequest req1 = nodeGroupRequest("ng-1");
+        req1.setLaunchTemplate(Map.of("id", ltId));
+        Thread first = new Thread(() -> eksService.createNodeGroup(CLUSTER_NAME, req1));
+        first.start();
+
+        // Wait until the first caller has claimed the slot and is blocked inside the container
+        // exec, then race a second node group in on the same user data.
+        assertTrue(enteredExecution.await(5, TimeUnit.SECONDS));
+
+        CreateNodeGroupRequest req2 = nodeGroupRequest("ng-2");
+        req2.setLaunchTemplate(Map.of("id", ltId));
+        Nodegroup ng2 = eksService.createNodeGroup(CLUSTER_NAME, req2);
+        assertEquals(NodegroupStatus.ACTIVE, ng2.getStatus());
+
+        releaseExecution.countDown();
+        first.join(5000);
+
+        verify(clusterManager, times(1)).executeUserData(any(Cluster.class), any(), any());
+        verify(clusterManager, never()).executeUserData(any(Cluster.class), eq("ng-2"), any());
+    }
+
+    @Test
+    void failedExecutionReleasesClaimForSubsequentRetry() {
+        String script = "#!/bin/bash\nexit 3\n";
+        String encoded = Base64.getEncoder().encodeToString(script.getBytes(StandardCharsets.UTF_8));
+        String ltId = createLaunchTemplate("lt-retry", encoded);
+
+        when(clusterManager.executeUserData(any(Cluster.class), eq("ng-1"), eq(encoded)))
+                .thenReturn(UserDataPipeline.ExecutionResult.failed(3L, 1, 1, "boom"));
+
+        CreateNodeGroupRequest req1 = nodeGroupRequest("ng-1");
+        req1.setLaunchTemplate(Map.of("id", ltId));
+        Nodegroup ng1 = eksService.createNodeGroup(CLUSTER_NAME, req1);
+        assertEquals(NodegroupStatus.CREATE_FAILED, ng1.getStatus());
+
+        when(clusterManager.executeUserData(any(Cluster.class), eq("ng-2"), eq(encoded)))
+                .thenReturn(UserDataPipeline.ExecutionResult.success(0L, "ok"));
+
+        CreateNodeGroupRequest req2 = nodeGroupRequest("ng-2");
+        req2.setLaunchTemplate(Map.of("id", ltId));
+        Nodegroup ng2 = eksService.createNodeGroup(CLUSTER_NAME, req2);
+
+        assertEquals(NodegroupStatus.ACTIVE, ng2.getStatus());
+        verify(clusterManager, times(1)).executeUserData(any(Cluster.class), eq("ng-1"), eq(encoded));
+        verify(clusterManager, times(1)).executeUserData(any(Cluster.class), eq("ng-2"), eq(encoded));
     }
 
     @Test
