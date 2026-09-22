@@ -47,6 +47,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.HexFormat;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.Iterator;
 import java.util.List;
@@ -111,7 +112,8 @@ public class DynamoDbService implements ResourceProvider {
 
     private static final int MAX_MULTI_ATTRIBUTE_KEY_PART_SIZE = 4;
 
-    private record IdempotencyEntry(String requestHash, long insertedAtNanos) {}
+    private record IdempotencyEntry(String requestHash, long insertedAtNanos,
+                                    Map<String, DynamoDbWriteCapacity.Cost> replayCapacity) {}
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
     private DynamoDbStreamService streamService;
@@ -1400,12 +1402,14 @@ public class DynamoDbService implements ResourceProvider {
         transactWriteItems(transactItems, region, null, null);
     }
 
-    public void transactWriteItems(List<JsonNode> transactItems, String region,
-                                    String clientRequestToken, JsonNode rawRequest) {
+    public TransactWriteResult transactWriteItems(List<JsonNode> transactItems, String region,
+                                                  String clientRequestToken, JsonNode rawRequest) {
         // Idempotency check via ClientRequestToken — AWS contract:
         //   * Same token + identical request body  → no-op success (silently dedupe).
         //   * Same token + different request body  → IdempotentParameterMismatchException.
         //   * No token, or expired token           → proceed normally.
+        String idempotencyKey = null;
+        IdempotencyEntry idempotencyEntry = null;
         if (clientRequestToken != null && !clientRequestToken.isEmpty() && rawRequest != null) {
             String cacheKey = regionResolver.getAccountId() + "::" + region + "::" + clientRequestToken;
             String requestHash = sha256(rawRequest.toString());
@@ -1415,7 +1419,7 @@ public class DynamoDbService implements ResourceProvider {
             if (existing != null && nowNanos - existing.insertedAtNanos() <= TX_IDEMPOTENCY_TTL_NANOS) {
                 if (existing.requestHash().equals(requestHash)) {
                     LOG.debugv("transactWriteItems: idempotent replay for token={0}", clientRequestToken);
-                    return;
+                    return TransactWriteResult.replayOf(existing);
                 }
                 throw new AwsException("IdempotentParameterMismatchException",
                         "Request parameters do not match those of an in-flight or recent transaction using the same ClientRequestToken",
@@ -1428,7 +1432,7 @@ public class DynamoDbService implements ResourceProvider {
                 if (v != null && nowNanos - v.insertedAtNanos() <= TX_IDEMPOTENCY_TTL_NANOS) {
                     return v;
                 }
-                return new IdempotencyEntry(requestHash, nowNanos);
+                return new IdempotencyEntry(requestHash, nowNanos, null);
             });
             if (!registered.requestHash().equals(requestHash)) {
                 throw new AwsException("IdempotentParameterMismatchException",
@@ -1438,11 +1442,13 @@ public class DynamoDbService implements ResourceProvider {
             if (registered.insertedAtNanos() != nowNanos) {
                 // Lost the race to a concurrent identical request — treat as a replay.
                 LOG.debugv("transactWriteItems: concurrent identical replay for token={0}", clientRequestToken);
-                return;
+                return TransactWriteResult.replayOf(registered);
             }
 
             // Best-effort eviction of stale entries.
             txIdempotency.entrySet().removeIf(e -> nowNanos - e.getValue().insertedAtNanos() > TX_IDEMPOTENCY_TTL_NANOS);
+            idempotencyKey = cacheKey;
+            idempotencyEntry = registered;
         }
 
 
@@ -1456,8 +1462,10 @@ public class DynamoDbService implements ResourceProvider {
         // user-supplied key cannot collapse distinct transaction participants.
         TreeMap<TransactParticipant, ReentrantLock> toAcquire = new TreeMap<>(PARTICIPANT_ORDER);
         Set<TransactParticipant> seenParticipants = new HashSet<>();
+        List<TransactParticipant> memberParticipants = new ArrayList<>();
         for (JsonNode transactItem : transactItems) {
             TransactParticipant p = resolveParticipant(transactItem, region);
+            memberParticipants.add(p);
             if (p == null) continue;
             if (!seenParticipants.add(p)) {
                 throw new AwsException("ValidationException",
@@ -1514,6 +1522,7 @@ public class DynamoDbService implements ResourceProvider {
                     throw cancelledByMember(transactItems.size(), i, e.getMessage());
                 }
             }
+            List<JsonNode> oldImages = stagedImages(memberParticipants, staged);
             for (JsonNode transactItem : transactItems) {
                 if (transactItem.has("Put")) {
                     JsonNode put = transactItem.get("Put");
@@ -1542,6 +1551,11 @@ public class DynamoDbService implements ResourceProvider {
                     affectedStorageKeys.add(storageKey);
                 }
             }
+            List<JsonNode> newImages = stagedImages(memberParticipants, staged);
+            Map<String, DynamoDbWriteCapacity.Cost> writeCapacity =
+                    transactCapacity(transactItems, memberParticipants, oldImages, newImages, false);
+            Map<String, DynamoDbWriteCapacity.Cost> replayCapacity =
+                    transactCapacity(transactItems, memberParticipants, oldImages, newImages, true);
 
             // Each participant remains protected by the locks acquired above. Only participant
             // entries are committed, so concurrent writes to other items are never overwritten.
@@ -1562,6 +1576,11 @@ public class DynamoDbService implements ResourceProvider {
             for (Runnable streamEvent : pendingStreamEvents) {
                 streamEvent.run();
             }
+            if (idempotencyKey != null) {
+                txIdempotency.replace(idempotencyKey, idempotencyEntry, new IdempotencyEntry(
+                        idempotencyEntry.requestHash(), idempotencyEntry.insertedAtNanos(), replayCapacity));
+            }
+            return new TransactWriteResult(writeCapacity, false);
         } finally {
             for (int i = acquired.size() - 1; i >= 0; i--) {
                 acquired.get(i).unlock();
@@ -1569,7 +1588,41 @@ public class DynamoDbService implements ResourceProvider {
         }
     }
 
-    private record TransactParticipant(String storageKey, String itemKey) {}
+    private static List<JsonNode> stagedImages(List<TransactParticipant> participants,
+                                               Map<String, ConcurrentSkipListMap<String, JsonNode>> staged) {
+        List<JsonNode> images = new ArrayList<>();
+        for (TransactParticipant participant : participants) {
+            images.add(participant == null ? null : staged.get(participant.storageKey()).get(participant.itemKey()));
+        }
+        return images;
+    }
+
+    private Map<String, DynamoDbWriteCapacity.Cost> transactCapacity(List<JsonNode> transactItems,
+            List<TransactParticipant> participants, List<JsonNode> oldImages, List<JsonNode> newImages,
+            boolean replay) {
+        Map<String, DynamoDbWriteCapacity.Cost> byTable = new LinkedHashMap<>();
+        for (int i = 0; i < transactItems.size(); i++) {
+            TransactParticipant participant = participants.get(i);
+            if (participant == null) {
+                continue;
+            }
+            JsonNode oldItem = oldImages.get(i);
+            JsonNode newItem = newImages.get(i);
+            DynamoDbWriteCapacity.Cost cost;
+            if (replay) {
+                cost = DynamoDbTransactCapacity.read(oldItem, newItem);
+            } else if (transactItems.get(i).has("ConditionCheck")) {
+                cost = DynamoDbTransactCapacity.conditionCheck(oldItem);
+            } else {
+                cost = DynamoDbTransactCapacity.write(
+                        requireActiveTable(participant.storageKey(), participant.tableName()), oldItem, newItem);
+            }
+            byTable.merge(participant.tableName(), cost, DynamoDbWriteCapacity.Cost::plus);
+        }
+        return byTable;
+    }
+
+    private record TransactParticipant(String storageKey, String itemKey, String tableName) {}
 
     private static final Comparator<TransactParticipant> PARTICIPANT_ORDER =
             Comparator.comparing(TransactParticipant::storageKey)
@@ -1600,7 +1653,7 @@ public class DynamoDbService implements ResourceProvider {
         String storageKey = regionKey(region, tableName);
         var table = requireActiveTable(storageKey, tableName);
         String itemKey = buildItemKey(table, keyOrItem);
-        return new TransactParticipant(storageKey, itemKey);
+        return new TransactParticipant(storageKey, itemKey, tableName);
     }
 
     // AWS checks the depth of a transact Update's values as part of that member, so a too
@@ -1814,8 +1867,9 @@ public class DynamoDbService implements ResourceProvider {
         }
     }
 
-    public List<JsonNode> transactGetItems(List<JsonNode> transactItems, String region) {
+    public TransactGetResult transactGetItems(List<JsonNode> transactItems, String region) {
         List<JsonNode> results = new ArrayList<>();
+        Map<String, DynamoDbWriteCapacity.Cost> capacity = new LinkedHashMap<>();
         List<TransactionCanceledException.CancellationReason> cancelReasons = new ArrayList<>();
         boolean hasCancelled = false;
 
@@ -1825,7 +1879,10 @@ public class DynamoDbService implements ResourceProvider {
                 String tableName = get.path("TableName").asText();
                 JsonNode key = get.get("Key");
                 try {
-                    results.add(projectTransactGet(getItem(tableName, key, region), get));
+                    JsonNode item = getItem(tableName, key, region);
+                    results.add(projectTransactGet(item, get));
+                    capacity.merge(canonicalTableName(region, tableName), DynamoDbTransactCapacity.read(item, null),
+                            DynamoDbWriteCapacity.Cost::plus);
                     cancelReasons.add(new TransactionCanceledException.CancellationReason("", null));
                 } catch (AwsException e) {
                     if ("ValidationException".equals(e.getErrorCode())) {
@@ -1846,7 +1903,7 @@ public class DynamoDbService implements ResourceProvider {
             throw new TransactionCanceledException(cancelReasons);
         }
 
-        return results;
+        return new TransactGetResult(results, capacity);
     }
 
     /**
@@ -3821,6 +3878,15 @@ public class DynamoDbService implements ResourceProvider {
 
     // One path the update expression acted on, with the value there before and after.
     public record TouchedPath(List<Object> tokens, JsonNode oldValue, JsonNode newValue) {}
+
+    public record TransactWriteResult(Map<String, DynamoDbWriteCapacity.Cost> capacity, boolean replayed) {
+
+        private static TransactWriteResult replayOf(IdempotencyEntry entry) {
+            return new TransactWriteResult(entry.replayCapacity() != null ? entry.replayCapacity() : Map.of(), true);
+        }
+    }
+
+    public record TransactGetResult(List<JsonNode> items, Map<String, DynamoDbWriteCapacity.Cost> capacity) {}
 
     // scannedBytes carries the pre-filter size of the read items: DynamoDB bills a
     // Query or Scan on what it read, not on what survived the filter or projection.

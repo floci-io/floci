@@ -1755,8 +1755,11 @@ public class DynamoDbJsonHandler {
                 : null;
 
         try {
-            dynamoDbService.transactWriteItems(transactItems, region, clientRequestToken, request);
-            return Response.ok(objectMapper.createObjectNode()).build();
+            DynamoDbService.TransactWriteResult result =
+                    dynamoDbService.transactWriteItems(transactItems, region, clientRequestToken, request);
+            ObjectNode response = objectMapper.createObjectNode();
+            addTransactWriteConsumedCapacity(response, request, result);
+            return Response.ok(response).build();
         } catch (TransactionCanceledException e) {
             return transactWriteCanceled(e);
         }
@@ -1841,9 +1844,9 @@ public class DynamoDbJsonHandler {
         List<JsonNode> transactItems = new ArrayList<>();
         transactItemsNode.forEach(transactItems::add);
 
-        List<JsonNode> results;
+        DynamoDbService.TransactGetResult result;
         try {
-            results = dynamoDbService.transactGetItems(transactItems, region);
+            result = dynamoDbService.transactGetItems(transactItems, region);
         } catch (TransactionCanceledException e) {
             ObjectNode body = objectMapper.createObjectNode();
             body.put("__type", "TransactionCanceledException");
@@ -1865,7 +1868,7 @@ public class DynamoDbJsonHandler {
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode responsesArray = objectMapper.createArrayNode();
-        for (JsonNode item : results) {
+        for (JsonNode item : result.items()) {
             ObjectNode entry = objectMapper.createObjectNode();
             if (item != null) {
                 entry.set("Item", item);
@@ -1873,6 +1876,7 @@ public class DynamoDbJsonHandler {
             responsesArray.add(entry);
         }
         response.set("Responses", responsesArray);
+        addPerTableConsumedCapacity(response, request, result.capacity(), "ReadCapacityUnits");
         return Response.ok(response).build();
     }
 
@@ -2285,32 +2289,59 @@ public class DynamoDbJsonHandler {
                 writeCapacityNode(tableName, cost, "INDEXES".equals(returnCC)));
     }
 
+    private void addTransactWriteConsumedCapacity(ObjectNode response, JsonNode request,
+                                                  DynamoDbService.TransactWriteResult result) {
+        addPerTableConsumedCapacity(response, request, result.capacity(),
+                result.replayed() ? "ReadCapacityUnits" : "WriteCapacityUnits");
+    }
+
+    private void addPerTableConsumedCapacity(ObjectNode response, JsonNode request,
+                                             Map<String, DynamoDbWriteCapacity.Cost> capacityByTable,
+                                             String unitsField) {
+        String returnCC = request.path("ReturnConsumedCapacity").asText("NONE");
+        if ("NONE".equals(returnCC) || capacityByTable.isEmpty()) {
+            return;
+        }
+        ArrayNode entries = objectMapper.createArrayNode();
+        capacityByTable.forEach((tableName, cost) ->
+                entries.add(writeCapacityNode(tableName, cost, "INDEXES".equals(returnCC), unitsField)));
+        response.set("ConsumedCapacity", entries);
+    }
+
     private ObjectNode writeCapacityNode(String tableName, DynamoDbWriteCapacity.Cost cost,
                                           boolean withBreakdown) {
-        var cc = objectMapper.createObjectNode();
+        return writeCapacityNode(tableName, cost, withBreakdown, null);
+    }
+
+    private ObjectNode writeCapacityNode(String tableName, DynamoDbWriteCapacity.Cost cost,
+                                          boolean withBreakdown, String unitsField) {
+        ObjectNode cc = objectMapper.createObjectNode();
         cc.put("TableName", DynamoDbTableNames.resolve(tableName));
-        cc.put("CapacityUnits", cost.total());
+        cc.setAll(capacityUnitsNode(cost.total(), unitsField));
         if (withBreakdown) {
-            var tableCap = objectMapper.createObjectNode();
-            tableCap.put("CapacityUnits", cost.table());
-            cc.set("Table", tableCap);
+            cc.set("Table", capacityUnitsNode(cost.table(), unitsField));
             if (!cost.gsi().isEmpty()) {
-                cc.set("GlobalSecondaryIndexes", capacityUnitsMap(cost.gsi()));
+                cc.set("GlobalSecondaryIndexes", capacityUnitsMap(cost.gsi(), unitsField));
             }
             if (!cost.lsi().isEmpty()) {
-                cc.set("LocalSecondaryIndexes", capacityUnitsMap(cost.lsi()));
+                cc.set("LocalSecondaryIndexes", capacityUnitsMap(cost.lsi(), unitsField));
             }
         }
         return cc;
     }
 
-    private ObjectNode capacityUnitsMap(Map<String, Double> unitsByIndex) {
-        var node = objectMapper.createObjectNode();
-        unitsByIndex.forEach((indexName, units) -> {
-            var cap = objectMapper.createObjectNode();
-            cap.put("CapacityUnits", units);
-            node.set(indexName, cap);
-        });
+    private ObjectNode capacityUnitsMap(Map<String, Double> unitsByIndex, String unitsField) {
+        ObjectNode node = objectMapper.createObjectNode();
+        unitsByIndex.forEach((indexName, units) -> node.set(indexName, capacityUnitsNode(units, unitsField)));
+        return node;
+    }
+
+    private ObjectNode capacityUnitsNode(double units, String unitsField) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("CapacityUnits", units);
+        if (unitsField != null) {
+            node.put(unitsField, units);
+        }
         return node;
     }
 
@@ -2703,7 +2734,7 @@ public class DynamoDbJsonHandler {
             if (reads == statements.size()) {
                 return executeTransactionReads(statements.stream()
                         .map(DynamoDbPartiQLParser.Stmt.Select.class::cast)
-                        .toList(), region);
+                        .toList(), request, region);
             }
             List<DynamoDbPartiQLHandler.TransactMember> members = new ArrayList<>();
             for (int i = 0; i < statements.size(); i++) {
@@ -2711,10 +2742,11 @@ public class DynamoDbJsonHandler {
                 members.add(inTransactStatement(i, () -> partiQLHandler.toTransactItem(stmt, region)));
             }
             List<JsonNode> transactItems = cancelOnMemberReasons(members);
-            dynamoDbService.transactWriteItems(transactItems, region,
+            DynamoDbService.TransactWriteResult result = dynamoDbService.transactWriteItems(transactItems, region,
                     request.path("ClientRequestToken").asText(null), request);
             ObjectNode resp = objectMapper.createObjectNode();
             resp.set("Responses", objectMapper.createArrayNode());
+            addTransactWriteConsumedCapacity(resp, request, result);
             return Response.ok(resp).build();
         } catch (TransactionCanceledException e) {
             ObjectNode body = objectMapper.createObjectNode();
@@ -2736,7 +2768,8 @@ public class DynamoDbJsonHandler {
         }
     }
 
-    private Response executeTransactionReads(List<DynamoDbPartiQLParser.Stmt.Select> selects, String region) {
+    private Response executeTransactionReads(List<DynamoDbPartiQLParser.Stmt.Select> selects, JsonNode request,
+                                             String region) {
         List<DynamoDbPartiQLHandler.TransactMember> members = new ArrayList<>();
         for (int i = 0; i < selects.size(); i++) {
             DynamoDbPartiQLParser.Stmt.Select select = selects.get(i);
@@ -2744,8 +2777,9 @@ public class DynamoDbJsonHandler {
         }
         List<JsonNode> getItems = cancelOnMemberReasons(members);
 
-        List<JsonNode> results = dynamoDbService.transactGetItems(getItems, region);
+        DynamoDbService.TransactGetResult result = dynamoDbService.transactGetItems(getItems, region);
         requireOneReadPerItem(getItems, region);
+        List<JsonNode> results = result.items();
         ArrayNode responses = objectMapper.createArrayNode();
         for (int i = 0; i < results.size(); i++) {
             JsonNode item = partiQLHandler.projectSelected(selects.get(i), results.get(i));
@@ -2757,6 +2791,7 @@ public class DynamoDbJsonHandler {
         }
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("Responses", responses);
+        addPerTableConsumedCapacity(resp, request, result.capacity(), "ReadCapacityUnits");
         return Response.ok(resp).build();
     }
 
