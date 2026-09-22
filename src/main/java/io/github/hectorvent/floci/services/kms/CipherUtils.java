@@ -18,6 +18,9 @@ import java.security.spec.RSAPublicKeySpec;
 import java.util.Arrays;
 
 public final class CipherUtils {
+    private CipherUtils() {
+    }
+
     /** Decodes a PKCS#8-encoded RSA private key. */
     public static PrivateKey generateRsaPrivateKey(byte[] encodedKey) throws GeneralSecurityException {
         return KeyFactory.getInstance("RSA").generatePrivate(new PKCS8EncodedKeySpec(encodedKey));
