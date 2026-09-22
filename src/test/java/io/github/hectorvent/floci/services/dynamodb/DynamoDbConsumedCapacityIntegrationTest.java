@@ -572,6 +572,62 @@ class DynamoDbConsumedCapacityIntegrationTest {
             .body("ConsumedCapacity[0].ReadCapacityUnits", equalTo(4.0f));
     }
 
+    @Test
+    @Order(19)
+    void transactionsRejectAnInvalidReturnConsumedCapacityBeforeWriting() {
+        String invalid = "Value 'INVALID' at 'returnConsumedCapacity' failed to satisfy constraint: "
+                + "Member must satisfy enum value set: [INDEXES, TOTAL, NONE]";
+        rejected("TransactWriteItems", """
+            {
+                "TransactItems": [{"Put": {"TableName": "%s", "Item": {"pk": {"S": "cc-rcc"}}}}],
+                "ReturnConsumedCapacity": "INVALID"
+            }
+            """.formatted(TABLE))
+            .body("message", equalTo("1 validation error detected: " + invalid));
+        rejected("ExecuteTransaction", """
+            {
+                "TransactStatements": [{"Statement": "INSERT INTO \\"%s\\" VALUE {'pk': 'cc-rcc-et'}"}],
+                "ReturnConsumedCapacity": "INVALID"
+            }
+            """.formatted(TABLE))
+            .body("message", equalTo("1 validation error detected: " + invalid));
+        rejected("TransactGetItems", """
+            {
+                "TransactItems": [{"Get": {"TableName": "%s", "Key": {"pk": {"S": "cc-get"}}}}],
+                "ReturnConsumedCapacity": "INVALID"
+            }
+            """.formatted(TABLE))
+            .body("message", equalTo("1 validation error detected: " + invalid));
+        rejected("TransactWriteItems", """
+            {"TransactItems": [], "ReturnConsumedCapacity": "INVALID"}
+            """)
+            .body("message", equalTo("2 validation errors detected: Value '[]' at 'transactItems' failed to "
+                    + "satisfy constraint: Member must have length greater than or equal to 1; " + invalid));
+
+        send("TransactGetItems", """
+            {
+                "TransactItems": [
+                    {"Get": {"TableName": "%1$s", "Key": {"pk": {"S": "cc-rcc"}}}},
+                    {"Get": {"TableName": "%1$s", "Key": {"pk": {"S": "cc-rcc-et"}}}}
+                ]
+            }
+            """.formatted(TABLE))
+            .body("Responses[0].Item", nullValue())
+            .body("Responses[1].Item", nullValue());
+    }
+
+    private static ValidatableResponse rejected(String operation, String body) {
+        return given()
+                .header("X-Amz-Target", "DynamoDB_20120810." + operation)
+                .contentType(CT)
+                .body(body)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
+    }
+
     private static ValidatableResponse transactWrite(String body) {
         return send("TransactWriteItems", body);
     }

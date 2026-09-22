@@ -1671,22 +1671,7 @@ public class DynamoDbJsonHandler {
     }
 
     private Response handleTransactWriteItems(JsonNode request, String region) {
-        JsonNode transactItemsNode = request.path("TransactItems");
-        if (transactItemsNode.isMissingNode() || transactItemsNode.isNull() || !transactItemsNode.isArray()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value null at 'transactItems' failed to satisfy constraint: "
-                    + "Member must have length greater than or equal to 1", 400);
-        }
-        if (transactItemsNode.isEmpty()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '[]' at 'transactItems' failed to satisfy constraint: "
-                    + "Member must have length greater than or equal to 1", 400);
-        }
-        if (transactItemsNode.size() > 100) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + transactItemsNode + "' at 'transactItems' failed to satisfy constraint: "
-                    + "Member must have length less than or equal to 100", 400);
-        }
+        JsonNode transactItemsNode = requireValidTransactRequest(request);
 
         for (JsonNode txItem : transactItemsNode) {
             for (JsonNode op : txItem) {
@@ -1765,6 +1750,42 @@ public class DynamoDbJsonHandler {
         }
     }
 
+    private static JsonNode requireValidTransactRequest(JsonNode request) {
+        JsonNode transactItems = request.path("TransactItems");
+        List<String> validationErrors = new ArrayList<>();
+        if (transactItems.isMissingNode() || transactItems.isNull() || !transactItems.isArray()) {
+            validationErrors.add("Value null at 'transactItems' failed to satisfy constraint: "
+                    + "Member must have length greater than or equal to 1");
+        } else if (transactItems.isEmpty()) {
+            validationErrors.add("Value '[]' at 'transactItems' failed to satisfy constraint: "
+                    + "Member must have length greater than or equal to 1");
+        } else if (transactItems.size() > 100) {
+            validationErrors.add("Value '" + transactItems + "' at 'transactItems' failed to satisfy constraint: "
+                    + "Member must have length less than or equal to 100");
+        }
+        addReturnConsumedCapacityError(request, validationErrors);
+        throwValidationErrors(validationErrors);
+        return transactItems;
+    }
+
+    private static void addReturnConsumedCapacityError(JsonNode request, List<String> validationErrors) {
+        String returnCC = request.has("ReturnConsumedCapacity") ? request.get("ReturnConsumedCapacity").asText() : null;
+        if (returnCC != null && !VALID_RETURN_CONSUMED_CAPACITY.contains(returnCC)) {
+            validationErrors.add("Value '" + returnCC + "' at 'returnConsumedCapacity' failed to satisfy constraint: "
+                    + "Member must satisfy enum value set: [INDEXES, TOTAL, NONE]");
+        }
+    }
+
+    private static void throwValidationErrors(List<String> validationErrors) {
+        if (validationErrors.isEmpty()) {
+            return;
+        }
+        int n = validationErrors.size();
+        throw new AwsException("ValidationException",
+                n + " validation error" + (n > 1 ? "s" : "") + " detected: "
+                + String.join("; ", validationErrors), 400);
+    }
+
     private Response transactWriteCanceled(TransactionCanceledException e) {
         ObjectNode body = objectMapper.createObjectNode();
         body.put("__type", "TransactionCanceledException");
@@ -1785,22 +1806,7 @@ public class DynamoDbJsonHandler {
     }
 
     private Response handleTransactGetItems(JsonNode request, String region) {
-        JsonNode transactItemsNode = request.path("TransactItems");
-        if (transactItemsNode.isMissingNode() || transactItemsNode.isNull() || !transactItemsNode.isArray()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value null at 'transactItems' failed to satisfy constraint: "
-                    + "Member must have length greater than or equal to 1", 400);
-        }
-        if (transactItemsNode.isEmpty()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '[]' at 'transactItems' failed to satisfy constraint: "
-                    + "Member must have length greater than or equal to 1", 400);
-        }
-        if (transactItemsNode.size() > 100) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + transactItemsNode + "' at 'transactItems' failed to satisfy constraint: "
-                    + "Member must have length less than or equal to 100", 400);
-        }
+        JsonNode transactItemsNode = requireValidTransactRequest(request);
 
         for (JsonNode txItem : transactItemsNode) {
             DynamoDbExpressionSize.checkRead(txItem.path("Get").path("ProjectionExpression").textValue(),
@@ -2718,6 +2724,9 @@ public class DynamoDbJsonHandler {
         if (stmts.isMissingNode() || !stmts.isArray() || stmts.isEmpty()) {
             throw new AwsException("ValidationException", "TransactStatements must not be empty", 400);
         }
+        List<String> validationErrors = new ArrayList<>();
+        addReturnConsumedCapacityError(request, validationErrors);
+        throwValidationErrors(validationErrors);
         try {
             List<DynamoDbPartiQLParser.Stmt> statements = new ArrayList<>();
             for (int i = 0; i < stmts.size(); i++) {
