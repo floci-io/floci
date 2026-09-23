@@ -4373,9 +4373,7 @@ public class S3Service implements Resettable, ResourceProvider {
         if (functionMarker < 0) {
             return null;
         }
-        String suffix = functionArn.substring(functionMarker + ":function:".length());
-        int qualifierSeparator = suffix.indexOf(':');
-        return qualifierSeparator >= 0 ? suffix.substring(0, qualifierSeparator) : suffix;
+        return functionArn.substring(functionMarker + ":function:".length());
     }
 
     private LambdaService resolveLambdaService() {

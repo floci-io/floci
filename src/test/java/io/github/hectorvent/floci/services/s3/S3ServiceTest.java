@@ -556,6 +556,27 @@ class S3ServiceTest {
         assertNull(lambdaInvoker.functionName);
     }
 
+    @Test
+    void putObjectKeepsTheQualifierOfTheNotificationFunctionArn() {
+        RecordingLambdaInvoker lambdaInvoker = new RecordingLambdaInvoker();
+        RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
+
+        S3Service service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(), tempDir.resolve("notif-s3-alias"),
+                false, lambdaInvoker, regionResolver);
+        service.createBucket("test-bucket", "ap-northeast-1");
+        NotificationConfiguration config = new NotificationConfiguration();
+        config.getLambdaFunctionConfigurations().add(new LambdaNotification(
+                "lambda-notif",
+                "arn:aws:lambda:ap-northeast-1:000000000000:function:s3-notif-test:PROD",
+                List.of("s3:ObjectCreated:Put"),
+                List.of()));
+        service.putBucketNotificationConfiguration("test-bucket", config);
+
+        service.putObject("test-bucket", "a.json", "{}".getBytes(StandardCharsets.UTF_8), "application/json", null);
+
+        assertEquals("s3-notif-test:PROD", lambdaInvoker.functionName);
+    }
+
     private static NotificationConfiguration lambdaNotificationConfig(String prefix, String suffix) {
         NotificationConfiguration config = new NotificationConfiguration();
         config.getLambdaFunctionConfigurations().add(new LambdaNotification(
