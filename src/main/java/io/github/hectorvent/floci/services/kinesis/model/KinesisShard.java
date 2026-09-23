@@ -56,6 +56,20 @@ public class KinesisShard {
         }
     }
 
+    /**
+     * Records the shard held at one instant, with the number of records pruned before them.
+     * Both values are read under one lock, so a concurrent prune cannot leave the count ahead of
+     * the snapshot.
+     */
+    public RecordsSnapshot snapshotRecords() {
+        synchronized (recordsMonitor) {
+            return new RecordsSnapshot(new ArrayList<>(records), prunedRecordCount);
+        }
+    }
+
+    /** A shard's records and the count of records pruned before the first of them. */
+    public record RecordsSnapshot(List<KinesisRecord> records, long prunedRecordCount) {}
+
     /** Appends a record. The sole production mutation path for a shard's log. */
     public void addRecord(KinesisRecord record) {
         synchronized (recordsMonitor) {

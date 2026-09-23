@@ -900,7 +900,8 @@ public class KinesisService implements ResourceProvider {
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Shard not found", 400));
         pruneExpiredRecords(stream, shard);
 
-        List<KinesisRecord> allRecords = shard.getRecords();
+        KinesisShard.RecordsSnapshot snapshot = shard.snapshotRecords();
+        List<KinesisRecord> allRecords = snapshot.records();
         int startIndex = 0;
 
         // Simple implementation of iterator types.
@@ -913,7 +914,7 @@ public class KinesisService implements ResourceProvider {
         // pruned too (pruning only ever removes a contiguous prefix), so falling through to the
         // startIndex=0 default below still correctly resumes at the oldest still-retained record.
         if ("TRIM_HORIZON".equals(type)) {
-            startIndex = legacyResumeIndex(shard, lastIndex, allRecords.size());
+            startIndex = legacyResumeIndex(snapshot, lastIndex);
         } else if ("AT_SEQUENCE_NUMBER".equals(type)) {
             for (int i = 0; i < allRecords.size(); i++) {
                 if (allRecords.get(i).getSequenceNumber().equals(startSeq)) {
@@ -1041,9 +1042,9 @@ public class KinesisService implements ResourceProvider {
      * log, and Firehose persists such iterators as checkpoints. Pruning shifts that index, so
      * subtract the records pruned since.
      */
-    private static int legacyResumeIndex(KinesisShard shard, int index, int recordCount) {
-        long resumeIndex = Math.max(0, index - shard.getPrunedRecordCount());
-        return (int) Math.min(resumeIndex, recordCount);
+    private static int legacyResumeIndex(KinesisShard.RecordsSnapshot snapshot, int index) {
+        long resumeIndex = Math.max(0, index - snapshot.prunedRecordCount());
+        return (int) Math.min(resumeIndex, snapshot.records().size());
     }
 
     /**
@@ -1155,13 +1156,14 @@ public class KinesisService implements ResourceProvider {
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Shard not found", 400));
         pruneExpiredRecords(stream, shard);
 
-        List<KinesisRecord> allRecords = shard.getRecords();
+        KinesisShard.RecordsSnapshot snapshot = shard.snapshotRecords();
+        List<KinesisRecord> allRecords = snapshot.records();
         int startIndex = 0;
         // LATEST resolves the same way as AFTER_SEQUENCE_NUMBER (see the longer explanation in
         // getRecords, above): it was encoded at GetShardIterator time as the shard tip's sequence
         // number, which retention pruning of earlier records can never invalidate.
         if ("TRIM_HORIZON".equals(type)) {
-            startIndex = legacyResumeIndex(shard, lastIndex, allRecords.size());
+            startIndex = legacyResumeIndex(snapshot, lastIndex);
         } else if ("AFTER_SEQUENCE_NUMBER".equals(type) || "LATEST".equals(type)) {
             for (int i = 0; i < allRecords.size(); i++) {
                 if (allRecords.get(i).getSequenceNumber().equals(startSeq)) {
