@@ -145,7 +145,7 @@ final class SesServiceTestBuilder {
 
     SesCvetService cvetService() {
         if (cvetService == null) {
-            cvetService = new SesCvetService(cvetStore);
+            throw new IllegalStateException("call build() first");
         }
         return cvetService;
     }
@@ -164,6 +164,7 @@ final class SesServiceTestBuilder {
         configSetService = new SesConfigurationSetService(configSetStore);
         identityService = new SesIdentityService(identityStore, route53Service, clock);
         sentEmailService = new SesSentEmailService(emailStore);
+        cvetService = new SesCvetService(cvetStore);
         return new SesService(
                 identityService,
                 sentEmailService,
@@ -173,7 +174,7 @@ final class SesServiceTestBuilder {
                 new SesDedicatedIpService(dedicatedIpPoolStore),
                 contactService,
                 new SesPolicyService(policyStore, objectMapper),
-                cvetService(),
+                cvetService,
                 new SesTenantService(tenantStore, tenantAssociationStore, clock, new SecureRandom()),
                 smtpRelay);
     }
