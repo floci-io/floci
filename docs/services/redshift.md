@@ -39,10 +39,10 @@ For running SQL without a PostgreSQL wire connection (the way Lambda and Step Fu
 | `DescribeClusterSubnetGroups` | List subnet groups, optionally filtered by name |
 | `ModifyClusterSubnetGroup` | Update a subnet group's description or subnet list |
 | `DeleteClusterSubnetGroup` | Remove a subnet group |
-| `ModifyCluster` | Update node type, parameter group, security groups, Multi-AZ flag, or the master password |
 | `CreateSnapshotCopyGrant` | Register a snapshot copy grant, defaulting `KmsKeyId` to the AWS-managed Redshift key. `SnapshotCopyGrantName` must be 1-63 characters, start with a lowercase letter, and contain only lowercase letters, digits and non-consecutive hyphens |
 | `DescribeSnapshotCopyGrants` | List snapshot copy grants, optionally filtered by name, paged with `MaxRecords` and `Marker` |
 | `DeleteSnapshotCopyGrant` | Remove a snapshot copy grant |
+| `ModifyCluster` | Update node type, parameter group, security groups, Multi-AZ flag, or the master password |
 | `DescribeClusterVersions` | Return the single emulated engine version and its parameter group family |
 | `DescribeOrderableClusterOptions` | Return the static node types and cluster types, optionally filtered by `NodeType` or `ClusterVersion` |
 | `ModifyClusterIamRoles` | Add or remove the IAM roles associated with a cluster; COPY and UNLOAD see the change on new connections. `DefaultIamRoleArn` is ignored |
