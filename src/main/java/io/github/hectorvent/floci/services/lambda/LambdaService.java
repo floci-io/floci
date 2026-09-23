@@ -3011,8 +3011,12 @@ public class LambdaService implements ResourceProvider {
         LOG.infov("Hot-reload configured for function {0}: bind-mounting {1}", fn.getFunctionName(), resolvedHostPath);
     }
 
-    /** Docker on the host expects a POSIX path, whatever separator the JVM running Floci uses. */
-    static String toDockerHostPath(Path normalized) {
+    /**
+     * Docker on the host expects a POSIX path, whatever separator the JVM running Floci uses.
+     * Public because the CloudFormation provisioner keys its hot-reload identity on the same form,
+     * so change detection agrees with what {@link #applyHotReload} stored.
+     */
+    public static String toDockerHostPath(Path normalized) {
         StringBuilder path = new StringBuilder();
         for (Path name : normalized) {
             path.append('/').append(name);

@@ -407,14 +407,16 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
 
     /**
      * The form LambdaService stores a hot-reload host path in: normalized, so {@code /a/../b/}
-     * and {@code /b} are the same mount. Identities and change detection use it so a redeploy
-     * that only rewrites the path spelling, or a function adopted from a direct CreateFunction,
-     * is not mistaken for a code change. The raw key still goes to Lambda, which validates it and
-     * reports its own error for a path it cannot use.
+     * and {@code /b} are the same mount, and rendered as the POSIX path Docker receives
+     * ({@link LambdaService#toDockerHostPath}), so the identity agrees with
+     * {@code getHotReloadHostPath()} on every host separator. Identities and change detection use
+     * it so a redeploy that only rewrites the path spelling, or a function adopted from a direct
+     * CreateFunction, is not mistaken for a code change. The raw key still goes to Lambda, which
+     * validates it and reports its own error for a path it cannot use.
      */
     private static String canonicalHotReloadPath(String s3Key) {
         try {
-            return Path.of(s3Key).normalize().toString();
+            return LambdaService.toDockerHostPath(Path.of(s3Key).normalize());
         } catch (InvalidPathException e) {
             return s3Key;
         }
