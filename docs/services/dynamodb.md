@@ -145,6 +145,15 @@ aws dynamodb create-table \
   --endpoint-url $AWS_ENDPOINT_URL
 ```
 
+Deviations from AWS:
+
+- **No index is stored.** A `Query` or `Scan` on an index reads the base table and applies the
+  index's key schema and projection on the way out.
+- **Index reads are immediately consistent.** A GSI on AWS is eventually consistent, so code that
+  tolerates replication lag never exercises that wait here.
+- **A new index is `ACTIVE` at once.** AWS copies the table's items into a new index first, which
+  takes minutes on a large table. Nothing is copied here, so a waiter returns straight away.
+
 ## Vector indexes
 
 A vector index serves `SearchVectors`, which ranks a table's items by the distance between a query
@@ -189,17 +198,25 @@ first, `DOT_PRODUCT` the highest. The vector attribute is left out of a result u
 `--projection-expression` names it, and when it is named the values returned are the index's own
 32 bit copies, so a `1` written to the table comes back as `1.0`.
 
-Deviations from AWS: the search is exact rather than approximate. AWS uses an approximate index, so
-on a large index it may return a slightly different set or order. `ItemCount` and `IndexSizeBytes`
-always report 0, which is what AWS reports for a fresh index because it refreshes both roughly every
-six hours. An index created with its table is `ACTIVE` at once. One added by `UpdateTable` walks a
-resource allocation phase and then a backfill phase, whose lengths are
-`FLOCI_SERVICES_DYNAMODB_VECTOR_INDEX_ALLOCATION_SECONDS` and
-`FLOCI_SERVICES_DYNAMODB_VECTOR_INDEX_BACKFILL_SECONDS`, 4 and 10 seconds by default against minutes
-on AWS. `SearchVectors` is served on Floci's ordinary endpoint. AWS gives the operation a dedicated
-search endpoint, but the SDKs honor an endpoint override, so this is invisible to callers. Vector
-search capacity is reported with the same 1024 byte floor AWS uses, but `VectorSearchRequestBytes`
-is a fixed figure rather than a measured one, because AWS's own value is not deterministic.
+Deviations from AWS:
+
+- **The search is exact, not approximate.** AWS may return a slightly different set or order on a
+  large index. Scoring every item makes a result here repeatable.
+- **No index is stored, as above.** Every search reads the vectors from the base table and converts
+  them, so the work grows with items times dimensions. A large index is slower than AWS.
+- **A written vector is searchable at once.** AWS copies it into the index in the background, so
+  code that polls for a new vector never waits here.
+- **`ItemCount` and `IndexSizeBytes` always report 0.** That is what AWS reports for a fresh index,
+  because it refreshes both roughly every six hours.
+- **An index created with its table is `ACTIVE` at once.** One added by `UpdateTable` walks a
+  resource allocation phase and then a backfill phase. Their lengths are
+  `FLOCI_SERVICES_DYNAMODB_VECTOR_INDEX_ALLOCATION_SECONDS` and
+  `FLOCI_SERVICES_DYNAMODB_VECTOR_INDEX_BACKFILL_SECONDS`, 4 and 10 seconds by default, against
+  minutes on AWS.
+- **`SearchVectors` is served on Floci's ordinary endpoint.** AWS gives the operation a dedicated
+  search endpoint. The SDKs honor an endpoint override, so this is invisible to callers.
+- **`VectorSearchRequestBytes` is a fixed figure, not a measured one.** It uses the same 1024 byte
+  floor AWS uses. AWS's own value above that floor is not deterministic.
 
 ## Export to S3
 
