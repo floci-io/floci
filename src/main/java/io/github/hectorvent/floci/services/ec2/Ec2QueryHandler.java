@@ -67,6 +67,10 @@ public class Ec2QueryHandler {
                 case "DescribeInstances" -> handleDescribeInstances(params, region);
                 case "DescribeIamInstanceProfileAssociations" ->
                         handleDescribeIamInstanceProfileAssociations(params, region);
+                case "AssociateIamInstanceProfile" -> handleAssociateIamInstanceProfile(params, region);
+                case "ReplaceIamInstanceProfileAssociation" ->
+                        handleReplaceIamInstanceProfileAssociation(params, region);
+                case "DisassociateIamInstanceProfile" -> handleDisassociateIamInstanceProfile(params, region);
                 case "TerminateInstances" -> handleTerminateInstances(params, region);
                 case "StartInstances" -> handleStartInstances(params, region);
                 case "StopInstances" -> handleStopInstances(params, region);
@@ -1131,7 +1135,7 @@ public class Ec2QueryHandler {
                 if (inst.getIamInstanceProfileArn() == null) {
                     continue;
                 }
-                String assocId = iamInstanceProfileAssociationId(inst.getInstanceId());
+                String assocId = Ec2Service.iamInstanceProfileAssociationId(inst.getInstanceId());
                 if (instanceFilter != null && !instanceFilter.contains(inst.getInstanceId())) {
                     continue;
                 }
@@ -1143,10 +1147,13 @@ public class Ec2QueryHandler {
                         .elem("instanceId", inst.getInstanceId())
                         .start("iamInstanceProfile")
                         .elem("arn", inst.getIamInstanceProfileArn())
-                        .elem("id", iamInstanceProfileId(inst.getInstanceId()))
+                        .elem("id", Ec2Service.iamInstanceProfileId(inst.getInstanceId()))
                         .end("iamInstanceProfile")
-                        .elem("state", "associated")
-                        .end("item");
+                        .elem("state", "associated");
+                if (inst.getIamInstanceProfileAssociationTime() != null) {
+                    xml.elem("timestamp", ISO_FMT.format(inst.getIamInstanceProfileAssociationTime()));
+                }
+                xml.end("item");
             }
         }
         xml.end("iamInstanceProfileAssociationSet")
@@ -1154,31 +1161,60 @@ public class Ec2QueryHandler {
         return xmlResponse(xml.build());
     }
 
-    /**
-     * Deterministic instance-profile id derived from the instance id so repeated describes are stable.
-     */
-    private static String iamInstanceProfileId(String instanceId) {
-        return "AIPA" + stableSuffix(instanceId, 17).toUpperCase();
-    }
-
-    /**
-     * Deterministic association id derived from the instance id so repeated describes are stable.
-     */
-    private static String iamInstanceProfileAssociationId(String instanceId) {
-        return "iip-assoc-" + stableSuffix(instanceId, 17);
-    }
-
-    private static String stableSuffix(String seed, int length) {
-        StringBuilder sb = new StringBuilder();
-        int h = seed.hashCode();
-        String alphabet = "0123456789abcdefghijklmnopqrstuvwxyz";
-        long v = ((long) h) & 0xFFFFFFFFL;
-        for (int i = 0; i < length; i++) {
-            sb.append(alphabet.charAt((int) (v % alphabet.length())));
-            v = v * 1103515245L + 12345L + i;
-            v &= 0xFFFFFFFFL;
+    private Response handleAssociateIamInstanceProfile(MultivaluedMap<String, String> p, String region) {
+        String instanceId = requiredParam(p, "InstanceId");
+        String profileArn = resolveIamInstanceProfileArn(p);
+        if (profileArn == null) {
+            throw new AwsException("MissingParameter",
+                    "The request must contain the parameter IamInstanceProfile", 400);
         }
-        return sb.toString();
+        return associationResponse("AssociateIamInstanceProfileResponse",
+                service.associateIamInstanceProfile(region, instanceId, profileArn));
+    }
+
+    private Response handleReplaceIamInstanceProfileAssociation(MultivaluedMap<String, String> p, String region) {
+        String associationId = requiredParam(p, "AssociationId");
+        String profileArn = resolveIamInstanceProfileArn(p);
+        if (profileArn == null) {
+            throw new AwsException("MissingParameter",
+                    "The request must contain the parameter IamInstanceProfile", 400);
+        }
+        return associationResponse("ReplaceIamInstanceProfileAssociationResponse",
+                service.replaceIamInstanceProfileAssociation(region, associationId, profileArn));
+    }
+
+    private Response handleDisassociateIamInstanceProfile(MultivaluedMap<String, String> p, String region) {
+        String associationId = requiredParam(p, "AssociationId");
+        return associationResponse("DisassociateIamInstanceProfileResponse",
+                service.disassociateIamInstanceProfile(region, associationId));
+    }
+
+    private static String requiredParam(MultivaluedMap<String, String> p, String name) {
+        String value = p.getFirst(name);
+        if (value == null || value.isBlank()) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter " + name, 400);
+        }
+        return value;
+    }
+
+    private Response associationResponse(String root, IamInstanceProfileAssociation association) {
+        XmlBuilder xml = new XmlBuilder()
+                .start(root, AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("iamInstanceProfileAssociation")
+                .elem("associationId", association.associationId())
+                .elem("instanceId", association.instanceId())
+                .start("iamInstanceProfile")
+                .elem("arn", association.arn())
+                .elem("id", association.id())
+                .end("iamInstanceProfile")
+                .elem("state", association.state());
+        if (association.timestamp() != null) {
+            xml.elem("timestamp", ISO_FMT.format(association.timestamp()));
+        }
+        xml.end("iamInstanceProfileAssociation")
+                .end(root);
+        return xmlResponse(xml.build());
     }
 
     private Response handleDescribeInstances(MultivaluedMap<String, String> p, String region) {
@@ -1390,6 +1426,12 @@ public class Ec2QueryHandler {
 
     private Response handleModifyInstanceAttribute(MultivaluedMap<String, String> p, String region) {
         String instanceId = p.getFirst("InstanceId");
+        // UserData arrives base64-encoded, as on RunInstances; both forms are kept so the attribute
+        // describes back exactly as sent.
+        String userDataEncoded = p.getFirst("UserData.Value");
+        if (userDataEncoded != null) {
+            service.modifyInstanceUserData(region, instanceId, decodeUserData(userDataEncoded), userDataEncoded);
+        }
         // Find which attribute is being modified
         for (String attr : List.of("InstanceType.Value", "SourceDestCheck.Value", "EbsOptimized.Value")) {
             String val = p.getFirst(attr);
@@ -4506,7 +4548,7 @@ public class Ec2QueryHandler {
         if (inst.getIamInstanceProfileArn() != null) {
             xml.start("iamInstanceProfile")
                     .elem("arn", inst.getIamInstanceProfileArn())
-                    .elem("id", iamInstanceProfileId(inst.getInstanceId()))
+                    .elem("id", Ec2Service.iamInstanceProfileId(inst.getInstanceId()))
                     .end("iamInstanceProfile");
         }
         xml.raw(tagSetXml(inst.getTags()));

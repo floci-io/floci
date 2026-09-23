@@ -48,6 +48,34 @@ class Ec2UserDataAttributeIntegrationTest {
         }
     }
 
+    @Test
+    void modifyingUserDataNeedsAStoppedInstanceAndIsDescribedBack() {
+        String id = given().header("Authorization", AUTH).formParam("Action", "RunInstances")
+                .formParam("ImageId", "ami-0abcdef1234567890").formParam("InstanceType", "t3.micro")
+                .formParam("UserData", "b2xk").post("/").then().statusCode(200)
+                .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
+        try {
+            // A running instance refuses the change, as on AWS.
+            given().header("Authorization", AUTH).formParam("Action", "ModifyInstanceAttribute")
+                    .formParam("InstanceId", id).formParam("UserData.Value", "bmV3")
+                    .post("/").then().statusCode(400)
+                    .body("Response.Errors.Error.Code", equalTo("IncorrectInstanceState"));
+            given().header("Authorization", AUTH).formParam("Action", "StopInstances")
+                    .formParam("InstanceId.1", id).post("/").then().statusCode(200);
+
+            given().header("Authorization", AUTH).formParam("Action", "ModifyInstanceAttribute")
+                    .formParam("InstanceId", id).formParam("UserData.Value", "bmV3")
+                    .post("/").then().statusCode(200)
+                    .body("ModifyInstanceAttributeResponse.return", equalTo("true"));
+            given().header("Authorization", AUTH).formParam("Action", "DescribeInstanceAttribute")
+                    .formParam("InstanceId", id).formParam("Attribute", "userData")
+                    .post("/").then().statusCode(200)
+                    .body("DescribeInstanceAttributeResponse.userData.value.text()", equalTo("bmV3"));
+        } finally {
+            terminate(id);
+        }
+    }
+
     private void terminate(String id) {
         given().header("Authorization", AUTH).formParam("Action", "TerminateInstances")
                 .formParam("InstanceId.1", id).post("/").then().statusCode(200);

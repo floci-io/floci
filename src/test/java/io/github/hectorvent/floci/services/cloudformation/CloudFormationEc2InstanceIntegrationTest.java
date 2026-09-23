@@ -25,6 +25,8 @@ class CloudFormationEc2InstanceIntegrationTest {
             "AWS4-HMAC-SHA256 Credential=test/20260205/ap-southeast-2/cloudformation/aws4_request";
     private static final String EC2_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260205/ap-southeast-2/ec2/aws4_request";
+    private static final String IAM_AUTH =
+            "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/iam/aws4_request";
 
     @Test
     void createStackProvisionsRealEc2Instance() {
@@ -148,6 +150,96 @@ class CloudFormationEc2InstanceIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<instanceType>t3.small</instanceType>"));
+    }
+
+    @Test
+    void updateStackAppliesUserDataAndIamInstanceProfileInPlace() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-ec2-inplace-" + suffix;
+        String firstProfile = "cfn-inplace-" + suffix;
+        String secondProfile = "cfn-inplace-v2-" + suffix;
+        String firstArn = createInstanceProfile(firstProfile);
+        String secondArn = createInstanceProfile(secondProfile);
+        String template = """
+                {
+                  "Resources": {
+                    "Server": {
+                      "Type": "AWS::EC2::Instance",
+                      "Properties": {"ImageId": "ami-12345678", "InstanceType": "t3.micro",
+                                     "UserData": "%s", "IamInstanceProfile": "%s"}
+                    }
+                  },
+                  "Outputs": {
+                    "InstanceId": {"Value": {"Ref": "Server"}}
+                  }
+                }
+                """;
+        try {
+            cfn("CreateStack", stackName, template.formatted("first boot", firstProfile));
+            String instanceId = instanceIdFrom(describeStacks(stackName, "CREATE_COMPLETE"));
+            assertUserData(instanceId, "Zmlyc3QgYm9vdA==");
+            assertInstanceProfile(instanceId, firstArn);
+
+            cfn("UpdateStack", stackName, template.formatted("second boot", secondProfile));
+            String updateXml = describeStacks(stackName, "UPDATE_COMPLETE");
+
+            // Both properties are mutable: the same instance carries the new values.
+            assertTrue(updateXml.contains("<OutputValue>" + instanceId + "</OutputValue>"),
+                    "instance id changed on update, so it was replaced not updated in place: " + updateXml);
+            assertUserData(instanceId, "c2Vjb25kIGJvb3Q=");
+            assertInstanceProfile(instanceId, secondArn);
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", EC2_AUTH)
+                .formParam("Action", "DescribeInstances")
+                .formParam("InstanceId.1", instanceId)
+            .when().post("/").then().statusCode(200)
+                .body(containsString("<name>running</name>"));
+        } finally {
+            deleteInstanceProfile(firstProfile);
+            deleteInstanceProfile(secondProfile);
+        }
+    }
+
+    private static void assertUserData(String instanceId, String encoded) {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", EC2_AUTH)
+            .formParam("Action", "DescribeInstanceAttribute")
+            .formParam("InstanceId", instanceId)
+            .formParam("Attribute", "userData")
+        .when().post("/").then().statusCode(200)
+            .body(containsString("<value>" + encoded + "</value>"));
+    }
+
+    private static void assertInstanceProfile(String instanceId, String arn) {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", EC2_AUTH)
+            .formParam("Action", "DescribeIamInstanceProfileAssociations")
+            .formParam("Filter.1.Name", "instance-id")
+            .formParam("Filter.1.Value.1", instanceId)
+        .when().post("/").then().statusCode(200)
+            .body(containsString("<arn>" + arn + "</arn>"));
+    }
+
+    private static String createInstanceProfile(String name) {
+        return given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "CreateInstanceProfile")
+            .formParam("InstanceProfileName", name)
+        .when().post("/").then().statusCode(200)
+            .extract().path("CreateInstanceProfileResponse.CreateInstanceProfileResult.InstanceProfile.Arn");
+    }
+
+    private static void deleteInstanceProfile(String name) {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "DeleteInstanceProfile")
+            .formParam("InstanceProfileName", name)
+        .when().post("/").then().statusCode(200);
     }
 
     @Test

@@ -50,6 +50,7 @@ import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
 import io.github.hectorvent.floci.services.ec2.model.CapacityReservation;
 import io.github.hectorvent.floci.services.ec2.model.EbsBlockDevice;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
+import io.github.hectorvent.floci.services.ec2.model.IamInstanceProfileAssociation;
 import io.github.hectorvent.floci.services.ec2.net.VpcNetworkManager;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
 import io.github.hectorvent.floci.services.ec2.model.Image;
@@ -2760,6 +2761,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 inst.setUserData(userData);
                 inst.setEncodedUserData(encodedUserData);
                 inst.setIamInstanceProfileArn(iamInstanceProfileArn);
+                if (iamInstanceProfileArn != null) {
+                    inst.setIamInstanceProfileAssociationTime(inst.getLaunchTime());
+                }
                 inst.setMetadataOptions(LaunchTemplateData.MetadataOptions.merge(launchMetadataOptions, null));
                 inst.setCreditSpecificationCpuCredits(
                         acquiredCpuCredits(effectiveInstanceType, creditSpecificationCpuCredits));
@@ -3427,6 +3431,116 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         Instance inst = getRequiredInstance(region, instanceId);
 
         return inst;
+    }
+
+    /**
+     * ModifyInstanceAttribute with {@code UserData}. The instance must be stopped, as on AWS, so the
+     * new data is what its next boot reads. Both forms are stored, as RunInstances does, so
+     * DescribeInstanceAttribute echoes the exact base64 the caller sent.
+     */
+    public void modifyInstanceUserData(String region, String instanceId, String userData) {
+        modifyInstanceUserData(region, instanceId, userData, userData == null ? null
+                : Base64.getEncoder().encodeToString(userData.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    public void modifyInstanceUserData(String region, String instanceId, String userData, String encodedUserData) {
+        ensureDefaultResources(region);
+        Instance inst = getRequiredInstance(region, instanceId);
+        String state = inst.getState() != null ? inst.getState().getName() : null;
+        if (!"stopped".equals(state)) {
+            throw new AwsException("IncorrectInstanceState",
+                    "The instance '" + instanceId + "' is not in the 'stopped' state.", 400);
+        }
+        inst.setUserData(userData);
+        inst.setEncodedUserData(encodedUserData);
+        instances.put(key(region, instanceId), inst);
+    }
+
+    /**
+     * Deterministic instance-profile id derived from the instance id so repeated describes are stable.
+     */
+    public static String iamInstanceProfileId(String instanceId) {
+        return "AIPA" + stableSuffix(instanceId, 17).toUpperCase();
+    }
+
+    /**
+     * Deterministic association id derived from the instance id so repeated describes are stable.
+     */
+    public static String iamInstanceProfileAssociationId(String instanceId) {
+        return "iip-assoc-" + stableSuffix(instanceId, 17);
+    }
+
+    private static String stableSuffix(String seed, int length) {
+        StringBuilder sb = new StringBuilder();
+        int h = seed.hashCode();
+        String alphabet = "0123456789abcdefghijklmnopqrstuvwxyz";
+        long v = ((long) h) & 0xFFFFFFFFL;
+        for (int i = 0; i < length; i++) {
+            sb.append(alphabet.charAt((int) (v % alphabet.length())));
+            v = v * 1103515245L + 12345L + i;
+            v &= 0xFFFFFFFFL;
+        }
+        return sb.toString();
+    }
+
+    /**
+     * AssociateIamInstanceProfile. An instance carries at most one profile, so a second association
+     * is refused with the IncorrectState AWS answers; the profile arrives already resolved to its
+     * ARN, the way RunInstances takes one.
+     */
+    public IamInstanceProfileAssociation associateIamInstanceProfile(String region, String instanceId,
+                                                                     String profileArn) {
+        ensureDefaultResources(region);
+        Instance inst = getRequiredInstance(region, instanceId);
+        if (inst.getIamInstanceProfileArn() != null) {
+            throw new AwsException("IncorrectState",
+                    "There is an existing association for instance " + instanceId, 400);
+        }
+        inst.setIamInstanceProfileArn(profileArn);
+        inst.setIamInstanceProfileAssociationTime(Instant.now());
+        instances.put(key(region, instanceId), inst);
+        return association(inst, profileArn, "associating");
+    }
+
+    /** ReplaceIamInstanceProfileAssociation: swaps the profile behind an existing association. */
+    public IamInstanceProfileAssociation replaceIamInstanceProfileAssociation(String region, String associationId,
+                                                                              String profileArn) {
+        ensureDefaultResources(region);
+        Instance inst = getRequiredAssociatedInstance(region, associationId);
+        inst.setIamInstanceProfileArn(profileArn);
+        inst.setIamInstanceProfileAssociationTime(Instant.now());
+        instances.put(key(region, inst.getInstanceId()), inst);
+        return association(inst, profileArn, "associating");
+    }
+
+    /** DisassociateIamInstanceProfile: the answer still names the profile being detached. */
+    public IamInstanceProfileAssociation disassociateIamInstanceProfile(String region, String associationId) {
+        ensureDefaultResources(region);
+        Instance inst = getRequiredAssociatedInstance(region, associationId);
+        String detached = inst.getIamInstanceProfileArn();
+        Instant associatedAt = inst.getIamInstanceProfileAssociationTime();
+        inst.setIamInstanceProfileArn(null);
+        inst.setIamInstanceProfileAssociationTime(null);
+        instances.put(key(region, inst.getInstanceId()), inst);
+        return new IamInstanceProfileAssociation(associationId, inst.getInstanceId(), detached,
+                iamInstanceProfileId(inst.getInstanceId()), "disassociating", associatedAt);
+    }
+
+    private Instance getRequiredAssociatedInstance(String region, String associationId) {
+        for (Instance inst : instances.scan(k -> true)) {
+            if (region.equals(inst.getRegion()) && inst.getIamInstanceProfileArn() != null
+                    && associationId.equals(iamInstanceProfileAssociationId(inst.getInstanceId()))) {
+                return inst;
+            }
+        }
+        throw new AwsException("InvalidAssociationID.NotFound",
+                "An invalid association-id of '" + associationId + "' was given", 400);
+    }
+
+    private static IamInstanceProfileAssociation association(Instance inst, String profileArn, String state) {
+        return new IamInstanceProfileAssociation(iamInstanceProfileAssociationId(inst.getInstanceId()),
+                inst.getInstanceId(), profileArn, iamInstanceProfileId(inst.getInstanceId()), state,
+                inst.getIamInstanceProfileAssociationTime());
     }
 
     public void modifyInstanceAttribute(String region, String instanceId, String attribute, String value) {

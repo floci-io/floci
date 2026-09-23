@@ -36,6 +36,9 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
     // __Floci prefix keeps them off the published Fn::GetAtt attributes.
     private static final String DECLARED_PRIVATE_IP_ATTR = "__FlociDeclaredPrivateIpAddress";
     private static final String DECLARED_AZ_ATTR = "__FlociDeclaredAvailabilityZone";
+    // The instance profile the template declared last time, so an update that drops the property
+    // can be told from one that never declared it (a launch template may have set the profile).
+    private static final String DECLARED_IAM_PROFILE_ATTR = "__FlociDeclaredIamInstanceProfile";
 
     private final Ec2Service ec2Service;
 
@@ -88,6 +91,10 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
         List<String> securityGroupIds = resolveSecurityGroupIds(props, engine);
         String privateIpAddress = ctx.resolveOptional(props, "PrivateIpAddress");
         String availabilityZone = ctx.resolveOptional(props, "AvailabilityZone");
+        String userData = ctx.resolveOptional(props, "UserData");
+        // The property names a profile; it is resolved to the ARN here, at provision time, as the
+        // RunInstances handler resolves IamInstanceProfile.Name, so an unknown name fails the resource.
+        String iamInstanceProfileArn = resolveIamInstanceProfileArn(ctx.resolveOptional(props, "IamInstanceProfile"));
 
         // On update, keep the existing instance unless a createOnly property changed: a changed
         // ImageId, SubnetId or KeyName replaces it (compared against the instance, which carries
@@ -100,19 +107,18 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
                 && !declaredCreateOnlyChanged(attributesBefore, privateIpAddress, availabilityZone)) {
             // A reused instance still has its mutable properties reconciled to the template rather
             // than left at their prior values; re-read it so the published attributes reflect them.
-            reconcileMutableProperties(region, prior, instanceType, securityGroupIds);
+            reconcileMutableProperties(region, prior, instanceType, securityGroupIds, userData,
+                    iamInstanceProfileArn, attributesBefore.get(DECLARED_IAM_PROFILE_ATTR));
             Instance reconciled = findInstance(region, prior.getInstanceId());
             Instance current = reconciled != null ? reconciled : prior;
             r.setPhysicalId(current.getInstanceId());
             publishInstanceAttributes(r, current);
             storeDeclaredCreateOnly(r, privateIpAddress, availabilityZone);
+            putOrRemove(r, DECLARED_IAM_PROFILE_ATTR, iamInstanceProfileArn);
             Ec2Tags.reconcile(ec2Service, region, current.getInstanceId(), ctx.resolveTags(props, "Tags"));
             ReplacementCleanup.record(r, ctx, attributesBefore);
             return;
         }
-
-        String userData = ctx.resolveOptional(props, "UserData");
-        String iamInstanceProfile = ctx.resolveOptional(props, "IamInstanceProfile");
 
         List<Tag> tags = new ArrayList<>();
         JsonNode tagsNode = props != null ? engine.resolveNode(props.get("Tags")) : null;
@@ -139,7 +145,7 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
         }
 
         Reservation reservation = ec2Service.runInstances(region, imageId, instanceType, 1, 1, keyName,
-                securityGroupIds, subnetId, null, tags, userData, iamInstanceProfile,
+                securityGroupIds, subnetId, null, tags, userData, iamInstanceProfileArn,
                 associatePublicIp);
         Instance instance = reservation.getInstances().get(0);
         r.setPhysicalId(instance.getInstanceId());
@@ -152,6 +158,7 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
         Instance launched = findInstance(region, instance.getInstanceId());
         publishInstanceAttributes(r, launched != null ? launched : instance);
         storeDeclaredCreateOnly(r, privateIpAddress, availabilityZone);
+        putOrRemove(r, DECLARED_IAM_PROFILE_ATTR, iamInstanceProfileArn);
         // A createOnly change that landed a new instance id replaced the prior one: record it so
         // the stack cleans the displaced instance up after the update commits.
         ReplacementCleanup.record(r, ctx, attributesBefore);
@@ -208,15 +215,18 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * Applies the mutable properties CloudFormation allows to change without replacing the instance:
-     * a changed InstanceType is resized in place and a changed SecurityGroupIds set is reattached,
-     * through the same Ec2Service calls the ModifyInstanceAttribute API uses. Only a declared
-     * SecurityGroupIds is reconciled, so a template that omits it does not strip the groups the
-     * instance already has. UserData and IamInstanceProfile have no in-place Ec2Service path yet, so
-     * they stay a follow-up: an instance kept on update still carries their prior values.
+     * Applies the mutable properties CloudFormation allows to change without replacing the instance,
+     * through the same Ec2Service calls the API actions use: a changed InstanceType is resized in
+     * place, a changed SecurityGroupIds set is reattached, a changed UserData is rewritten the way
+     * ModifyInstanceAttribute requires it (the instance stopped first and started again after, the
+     * "some interruptions" the property is documented with), and a changed IamInstanceProfile is
+     * associated or replaced, or disassociated when the template declared one last time and drops it
+     * now. Only a declared SecurityGroupIds or UserData is reconciled, so a template that omits them
+     * does not strip what the instance already has (a launch template may have set it).
      */
     private void reconcileMutableProperties(String region, Instance prior, String instanceType,
-                                            List<String> securityGroupIds) {
+                                            List<String> securityGroupIds, String userData,
+                                            String iamInstanceProfileArn, String priorDeclaredProfileArn) {
         if (instanceType != null && !instanceType.isBlank()
                 && !instanceType.equals(prior.getInstanceType())) {
             ec2Service.modifyInstanceAttribute(region, prior.getInstanceId(), "instanceType", instanceType);
@@ -224,6 +234,51 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
         if (!securityGroupIds.isEmpty() && !sameSecurityGroups(prior, securityGroupIds)) {
             ec2Service.modifyInstanceGroups(region, prior.getInstanceId(), securityGroupIds);
         }
+        if (userData != null && !userData.equals(prior.getUserData())) {
+            rewriteUserData(region, prior, userData);
+        }
+        reconcileIamInstanceProfile(region, prior, iamInstanceProfileArn, priorDeclaredProfileArn);
+    }
+
+    /**
+     * User data can only be modified on a stopped instance, so a running one is stopped for the
+     * rewrite and started again after it, as CloudFormation's "some interruptions" update does; an
+     * instance that was already stopped is left stopped.
+     */
+    private void rewriteUserData(String region, Instance prior, String userData) {
+        String instanceId = prior.getInstanceId();
+        boolean wasStopped = prior.getState() != null && "stopped".equals(prior.getState().getName());
+        if (!wasStopped) {
+            ec2Service.stopInstances(region, List.of(instanceId));
+        }
+        ec2Service.modifyInstanceUserData(region, instanceId, userData);
+        if (!wasStopped) {
+            ec2Service.startInstances(region, List.of(instanceId));
+            Instance started = findInstance(region, instanceId);
+            ec2Service.awaitContainerLaunch(started != null ? started : prior);
+        }
+    }
+
+    private void reconcileIamInstanceProfile(String region, Instance prior, String desiredArn,
+                                             String priorDeclaredArn) {
+        String currentArn = prior.getIamInstanceProfileArn();
+        String associationId = Ec2Service.iamInstanceProfileAssociationId(prior.getInstanceId());
+        if (desiredArn != null) {
+            if (currentArn == null) {
+                ec2Service.associateIamInstanceProfile(region, prior.getInstanceId(), desiredArn);
+            } else if (!desiredArn.equals(currentArn)) {
+                ec2Service.replaceIamInstanceProfileAssociation(region, associationId, desiredArn);
+            }
+        } else if (priorDeclaredArn != null && currentArn != null) {
+            ec2Service.disassociateIamInstanceProfile(region, associationId);
+        }
+    }
+
+    private String resolveIamInstanceProfileArn(String nameOrArn) {
+        if (nameOrArn == null || nameOrArn.isBlank()) {
+            return null;
+        }
+        return nameOrArn.startsWith("arn:") ? nameOrArn : ec2Service.resolveIamInstanceProfileName(nameOrArn);
     }
 
     private static boolean sameSecurityGroups(Instance prior, List<String> desired) {

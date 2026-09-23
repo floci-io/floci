@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.ec2.model.Reservation;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -33,6 +34,7 @@ import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -48,6 +50,8 @@ import static org.mockito.Mockito.when;
 class Ec2InstanceCfnProvisionerTest {
 
     private static final String TYPE = "AWS::EC2::Instance";
+    private static final String PROFILE_A = "arn:aws:iam::000000000000:instance-profile/web";
+    private static final String PROFILE_B = "arn:aws:iam::000000000000:instance-profile/web-v2";
 
     private final Ec2Service ec2 = mock(Ec2Service.class);
     private final Ec2InstanceCfnProvisioner provisioner = new Ec2InstanceCfnProvisioner(ec2);
@@ -221,6 +225,127 @@ class Ec2InstanceCfnProvisionerTest {
         assertEquals("i-1", r.getPhysicalId());
         verify(ec2, times(1)).runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(),
                 anyList(), any(), any(), anyList(), any(), any(), any());
+    }
+
+    @Test
+    void changedUserDataIsRewrittenAcrossAStopAndAStart() throws Exception {
+        Instance i1 = reusable("i-1");
+        i1.setUserData("old");
+        i1.setState(InstanceState.running());
+        StackResource r = resource("Server");
+
+        provisioner.provision(r, props("{\"ImageId\": \"ami-1\", \"UserData\": \"new\"}"), ctx("i-1"));
+
+        assertEquals("i-1", r.getPhysicalId());
+        InOrder order = inOrder(ec2);
+        order.verify(ec2).stopInstances("us-east-1", List.of("i-1"));
+        order.verify(ec2).modifyInstanceUserData("us-east-1", "i-1", "new");
+        order.verify(ec2).startInstances("us-east-1", List.of("i-1"));
+        order.verify(ec2).awaitContainerLaunch(i1);
+    }
+
+    @Test
+    void unchangedUserDataLeavesTheInstanceRunning() throws Exception {
+        Instance i1 = reusable("i-1");
+        i1.setUserData("same");
+        i1.setState(InstanceState.running());
+
+        provisioner.provision(resource("Server"), props("{\"ImageId\": \"ami-1\", \"UserData\": \"same\"}"),
+                ctx("i-1"));
+
+        verify(ec2, never()).stopInstances(anyString(), anyList());
+        verify(ec2, never()).modifyInstanceUserData(anyString(), anyString(), any());
+    }
+
+    @Test
+    void aStoppedInstanceGetsItsUserDataRewrittenWithoutARestart() throws Exception {
+        Instance i1 = reusable("i-1");
+        i1.setUserData("old");
+        i1.setState(InstanceState.stopped());
+
+        provisioner.provision(resource("Server"), props("{\"ImageId\": \"ami-1\", \"UserData\": \"new\"}"),
+                ctx("i-1"));
+
+        verify(ec2).modifyInstanceUserData("us-east-1", "i-1", "new");
+        verify(ec2, never()).stopInstances(anyString(), anyList());
+        verify(ec2, never()).startInstances(anyString(), anyList());
+    }
+
+    @Test
+    void declaringAnIamInstanceProfileAssociatesItByResolvedArn() throws Exception {
+        reusable("i-1");
+        when(ec2.resolveIamInstanceProfileName("web")).thenReturn(PROFILE_A);
+        StackResource r = resource("Server");
+
+        provisioner.provision(r, props("{\"ImageId\": \"ami-1\", \"IamInstanceProfile\": \"web\"}"), ctx("i-1"));
+
+        verify(ec2).associateIamInstanceProfile("us-east-1", "i-1", PROFILE_A);
+        assertEquals(PROFILE_A, r.getAttributes().get("__FlociDeclaredIamInstanceProfile"));
+        assertFalse(r.getAttributes().containsKey("IamInstanceProfile"));
+    }
+
+    @Test
+    void changingTheIamInstanceProfileReplacesTheAssociation() throws Exception {
+        Instance i1 = reusable("i-1");
+        i1.setIamInstanceProfileArn(PROFILE_A);
+
+        provisioner.provision(resource("Server"),
+                props("{\"ImageId\": \"ami-1\", \"IamInstanceProfile\": \"" + PROFILE_B + "\"}"), ctx("i-1"));
+
+        verify(ec2).replaceIamInstanceProfileAssociation("us-east-1",
+                Ec2Service.iamInstanceProfileAssociationId("i-1"), PROFILE_B);
+        verify(ec2, never()).associateIamInstanceProfile(anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void droppingADeclaredIamInstanceProfileDisassociatesIt() throws Exception {
+        Instance i1 = reusable("i-1");
+        i1.setIamInstanceProfileArn(PROFILE_A);
+        StackResource r = resource("Server");
+        r.getAttributes().put("__FlociDeclaredIamInstanceProfile", PROFILE_A);
+
+        provisioner.provision(r, props("{\"ImageId\": \"ami-1\"}"), ctx("i-1"));
+
+        verify(ec2).disassociateIamInstanceProfile("us-east-1", Ec2Service.iamInstanceProfileAssociationId("i-1"));
+        assertFalse(r.getAttributes().containsKey("__FlociDeclaredIamInstanceProfile"));
+    }
+
+    @Test
+    void aProfileTheTemplateNeverDeclaredIsKeptWhenItStaysUndeclared() throws Exception {
+        Instance i1 = reusable("i-1");
+        i1.setIamInstanceProfileArn(PROFILE_A);
+
+        provisioner.provision(resource("Server"), props("{\"ImageId\": \"ami-1\"}"), ctx("i-1"));
+
+        verify(ec2, never()).disassociateIamInstanceProfile(anyString(), anyString());
+        verify(ec2, never()).replaceIamInstanceProfileAssociation(anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void launchResolvesAProfileNameThroughIam() throws Exception {
+        Instance instance = new Instance();
+        instance.setInstanceId("i-1");
+        stubLaunch(instance);
+        when(ec2.resolveIamInstanceProfileName("web")).thenReturn(PROFILE_A);
+        StackResource r = resource("Server");
+
+        provisioner.provision(r, props("{\"ImageId\": \"ami-1\", \"IamInstanceProfile\": \"web\"}"), ctx());
+
+        ArgumentCaptor<String> profile = ArgumentCaptor.forClass(String.class);
+        verify(ec2).runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(), anyList(),
+                any(), any(), anyList(), any(), profile.capture(), any());
+        assertEquals(PROFILE_A, profile.getValue());
+        assertEquals(PROFILE_A, r.getAttributes().get("__FlociDeclaredIamInstanceProfile"));
+    }
+
+    /** An instance the update finds and keeps: same image as the template, no createOnly change. */
+    private Instance reusable(String instanceId) {
+        Instance instance = new Instance();
+        instance.setInstanceId(instanceId);
+        instance.setImageId("ami-1");
+        when(ec2.describeInstances("us-east-1", List.of(instanceId), null))
+                .thenReturn(List.of(reservationOf(instance)));
+        return instance;
     }
 
     @Test

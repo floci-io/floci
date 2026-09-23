@@ -186,7 +186,7 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | DescribeInstanceStatus | Returns status records for stored instances. |
 | DescribeInstanceCreditSpecifications | Returns the CPU credit option of burstable performance instances. A named instance id reports the option the instance acquired at launch, either the explicit `CreditSpecification.CpuCredits` or the family default, `standard` for t2 and `unlimited` for t3, t3a and t4g. An id that is not a burstable performance instance reports `standard`, and only an unknown id is an error. Naming no id returns the instances on the unlimited option, including one that kept `unlimited` after a resize onto a non-burstable type. `Filter.N` supports the modeled `instance-id` and narrows whichever set the request selected. `MaxResults` accepts 5 through 1000 and cannot be combined with instance ids. `DryRun=true` returns `DryRunOperation`. |
 | DescribeInstanceAttribute | Returns a supported attribute for an instance. |
-| ModifyInstanceAttribute | Updates supported mutable attributes for an instance. |
+| ModifyInstanceAttribute | Updates supported mutable attributes for an instance. `UserData.Value` (base64) needs the instance stopped, as on AWS, and answers `IncorrectInstanceState` otherwise. |
 | ModifyInstanceMetadataOptions | Updates an instance's IMDS options, changing only the fields the request names. |
 
 ### VPCs
@@ -649,6 +649,9 @@ prefix lists, `EnaSrdSpecification`, `PrimaryIpv6` and `EnaQueueCount` are likew
 | Action | Description |
 |--------|-------------|
 | DescribeIamInstanceProfileAssociations | Lists IAM instance profile associations known to the local EC2 service. |
+| AssociateIamInstanceProfile | Attaches a profile, named by `IamInstanceProfile.Arn` or `IamInstanceProfile.Name`, to an instance that has none; a second association answers `IncorrectState`. |
+| ReplaceIamInstanceProfileAssociation | Swaps the profile behind an existing association id; an unknown id answers `InvalidAssociationID.NotFound`. |
+| DisassociateIamInstanceProfile | Detaches the profile behind an association id. |
 
 ### Network Interfaces
 
