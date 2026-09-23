@@ -227,8 +227,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
      * delegating.
      */
     private VpcNetworkManager vpcNetworkManager;
+    private jakarta.enterprise.inject.Instance<ClusterNodeInstanceProvider> clusterNodeInstanceProviders;
+    private ClusterNodeInstanceProvider testClusterNodeInstanceProvider;
 
-    // Public, no request context — for callers (and tests) that construct this service directly
+    void setClusterNodeInstanceProvider(ClusterNodeInstanceProvider provider) {
+        this.testClusterNodeInstanceProvider = provider;
+    }
+
+    // Public, no request context - for callers (and tests) that construct this service directly
     // without CDI. Caller-identity resolution falls back to the configured default account.
     public Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
                       Ec2PortForwardManager portForwardManager,
@@ -255,10 +261,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                       AmiImageResolver amiImageResolver, Ec2ImageCatalog imageCatalog,
                       Ec2InstanceTypeCatalog instanceTypeCatalog, StorageFactory storageFactory,
                       jakarta.enterprise.inject.Instance<RequestContext> requestContextInstance,
-                      VpcNetworkManager vpcNetworkManager, IamService iamService) {
+                      VpcNetworkManager vpcNetworkManager, IamService iamService,
+                      jakarta.enterprise.inject.Instance<ClusterNodeInstanceProvider> clusterNodeInstanceProviders) {
         this(config, containerManager, portForwardManager, amiImageResolver, imageCatalog,
                 instanceTypeCatalog, storageFactory, requestContextInstance, iamService);
         this.vpcNetworkManager = vpcNetworkManager;
+        this.clusterNodeInstanceProviders = clusterNodeInstanceProviders;
     }
 
     public Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
@@ -3102,7 +3110,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                         instances.put(key(i.getRegion(), i.getInstanceId()), i);
                     });
         }
-        List<Instance> matched = instances.scan(k -> true).stream()
+        List<Instance> all = new ArrayList<>(instances.scan(k -> true));
+        Set<String> seenIds = all.stream().map(Instance::getInstanceId).collect(Collectors.toSet());
+        for (Instance external : listExternalInstances(region)) {
+            if (seenIds.add(external.getInstanceId())) {
+                all.add(external);
+            }
+        }
+        List<Instance> matched = all.stream()
                 .filter(i -> i.getRegion().equals(region))
                 .filter(i -> instanceIds.isEmpty() || instanceIds.contains(i.getInstanceId()))
                 .filter(i -> matchesFilters(i, filters, region))
@@ -3134,6 +3149,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         String owner = callerAccountId();
         for (String id : instanceIds) {
             Instance inst = getRequiredInstance(region, id);
+            if (isExternalInstance(region, id)) {
+                throw new AwsException("OperationNotPermitted",
+                        "The instance '" + id + "' is a cluster node and cannot be terminated through EC2", 400);
+            }
 
             if (config.services().ec2().mock() && "pending".equals(inst.getState().getName())) {
                 inst.setState(InstanceState.running());
@@ -3231,6 +3250,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         List<Map<String, String>> result = new ArrayList<>();
         for (String id : instanceIds) {
             Instance inst = getRequiredInstance(region, id);
+            if (isExternalInstance(region, id)) {
+                throw new AwsException("OperationNotPermitted",
+                        "The instance '" + id + "' is a cluster node and cannot be stopped through EC2", 400);
+            }
 
             if (config.services().ec2().mock() && "pending".equals(inst.getState().getName())) {
                 inst.setState(InstanceState.running());
@@ -3258,6 +3281,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         List<Map<String, String>> result = new ArrayList<>();
         for (String id : instanceIds) {
            Instance inst = getRequiredInstance(region, id);
+            if (isExternalInstance(region, id)) {
+                throw new AwsException("OperationNotPermitted",
+                        "The instance '" + id + "' is a cluster node and cannot be started through EC2", 400);
+            }
 
             if ("terminated".equals(inst.getState().getName())) {
                 throw new AwsException("IncorrectInstanceState",
@@ -3286,6 +3313,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         ensureDefaultResources(region);
         for (String id : instanceIds) {
             Instance inst = getRequiredInstance(region, id);
+            if (isExternalInstance(region, id)) {
+                throw new AwsException("OperationNotPermitted",
+                        "The instance '" + id + "' is a cluster node and cannot be rebooted through EC2", 400);
+            }
 
             if (!config.services().ec2().mock()) {
                 containerManager.reboot(inst);
@@ -3318,7 +3349,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                         instances.put(key(i.getRegion(), i.getInstanceId()), i);
                     });
         }
-        return instances.scan(k -> true).stream()
+        List<Instance> all = new ArrayList<>(instances.scan(k -> true));
+        Set<String> seenIds = all.stream().map(Instance::getInstanceId).collect(Collectors.toSet());
+        for (Instance external : listExternalInstances(region)) {
+            if (seenIds.add(external.getInstanceId())) {
+                all.add(external);
+            }
+        }
+        return all.stream()
                 .filter(i -> i.getRegion().equals(region))
                 .filter(i -> instanceIds.isEmpty() || instanceIds.contains(i.getInstanceId()))
                 .filter(i -> "running".equals(i.getState().getName()))
@@ -3668,10 +3706,52 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                         + "Valid values are: standard, unlimited.", 400);
     }
 
+    private Optional<Instance> findExternalInstance(String region, String instanceId) {
+        if (testClusterNodeInstanceProvider != null) {
+            return testClusterNodeInstanceProvider.findInstance(region, instanceId);
+        }
+        if (clusterNodeInstanceProviders == null || clusterNodeInstanceProviders.isUnsatisfied()) {
+            return Optional.empty();
+        }
+        for (ClusterNodeInstanceProvider provider : clusterNodeInstanceProviders) {
+            Optional<Instance> inst = provider.findInstance(region, instanceId);
+            if (inst.isPresent()) {
+                return inst;
+            }
+        }
+        return Optional.empty();
+    }
+
+    private List<Instance> listExternalInstances(String region) {
+        if (testClusterNodeInstanceProvider != null) {
+            return testClusterNodeInstanceProvider.listInstances(region);
+        }
+        if (clusterNodeInstanceProviders == null || clusterNodeInstanceProviders.isUnsatisfied()) {
+            return List.of();
+        }
+        List<Instance> result = new ArrayList<>();
+        for (ClusterNodeInstanceProvider provider : clusterNodeInstanceProviders) {
+            List<Instance> list = provider.listInstances(region);
+            if (list != null && !list.isEmpty()) {
+                result.addAll(list);
+            }
+        }
+        return result;
+    }
+
+    private boolean isExternalInstance(String region, String instanceId) {
+        return instances.get(key(region, instanceId)).isEmpty()
+                && findExternalInstance(region, instanceId).isPresent();
+    }
+
     private Instance getRequiredInstance(String region, String instanceId) {
         Instance inst = instances.get(key(region, instanceId)).orElse(null);
-        if (inst == null)
+        if (inst == null) {
+            inst = findExternalInstance(region, instanceId).orElse(null);
+        }
+        if (inst == null) {
             throw new AwsException("InvalidInstanceID.NotFound", "The instance ID '" + instanceId + "' does not exist", 400);
+        }
 
         return inst;
     }
@@ -5061,15 +5141,23 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     }
 
     public Optional<Instance> findInstanceForAccount(String accountId, String region, String instanceId) {
-        return instances instanceof AccountAwareStorageBackend<Instance> aware
+        Optional<Instance> found = instances instanceof AccountAwareStorageBackend<Instance> aware
                 ? aware.getForAccount(accountId, key(region, instanceId)) : instances.get(key(region, instanceId));
+        if (found.isPresent()) {
+            return found;
+        }
+        return findExternalInstance(region, instanceId);
     }
 
     public Instance findInstanceById(String instanceId) {
-        return instances.scan(k -> true).stream()
+        Instance inst = instances.scan(k -> true).stream()
                 .filter(i -> instanceId.equals(i.getInstanceId()))
                 .findFirst()
                 .orElse(null);
+        if (inst != null) {
+            return inst;
+        }
+        return findExternalInstance(null, instanceId).orElse(null);
     }
 
     public boolean isInstanceContainerRunning(String instanceId) {
@@ -6393,6 +6481,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         String storeKey = key(region, resourceId);
         Instance inst = instances.get(storeKey).orElse(null);
         if (inst != null) { inst.setTags(new ArrayList<>(tagList)); instances.put(storeKey, inst); return; }
+        inst = findExternalInstance(region, resourceId).orElse(null);
+        if (inst != null) { inst.setTags(new ArrayList<>(tagList)); return; }
         Vpc vpc = vpcs.get(storeKey).orElse(null);
         if (vpc != null) { vpc.setTags(new ArrayList<>(tagList)); vpcs.put(storeKey, vpc); return; }
         CapacityReservation cr = capacityReservations.get(storeKey).orElse(null);

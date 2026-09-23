@@ -164,6 +164,14 @@ Registering a container with SSM is independent of this: an SSM agent that calls
 
 To get a container that both answers IMDS (including instance profile credentials) and executes `SendCommand` directly, launch it with `RunInstances` first, then register that same container's SSM agent as a managed instance. Do not register an arbitrary or pre-existing container directly with SSM and expect IMDS to work. See [SSM](ssm.md#run-command-execution) for the SendCommand side of this.
 
+### Cluster Node Instances
+
+When an EKS cluster is running, its synthesized node instance is registered and visible through the EC2 service:
+
+- **Visibility**: Exposed via `DescribeInstances` and `DescribeInstanceStatus` with its synthesized instance ID (`i-...`), type (`m5.large`), running state, VPC, subnet, launch time, and cluster tags (`Name`, `kubernetes.io/cluster/<cluster-name>=owned`, `eks:cluster-name=<cluster-name>`). It can be queried by ID, filtered, or listed with other instances.
+- **Operations**: Supports volume attachments (`AttachVolume`, `DetachVolume`), instance attribute inspection and modification, and resource tagging (`CreateTags`, `DeleteTags`, `DescribeTags`).
+- **Lifecycle protection**: Lifecycle actions that would mutate or delete the node through EC2 (`TerminateInstances`, `StopInstances`, `StartInstances`, `RebootInstances`) are rejected with `OperationNotPermitted` (HTTP 400). The instance lifecycle is managed solely through the EKS cluster lifecycle.
+
 ## Default Resources
 
 Floci seeds the following resources on first use in each region so Terraform, the AWS CLI, and SDK clients work out of the box without any setup:

@@ -27,11 +27,13 @@ import com.github.dockerjava.api.command.ExecCreateCmdResponse;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.Frame;
+import io.github.hectorvent.floci.services.ec2.ClusterNodeInstanceProvider;
 import io.github.hectorvent.floci.services.ec2.Ec2MetadataProxy;
 import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InstanceState;
 import io.github.hectorvent.floci.services.ec2.model.Placement;
+import io.github.hectorvent.floci.services.ec2.model.Tag;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
@@ -70,7 +72,7 @@ import java.util.concurrent.TimeUnit;
  * Not used when {@code floci.services.eks.mock=true}.
  */
 @ApplicationScoped
-public class EksClusterManager {
+public class EksClusterManager implements ClusterNodeInstanceProvider {
 
     private static final Logger LOG = Logger.getLogger(EksClusterManager.class);
     private static final int K3S_API_SERVER_PORT = 6443;
@@ -417,6 +419,7 @@ public class EksClusterManager {
         }
 
         applyEndpoints(cluster, containerName, hostPort, info);
+        registerClusterNodeInstance(cluster, containerId);
         configureLinkLocalMetadataEndpoint(cluster, containerId);
         configurePodIdentityRelay(cluster, containerId);
         attachClusterLogs(cluster);
@@ -474,6 +477,7 @@ public class EksClusterManager {
         cluster.setContainerId(info.containerId());
         cluster.setHostPort(hostPort);
         applyEndpoints(cluster, containerName, hostPort, info);
+        registerClusterNodeInstance(cluster, info.containerId());
         configureLinkLocalMetadataEndpoint(cluster, info.containerId());
         configurePodIdentityRelay(cluster, info.containerId());
         attachClusterLogsFromNow(cluster);
@@ -1598,17 +1602,32 @@ public class EksClusterManager {
                 """.formatted(serverUrl);
     }
 
+    void registerClusterNodeInstance(Cluster cluster, String containerId) {
+        try {
+            String accountId = resolveClusterAccountId(cluster);
+            String region = clusterRegion(cluster);
+            ContainerIps containerIps = resolveContainerIps(containerId);
+            Instance nodeInstance = synthesizeClusterNodeInstance(cluster, containerIps.primaryIp(), region, accountId);
+            clusterNodeInstances.put(clusterResourceName(cluster), nodeInstance);
+        } catch (Exception e) {
+            LOG.warnv("Could not register cluster node instance for EKS cluster {0}: {1}",
+                    cluster.getName(), e.getMessage());
+        }
+    }
+
     void configureLinkLocalMetadataEndpoint(Cluster cluster, String containerId) {
         if (!config.services().eks().imds()) {
             return;
         }
         try {
-            String accountId = resolveClusterAccountId(cluster);
-            String region = clusterRegion(cluster);
-
+            Instance nodeInstance = clusterNodeInstances.get(clusterResourceName(cluster));
             ContainerIps containerIps = resolveContainerIps(containerId);
-            Instance nodeInstance = synthesizeClusterNodeInstance(cluster, containerIps.primaryIp(), region, accountId);
-            clusterNodeInstances.put(clusterResourceName(cluster), nodeInstance);
+            if (nodeInstance == null) {
+                String accountId = resolveClusterAccountId(cluster);
+                String region = clusterRegion(cluster);
+                nodeInstance = synthesizeClusterNodeInstance(cluster, containerIps.primaryIp(), region, accountId);
+                clusterNodeInstances.put(clusterResourceName(cluster), nodeInstance);
+            }
 
             if (metadataServer != null) {
                 metadataServer.reconcileContainerAddresses(containerIps.allIps(), nodeInstance);
@@ -1746,7 +1765,37 @@ public class EksClusterManager {
         // node instance profile identity so /latest/meta-data/iam/info returns a valid profile ARN.
         String nodeProfileName = safeClusterName + "-node-profile";
         inst.setIamInstanceProfileArn("arn:aws:iam::" + safeAccountId + ":instance-profile/" + nodeProfileName);
+
+        if (cluster.getResourcesVpcConfig() != null) {
+            inst.setVpcId(cluster.getResourcesVpcConfig().getVpcId());
+            if (cluster.getResourcesVpcConfig().getSubnetIds() != null && !cluster.getResourcesVpcConfig().getSubnetIds().isEmpty()) {
+                inst.setSubnetId(cluster.getResourcesVpcConfig().getSubnetIds().getFirst());
+            }
+        }
+        inst.setLaunchTime(cluster.getCreatedAt() != null ? cluster.getCreatedAt() : Instant.now());
+        List<Tag> tags = new ArrayList<>();
+        tags.add(new Tag("Name", safeClusterName + "-node"));
+        tags.add(new Tag("kubernetes.io/cluster/" + safeClusterName, "owned"));
+        tags.add(new Tag("eks:cluster-name", safeClusterName));
+        inst.setTags(tags);
         return inst;
+    }
+
+    @Override
+    public Optional<Instance> findInstance(String region, String instanceId) {
+        if (instanceId == null || instanceId.isBlank()) {
+            return Optional.empty();
+        }
+        return clusterNodeInstances.values().stream()
+                .filter(i -> (region == null || region.equals(i.getRegion())) && instanceId.equals(i.getInstanceId()))
+                .findFirst();
+    }
+
+    @Override
+    public List<Instance> listInstances(String region) {
+        return clusterNodeInstances.values().stream()
+                .filter(i -> region == null || region.equals(i.getRegion()))
+                .toList();
     }
 
     record ContainerIps(String primaryIp, Set<String> allIps) {}

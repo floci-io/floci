@@ -20,6 +20,7 @@ import io.github.hectorvent.floci.services.eks.model.ClusterOidcKey;
 import io.github.hectorvent.floci.services.eks.model.LogSetup;
 import io.github.hectorvent.floci.services.eks.model.Logging;
 import io.github.hectorvent.floci.services.eks.model.OidcIdentity;
+import io.github.hectorvent.floci.services.eks.model.ResourcesVpcConfig;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -910,6 +911,50 @@ class EksClusterManagerTest {
         }
 
         @Test
+        void registerClusterNodeInstanceRegistersWithoutImds() {
+            Cluster cluster = new Cluster();
+            cluster.setName("no-imds-cluster");
+            ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
+            vpcConfig.setVpcId("vpc-12345678");
+            vpcConfig.setSubnetIds(List.of("subnet-87654321"));
+            cluster.setResourcesVpcConfig(vpcConfig);
+
+            manager.registerClusterNodeInstance(cluster, "container-no-imds");
+            Instance instance = manager.getRegisteredClusterNodeInstance(cluster);
+            assertNotNull(instance);
+            assertEquals("vpc-12345678", instance.getVpcId());
+            assertEquals("subnet-87654321", instance.getSubnetId());
+            assertNotNull(instance.getLaunchTime());
+            assertTrue(instance.getTags().stream().anyMatch(t -> "Name".equals(t.getKey()) && "no-imds-cluster-node".equals(t.getValue())));
+            assertTrue(instance.getTags().stream().anyMatch(t -> "kubernetes.io/cluster/no-imds-cluster".equals(t.getKey()) && "owned".equals(t.getValue())));
+            assertTrue(instance.getTags().stream().anyMatch(t -> "eks:cluster-name".equals(t.getKey()) && "no-imds-cluster".equals(t.getValue())));
+        }
+
+        @Test
+        void clusterNodeInstanceProviderFindsAndListsRegisteredInstances() {
+            Cluster cluster = new Cluster();
+            cluster.setName("prov-cluster");
+            cluster.setArn("arn:aws:eks:us-east-1:123456789012:cluster/prov-cluster");
+
+            manager.registerClusterNodeInstance(cluster, "container-prov");
+            Instance registered = manager.getRegisteredClusterNodeInstance(cluster);
+            assertNotNull(registered);
+
+            assertTrue(manager.findInstance("us-east-1", registered.getInstanceId()).isPresent());
+            assertEquals(registered.getInstanceId(), manager.findInstance("us-east-1", registered.getInstanceId()).get().getInstanceId());
+            assertTrue(manager.findInstance(null, registered.getInstanceId()).isPresent());
+            assertTrue(manager.findInstance("eu-central-1", registered.getInstanceId()).isEmpty());
+
+            List<Instance> eastInstances = manager.listInstances("us-east-1");
+            assertTrue(eastInstances.stream().anyMatch(i -> registered.getInstanceId().equals(i.getInstanceId())));
+            assertTrue(manager.listInstances("eu-central-1").isEmpty());
+
+            manager.unregisterMetadataEndpoint(cluster);
+            assertTrue(manager.findInstance("us-east-1", registered.getInstanceId()).isEmpty());
+            assertTrue(manager.listInstances("us-east-1").isEmpty());
+        }
+
+        @Test
         void failureToWireLogsAndDoesNotAbort() {
             when(dockerClient.execCreateCmd(anyString())).thenThrow(new RuntimeException("docker exec failed"));
 
@@ -1216,7 +1261,7 @@ class EksClusterManagerTest {
             assertFalse(cmd.stream().anyMatch(a -> a.contains("service-account-issuer")));
             assertFalse(cmd.stream().anyMatch(a -> a.contains("api-audiences")));
 
-            verifyNoInteractions(dockerClient);
+            verify(dockerClient, never()).copyArchiveToContainerCmd(anyString());
             assertFalse(Files.exists(tempDir.resolve("keys")));
         }
 
