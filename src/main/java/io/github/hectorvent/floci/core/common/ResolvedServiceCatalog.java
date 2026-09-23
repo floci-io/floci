@@ -38,6 +38,7 @@ import io.github.hectorvent.floci.services.ses.SesConfigurationSetController;
 import io.github.hectorvent.floci.services.ses.SesContactController;
 import io.github.hectorvent.floci.services.ses.SesCvetController;
 import io.github.hectorvent.floci.services.ses.SesDedicatedIpController;
+import io.github.hectorvent.floci.services.ses.SesExportJobController;
 import io.github.hectorvent.floci.services.ses.SesIdentityController;
 import io.github.hectorvent.floci.services.ses.SesImportJobController;
 import io.github.hectorvent.floci.services.ses.SesInsightsController;
@@ -306,7 +307,8 @@ public class ResolvedServiceCatalog {
                         Set.of(), Set.of("email", "ses", "sesv2"), Set.of(),
                         Set.of(SesAccountController.class, SesConfigurationSetController.class,
                                 SesContactController.class, SesCvetController.class,
-                                SesDedicatedIpController.class, SesIdentityController.class,
+                                SesDedicatedIpController.class, SesExportJobController.class,
+                                SesIdentityController.class,
                                 SesInsightsController.class, SesMetricsController.class,
                                 SesSendController.class,
                                 SesSuppressionController.class, SesTagController.class,

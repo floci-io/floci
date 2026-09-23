@@ -166,7 +166,7 @@ final class SesMetricData {
      * An identity dimension names either the sending address or its domain, the way the identity
      * itself can be either; the probe filtered a domain and matched sends from an address in it.
      */
-    private static boolean matchesIdentity(String source, String identity) {
+    static boolean matchesIdentity(String source, String identity) {
         if (source == null) {
             return false;
         }
