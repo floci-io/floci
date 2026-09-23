@@ -103,6 +103,17 @@ class PipesTargetInvokerTest {
     }
 
     @Test
+    void invoke_keepsTheQualifierOfTheTargetFunctionArn() {
+        Pipe pipe = createPipe("arn:aws:lambda:us-east-1:000000000000:function:my-fn:PROD", null);
+        when(lambdaService.invoke(anyString(), anyString(), any(byte[].class), any(InvocationType.class)))
+                .thenReturn(new io.github.hectorvent.floci.services.lambda.model.InvokeResult(200, null, "{}".getBytes(), null, "req"));
+
+        invoker.invoke(pipe, "{}", "us-east-1");
+
+        verify(lambdaService).invoke(eq("us-east-1"), eq("my-fn:PROD"), any(byte[].class), eq(InvocationType.RequestResponse));
+    }
+
+    @Test
     void invoke_throwsOnDeliveryFailure() {
         Pipe pipe = createPipe("arn:aws:lambda:us-east-1:000000000000:function:my-fn", null);
         doThrow(new RuntimeException("boom")).when(lambdaService)
@@ -275,15 +286,15 @@ class PipesTargetInvokerTest {
     }
 
     @Test
-    void applyEnrichment_qualifiedArnResolvesFunctionName() {
+    void applyEnrichment_keepsTheQualifierOfTheFunctionArn() {
         String region = "us-east-1";
-        Pipe pipe = enrichmentPipe(region, "arn:aws:lambda:" + region + ":000000000000:function:enrich-fn:$LATEST");
-        when(lambdaService.invoke(eq(region), eq("enrich-fn"), any(byte[].class), eq(InvocationType.RequestResponse)))
+        Pipe pipe = enrichmentPipe(region, "arn:aws:lambda:" + region + ":000000000000:function:enrich-fn:PROD");
+        when(lambdaService.invoke(eq(region), eq("enrich-fn:PROD"), any(byte[].class), eq(InvocationType.RequestResponse)))
                 .thenReturn(new io.github.hectorvent.floci.services.lambda.model.InvokeResult(200, null, "{}".getBytes(), null, "req"));
 
         invoker.applyEnrichment(pipe, "[]", region);
 
-        verify(lambdaService).invoke(eq(region), eq("enrich-fn"), any(byte[].class), eq(InvocationType.RequestResponse));
+        verify(lambdaService).invoke(eq(region), eq("enrich-fn:PROD"), any(byte[].class), eq(InvocationType.RequestResponse));
     }
 
     @Test
