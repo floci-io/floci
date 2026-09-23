@@ -4,8 +4,10 @@ import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
+import static org.junit.jupiter.api.Assertions.fail;
 
 /**
  * End-to-end check that CloudFormation applies the inline {@code Policies} of an
@@ -138,6 +140,7 @@ class CloudFormationIamRoleInlinePoliciesIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        awaitStackDeleted(stackName);
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -148,5 +151,36 @@ class CloudFormationIamRoleInlinePoliciesIntegrationTest {
             .post("/")
         .then()
             .statusCode(404);
+    }
+
+    /**
+     * DeleteStack answers before the stack is gone. The deletion runs on an executor. This waits
+     * until DescribeStacks no longer knows the stack, and fails on DELETE_FAILED or after ten seconds.
+     */
+    private static void awaitStackDeleted(String stackName) {
+        long deadline = System.currentTimeMillis() + 10_000;
+        String body = "";
+        while (System.currentTimeMillis() < deadline) {
+            body = given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", CFN_AUTH)
+                .formParam("Action", "DescribeStacks")
+                .formParam("StackName", stackName)
+            .when()
+                .post("/")
+            .then()
+                .extract().body().asString();
+            assertThat(body, not(containsString("<StackStatus>DELETE_FAILED</StackStatus>")));
+            if (body.contains("Stack with id " + stackName + " does not exist")) {
+                return;
+            }
+            try {
+                Thread.sleep(50);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new AssertionError("Interrupted while waiting for stack " + stackName + " to be deleted", e);
+            }
+        }
+        fail("Stack " + stackName + " was not deleted within ten seconds: " + body);
     }
 }
