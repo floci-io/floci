@@ -928,8 +928,16 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         snapshot.setNextVersionNumber(catalogPolicy.getNextVersionNumber());
         snapshot.setCreateDate(catalogPolicy.getCreateDate());
         snapshot.setUpdateDate(catalogPolicy.getUpdateDate());
-        snapshot.setTags(catalogPolicy.getTags());
-        snapshot.setVersions(catalogPolicy.getVersions());
+        snapshot.setTags(new LinkedHashMap<>(catalogPolicy.getTags()));
+        Map<String, PolicyVersion> versions = new LinkedHashMap<>();
+        synchronized (catalogPolicy.getVersions()) {
+            for (Map.Entry<String, PolicyVersion> entry : catalogPolicy.getVersions().entrySet()) {
+                PolicyVersion version = entry.getValue();
+                versions.put(entry.getKey(), new PolicyVersion(version.getVersionId(), version.getDocument(),
+                        version.isDefaultVersion(), version.getCreateDate()));
+            }
+        }
+        snapshot.setVersions(versions);
         snapshot.setAttachmentCount(attachmentCount);
         return snapshot;
     }
