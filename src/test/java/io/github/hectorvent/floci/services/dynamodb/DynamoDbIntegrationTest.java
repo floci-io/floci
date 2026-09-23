@@ -858,6 +858,77 @@ class DynamoDbIntegrationTest {
 
     @Test
     @Order(10)
+    void batchGetItemWithProjectionExpressionAndAttributesToGetFails() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.BatchGetItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "RequestItems": {
+                        "TestTable": {
+                            "Keys": [{"pk": {"S": "user-1"}, "sk": {"S": "profile"}}],
+                            "ProjectionExpression": "pk",
+                            "AttributesToGet": ["pk"]
+                        }
+                    }
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("Can not use both expression and non-expression parameters in the same request: "
+                    + "Non-expression parameters: {AttributesToGet} Expression parameters: {ProjectionExpression}"));
+    }
+
+    @Test
+    @Order(10)
+    void batchGetItemMixingProjectionStylesAcrossTablesFails() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "BatchGetMixTable",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.BatchGetItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "RequestItems": {
+                        "TestTable": {
+                            "Keys": [{"pk": {"S": "user-1"}, "sk": {"S": "profile"}}],
+                            "ProjectionExpression": "pk"
+                        },
+                        "BatchGetMixTable": {
+                            "Keys": [{"pk": {"S": "user-1"}}],
+                            "AttributesToGet": ["pk"]
+                        }
+                    }
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("Can not use both expression and non-expression parameters in the same request: "
+                    + "Non-expression parameters: {AttributesToGet} Expression parameters: {ProjectionExpression}"));
+    }
+
+    @Test
+    @Order(10)
     void queryWithQueryFilterAndKeyConditionExpressionFails() {
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.Query")

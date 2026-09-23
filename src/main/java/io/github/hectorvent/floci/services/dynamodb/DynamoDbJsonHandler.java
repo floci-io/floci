@@ -1552,6 +1552,20 @@ public class DynamoDbJsonHandler {
             items.put(entry.getKey(), entry.getValue());
         }
 
+        // AWS weighs the two projection styles across the whole request, so one table
+        // entry naming AttributesToGet and another naming ProjectionExpression conflict.
+        boolean usesAttributesToGet = false;
+        boolean usesProjectionExpression = false;
+        for (JsonNode tableRequest : items.values()) {
+            usesAttributesToGet |= tableRequest.hasNonNull("AttributesToGet");
+            usesProjectionExpression |= tableRequest.hasNonNull("ProjectionExpression");
+        }
+        if (usesAttributesToGet && usesProjectionExpression) {
+            throw new AwsException("ValidationException",
+                    "Can not use both expression and non-expression parameters in the same request: "
+                    + "Non-expression parameters: {AttributesToGet} Expression parameters: {ProjectionExpression}", 400);
+        }
+
         // Per-table check: max 100 keys
         for (Map.Entry<String, JsonNode> entry : items.entrySet()) {
             var projection = entry.getValue().path("ProjectionExpression");
