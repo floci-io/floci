@@ -654,6 +654,25 @@ public class DynamoDbService implements ResourceProvider {
     }
 
     /**
+     * Every live item of the table, expired ones dropped. SearchVectors reads the whole table:
+     * it has no page boundary and no cursor, so it cannot go through {@link #scan}, which stops
+     * at the 1 MB response cap.
+     */
+    public List<JsonNode> liveItems(String tableName, String region) {
+        String canonicalTableName = canonicalTableName(region, tableName);
+        String storageKey = regionKey(region, canonicalTableName);
+        TableDefinition table = tableStore.get(storageKey)
+                .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
+        ConcurrentSkipListMap<String, JsonNode> items = itemsByTable.get(scopedItemsKey(storageKey));
+        if (items == null) {
+            return List.of();
+        }
+        return items.values().stream()
+                .filter(item -> !isExpired(item, table))
+                .toList();
+    }
+
+    /**
      * The stored table definition without the {@link #describeTable} item-count refresh,
      * which is {@code O(items)} on the item map. For callers that only need static metadata
      * such as the key schema — notably IAM condition-key resolution, which runs on the

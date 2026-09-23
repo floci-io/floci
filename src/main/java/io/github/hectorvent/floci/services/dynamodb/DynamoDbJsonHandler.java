@@ -57,6 +57,7 @@ public class DynamoDbJsonHandler {
             case "UpdateItem" -> handleUpdateItem(request, region);
             case "Query" -> handleQuery(request, region);
             case "Scan" -> handleScan(request, region);
+            case "SearchVectors" -> handleSearchVectors(request, region);
             case "BatchWriteItem" -> handleBatchWriteItem(request, region);
             case "BatchGetItem" -> handleBatchGetItem(request, region);
             case "UpdateTable" -> handleUpdateTable(request, region);
@@ -1216,6 +1217,85 @@ public class DynamoDbJsonHandler {
         addConsumedCapacity(response, request, tableName,
                 readCapacityUnits(result.scannedBytes(), request.path("ConsistentRead").asBoolean(false)), scanAccessPath);
         return Response.ok(response).build();
+    }
+
+    // The floor AWS reports for a small search. The real figure is non-deterministic there,
+    // so every search reports the floor (measured in eu-west-2, 2026-09-23).
+    private static final double VECTOR_SEARCH_REQUEST_BYTES = 1024;
+
+    private Response handleSearchVectors(JsonNode request, String region) {
+        String tableName = request.path("TableName").asText();
+        String indexName = request.has("IndexName") ? request.get("IndexName").asText() : null;
+        String rccSearch = request.has("ReturnConsumedCapacity")
+                ? request.get("ReturnConsumedCapacity").asText() : null;
+        if (rccSearch != null && !VALID_RETURN_CONSUMED_CAPACITY.contains(rccSearch)) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + rccSearch + "' at 'returnConsumedCapacity' "
+                    + "failed to satisfy constraint: Member must satisfy enum value set: "
+                    + "[INDEXES, TOTAL, NONE]", 400);
+        }
+        if (!request.hasNonNull("TopK")) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value null at 'topK' failed to satisfy constraint: "
+                    + "Member must not be null", 400);
+        }
+        int topK = request.get("TopK").asInt();
+        if (topK < 1) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + topK + "' at 'topK' failed to satisfy "
+                    + "constraint: Member must have value greater than or equal to 1", 400);
+        }
+
+        TableDefinition table = dynamoDbService.describeTable(tableName, region);
+        VectorIndex index = requireSearchableVectorIndex(table, indexName);
+
+        JsonNode exprAttrNames = request.has("ExpressionAttributeNames")
+                ? request.get("ExpressionAttributeNames") : null;
+        JsonNode exprAttrValues = request.has("ExpressionAttributeValues")
+                ? request.get("ExpressionAttributeValues") : null;
+        List<DynamoDbVectorSearch.Hit> hits = DynamoDbVectorSearch.search(table, index,
+                dynamoDbService.liveItems(tableName, region),
+                request.path("SearchVector"), topK,
+                request.has("SearchConditionExpression")
+                        ? request.get("SearchConditionExpression").asText() : null,
+                exprAttrNames, exprAttrValues,
+                request.has("ProjectionExpression") ? request.get("ProjectionExpression").asText() : null);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode searchResults = objectMapper.createArrayNode();
+        for (DynamoDbVectorSearch.Hit hit : hits) {
+            ObjectNode searchResult = objectMapper.createObjectNode();
+            searchResult.set("Item", hit.item());
+            searchResult.put("Score", hit.score());
+            searchResults.add(searchResult);
+        }
+        response.set("SearchResults", searchResults);
+        if (rccSearch != null && !"NONE".equals(rccSearch)) {
+            ObjectNode consumedCapacity = objectMapper.createObjectNode();
+            consumedCapacity.put("VectorSearchRequestBytes", VECTOR_SEARCH_REQUEST_BYTES);
+            response.set("ConsumedCapacity", consumedCapacity);
+        }
+        return Response.ok(response).build();
+    }
+
+    /**
+     * The vector index a search may run against.
+     *
+     * <p>An index still in its resource allocation phase answers as if the table did not have it,
+     * which is the wording AWS uses there and what the documented readiness wait retries on.
+     */
+    private VectorIndex requireSearchableVectorIndex(TableDefinition table, String indexName) {
+        VectorIndex index = table.findVectorIndex(indexName).orElse(null);
+        if (index == null || ("CREATING".equals(index.getIndexStatus())
+                && !dynamoDbService.isVectorIndexBackfilling(index))) {
+            throw new AwsException("ValidationException",
+                    "The table does not have the specified index: " + indexName, 400);
+        }
+        if ("CREATING".equals(index.getIndexStatus())) {
+            throw new AwsException("ValidationException",
+                    "Cannot search backfilling vector index: " + indexName, 400);
+        }
+        return index;
     }
 
     private Response handleBatchWriteItem(JsonNode request, String region) {
