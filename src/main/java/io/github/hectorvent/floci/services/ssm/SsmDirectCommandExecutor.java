@@ -10,7 +10,6 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -98,8 +97,8 @@ public class SsmDirectCommandExecutor {
 
         String execId = create.exec().getId();
         CountDownLatch latch = new CountDownLatch(1);
-        ByteArrayOutputStream stdout = new ByteArrayOutputStream();
-        ByteArrayOutputStream stderr = new ByteArrayOutputStream();
+        BoundedOutputCollector stdout = new BoundedOutputCollector(SsmCommandService.MAX_STDOUT_CHARS);
+        BoundedOutputCollector stderr = new BoundedOutputCollector(SsmCommandService.MAX_STDERR_CHARS);
         Instant start = Instant.now();
 
         ResultCallback<Frame> callback = dockerClient.execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
@@ -109,12 +108,8 @@ public class SsmDirectCommandExecutor {
                 if (payload == null) {
                     return;
                 }
-                ByteArrayOutputStream target = frame.getStreamType() == StreamType.STDERR ? stderr : stdout;
-                try {
-                    target.write(payload);
-                }
-                catch (IOException ignored) {
-                }
+                BoundedOutputCollector target = frame.getStreamType() == StreamType.STDERR ? stderr : stdout;
+                target.write(payload);
             }
 
             @Override
@@ -124,12 +119,8 @@ public class SsmDirectCommandExecutor {
 
             @Override
             public void onError(Throwable throwable) {
-                try {
-                    stderr.write((throwable.getMessage() != null ? throwable.getMessage() : throwable.toString())
-                            .getBytes(StandardCharsets.UTF_8));
-                }
-                catch (IOException ignored) {
-                }
+                stderr.write((throwable.getMessage() != null ? throwable.getMessage() : throwable.toString())
+                        .getBytes(StandardCharsets.UTF_8));
                 latch.countDown();
             }
         });
@@ -138,15 +129,15 @@ public class SsmDirectCommandExecutor {
         if (!completed) {
             closeQuietly(callback);
             return ExecutionResult.timedOut(
-                    stdout.toString(StandardCharsets.UTF_8),
+                    stdout.content(),
                     "Timed out after " + timeoutSeconds + "s",
                     start);
         }
 
         Long exitCode = dockerClient.inspectExecCmd(execId).exec().getExitCodeLong();
         int responseCode = exitCode != null ? exitCode.intValue() : 1;
-        String standardOutput = stdout.toString(StandardCharsets.UTF_8);
-        String standardError = stderr.toString(StandardCharsets.UTF_8);
+        String standardOutput = stdout.content();
+        String standardError = stderr.content();
         if (isTimeoutExitCode(responseCode)) {
             logFailureDiagnostics(containerId);
             return ExecutionResult.timedOut(standardOutput, standardError, start);
@@ -196,7 +187,7 @@ public class SsmDirectCommandExecutor {
                 .withAttachStderr(true);
         String execId = create.exec().getId();
         CountDownLatch latch = new CountDownLatch(1);
-        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        BoundedOutputCollector output = new BoundedOutputCollector(SsmCommandService.MAX_STDOUT_CHARS);
         ResultCallback<Frame> callback = dockerClient.execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
             @Override
             public void onNext(Frame frame) {
@@ -204,11 +195,7 @@ public class SsmDirectCommandExecutor {
                 if (payload == null) {
                     return;
                 }
-                try {
-                    output.write(payload);
-                }
-                catch (IOException ignored) {
-                }
+                output.write(payload);
             }
 
             @Override
@@ -225,7 +212,7 @@ public class SsmDirectCommandExecutor {
         if (!completed) {
             closeQuietly(callback);
         }
-        return output.toString(StandardCharsets.UTF_8);
+        return output.content();
     }
 
     static String failureDiagnosticsScript() {

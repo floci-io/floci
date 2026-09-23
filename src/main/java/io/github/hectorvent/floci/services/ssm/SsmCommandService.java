@@ -45,8 +45,8 @@ public class SsmCommandService implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(SsmCommandService.class);
     private static final int MIN_TIMEOUT_SECONDS = 30;
-    private static final int MAX_STDOUT_CHARS = 24000;
-    private static final int MAX_STDERR_CHARS = 8000;
+    static final int MAX_STDOUT_CHARS = 24000;
+    static final int MAX_STDERR_CHARS = 8000;
 
     private final StorageBackend<String, InstanceInformation> instanceStore;
     private final StorageBackend<String, Command> commandStore;
