@@ -34,6 +34,23 @@ class ElbV2TargetResolverTest {
     }
 
     @Test
+    void instanceTargetPassesTargetGroupAccountIdToEc2Service() {
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        Instance instance = new Instance();
+        instance.setInstanceId("i-1234567890abcdef0");
+        instance.setContainerBridgeIp("172.18.0.42");
+        when(ec2Service.findInstanceById("111122223333", "i-1234567890abcdef0")).thenReturn(instance);
+
+        TargetGroup targetGroup = new TargetGroup();
+        targetGroup.setTargetGroupArn("arn:aws:elasticloadbalancing:us-east-1:111122223333:targetgroup/tg/123456");
+        targetGroup.setTargetType("instance");
+        TargetDescription target = new TargetDescription();
+        target.setId("i-1234567890abcdef0");
+
+        assertEquals("172.18.0.42", ElbV2TargetResolver.resolveHost(ec2Service, targetGroup, target));
+    }
+
+    @Test
     void ipTargetKeepsRegisteredAddress() {
         Ec2Service ec2Service = mock(Ec2Service.class);
         TargetGroup targetGroup = new TargetGroup();

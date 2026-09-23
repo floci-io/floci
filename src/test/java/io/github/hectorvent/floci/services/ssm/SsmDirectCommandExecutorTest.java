@@ -404,6 +404,19 @@ class SsmDirectCommandExecutorTest {
         assertEquals("E".repeat(8_000), result.get().standardError());
     }
 
+    @Test
+    void supportsPassesAccountIdToEc2Service() {
+        DockerClient dockerClient = mock(DockerClient.class);
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        Instance instance = instance("i-container", "container-1");
+        when(ec2Service.findInstanceById("111122223333", "i-container")).thenReturn(instance);
+        when(ec2Service.isInstanceContainerRunning("111122223333", "i-container")).thenReturn(true);
+
+        SsmDirectCommandExecutor executor = new SsmDirectCommandExecutor(dockerClient, ec2Service);
+        assertTrue(executor.supports("111122223333", "i-container", "AWS-RunShellScript"));
+        assertFalse(executor.supports("444455556666", "i-container", "AWS-RunShellScript"));
+    }
+
     private static Instance instance(String instanceId, String containerId) {
         Instance instance = new Instance();
         instance.setInstanceId(instanceId);

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.elbv2;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.SsrfProtection;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
@@ -25,7 +26,10 @@ final class ElbV2TargetResolver {
             return targetId;
         }
 
-        Instance instance = ec2Service.findInstanceById(targetId);
+        String accountId = extractAccountId(targetGroup.getTargetGroupArn());
+        Instance instance = accountId != null
+                ? ec2Service.findInstanceById(accountId, targetId)
+                : ec2Service.findInstanceById(targetId);
         if (instance == null) {
             return targetId;
         }
@@ -45,5 +49,16 @@ final class ElbV2TargetResolver {
 
     static boolean isIpLiteral(String host) {
         return host != null && (host.contains(":") || host.matches("[0-9.]+"));
+    }
+
+    private static String extractAccountId(String targetGroupArn) {
+        if (targetGroupArn == null || !targetGroupArn.startsWith("arn:")) {
+            return null;
+        }
+        try {
+            return AwsArnUtils.parse(targetGroupArn).accountId();
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
     }
 }

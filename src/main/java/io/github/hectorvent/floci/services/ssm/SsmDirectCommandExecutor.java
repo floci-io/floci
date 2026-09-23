@@ -39,11 +39,22 @@ public class SsmDirectCommandExecutor {
             String documentName,
             Map<String, List<String>> parameters,
             int timeoutSeconds) {
-        if (!supports(instanceId, documentName)) {
+        return executeIfSupported(null, instanceId, documentName, parameters, timeoutSeconds);
+    }
+
+    public Optional<ExecutionResult> executeIfSupported(
+            String accountId,
+            String instanceId,
+            String documentName,
+            Map<String, List<String>> parameters,
+            int timeoutSeconds) {
+        if (!supports(accountId, instanceId, documentName)) {
             return Optional.empty();
         }
 
-        Instance instance = ec2Service.findInstanceById(instanceId);
+        Instance instance = accountId != null
+                ? ec2Service.findInstanceById(accountId, instanceId)
+                : ec2Service.findInstanceById(instanceId);
         String script = String.join("\n", parameters.getOrDefault("commands", List.of()));
         if (script.isBlank()) {
             return Optional.of(ExecutionResult.success("", "", 0));
@@ -65,10 +76,14 @@ public class SsmDirectCommandExecutor {
     }
 
     public boolean supports(String instanceId, String documentName) {
+        return supports(null, instanceId, documentName);
+    }
+
+    public boolean supports(String accountId, String instanceId, String documentName) {
         if (!"AWS-RunShellScript".equals(documentName)) {
             return false;
         }
-        return isContainerBacked(instanceId);
+        return isContainerBacked(accountId, instanceId);
     }
 
     /**
@@ -77,11 +92,19 @@ public class SsmDirectCommandExecutor {
      * managed instance is served through the SSM agent polling flow.
      */
     public boolean isContainerBacked(String instanceId) {
-        Instance instance = ec2Service.findInstanceById(instanceId);
+        return isContainerBacked(null, instanceId);
+    }
+
+    public boolean isContainerBacked(String accountId, String instanceId) {
+        Instance instance = accountId != null
+                ? ec2Service.findInstanceById(accountId, instanceId)
+                : ec2Service.findInstanceById(instanceId);
         if (instance == null || instance.getDockerContainerId() == null || instance.getDockerContainerId().isBlank()) {
             return false;
         }
-        return ec2Service.isInstanceContainerRunning(instanceId);
+        return accountId != null
+                ? ec2Service.isInstanceContainerRunning(accountId, instanceId)
+                : ec2Service.isInstanceContainerRunning(instanceId);
     }
 
     private ExecutionResult executeInContainer(String containerId, String script, String workingDirectory, int timeoutSeconds)

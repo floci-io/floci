@@ -143,6 +143,9 @@ public class ElbClassicService {
         ClassicLoadBalancer lb = new ClassicLoadBalancer();
         lb.setLoadBalancerName(name);
         lb.setRegion(region);
+        if (regionResolver != null && regionResolver.getAccountId() != null) {
+            lb.setAccountId(regionResolver.getAccountId());
+        }
         lb.setDnsName(dnsName);
         lb.setCanonicalHostedZoneName(dnsName);
         lb.setCanonicalHostedZoneNameId(CANONICAL_HOSTED_ZONE_ID);

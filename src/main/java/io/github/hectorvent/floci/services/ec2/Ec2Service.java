@@ -5216,18 +5216,30 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     }
 
     public Instance findInstanceById(String instanceId) {
-        Instance inst = instances.scan(k -> true).stream()
+        return findInstanceById(callerAccountId(), instanceId);
+    }
+
+    public Instance findInstanceById(String accountId, String instanceId) {
+        String safeAccount = accountId != null ? accountId : callerAccountId();
+        List<Instance> accountInstances = instances instanceof AccountAwareStorageBackend<Instance> aware
+                ? aware.scanForAccount(safeAccount, k -> true)
+                : instances.scan(k -> true);
+        Instance inst = accountInstances.stream()
                 .filter(i -> instanceId.equals(i.getInstanceId()))
                 .findFirst()
                 .orElse(null);
         if (inst != null) {
             return inst;
         }
-        return findExternalInstance(null, null, instanceId).orElse(null);
+        return findExternalInstance(safeAccount, null, instanceId).orElse(null);
     }
 
     public boolean isInstanceContainerRunning(String instanceId) {
-        Instance instance = findInstanceById(instanceId);
+        return isInstanceContainerRunning(callerAccountId(), instanceId);
+    }
+
+    public boolean isInstanceContainerRunning(String accountId, String instanceId) {
+        Instance instance = findInstanceById(accountId, instanceId);
         if (instance == null) {
             return false;
         }

@@ -4668,6 +4668,14 @@ class Ec2ServiceTest {
         // findInstanceForAccount respects account argument
         assertTrue(service.findInstanceForAccount(accountA, "us-east-1", "i-node1234567890abc").isPresent());
         assertTrue(service.findInstanceForAccount(accountB, "us-east-1", "i-node1234567890abc").isEmpty());
+
+        // findInstanceById respects callerAccountId and explicit account argument
+        assertNull(service.findInstanceById("i-node1234567890abc"));
+        assertNull(service.findInstanceById(accountB, "i-node1234567890abc"));
+        assertNotNull(service.findInstanceById(accountA, "i-node1234567890abc"));
+
+        reqCtx.setAccountId(accountA);
+        assertNotNull(service.findInstanceById("i-node1234567890abc"));
     }
 
     @Test

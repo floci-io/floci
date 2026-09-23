@@ -27,6 +27,7 @@ public class ClassicLoadBalancer {
     private String scheme;
     private String vpcId;
     private String region;
+    private String accountId;
     private Instant createdTime;
 
     private List<ClassicListener> listeners = new ArrayList<>();
@@ -64,6 +65,9 @@ public class ClassicLoadBalancer {
 
     public String getRegion() { return region; }
     public void setRegion(String v) { this.region = v; }
+
+    public String getAccountId() { return accountId; }
+    public void setAccountId(String v) { this.accountId = v; }
 
     public Instant getCreatedTime() { return createdTime; }
     public void setCreatedTime(Instant v) { this.createdTime = v; }
