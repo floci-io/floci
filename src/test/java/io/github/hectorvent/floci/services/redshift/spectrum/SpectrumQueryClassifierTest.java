@@ -3,7 +3,6 @@ package io.github.hectorvent.floci.services.redshift.spectrum;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SpectrumQueryClassifierTest {
@@ -31,12 +30,12 @@ class SpectrumQueryClassifierTest {
 
     @Test
     void rejectsParametersAndUnsupportedExternalShapes() {
-        assertThrows(SpectrumSqlException.class, () -> classifier.classify("SELECT * FROM analytics.events", 1));
-        assertThrows(SpectrumSqlException.class, () -> classifier.classify(
-                "SELECT * FROM analytics.events JOIN analytics.users ON events.id = users.id", 0));
-        assertThrows(SpectrumSqlException.class, () -> classifier.classify(
-                "SELECT count(*) FROM analytics.events", 0));
-        assertThrows(SpectrumSqlException.class, () -> classifier.classify(
-                "SELECT * FROM analytics.events; SELECT 1", 0));
+        assertTrue(classifier.classify("SELECT * FROM analytics.events", 1).isEmpty());
+        assertTrue(classifier.classify(
+                "SELECT * FROM analytics.events JOIN analytics.users ON events.id = users.id", 0).isEmpty());
+        assertTrue(classifier.classify(
+                "SELECT count(*) FROM analytics.events", 0).isEmpty());
+        assertTrue(classifier.classify(
+                "SELECT * FROM analytics.events; SELECT 1", 0).isEmpty());
     }
 }

@@ -14,17 +14,17 @@ public final class SpectrumQueryClassifier {
             return Optional.empty();
         }
         if (parameterCount > 0 || containsOutsideQuotes(normalized, '?')) {
-            throw unsupported("parameterized Spectrum queries are not supported");
+            return Optional.empty();
         }
         String statement = stripTrailingSemicolon(normalized);
         if (statement.indexOf(';') >= 0 || hasParenthesesOutsideQuotes(statement)) {
-            throw unsupported("unsupported Spectrum query shape");
+            return Optional.empty();
         }
         String lower = statement.toLowerCase(Locale.ROOT);
         for (String keyword : new String[]{" join ", " group ", " order ", " having ", " union ", " intersect ",
                 " except ", " limit ", " offset ", " distinct "}) {
             if (lower.contains(keyword)) {
-                throw unsupported("unsupported Spectrum query shape");
+                return Optional.empty();
             }
         }
         int from = keywordIndex(statement, "from", 6);
@@ -33,21 +33,21 @@ public final class SpectrumQueryClassifier {
         }
         String projection = statement.substring(6, from).trim();
         if (projection.isEmpty() || projection.contains(",") && projection.contains("(")) {
-            throw unsupported("unsupported Spectrum projection");
+            return Optional.empty();
         }
         String source = statement.substring(from + 4).trim();
         int where = keywordIndex(source, "where", 0);
         String tablePart = where < 0 ? source : source.substring(0, where).trim();
         String predicate = where < 0 ? null : source.substring(where + 5).trim();
         if (!isIdentifierPath(tablePart) || (predicate != null && !simplePredicate(predicate))) {
-            throw unsupported("unsupported Spectrum query shape");
+            return Optional.empty();
         }
         String[] identifiers = tablePart.split("\\.", -1);
         String schema = identifiers.length == 2 ? identifier(identifiers[0]) : null;
         String table = identifier(identifiers[identifiers.length - 1]);
         boolean star = "*".equals(projection);
         if (!star && !isProjection(projection)) {
-            throw unsupported("unsupported Spectrum projection");
+            return Optional.empty();
         }
         return Optional.of(new SpectrumQuery(schema, table, projection, predicate, star));
     }
@@ -116,9 +116,5 @@ public final class SpectrumQueryClassifier {
 
     private static boolean hasParenthesesOutsideQuotes(String sql) {
         return containsOutsideQuotes(sql, '(') || containsOutsideQuotes(sql, ')');
-    }
-
-    private static SpectrumSqlException unsupported(String message) {
-        return new SpectrumSqlException("0A000", message);
     }
 }

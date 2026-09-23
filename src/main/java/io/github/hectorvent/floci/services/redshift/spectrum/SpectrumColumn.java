@@ -1,7 +1,10 @@
 package io.github.hectorvent.floci.services.redshift.spectrum;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
 import java.util.Locale;
 
+@RegisterForReflection(targets = SpectrumColumn.Type.class)
 public record SpectrumColumn(String name, Type type) {
 
     public SpectrumColumn {
@@ -16,6 +19,7 @@ public record SpectrumColumn(String name, Type type) {
         }
     }
 
+    @RegisterForReflection
     public enum Type {
         VARCHAR,
         CHAR,

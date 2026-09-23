@@ -1,5 +1,8 @@
 package io.github.hectorvent.floci.services.redshift.spectrum;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
+@RegisterForReflection
 public record SpectrumExternalSchema(
         String accountId,
         String databaseName,
