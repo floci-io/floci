@@ -40,6 +40,20 @@ public class CloudFormationTemplateEngine {
     private final UnaryOperator<String> dynamicReferenceResolver;
     private final List<String> unresolvedIntrinsics = new ArrayList<>();
 
+    /**
+     * A minimal engine for a resource provisioned outside any stack (Cloud Control CreateResource).
+     * Desired state carries resolved values, so it needs no parameters, mappings, conditions or
+     * sibling resources: only intrinsics and dynamic references. The constructors stay
+     * package-private so tests in {@code provisioners/} keep mocking the engine.
+     */
+    public static CloudFormationTemplateEngine standalone(String accountId, String region, String stackName,
+                                                          ObjectMapper objectMapper,
+                                                          UnaryOperator<String> dynamicReferenceResolver) {
+        return new CloudFormationTemplateEngine(accountId, region, stackName, stackName,
+                Map.of(), new HashMap<>(), new HashMap<>(), Map.of(), Map.of(), objectMapper,
+                name -> null, dynamicReferenceResolver);
+    }
+
     CloudFormationTemplateEngine(String accountId, String region, String stackName, String stackId,
                                  Map<String, String> parameters,
                                  Map<String, String> physicalIds,

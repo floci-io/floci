@@ -32,7 +32,7 @@ import java.util.Set;
 /**
  * CloudFormation provisioning for the ECS core types, {@code AWS::ECS::Cluster},
  * {@code AWS::ECS::TaskDefinition} and {@code AWS::ECS::Service}, moved out of the
- * {@code CloudFormationResourceProvisioner} switch. Capacity providers live in
+ * former CloudFormation monolith's switch. Capacity providers live in
  * {@link EcsCapacityCfnProvisioner}.
  */
 @ApplicationScoped

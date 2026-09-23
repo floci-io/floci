@@ -25,7 +25,7 @@ import java.util.concurrent.TimeoutException;
 
 /**
  * Provisions {@code AWS::CloudFormation::CustomResource} and every {@code Custom::*} type, moved out
- * of the {@code CloudFormationResourceProvisioner} monolith.
+ * of the former CloudFormation monolith.
  *
  * <p>A custom resource is backed by a Lambda named by its {@code ServiceToken}. CloudFormation
  * invokes that Lambda with a request event and the Lambda PUTs its result to the event's

@@ -27,7 +27,7 @@ import java.util.Set;
 /**
  * Provisions {@code AWS::SecretsManager::SecretTargetAttachment}.
  *
- * <p>Extracted from {@code CloudFormationResourceProvisioner}. Unlike most provisioners this one
+ * <p>Extracted from the former CloudFormation monolith. Unlike most provisioners this one
  * wraps three services rather than one: an attachment reads the endpoint of the RDS or DocumentDB
  * instance or cluster it points at, so it can write the connection detail (engine, host, port,
  * dbname, identifier) into the target secret. That dependency is inherent to the type, and it is
@@ -37,9 +37,8 @@ import java.util.Set;
  * overrides {@code delete(StackResource, String)}. The delete needs two create-time attributes
  * that no physical id carries: which secret fields this attachment managed, so only those are
  * stripped, and which attachment owns the secret, so a second attachment's fields are left alone.
- * Registering that here is what lets the type leave the engine's
- * {@code DELETE_NEEDS_STACK_RESOURCE} set; the two must change together or
- * {@code CfnDeletePrecedenceTest} fails with both claiming it.
+ * The dispatcher hands the owner the whole resource on delete, which is what makes that
+ * possible.
  */
 @ApplicationScoped
 public class SecretTargetAttachmentCfnProvisioner implements CfnResourceProvisioner {

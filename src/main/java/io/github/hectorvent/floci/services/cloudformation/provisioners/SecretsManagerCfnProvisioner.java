@@ -18,14 +18,13 @@ import java.util.Set;
 /**
  * Provisions {@code AWS::SecretsManager::Secret}.
  *
- * <p>Extracted from {@code CloudFormationResourceProvisioner}. The sibling type
+ * <p>Extracted from the former CloudFormation monolith. The sibling type
  * {@code AWS::SecretsManager::SecretTargetAttachment} lives in
  * {@link SecretTargetAttachmentCfnProvisioner} instead of here, because it has to read an RDS or
  * DocumentDB endpoint to build the connection detail it writes into the secret, so it needs three
  * services where this one needs only its own.
  *
- * <p>The secret deletes by physical id alone, so the id-only delete override serves it and it is
- * not in the engine's {@code DELETE_NEEDS_STACK_RESOURCE} set.
+ * <p>The secret deletes by physical id alone, so the id-only delete override serves it.
  */
 @ApplicationScoped
 public class SecretsManagerCfnProvisioner implements CfnResourceProvisioner {

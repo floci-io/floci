@@ -17,7 +17,7 @@ import java.util.UUID;
 
 /**
  * CloudFormation provisioning for SQS: {@code AWS::SQS::Queue} and {@code AWS::SQS::QueuePolicy}.
- * Extracted verbatim from {@code CloudFormationResourceProvisioner} (item 15 decomposition).
+ * Extracted verbatim from the former CloudFormation monolith (item 15 decomposition).
  */
 @ApplicationScoped
 public class SqsCfnProvisioner implements CfnResourceProvisioner {

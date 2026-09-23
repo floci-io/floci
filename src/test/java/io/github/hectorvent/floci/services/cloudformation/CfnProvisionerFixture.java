@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.appsync.AppSyncService;
 import io.github.hectorvent.floci.services.autoscaling.AutoScalingService;
 import io.github.hectorvent.floci.services.batch.BatchService;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnDynamicReferences;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceDispatcher;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudFrontCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ConfigCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.DynamoDbCfnProvisioner;
@@ -132,7 +133,7 @@ import java.util.Arrays;
 import java.util.List;
 
 /**
- * Builds {@link CloudFormationResourceProvisioner} for tests without a wall of positional nulls.
+ * Builds {@link CfnResourceDispatcher} for tests without a wall of positional nulls.
  *
  * <p>The provisioner takes one constructor argument per service it still provisions, so every test
  * that built it directly had to pass 30-plus {@code null}s in the right order, and every argument
@@ -704,12 +705,12 @@ final class CfnProvisionerFixture {
                     : new CloudFormationResourceRegistry(inferredProvisioners());
         }
 
-        public CloudFormationResourceProvisioner build() {
+        public CfnResourceDispatcher build() {
             if (!registryChosenByTest) {
                 resourceRegistry = buildRegistry();
             }
             ensureDynamicReferences();
-            return new CloudFormationResourceProvisioner(
+            return new CfnResourceDispatcher(
                     objectMapper,
                     resourceRegistry,
                     dynamicReferences,

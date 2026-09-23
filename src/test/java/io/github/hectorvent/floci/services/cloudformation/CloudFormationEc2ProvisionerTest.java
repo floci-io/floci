@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceDispatcher;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnRollback;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
@@ -31,7 +32,7 @@ class CloudFormationEc2ProvisionerTest {
 
     private final ObjectMapper mapper = new ObjectMapper();
     private Ec2Service ec2Service;
-    private CloudFormationResourceProvisioner provisioner;
+    private CfnResourceDispatcher provisioner;
 
     @BeforeEach
     void setUp() {

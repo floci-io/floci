@@ -20,7 +20,7 @@ import java.net.URI;
  *   <li>{@link LaunchedContainerAwsEnv}, which sets the AWS endpoint for Lambda, ECS, Flink and MWAA
  *       containers</li>
  *   <li>{@code Ec2ContainerManager}, for the {@code AWS_ENDPOINT_URL} of EC2 instance containers</li>
- *   <li>{@code CloudFormationResourceProvisioner}, for the {@code ResponseURL} a custom resource
+ *   <li>{@code CustomResourceCfnProvisioner}, for the {@code ResponseURL} a custom resource
  *       Lambda PUTs its result to</li>
  * </ul>
  *

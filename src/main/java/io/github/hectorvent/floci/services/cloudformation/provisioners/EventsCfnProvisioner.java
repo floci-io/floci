@@ -35,7 +35,7 @@ import java.util.regex.Pattern;
 /**
  * CloudFormation provisioning for EventBridge: {@code AWS::Events::Rule},
  * {@code AWS::Events::EventBus} and {@code AWS::Events::EventBusPolicy}. Extracted from
- * {@code CloudFormationResourceProvisioner}.
+ * the former CloudFormation monolith.
  *
  * <p>Two of these types need the resource's stored attributes to delete, not just the physical
  * id, so they are served by the {@link #delete(StackResource, String)} override rather than the

@@ -37,7 +37,7 @@ import java.util.zip.ZipOutputStream;
 
 /**
  * Provisions {@code AWS::Lambda::Function} and {@code AWS::Lambda::LayerVersion}, moved verbatim out
- * of the {@code CloudFormationResourceProvisioner} monolith. Function provisioning covers create,
+ * of the former CloudFormation monolith. Function provisioning covers create,
  * in-place configuration/code update, and replacement on a name or package-type change; layer
  * version provisioning publishes a new version and exposes its ARN for {@code Ref}/{@code Fn::GetAtt}.
  */

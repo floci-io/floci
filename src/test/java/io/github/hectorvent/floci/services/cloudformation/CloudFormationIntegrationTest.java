@@ -8441,7 +8441,7 @@ class CloudFormationIntegrationTest {
 
     @Test
     void createStack_samFunctionWithPackageTypeImageDeploysAsImageFunction() {
-        // Without PackageType carried through by the SAM transform, CloudFormationResourceProvisioner
+        // Without PackageType carried through by the SAM transform, the Lambda provisioner
         // defaults PackageType to "Zip" (buildLambdaDesiredState's resolveOrDefault), which then also
         // forces Runtime/Handler defaults onto a function that declared neither — the function is
         // created as a broken Zip function instead of running the real container image.
@@ -8495,7 +8495,7 @@ class CloudFormationIntegrationTest {
 
     @Test
     void createStack_samFunctionWithImageConfigDeploysWithOverrides() {
-        // ImageConfig must also be carried through the SAM transform to CloudFormationResourceProvisioner,
+        // ImageConfig must also be carried through the SAM transform to the Lambda provisioner,
         // which already reads it (provisionLambda's putResolvedMapIfPresent(configRequest, props,
         // "ImageConfig", ...)) — without the transform copying it, a PackageType: Image SAM function's
         // EntryPoint/Command/WorkingDirectory override silently never reaches the deployed function.
@@ -8660,7 +8660,7 @@ class CloudFormationIntegrationTest {
     void createStack_samHttpApiAuthorizerHonorsCustomIdentitySource() {
         // SAM's Authorizers.<Name>.IdentitySource lets a JWT authorizer read the token from
         // somewhere other than the default Authorization header — e.g. a query-string token,
-        // the same case CloudFormationResourceProvisioner/ApiGatewayExecuteController already
+        // the same case the API Gateway provisioner/ApiGatewayExecuteController already
         // support end-to-end for raw (non-SAM) templates. The SAM transform must forward it
         // rather than always emitting the header default.
         String template = """

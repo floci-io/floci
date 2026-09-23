@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceDispatcher;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -34,7 +35,7 @@ class CloudFormationLogGroupProvisionerTest {
 
     private final ObjectMapper mapper = new ObjectMapper();
     private CloudWatchLogsService logsService;
-    private CloudFormationResourceProvisioner provisioner;
+    private CfnResourceDispatcher provisioner;
 
     @BeforeEach
     void setUp() {

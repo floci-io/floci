@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceDispatcher;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
@@ -42,7 +43,7 @@ class CustomResourceProviderFrameworkTest {
     private LambdaService lambdaService;
     private ProviderFrameworkDetector detector;
     private CustomResourceResponseStore store;
-    private CloudFormationResourceProvisioner provisioner;
+    private CfnResourceDispatcher provisioner;
 
     @BeforeEach
     void setUp() {

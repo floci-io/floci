@@ -10,8 +10,8 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
-import io.github.hectorvent.floci.services.cloudformation.CloudFormationResourceProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceDispatcher;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
@@ -51,7 +51,7 @@ public class CloudControlService {
     private final S3Service s3Service;
     private final Ec2Service ec2Service;
     private final IamService iamService;
-    private final CloudFormationResourceProvisioner provisioner;
+    private final CfnResourceDispatcher provisioner;
     private final ObjectMapper mapper;
     private final AccountAwareStorageBackend<PersistedRequest> requestStore;
     private final AccountAwareStorageBackend<PersistedCreatedResource> createdStore;
@@ -181,7 +181,7 @@ public class CloudControlService {
 
     @Inject
     public CloudControlService(S3Service s3Service, Ec2Service ec2Service,
-                               IamService iamService, CloudFormationResourceProvisioner provisioner,
+                               IamService iamService, CfnResourceDispatcher provisioner,
                                ObjectMapper mapper, StorageFactory storageFactory) {
         this(s3Service, ec2Service, iamService, provisioner, mapper,
                 storageFactory.create("cloudcontrol", "cloudcontrol-requests.json",
@@ -191,7 +191,7 @@ public class CloudControlService {
     }
 
     public CloudControlService(S3Service s3Service, Ec2Service ec2Service,
-                               IamService iamService, CloudFormationResourceProvisioner provisioner,
+                               IamService iamService, CfnResourceDispatcher provisioner,
                                ObjectMapper mapper) {
         this(s3Service, ec2Service, iamService, provisioner, mapper,
                 AccountAwareStorageBackend.inMemory(DEFAULT_ACCOUNT),
@@ -199,7 +199,7 @@ public class CloudControlService {
     }
 
     CloudControlService(S3Service s3Service, Ec2Service ec2Service,
-                                IamService iamService, CloudFormationResourceProvisioner provisioner,
+                                IamService iamService, CfnResourceDispatcher provisioner,
                                 ObjectMapper mapper,
                                 AccountAwareStorageBackend<PersistedRequest> requestStore,
                                 AccountAwareStorageBackend<PersistedCreatedResource> createdStore) {
@@ -340,7 +340,7 @@ public class CloudControlService {
         }
 
         RequestScopes.runAs(accountId,
-                () -> provisioner.deleteStandalone(typeName, identifier, region, accountId, attributes));
+                () -> provisioner.deleteStandalone(typeName, identifier, region, attributes));
         created.remove(key);
         removePersistedCreated(accountId, region, typeName, identifier);
         return record(new ProgressEvent(typeName, identifier,

@@ -24,11 +24,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * Pins the full set of CloudFormation resource types Floci provisions, and who serves each one.
  *
- * <p>This is the guard for the per-service provisioner migration. {@code provision}'s default arm
+ * <p>This is the guard against a type quietly losing its provisioner. {@code CfnResourceDispatcher}
  * stubs an unknown type with {@code arn:aws:stub:::<logicalId>} and reports CREATE_COMPLETE, so a
- * type that falls out of both the switch and the registry would otherwise pass every test while
- * provisioning nothing. Making the inventory a checked-in file turns each migration slice into an
- * intentional two-line diff.
+ * type that falls out of the registry would otherwise pass every test while provisioning nothing.
+ * Making the inventory a checked-in file turns each ownership change into an intentional diff.
  *
  * <p>Runs under {@code @QuarkusTest} deliberately: the registry is compared as CDI resolved it, so
  * a provisioner written without {@code @ApplicationScoped} is caught. That mistake leaves the
@@ -40,7 +39,6 @@ class CfnResourceInventoryTest {
     private static final Path INVENTORY =
             Path.of("src/test/resources/cloudformation/supported-resource-types.tsv");
     private static final Path SCHEMA_DIR = Path.of("local/aws/cfn-resource-schemas/us-east-1");
-    private static final String LEGACY_OWNER = "LEGACY_SWITCH";
 
     /**
      * Types with no CloudFormation registry schema. {@code AWS::CDK::Metadata} is emitted by the
@@ -52,30 +50,15 @@ class CfnResourceInventoryTest {
     CloudFormationResourceRegistry registry;
 
     @Test
-    void inventoryMatchesTheRegistryAndTheLegacySwitch() {
+    void inventoryMatchesTheRegistry() {
         Map<String, String> actual = new TreeMap<>();
         for (String type : registry.registeredTypes()) {
             actual.put(type, registry.ownerOf(type));
-        }
-        for (String type : CloudFormationResourceProvisioner.LEGACY_SWITCH_TYPES) {
-            actual.put(type, LEGACY_OWNER);
         }
 
         assertEquals(render(readInventory()), render(actual),
                 "The provisioned resource-type inventory changed. If that was intentional, write "
                         + "this exact content to " + INVENTORY + ".");
-    }
-
-    @Test
-    void noTypeIsServedByBothTheRegistryAndTheSwitch() {
-        List<String> both = registry.registeredTypes().stream()
-                .filter(CloudFormationResourceProvisioner.LEGACY_SWITCH_TYPES::contains)
-                .sorted()
-                .toList();
-
-        assertTrue(both.isEmpty(),
-                "A type served by an extracted provisioner must have its switch arm removed; the "
-                        + "registry wins, leaving the arm as dead code that still looks live: " + both);
     }
 
     @Test

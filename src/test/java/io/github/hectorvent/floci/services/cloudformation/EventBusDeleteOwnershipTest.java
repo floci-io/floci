@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceDispatcher;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.eventbridge.model.EventBus;
 import org.junit.jupiter.api.BeforeEach;
@@ -30,7 +31,7 @@ class EventBusDeleteOwnershipTest {
     private static final String CREATED_TIME_ATTR = "FlociEventBusCreatedTime";
 
     private EventBridgeService eventBridgeService;
-    private CloudFormationResourceProvisioner provisioner;
+    private CfnResourceDispatcher provisioner;
 
     @BeforeEach
     void setUp() {

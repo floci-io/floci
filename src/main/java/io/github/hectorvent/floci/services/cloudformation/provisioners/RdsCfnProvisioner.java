@@ -28,11 +28,10 @@ import java.util.Set;
 /**
  * CloudFormation provisioning for RDS: the two parameter-group types, {@code DBSubnetGroup},
  * {@code DBInstance}, {@code DBCluster}, {@code DBProxy} and {@code DBProxyTargetGroup}.
- * Extracted from {@code CloudFormationResourceProvisioner}.
+ * Extracted from the former CloudFormation monolith.
  *
  * <p>Every type here deletes by physical id alone, so the id-only
- * {@link #delete(String, String, String)} serves all seven and none of them appears in the
- * engine's {@code DELETE_NEEDS_STACK_RESOURCE} set. {@code DBCluster} is the one type that
+ * {@link #delete(String, String, String)} serves all seven. {@code DBCluster} is the one type that
  * replaces through {@link ReplacementCleanup}; see {@code provisionDbCluster}.
  *
  * <p>Unlike most extractions this one does not take {@code RdsService} out of the monolith.

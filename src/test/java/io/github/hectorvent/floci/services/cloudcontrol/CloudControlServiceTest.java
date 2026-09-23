@@ -4,7 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
-import io.github.hectorvent.floci.services.cloudformation.CloudFormationResourceProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceDispatcher;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
@@ -33,7 +33,7 @@ class CloudControlServiceTest {
 
     @Test
     void accountScopesCreateStatusLookupAndDelete() throws Exception {
-        CloudFormationResourceProvisioner provisioner = mock(CloudFormationResourceProvisioner.class);
+        CfnResourceDispatcher provisioner = mock(CfnResourceDispatcher.class);
         StackResource resource = new StackResource();
         resource.setPhysicalId("vpc-account-a");
         resource.setAttributes(Map.of("VpcId", "vpc-account-a"));
@@ -61,20 +61,18 @@ class CloudControlServiceTest {
         CloudControlService.ProgressEvent deniedDelete = service.deleteResource(
                 "us-east-1", "222222222222", "AWS::EC2::VPC", "vpc-account-a");
         assertEquals("FAILED", deniedDelete.operationStatus());
-        verify(provisioner, never()).deleteStandalone(anyString(),
-                anyString(), anyString(),
-                anyString(), anyMap());
+        verify(provisioner, never()).deleteStandalone(anyString(), anyString(), anyString(), anyMap());
 
         CloudControlService.ProgressEvent deleted = service.deleteResource(
                 "us-east-1", "111111111111", "AWS::EC2::VPC", "vpc-account-a");
         assertEquals("SUCCESS", deleted.operationStatus());
         verify(provisioner).deleteStandalone("AWS::EC2::VPC", "vpc-account-a", "us-east-1",
-                "111111111111", Map.of("VpcId", "vpc-account-a"));
+                Map.of("VpcId", "vpc-account-a"));
     }
 
     @Test
     void restoresAccountOwnersAndRequestStateFromMetadataStores() throws Exception {
-        CloudFormationResourceProvisioner provisioner = mock(CloudFormationResourceProvisioner.class);
+        CfnResourceDispatcher provisioner = mock(CfnResourceDispatcher.class);
         StackResource resource = new StackResource();
         resource.setPhysicalId("igw-persisted");
         when(provisioner.provisionStandalone(eq("AWS::EC2::InternetGateway"),
@@ -120,7 +118,7 @@ class CloudControlServiceTest {
         ObjectMapper mapper = new ObjectMapper();
         CloudControlService service = new CloudControlService(
                 mock(S3Service.class), ec2Service, mock(IamService.class),
-                mock(CloudFormationResourceProvisioner.class), mapper);
+                mock(CfnResourceDispatcher.class), mapper);
 
         String properties = service.listResources("us-east-1", "AWS::EC2::VPC").getFirst().properties();
         JsonNode tags = mapper.readTree(properties).path("Tags");
@@ -140,7 +138,7 @@ class CloudControlServiceTest {
     void listResourcesRejectsARealButUnbackedTypeInsteadOfReturningEmpty() {
         CloudControlService service = new CloudControlService(
                 mock(S3Service.class), mock(Ec2Service.class), mock(IamService.class),
-                mock(CloudFormationResourceProvisioner.class), new ObjectMapper());
+                mock(CfnResourceDispatcher.class), new ObjectMapper());
 
         AwsException e = assertThrows(AwsException.class,
                 () -> service.listResources("us-east-1", "AWS::SQS::Queue"));
@@ -153,7 +151,7 @@ class CloudControlServiceTest {
     void listResourcesRejectsATypeThatDoesNotExistInAwsAtAll() {
         CloudControlService service = new CloudControlService(
                 mock(S3Service.class), mock(Ec2Service.class), mock(IamService.class),
-                mock(CloudFormationResourceProvisioner.class), new ObjectMapper());
+                mock(CfnResourceDispatcher.class), new ObjectMapper());
 
         AwsException e = assertThrows(AwsException.class,
                 () -> service.listResources("us-east-1", "AWS::NoSuch::Type"));
@@ -168,7 +166,7 @@ class CloudControlServiceTest {
         when(s3Service.listBuckets()).thenReturn(List.of());
         CloudControlService service = new CloudControlService(
                 s3Service, mock(Ec2Service.class), mock(IamService.class),
-                mock(CloudFormationResourceProvisioner.class), new ObjectMapper());
+                mock(CfnResourceDispatcher.class), new ObjectMapper());
 
         assertTrue(service.listResources("us-east-1", "AWS::S3::Bucket").isEmpty());
     }

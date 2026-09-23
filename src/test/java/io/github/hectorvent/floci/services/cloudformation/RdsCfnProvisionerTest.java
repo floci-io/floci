@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceDispatcher;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.UpdateCleanupResult;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.rds.RdsService;
@@ -66,7 +67,7 @@ class RdsCfnProvisionerTest {
     private RdsService rdsService;
     private SecretsManagerService secretsManagerService;
     private SsmService ssmService;
-    private CloudFormationResourceProvisioner provisioner;
+    private CfnResourceDispatcher provisioner;
     private Function<String, String> importResolver;
     private Map<String, Boolean> conditions;
 
@@ -122,7 +123,7 @@ class RdsCfnProvisionerTest {
      */
     private StackResource provisionUpdate(String logicalId, String type, String json, String existingPhysicalId) {
         return provisioner.provision(logicalId, type, props(json), engine(),
-                "us-east-1", "000000000000", "my-stack", existingPhysicalId);
+                "us-east-1", "000000000000", "my-stack", existingPhysicalId, Map.of());
     }
 
     @Test

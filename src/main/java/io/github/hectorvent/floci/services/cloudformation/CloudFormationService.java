@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.services.cloudformation.model.StackEvent;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.cloudformation.model.TemplateSummary;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnDynamicReferences;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceDispatcher;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnRollback;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.UpdateCleanupResult;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -75,7 +76,7 @@ public class CloudFormationService implements ResourceProvider {
                 new ThreadPoolExecutor.AbortPolicy());
     }
 
-    private final CloudFormationResourceProvisioner provisioner;
+    private final CfnResourceDispatcher dispatcher;
     private final S3Service s3Service;
     private final SsmService ssmService;
     private final CfnDynamicReferences dynamicReferences;
@@ -94,12 +95,12 @@ public class CloudFormationService implements ResourceProvider {
 
 
     @Inject
-    public CloudFormationService(CloudFormationResourceProvisioner provisioner, S3Service s3Service,
+    public CloudFormationService(CfnResourceDispatcher dispatcher, S3Service s3Service,
                                  SsmService ssmService, CfnDynamicReferences dynamicReferences,
                                  ObjectMapper objectMapper, EmulatorConfig config,
                                  RegionResolver regionResolver, Clock clock,
                                  StorageFactory storageFactory) {
-        this.provisioner = provisioner;
+        this.dispatcher = dispatcher;
         this.s3Service = s3Service;
         this.ssmService = ssmService;
         this.dynamicReferences = dynamicReferences;
@@ -1323,7 +1324,7 @@ public class CloudFormationService implements ResourceProvider {
                                 props.isMissingNode() ? null : props,
                                 engine, region, accountId, isCreate, previousResource);
                     } else {
-                        resource = provisioner.provision(logicalId, type, props.isMissingNode() ? null : props,
+                        resource = dispatcher.provision(logicalId, type, props.isMissingNode() ? null : props,
                                 engine, region, accountId, stack.getStackName(),
                                 resource.getPhysicalId(), resource.getAttributes(),
                                 event -> addEvent(stack, logicalId, event.getPhysicalResourceId(), type,
@@ -1355,21 +1356,21 @@ public class CloudFormationService implements ResourceProvider {
                         // A provisioner that keeps the failed attempt's identity and tracking for
                         // its own rollback is not restored here; the rollback walker owns it.
                         if (!isCreate && previousResource != null
-                                && !provisioner.retainsFailedUpdateState(resource)) {
+                                && !dispatcher.retainsFailedUpdateState(resource)) {
                             // Provisioners work on a copy of the stored resource metadata. Keep the
                             // last known-good identity and status when an update attempt fails so a
                             // later retry or stack deletion still manages the original resource.
                             // Preserve any additional resources that the failed attempt could not
                             // clean up, otherwise restoring this object would orphan them.
-                            provisioner.mergeFailedUpdateResourceTracking(previousResource, resource);
+                            dispatcher.mergeFailedUpdateResourceTracking(previousResource, resource);
                             String rollbackFailure = resource.getAttributes().get(
-                                    CloudFormationResourceProvisioner.UPDATE_ROLLBACK_FAILURE_ATTR);
+                                    CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR);
                             if (rollbackFailure == null) {
                                 // The rollback walker must know this resource is already restored;
                                 // otherwise an earlier UPDATE_COMPLETE status looks like an
                                 // unhandled mutation and incorrectly becomes ROLLBACK_FAILED.
                                 previousResource.getAttributes().put(
-                                        CloudFormationResourceProvisioner.UPDATE_ROLLBACK_RESTORED_ATTR,
+                                        CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR,
                                         "true");
                             } else {
                                 // Restoration was attempted eagerly by the provisioner but did not
@@ -1377,7 +1378,7 @@ public class CloudFormationService implements ResourceProvider {
                                 // rollback walker reports UPDATE_ROLLBACK_FAILED rather than claiming
                                 // the stale snapshot is live.
                                 previousResource.getAttributes().put(
-                                        CloudFormationResourceProvisioner.UPDATE_ROLLBACK_FAILURE_ATTR,
+                                        CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR,
                                         rollbackFailure);
                             }
                             stack.getResources().put(logicalId, previousResource);
@@ -1556,7 +1557,7 @@ public class CloudFormationService implements ResourceProvider {
         List<StackResource> resources = resourcesInCreationOrder(stack, region);
         Collections.reverse(resources);
         for (StackResource resource : resources) {
-            String cleanupPhysicalId = provisioner.updateCleanupPhysicalId(resource);
+            String cleanupPhysicalId = dispatcher.updateCleanupPhysicalId(resource);
             if (cleanupPhysicalId != null) {
                 addEvent(
                         stack,
@@ -1567,7 +1568,7 @@ public class CloudFormationService implements ResourceProvider {
                         null);
             }
             while (true) {
-                UpdateCleanupResult result = provisioner.completeUpdate(resource);
+                UpdateCleanupResult result = dispatcher.completeUpdate(resource);
                 if (!result.applicable()) {
                     break;
                 }
@@ -1581,7 +1582,7 @@ public class CloudFormationService implements ResourceProvider {
                                 "DELETE_COMPLETE",
                                 null);
                     }
-                    provisioner.clearUpdate(resource);
+                    dispatcher.clearUpdate(resource);
                     break;
                 }
                 if (result.attempts() < 3) {
@@ -1600,7 +1601,7 @@ public class CloudFormationService implements ResourceProvider {
                         resource.getResourceType(),
                         "DELETE_FAILED",
                         reason);
-                provisioner.clearUpdate(resource);
+                dispatcher.clearUpdate(resource);
                 break;
             }
         }
@@ -1629,7 +1630,7 @@ public class CloudFormationService implements ResourceProvider {
 
     private boolean hasReplacementUpdates(Stack stack) {
         return stack.resourcesSnapshot().values().stream()
-                .anyMatch(provisioner::hasReplacementUpdate);
+                .anyMatch(dispatcher::hasReplacementUpdate);
     }
 
     private boolean hasRemovedOrConditionFalseResources(Stack stack, JsonNode resources, Map<String, Boolean> conditions) {
@@ -1666,7 +1667,7 @@ public class CloudFormationService implements ResourceProvider {
                     "AWS::CloudFormation::Stack", "DELETE_IN_PROGRESS", null);
             deleteStackResources(child, region, accountId);
         } else {
-            provisioner.delete(resource, region);
+            dispatcher.delete(resource, region);
         }
     }
 
@@ -1754,17 +1755,17 @@ public class CloudFormationService implements ResourceProvider {
                             "Resource creation cancelled during update rollback");
                     removedResources.add(resource.getLogicalId());
                 } else if (resource.getAttributes().containsKey(
-                        CloudFormationResourceProvisioner.UPDATE_ROLLBACK_FAILURE_ATTR)) {
+                        CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR)) {
                     String reason = resource.getAttributes().remove(
-                            CloudFormationResourceProvisioner.UPDATE_ROLLBACK_FAILURE_ATTR);
+                            CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR);
                     failures.add(resource.getLogicalId());
                     resource.setStatus("UPDATE_FAILED");
                     resource.setStatusReason(reason);
                     addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                             resource.getResourceType(), "UPDATE_FAILED", reason);
                 } else if ("true".equals(resource.getAttributes().remove(
-                        CloudFormationResourceProvisioner.UPDATE_ROLLBACK_RESTORED_ATTR))
-                        || provisioner.rollbackUpdate(resource,
+                        CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR))
+                        || dispatcher.rollbackUpdate(resource,
                                 event -> addEvent(stack, resource.getLogicalId(), event.getPhysicalResourceId(),
                                         resource.getResourceType(), event.getResourceStatus(), event.getResourceStatusReason()))) {
                     resource.setStatus(previous.getStatus());
@@ -2044,7 +2045,7 @@ public class CloudFormationService implements ResourceProvider {
                         || "UPDATE_COMPLETE".equals(resource.getStatus())
                         || "DELETE_FAILED".equals(resource.getStatus())
                         || ("UPDATE_FAILED".equals(resource.getStatus())
-                                && provisioner.hasPendingRollbackCleanup(resource));
+                                && dispatcher.hasPendingRollbackCleanup(resource));
                 if (resource.getPhysicalId() == null || !deletable) {
                     continue;
                 }

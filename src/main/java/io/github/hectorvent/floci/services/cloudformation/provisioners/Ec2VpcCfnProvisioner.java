@@ -15,7 +15,7 @@ import java.util.Set;
 
 /**
  * CloudFormation provisioning for {@code AWS::EC2::VPC}. Extracted verbatim from
- * {@code CloudFormationResourceProvisioner} as part of the per-service decomposition.
+ * the former CloudFormation monolith as part of the per-service decomposition.
  */
 @ApplicationScoped
 public class Ec2VpcCfnProvisioner implements CfnResourceProvisioner {

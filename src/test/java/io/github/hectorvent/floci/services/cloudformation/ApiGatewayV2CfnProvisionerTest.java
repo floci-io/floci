@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.apigatewayv2.model.Authorizer;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Route;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewayV2CfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceDispatcher;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudFormationResourceRegistry;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import org.junit.jupiter.api.BeforeEach;
@@ -37,7 +38,7 @@ class ApiGatewayV2CfnProvisionerTest {
     private static final String API_ID = "api-123";
     private final ObjectMapper mapper = new ObjectMapper();
     private ApiGatewayV2Service apiGatewayV2Service;
-    private CloudFormationResourceProvisioner provisioner;
+    private CfnResourceDispatcher provisioner;
 
     @BeforeEach
     void setUp() {

@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.ChangeSet;
 import io.github.hectorvent.floci.services.cloudformation.model.Stack;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceDispatcher;
 import io.quarkus.arc.ClientProxy;
 import io.quarkus.test.junit.QuarkusMock;
 import io.quarkus.test.junit.QuarkusTest;
@@ -35,11 +36,10 @@ import static org.mockito.Mockito.withSettings;
  * provisioning, then checks that the execution it rejects leaves its stack and change set as
  * they were.
  *
- * <p>The provisioner bean is swapped for a mock whose default answer blocks {@code provision}
- * for this test's stacks and forwards everything else to the real provisioner. The answer
- * recognises those calls by method name and stack name rather than by stubbing one overload,
- * because the service picks whichever {@code provision} overload the current main branch has,
- * and a stubbing tied to an older overload silently returns null once main adds a new one.
+ * <p>The dispatcher bean is swapped for a mock whose default answer blocks {@code provision}
+ * for this test's stacks and forwards everything else to the real dispatcher. The answer
+ * recognises those calls by method name and stack name rather than by stubbing one overload, so
+ * it does not depend on which {@code provision} overload the service calls.
  */
 @QuarkusTest
 class CloudFormationServiceRestoreIntegrationTest {
@@ -57,20 +57,20 @@ class CloudFormationServiceRestoreIntegrationTest {
     CloudFormationService service;
 
     @Inject
-    CloudFormationResourceProvisioner provisioner;
+    CfnResourceDispatcher provisioner;
 
     private final CountDownLatch activeOperations = new CountDownLatch(ACTIVE_OPERATIONS);
     private final CountDownLatch releaseOperations = new CountDownLatch(1);
-    private CloudFormationResourceProvisioner blockingProvisioner;
+    private CfnResourceDispatcher blockingProvisioner;
 
     @BeforeEach
     void blockProvisioningForTestStacks() {
         Answer<Object> realProvisioner = AdditionalAnswers.delegatesTo(ClientProxy.unwrap(provisioner));
-        blockingProvisioner = Mockito.mock(CloudFormationResourceProvisioner.class,
+        blockingProvisioner = Mockito.mock(CfnResourceDispatcher.class,
                 withSettings().defaultAnswer(invocation -> isTestStackProvision(invocation)
                         ? provisionAfterRelease(invocation)
                         : realProvisioner.answer(invocation)));
-        QuarkusMock.installMockForType(blockingProvisioner, CloudFormationResourceProvisioner.class);
+        QuarkusMock.installMockForType(blockingProvisioner, CfnResourceDispatcher.class);
     }
 
     @Test

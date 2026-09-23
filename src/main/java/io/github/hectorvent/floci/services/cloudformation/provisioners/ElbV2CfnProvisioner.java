@@ -24,7 +24,7 @@ import java.util.UUID;
 /**
  * CloudFormation provisioning for the Elastic Load Balancing v2 types,
  * {@code AWS::ElasticLoadBalancingV2::LoadBalancer}, {@code TargetGroup}, {@code Listener} and
- * {@code ListenerRule}, moved out of the {@code CloudFormationResourceProvisioner} switch.
+ * {@code ListenerRule}, moved out of the former CloudFormation monolith's switch.
  */
 @ApplicationScoped
 public class ElbV2CfnProvisioner implements CfnResourceProvisioner {

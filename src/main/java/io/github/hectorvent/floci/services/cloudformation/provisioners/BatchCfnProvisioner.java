@@ -19,7 +19,7 @@ import java.util.function.Function;
 /**
  * CloudFormation provisioning for Batch: {@code AWS::Batch::ComputeEnvironment},
  * {@code AWS::Batch::JobQueue} and {@code AWS::Batch::JobDefinition}. Extracted from
- * {@code CloudFormationResourceProvisioner}.
+ * the former CloudFormation monolith.
  *
  * <p>The template property names are PascalCase and {@link BatchService} speaks the wire
  * shape's camelCase, so every arm builds a request node rather than passing properties

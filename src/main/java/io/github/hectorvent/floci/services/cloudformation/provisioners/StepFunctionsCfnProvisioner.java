@@ -29,7 +29,7 @@ import java.util.regex.Pattern;
 /**
  * Provisions {@code AWS::StepFunctions::StateMachine}.
  *
- * <p>Extracted from {@code CloudFormationResourceProvisioner}. This type carried the last
+ * <p>Extracted from the former CloudFormation monolith. This type carried the last
  * fall-through arm in that class's five update-cleanup hooks, so moving it here reduces every
  * one of them to plain registry delegation: a replacement's bookkeeping, its retry budget and
  * its rollback now live beside the code that creates the replacement.

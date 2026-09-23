@@ -14,7 +14,7 @@ import java.util.function.Consumer;
 /**
  * The per-provision context every resource handler drew from: the template engine (for resolving
  * intrinsic functions in properties) plus the region/account/stack it is being created in. The
- * helpers are lifted verbatim from {@code CloudFormationResourceProvisioner}'s private methods
+ * helpers were lifted verbatim from the former CloudFormation monolith's private methods
  * so extracted provisioners produce byte-identical physical ids and resolved values.
  */
 public record ProvisionContext(CloudFormationTemplateEngine engine, String region,

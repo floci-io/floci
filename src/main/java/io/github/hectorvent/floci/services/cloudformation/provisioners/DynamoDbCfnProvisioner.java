@@ -24,7 +24,7 @@ import java.util.Set;
  * Provisions {@code AWS::DynamoDB::Table}, {@code AWS::DynamoDB::GlobalTable} and the CDK legacy
  * global-table custom resource {@code Custom::DynamoDBReplica}.
  *
- * <p>Extracted from {@code CloudFormationResourceProvisioner}. A global table is provisioned as a
+ * <p>Extracted from the former CloudFormation monolith. A global table is provisioned as a
  * plain table and then its {@code Replicas} property is reconciled against the tracked replica
  * regions: declared regions are added and dropped ones removed, so an UpdateStack that changes the
  * Replicas list converges. The deployment region is served by the table itself and is filtered out

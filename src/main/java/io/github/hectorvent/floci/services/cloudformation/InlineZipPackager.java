@@ -14,8 +14,7 @@ import java.util.zip.ZipOutputStream;
  * {@code cfn-response} (Node.js) / {@code cfnresponse} (Python) module into ZipFile
  * packages so custom-resource handlers can send their CloudFormation callbacks, and
  * Solutions-style templates (e.g. Landing Zone Accelerator's installer) rely on it.
- * Lives outside {@code CloudFormationResourceProvisioner} so the eventual Lambda
- * provisioner extraction can take it along unchanged.</p>
+ * Kept separate from {@code LambdaCfnProvisioner} so other callers can share it unchanged.</p>
  */
 public final class InlineZipPackager {
 

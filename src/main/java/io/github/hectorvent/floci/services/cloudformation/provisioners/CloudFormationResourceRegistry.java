@@ -12,8 +12,8 @@ import java.util.Set;
 
 /**
  * Maps a CloudFormation resource type to the {@link CfnResourceProvisioner} that serves it.
- * {@code CloudFormationResourceProvisioner} consults this first and falls through to its own
- * switch for types not yet extracted, so the two coexist during the incremental migration.
+ * {@code CfnResourceDispatcher} consults this for every type; a type nothing here serves is stubbed
+ * by the dispatcher, never provisioned.
  */
 @ApplicationScoped
 public class CloudFormationResourceRegistry {

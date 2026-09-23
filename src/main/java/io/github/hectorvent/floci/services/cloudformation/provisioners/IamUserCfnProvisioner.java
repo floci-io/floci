@@ -22,7 +22,7 @@ import java.util.Set;
 
 /**
  * CloudFormation provisioning for {@code AWS::IAM::User}, moved out of the
- * {@code CloudFormationResourceProvisioner} switch.
+ * former CloudFormation monolith's switch.
  */
 @ApplicationScoped
 public class IamUserCfnProvisioner implements CfnResourceProvisioner {

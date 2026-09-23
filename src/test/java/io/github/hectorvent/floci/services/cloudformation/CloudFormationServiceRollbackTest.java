@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudformation.model.Stack;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnDynamicReferences;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceDispatcher;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.ssm.SsmService;
 import org.junit.jupiter.api.BeforeEach;
@@ -35,12 +36,12 @@ class CloudFormationServiceRollbackTest {
     private static final String ACCOUNT = "000000000000";
     private static final String REGION = "us-east-1";
 
-    private CloudFormationResourceProvisioner provisioner;
+    private CfnResourceDispatcher provisioner;
     private CloudFormationService service;
 
     @BeforeEach
     void setUp() {
-        provisioner = mock(CloudFormationResourceProvisioner.class);
+        provisioner = mock(CfnResourceDispatcher.class);
         EmulatorConfig config = mock(EmulatorConfig.class);
         when(config.defaultAccountId()).thenReturn(ACCOUNT);
 

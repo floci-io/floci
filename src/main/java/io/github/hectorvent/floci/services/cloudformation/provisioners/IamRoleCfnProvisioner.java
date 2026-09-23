@@ -21,7 +21,7 @@ import java.util.Set;
 
 /**
  * CloudFormation provisioning for {@code AWS::IAM::Role}, moved out of the
- * {@code CloudFormationResourceProvisioner} switch. The other IAM types (User, AccessKey, Policy,
+ * former CloudFormation monolith's switch. The other IAM types (User, AccessKey, Policy,
  * ManagedPolicy, InstanceProfile) still live there and share {@link CfnRollback} with this class.
  */
 @ApplicationScoped

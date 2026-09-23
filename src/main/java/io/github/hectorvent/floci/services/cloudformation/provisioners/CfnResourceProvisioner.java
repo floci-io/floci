@@ -8,8 +8,8 @@ import java.util.Set;
 import java.util.function.Consumer;
 
 /**
- * Provisions and deletes the CloudFormation resource types for a single service, replacing one
- * arm of the switch in {@code CloudFormationResourceProvisioner}. Implementations inject only
+ * Provisions and deletes the CloudFormation resource types for a single service. Implementations
+ * inject only
  * the service they wrap and are discovered via CDI by {@link CloudFormationResourceRegistry}.
  *
  * <p>{@code provision} mutates the passed {@link StackResource} in place — setting its physical
