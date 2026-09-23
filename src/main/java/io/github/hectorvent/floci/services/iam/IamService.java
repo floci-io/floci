@@ -46,6 +46,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.function.Function;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 /**
  * Core IAM business logic — users, groups, roles, policies, access keys, instance profiles.
@@ -457,7 +458,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                                 + "refusing to apply an update meant for the original user.", 409);
             }
             if (newUserName != null && !newUserName.equals(userName)) {
-                boolean nameTaken = users.scan(k -> true).stream()
+                boolean nameTaken = resourcesInCurrentAccount(users)
                         .filter(existing -> !existing.getUserId().equals(user.getUserId()))
                         .anyMatch(existing -> existing.getUserName().equalsIgnoreCase(newUserName));
                 if (nameTaken) {
@@ -540,34 +541,42 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     public void updateGroup(String groupName, String newGroupName, String newPath) {
         validateIamResourceName(groupName, "GroupName");
-        if (newGroupName != null) validateIamResourceName(newGroupName, "NewGroupName");
+        if (newGroupName != null) {
+            validateIamResourceName(newGroupName, "NewGroupName");
+        }
         validateIamPath(newPath, "NewPath");
-        IamGroup group = getGroup(groupName);
-        if (newGroupName != null && !newGroupName.equals(groupName)) {
-            if (groups.get(newGroupName).isPresent()) {
-                throw new AwsException("EntityAlreadyExists",
-                        "Group with name " + newGroupName + " already exists.", 409);
+        synchronized (resourceNameLock) {
+            IamGroup group = getGroup(groupName);
+            if (newGroupName != null && !newGroupName.equals(groupName)) {
+                boolean nameTaken = resourcesInCurrentAccount(groups)
+                        .filter(existing -> !existing.getGroupId().equals(group.getGroupId()))
+                        .anyMatch(existing -> existing.getGroupName().equalsIgnoreCase(newGroupName));
+                if (nameTaken) {
+                    throw new AwsException("EntityAlreadyExists",
+                            "Group with name " + newGroupName + " already exists.", 409);
+                }
+                groups.delete(groupName);
+                group.setGroupName(newGroupName);
+                if (newPath != null) {
+                    group.setPath(normalizePath(newPath));
+                }
+                group.setArn(iamArn("group", group.getPath(), newGroupName));
+                groups.put(newGroupName, group);
+                // Keep member references in sync so group policies still resolve after a rename.
+                for (String memberName : group.getUserNames()) {
+                    users.get(memberName).ifPresent(member -> {
+                        member.getGroupNames().remove(groupName);
+                        member.getGroupNames().add(newGroupName);
+                        users.put(memberName, member);
+                    });
+                }
+            } else {
+                if (newPath != null) {
+                    group.setPath(normalizePath(newPath));
+                    group.setArn(iamArn("group", group.getPath(), groupName));
+                }
+                groups.put(groupName, group);
             }
-            groups.delete(groupName);
-            group.setGroupName(newGroupName);
-            if (newPath != null) group.setPath(normalizePath(newPath));
-            group.setArn(iamArn("group", group.getPath(), newGroupName));
-            groups.put(newGroupName, group);
-            // Members still carry the old name in their own groupNames list — without this,
-            // ListGroupsForUser drops the renamed group and its policies stop resolving for them.
-            for (String memberName : group.getUserNames()) {
-                users.get(memberName).ifPresent(member -> {
-                    member.getGroupNames().remove(groupName);
-                    member.getGroupNames().add(newGroupName);
-                    users.put(memberName, member);
-                });
-            }
-        } else {
-            if (newPath != null) {
-                group.setPath(normalizePath(newPath));
-                group.setArn(iamArn("group", group.getPath(), groupName));
-            }
-            groups.put(groupName, group);
         }
     }
 
@@ -2629,9 +2638,20 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private static <T> boolean containsNameIgnoreCase(StorageBackend<String, T> storage,
                                                        Function<T, String> nameExtractor,
                                                        String requestedName) {
-        return storage.scan(key -> true).stream()
+        return resourcesInCurrentAccount(storage)
                 .map(nameExtractor)
                 .anyMatch(existingName -> existingName != null && existingName.equalsIgnoreCase(requestedName));
+    }
+
+    private static <T> Stream<T> resourcesInCurrentAccount(StorageBackend<String, T> storage) {
+        if (storage instanceof AccountAwareStorageBackend<T> accountAware) {
+            String accountId = accountAware.accountId();
+            // Include unmigrated legacy names, which belong to the configured default account.
+            return accountAware.scanAllAccountEntries(key -> true).stream()
+                    .filter(entry -> accountId.equals(entry.accountId()))
+                    .map(entry -> entry.value());
+        }
+        return storage.scan(key -> true).stream();
     }
 
     private static String normalizePath(String path) {

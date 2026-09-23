@@ -83,6 +83,23 @@ class IamCaseInsensitiveNamesIntegrationTest {
                 .body("ErrorResponse.Error.Code", equalTo("EntityAlreadyExists"));
     }
 
+    @Test
+    void updateGroupRejectsCaseCollisionWithoutChangingTheSourceGroup() {
+        iam("CreateGroup", Map.of("GroupName", "CaseGroupRenameTarget")).statusCode(200);
+        iam("CreateGroup", Map.of("GroupName", "CaseGroupRenameSource", "Path", "/original/"))
+                .statusCode(200);
+
+        assertAlreadyExists("UpdateGroup", Map.of(
+                "GroupName", "CaseGroupRenameSource",
+                "NewGroupName", "casegrouprenametarget",
+                "NewPath", "/changed/"));
+
+        iam("GetGroup", Map.of("GroupName", "CaseGroupRenameSource"))
+                .statusCode(200)
+                .body("GetGroupResponse.GetGroupResult.Group.GroupName", equalTo("CaseGroupRenameSource"))
+                .body("GetGroupResponse.GetGroupResult.Group.Path", equalTo("/original/"));
+    }
+
     private static ValidatableResponse iam(String action, Map<String, String> parameters) {
         return iam(AUTHORIZATION, action, parameters);
     }

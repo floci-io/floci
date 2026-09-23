@@ -880,6 +880,36 @@ class IamServiceTest {
     }
 
     @Test
+    void updateGroupRejectsAnotherGroupNameThatDiffersOnlyByCase() {
+        IamGroup target = iamService.createGroup("CaseGroup", "/");
+        IamGroup source = iamService.createGroup("OtherGroup", "/original/");
+
+        AwsException exception = assertThrows(AwsException.class,
+                () -> iamService.updateGroup("OtherGroup", "casegroup", "/changed/"));
+
+        assertEquals("EntityAlreadyExists", exception.getErrorCode());
+        assertEquals(source.getGroupId(), iamService.getGroup("OtherGroup").getGroupId());
+        assertEquals("/original/", iamService.getGroup("OtherGroup").getPath());
+        assertEquals(target.getGroupId(), iamService.getGroup("CaseGroup").getGroupId());
+    }
+
+    @Test
+    void updateGroupAllowsChangingOnlyItsOwnNameCaseAndPreservesMembers() {
+        IamGroup original = iamService.createGroup("CaseGroup", "/original/");
+        iamService.createUser("case-group-member", "/");
+        iamService.addUserToGroup("CaseGroup", "case-group-member");
+
+        iamService.updateGroup("CaseGroup", "casegroup", "/changed/");
+
+        IamGroup renamed = iamService.getGroup("casegroup");
+        assertEquals(original.getGroupId(), renamed.getGroupId());
+        assertEquals("/changed/", renamed.getPath());
+        assertEquals(List.of("case-group-member"), renamed.getUserNames());
+        assertEquals(List.of("casegroup"), iamService.getUser("case-group-member").getGroupNames());
+        assertThrows(AwsException.class, () -> iamService.getGroup("CaseGroup"));
+    }
+
+    @Test
     void updateGroupMalformedNewGroupNameIsRejected() {
         iamService.createGroup("orig-group", "/");
         assertThrows(AwsException.class,
