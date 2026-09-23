@@ -875,7 +875,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         if (policyArn != null && policyArn.startsWith(AwsManagedPolicies.ARN_PREFIX)) {
             IamPolicy managed = awsManagedPolicies.get(policyArn);
             if (managed != null) {
-                return managed;
+                return managedPolicySnapshot(managed, managedPolicyAttachmentCount(policyArn));
             }
             throw new AwsException("NoSuchEntity", "Policy " + policyArn + " does not exist.", 404);
         }
@@ -893,9 +893,65 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      */
     private Optional<IamPolicy> resolvePolicy(String arn) {
         if (arn != null && arn.startsWith(AwsManagedPolicies.ARN_PREFIX)) {
-            return Optional.ofNullable(awsManagedPolicies.get(arn));
+            return Optional.ofNullable(awsManagedPolicies.get(arn))
+                    .map(policy -> managedPolicySnapshot(policy, managedPolicyAttachmentCount(arn)));
         }
         return policies.get(arn);
+    }
+
+    private int managedPolicyAttachmentCount(String policyArn) {
+        return managedPolicyAttachmentCounts().getOrDefault(policyArn, 0);
+    }
+
+    private Map<String, Integer> managedPolicyAttachmentCounts() {
+        Map<String, Integer> counts = new LinkedHashMap<>();
+        users.scan(k -> true).forEach(user -> tallyManagedPolicyAttachments(user.getAttachedPolicyArns(), counts));
+        groups.scan(k -> true).forEach(group -> tallyManagedPolicyAttachments(group.getAttachedPolicyArns(), counts));
+        roles.scan(k -> true).forEach(role -> tallyManagedPolicyAttachments(role.getAttachedPolicyArns(), counts));
+        return counts;
+    }
+
+    private void tallyManagedPolicyAttachments(List<String> policyArns, Map<String, Integer> counts) {
+        for (String policyArn : policyArns) {
+            if (policyArn.startsWith(AwsManagedPolicies.ARN_PREFIX)) {
+                counts.merge(policyArn, 1, Integer::sum);
+            }
+        }
+    }
+
+    private IamPolicy managedPolicySnapshot(IamPolicy catalogPolicy, int attachmentCount) {
+        IamPolicy snapshot = new IamPolicy();
+        snapshot.setPolicyId(catalogPolicy.getPolicyId());
+        snapshot.setPolicyName(catalogPolicy.getPolicyName());
+        snapshot.setPath(catalogPolicy.getPath());
+        snapshot.setArn(catalogPolicy.getArn());
+        snapshot.setDescription(catalogPolicy.getDescription());
+        snapshot.setDefaultVersionId(catalogPolicy.getDefaultVersionId());
+        snapshot.setNextVersionNumber(catalogPolicy.getNextVersionNumber());
+        snapshot.setCreateDate(catalogPolicy.getCreateDate());
+        snapshot.setUpdateDate(catalogPolicy.getUpdateDate());
+        snapshot.setTags(catalogPolicy.getTags());
+        snapshot.setVersions(catalogPolicy.getVersions());
+        snapshot.setAttachmentCount(attachmentCount);
+        return snapshot;
+    }
+
+    private void incrementCustomerManagedPolicyAttachmentCount(IamPolicy policy) {
+        if (policy.getArn().startsWith(AwsManagedPolicies.ARN_PREFIX)) {
+            return;
+        }
+        policy.setAttachmentCount(policy.getAttachmentCount() + 1);
+        policies.put(policy.getArn(), policy);
+    }
+
+    private void decrementCustomerManagedPolicyAttachmentCount(String policyArn) {
+        if (policyArn.startsWith(AwsManagedPolicies.ARN_PREFIX)) {
+            return;
+        }
+        policies.get(policyArn).ifPresent(policy -> {
+            policy.setAttachmentCount(Math.max(0, policy.getAttachmentCount() - 1));
+            policies.put(policyArn, policy);
+        });
     }
 
     private void rejectIfAwsManaged(String policyArn) {
@@ -966,8 +1022,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             // AWS-managed policies are global (account-less arn:aws:iam::aws:policy/... ARN), so
             // every caller sees the full set regardless of the request account — mirroring the
             // getPolicy fix, and keeping the ListPolicies and GetPolicy read paths consistent.
+            Map<String, Integer> attachmentCounts = managedPolicyAttachmentCounts();
             awsManagedPolicies.values().stream()
                     .filter(p -> p.getPath().startsWith(prefix))
+                    .map(p -> managedPolicySnapshot(p, attachmentCounts.getOrDefault(p.getArn(), 0)))
                     .forEach(result::add);
         }
         return result;
@@ -1155,8 +1213,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         if (!user.getAttachedPolicyArns().contains(policyArn)) {
             user.getAttachedPolicyArns().add(policyArn);
             users.put(userName, user);
-            policy.setAttachmentCount(policy.getAttachmentCount() + 1);
-            policies.put(policyArn, policy);
+            incrementCustomerManagedPolicyAttachmentCount(policy);
         }
     }
 
@@ -1167,10 +1224,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                     "Policy " + policyArn + " is not attached to user " + userName + ".", 404);
         }
         users.put(userName, user);
-        policies.get(policyArn).ifPresent(p -> {
-            p.setAttachmentCount(Math.max(0, p.getAttachmentCount() - 1));
-            policies.put(policyArn, p);
-        });
+        decrementCustomerManagedPolicyAttachmentCount(policyArn);
     }
 
     public List<IamPolicy> listAttachedUserPolicies(String userName, String pathPrefix) {
@@ -1190,8 +1244,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         if (!group.getAttachedPolicyArns().contains(policyArn)) {
             group.getAttachedPolicyArns().add(policyArn);
             groups.put(groupName, group);
-            policy.setAttachmentCount(policy.getAttachmentCount() + 1);
-            policies.put(policyArn, policy);
+            incrementCustomerManagedPolicyAttachmentCount(policy);
         }
     }
 
@@ -1202,10 +1255,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                     "Policy " + policyArn + " is not attached to group " + groupName + ".", 404);
         }
         groups.put(groupName, group);
-        policies.get(policyArn).ifPresent(p -> {
-            p.setAttachmentCount(Math.max(0, p.getAttachmentCount() - 1));
-            policies.put(policyArn, p);
-        });
+        decrementCustomerManagedPolicyAttachmentCount(policyArn);
     }
 
     public List<IamPolicy> listAttachedGroupPolicies(String groupName, String pathPrefix) {
@@ -1226,8 +1276,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         if (!role.getAttachedPolicyArns().contains(policyArn)) {
             role.getAttachedPolicyArns().add(policyArn);
             roles.put(roleName, role);
-            policy.setAttachmentCount(policy.getAttachmentCount() + 1);
-            policies.put(policyArn, policy);
+            incrementCustomerManagedPolicyAttachmentCount(policy);
         }
     }
 
@@ -1239,10 +1288,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                     "Policy " + policyArn + " is not attached to role " + roleName + ".", 404);
         }
         roles.put(roleName, role);
-        policies.get(policyArn).ifPresent(p -> {
-            p.setAttachmentCount(Math.max(0, p.getAttachmentCount() - 1));
-            policies.put(policyArn, p);
-        });
+        decrementCustomerManagedPolicyAttachmentCount(policyArn);
     }
 
     public List<IamPolicy> listAttachedRolePolicies(String roleName, String pathPrefix) {
