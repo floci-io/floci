@@ -125,7 +125,7 @@ public class SesSendController {
                         configurationSetName, regionResolver.getAccountId(), region);
                 messageId = sesService.sendRawEmail(fromEmailAddress, allDestinations, rawData,
                         feedbackForwardingAddress, configurationSetName, emailTags, listManagement,
-                        region);
+                        tenantName, region);
             } else if (content.has("Simple")) {
                 if (fromEmailAddress == null || fromEmailAddress.isBlank()) {
                     // AWS returns BadRequestException with a null message body here.
@@ -142,7 +142,8 @@ public class SesSendController {
                 messageId = sesService.sendEmail(fromEmailAddress, toAddresses, ccAddresses,
                         bccAddresses, replyToAddresses, feedbackForwardingAddress,
                         subject, bodyText, bodyHtml,
-                        configurationSetName, emailTags, additionalHeaders, listManagement, region);
+                        configurationSetName, emailTags, additionalHeaders, listManagement,
+                        tenantName, region);
             } else if (content.has("Template")) {
                 if (fromEmailAddress == null || fromEmailAddress.isBlank()) {
                     throw new AwsException("BadRequestException", "Source cannot be empty", 400);
@@ -175,7 +176,7 @@ public class SesSendController {
                     messageId = sesService.sendTemplatedEmail(fromEmailAddress, toAddresses, ccAddresses,
                             bccAddresses, replyToAddresses, feedbackForwardingAddress,
                             resolvedName, templateData,
-                            configurationSetName, emailTags, additionalHeaders, listManagement, region);
+                            configurationSetName, emailTags, additionalHeaders, listManagement, tenantName, region);
                 } else {
                     JsonNode inline = template.path("TemplateContent");
                     String subject = inline.path("Subject").asText(null);
@@ -190,7 +191,7 @@ public class SesSendController {
                     messageId = sesService.sendInlineTemplatedEmail(fromEmailAddress, toAddresses,
                             ccAddresses, bccAddresses, replyToAddresses, feedbackForwardingAddress,
                             subject, text, html, templateData,
-                            configurationSetName, emailTags, additionalHeaders, listManagement, region);
+                            configurationSetName, emailTags, additionalHeaders, listManagement, tenantName, region);
                 }
             } else {
                 throw new AwsException("BadRequestException",
@@ -318,7 +319,7 @@ public class SesSendController {
             List<BulkEmailEntryResult> results = sesService.sendBulkTemplatedEmail(fromEmailAddress,
                     replyToAddresses, feedbackForwardingAddress, subject, text, html,
                     defaultTemplateData, entries, configurationSetName,
-                    defaultEmailTags, defaultHeaders, region);
+                    defaultEmailTags, defaultHeaders, tenantName, region);
 
             ObjectNode response = objectMapper.createObjectNode();
             ArrayNode arr = response.putArray("BulkEmailEntryResults");

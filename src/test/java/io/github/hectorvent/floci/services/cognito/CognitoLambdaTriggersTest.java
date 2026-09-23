@@ -1130,7 +1130,7 @@ class CognitoLambdaTriggersTest {
                 eq(List.of()), eq(List.of()), eq(List.of()), isNull(),
                 eq("TRIGGER-FIRED"),
                 eq("TRIGGER-FIRED code=246962"),
-                any(), any(), eq(List.of()), eq(List.of()), any(), anyString());
+                any(), any(), eq(List.of()), eq(List.of()), any(), isNull(), anyString());
     }
 
     @Test
@@ -1187,7 +1187,7 @@ class CognitoLambdaTriggersTest {
                 any(), any(), any(), isNull(),
                 eq("Your verification code"),
                 eq("Your verification code is 246962."),
-                any(), any(), any(), any(), any(), anyString());
+                any(), any(), any(), any(), any(), isNull(), anyString());
     }
 
     @Test
@@ -1211,7 +1211,7 @@ class CognitoLambdaTriggersTest {
                 any(), any(), any(), isNull(),
                 eq("Your verification code"),
                 eq("Your verification code is 246962."),
-                any(), any(), any(), any(), any(), anyString());
+                any(), any(), any(), any(), any(), isNull(), anyString());
     }
 
     @Test

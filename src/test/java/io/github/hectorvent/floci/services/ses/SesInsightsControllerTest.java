@@ -18,6 +18,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -45,9 +46,12 @@ class SesInsightsControllerTest {
     }
 
     private void vdmEnabled(boolean enabled) {
-        when(accountService.findAccountVdmAttributes(REGION))
-                .thenReturn(enabled ? Optional.of(new AccountVdmAttributes(true, false, false))
-                        : Optional.empty());
+        if (enabled) {
+            return;
+        }
+        doThrow(new AwsException("NotFoundException",
+                "To use this feature you must enable Virtual Deliverability Manager", 404))
+                .when(accountService).requireVdmEnabled(REGION);
     }
 
     @Test
@@ -59,19 +63,8 @@ class SesInsightsControllerTest {
 
         assertEquals("NotFoundException", thrown.getErrorCode());
         assertTrue(thrown.getMessage().contains("Virtual Deliverability Manager"), thrown.getMessage());
-        // The integration test can only infer the ordering from the response; this pins it.
-        verifyNoInteractions(sentEmailService);
-    }
-
-    @Test
-    void vdmConfiguredButDisabledIsStillGated() {
-        when(accountService.findAccountVdmAttributes(REGION))
-                .thenReturn(Optional.of(new AccountVdmAttributes(false, false, false)));
-
-        AwsException thrown = assertThrows(AwsException.class,
-                () -> controller.getMessageInsights(null, "any-id"));
-
-        assertTrue(thrown.getMessage().contains("Virtual Deliverability Manager"), thrown.getMessage());
+        // The integration test can only infer the ordering from the response; this pins it. What
+        // the gate itself decides is SesAccountServiceTest's business.
         verifyNoInteractions(sentEmailService);
     }
 

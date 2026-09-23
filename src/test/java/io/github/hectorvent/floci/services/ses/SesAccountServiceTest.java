@@ -99,4 +99,19 @@ class SesAccountServiceTest {
         assertFalse(service.isDedicatedIpAutoWarmupEnabled(REGION));
         assertTrue(service.isDedicatedIpAutoWarmupEnabled("eu-west-1"));
     }
+
+    @Test
+    void requireVdmEnabled_rejectsAnUnconfiguredRegionAndADisabledOne() {
+        AwsException unconfigured = assertThrows(AwsException.class,
+                () -> service.requireVdmEnabled("eu-north-1"));
+        assertEquals("NotFoundException", unconfigured.getErrorCode());
+        assertEquals("To use this feature you must enable Virtual Deliverability Manager",
+                unconfigured.getMessage());
+
+        service.putAccountVdmAttributes("eu-north-1", new AccountVdmAttributes(false, false, false));
+        assertThrows(AwsException.class, () -> service.requireVdmEnabled("eu-north-1"));
+
+        service.putAccountVdmAttributes("eu-north-1", new AccountVdmAttributes(true, false, false));
+        service.requireVdmEnabled("eu-north-1");
+    }
 }

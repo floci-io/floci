@@ -5,7 +5,6 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.services.ses.model.AccountVdmAttributes;
 import io.github.hectorvent.floci.services.ses.model.EmailInsights;
 import io.github.hectorvent.floci.services.ses.model.InsightsBounce;
 import io.github.hectorvent.floci.services.ses.model.InsightsComplaint;
@@ -25,7 +24,6 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
 import java.util.List;
-import java.util.Optional;
 
 /**
  * SES V2 message insights ({@code /v2/email/insights/{MessageId}/}), the read side of the
@@ -40,9 +38,6 @@ import java.util.Optional;
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
 public class SesInsightsController {
-
-    private static final String VDM_DISABLED_MESSAGE =
-            "To use this feature you must enable Virtual Deliverability Manager";
 
     private final SesSentEmailService sentEmailService;
     private final SesAccountService accountService;
@@ -63,19 +58,12 @@ public class SesInsightsController {
     public Response getMessageInsights(@Context HttpHeaders headers,
                                        @PathParam("messageId") String messageId) {
         String region = regionResolver.resolveRegion(headers);
-        requireVdmEnabled(region);
+        accountService.requireVdmEnabled(region);
         SentEmail email = sentEmailService.find(region, messageId)
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "Message <" + messageId + "> not found for account <"
                                 + regionResolver.getAccountId() + ">", 404));
         return Response.ok(render(email)).build();
-    }
-
-    private void requireVdmEnabled(String region) {
-        Optional<AccountVdmAttributes> vdm = accountService.findAccountVdmAttributes(region);
-        if (vdm.isEmpty() || !vdm.get().vdmEnabled()) {
-            throw new AwsException("NotFoundException", VDM_DISABLED_MESSAGE, 404);
-        }
     }
 
     private ObjectNode render(SentEmail email) {

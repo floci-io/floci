@@ -216,7 +216,7 @@ public class SesService {
                             String subject, String bodyText, String bodyHtml,
                             String configurationSetName, List<MessageTag> emailTags,
                             List<MessageHeader> additionalHeaders, ListManagementOptions listManagement,
-                            String region) {
+                            String tenantName, String region) {
         if (source == null || source.isBlank()) {
             throw new AwsException("InvalidParameterValue", "Source email is required.", 400);
         }
@@ -266,6 +266,8 @@ public class SesService {
         SentEmail email = new SentEmail(messageId, region, source, toAddresses, ccAddresses,
                 bccAddresses, replyToAddresses, subject, bodyText, bodyHtml);
         email.setReturnPath(effectiveReturnPath);
+        email.setConfigurationSetName(firstNonBlank(effectiveConfigSet));
+        email.setTenantName(firstNonBlank(tenantName));
         if (additionalHeaders != null && !additionalHeaders.isEmpty()) {
             email.setHeaders(additionalHeaders);
         }
@@ -310,7 +312,7 @@ public class SesService {
 
     public String sendRawEmail(String source, List<String> destinations, String rawMessage,
                                String returnPath, String configurationSetName, List<MessageTag> emailTags,
-                               ListManagementOptions listManagement, String region) {
+                               ListManagementOptions listManagement, String tenantName, String region) {
         if (rawMessage == null || rawMessage.isBlank()) {
             throw new AwsException("InvalidParameterValue", "RawMessage.Data is required.", 400);
         }
@@ -384,6 +386,8 @@ public class SesService {
                 : firstNonBlank(headers.returnPath(), returnPath, effectiveSource);
         SentEmail email = new SentEmail(messageId, region, effectiveSource, effectiveDestinations, rawMessage);
         email.setReturnPath(effectiveReturnPath);
+        email.setConfigurationSetName(firstNonBlank(effectiveConfigSet));
+        email.setTenantName(firstNonBlank(tenantName));
         // The MIME subject is already parsed for the published events; store it too so
         // GetMessageInsights reports it for a raw send as it does for a simple one. The parser
         // yields "" for a missing header, and an absent subject must stay absent.
@@ -550,7 +554,9 @@ public class SesService {
 
     private record IdentityNotificationTarget(String topicArn, boolean includeHeaders) {}
 
-    private static String extractEmailAddress(String source) {
+    // Package-private: the metric aggregation normalizes a stored Source the same way the
+    // send path does, so "Name <addr>" still matches an EMAIL_IDENTITY dimension.
+    static String extractEmailAddress(String source) {
         int open = source.indexOf('<');
         int close = source.indexOf('>', open + 1);
         if (open >= 0 && close > open) {
@@ -717,6 +723,7 @@ public class SesService {
                 List.of(emailAddress), List.of(), List.of(), List.of(),
                 template.getTemplateSubject(), null, renderedHtml);
         email.setReturnPath(template.getFromEmailAddress());
+        email.setConfigurationSetName(firstNonBlank(effectiveConfigSet));
         email.setInsights(SesMessageInsights.build(List.of(emailAddress),
                 SesRecipientEvents.classify(List.of(emailAddress), suppressedReasons, rejected),
                 email.getSentAt()));
@@ -1426,12 +1433,13 @@ public class SesService {
                                      String returnPath, String templateName, JsonNode templateData,
                                      String configurationSetName, List<MessageTag> emailTags,
                                      List<MessageHeader> additionalHeaders,
-                                     ListManagementOptions listManagement, String region) {
+                                     ListManagementOptions listManagement, String tenantName, String region) {
         EmailTemplate template = templateService.getTemplate(templateName, region);
         return sendInlineTemplatedEmail(source, toAddresses, ccAddresses, bccAddresses,
                 replyToAddresses, returnPath, template.getSubject(), template.getTextPart(),
                 template.getHtmlPart(), templateData,
-                configurationSetName, emailTags, additionalHeaders, listManagement, region);
+                configurationSetName, emailTags, additionalHeaders, listManagement,
+                tenantName, region);
     }
 
     /**
@@ -1456,13 +1464,14 @@ public class SesService {
                                             JsonNode templateData,
                                             String configurationSetName, List<MessageTag> emailTags,
                                             List<MessageHeader> additionalHeaders,
-                                            ListManagementOptions listManagement, String region) {
+                                            ListManagementOptions listManagement, String tenantName, String region) {
         requireInlineTemplateContent(subject, textPart, htmlPart);
         return sendEmail(source, toAddresses, ccAddresses, bccAddresses, replyToAddresses, returnPath,
                 SesTemplateService.applyTemplateData(subject, templateData),
                 SesTemplateService.applyTemplateData(textPart, templateData),
                 SesTemplateService.applyTemplateData(htmlPart, templateData),
-                configurationSetName, emailTags, additionalHeaders, listManagement, region);
+                configurationSetName, emailTags, additionalHeaders, listManagement,
+                tenantName, region);
     }
 
     public List<BulkEmailEntryResult> sendBulkTemplatedEmail(String source,
@@ -1474,7 +1483,7 @@ public class SesService {
                                                               String configurationSetName,
                                                               List<MessageTag> defaultEmailTags,
                                                               List<MessageHeader> defaultHeaders,
-                                                              String region) {
+                                                              String tenantName, String region) {
         if (source == null || source.isBlank()) {
             throw new AwsException("InvalidParameterValue", "Source email is required.", 400);
         }
@@ -1514,7 +1523,7 @@ public class SesService {
                         SesTemplateService.applyTemplateData(subject, merged),
                         SesTemplateService.applyTemplateData(textPart, merged),
                         SesTemplateService.applyTemplateData(htmlPart, merged),
-                        configurationSetName, mergedTags, mergedHeaders, null, region);
+                        configurationSetName, mergedTags, mergedHeaders, null, tenantName, region);
                 results.add(BulkEmailEntryResult.success(messageId));
             } catch (AwsException e) {
                 results.add(BulkEmailEntryResult.failure(

@@ -254,7 +254,7 @@ public class SesQueryHandler {
         // ListManagementOptions is a v2-only SendEmail field; the v1 Query API has no equivalent.
         String messageId = sesService.sendEmail(source, toAddresses, ccAddresses, bccAddresses,
                 replyToAddresses, returnPath, subject, bodyText, bodyHtml, configurationSetName,
-                emailTags, List.of(), null, region);
+                emailTags, List.of(), null, null, region);
 
         String result = new XmlBuilder().elem("MessageId", messageId).build();
         return Response.ok(AwsQueryResponse.envelope("SendEmail", AwsNamespaces.SES, result)).build();
@@ -272,7 +272,7 @@ public class SesQueryHandler {
         List<MessageTag> emailTags = extractMessageTags(params, "Tags");
 
         String messageId = sesService.sendRawEmail(source, destinations, rawMessage,
-                null, configurationSetName, emailTags, null, region);
+                null, configurationSetName, emailTags, null, null, region);
 
         String result = new XmlBuilder().elem("MessageId", messageId).build();
         return Response.ok(AwsQueryResponse.envelope("SendRawEmail", AwsNamespaces.SES, result)).build();
@@ -606,7 +606,7 @@ public class SesQueryHandler {
         List<MessageTag> emailTags = extractMessageTags(params, "Tags");
         String messageId = sesService.sendTemplatedEmail(source, toAddresses, ccAddresses,
                 bccAddresses, replyToAddresses, returnPath, resolvedName, templateData,
-                configurationSetName, emailTags, List.of(), null, region);
+                configurationSetName, emailTags, List.of(), null, null, region);
 
         String result = new XmlBuilder().elem("MessageId", messageId).build();
         return Response.ok(AwsQueryResponse.envelope("SendTemplatedEmail", AwsNamespaces.SES, result)).build();
@@ -753,7 +753,7 @@ public class SesQueryHandler {
         List<BulkEmailEntryResult> results = sesService.sendBulkTemplatedEmail(source, replyToAddresses,
                 returnPath, template.getSubject(), template.getTextPart(), template.getHtmlPart(),
                 defaultTemplateData, entries, configurationSetName,
-                defaultEmailTags, List.of(), region);
+                defaultEmailTags, List.of(), null, region);
 
         XmlBuilder xml = new XmlBuilder().start("Status");
         for (BulkEmailEntryResult result : results) {

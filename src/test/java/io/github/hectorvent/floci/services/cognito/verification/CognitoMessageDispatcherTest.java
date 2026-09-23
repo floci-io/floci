@@ -50,7 +50,7 @@ class CognitoMessageDispatcherTest {
             eq("Verify your account"),
             eq("Hi! Your code is 123456."),
             isNull(), isNull(), eq(List.of()), eq(List.of()),
-            isNull(), eq("us-east-1"));
+            isNull(), isNull(), eq("us-east-1"));
         verifyNoInteractions(sns);
     }
 
@@ -123,7 +123,7 @@ class CognitoMessageDispatcherTest {
             eq(List.of()), eq(List.of()), eq(List.of()), isNull(),
             eq("Your verification code"),
             eq("Your verification code is 111222."),
-            isNull(), isNull(), eq(List.of()), eq(List.of()), isNull(), eq("us-east-1"));
+            isNull(), isNull(), eq(List.of()), eq(List.of()), isNull(), isNull(), eq("us-east-1"));
     }
 
     @Test
@@ -139,7 +139,7 @@ class CognitoMessageDispatcherTest {
             eq(List.of()), eq(List.of()), eq(List.of()), isNull(),
             anyString(),
             eq("Welcome, please verify.\nCode: 999000"),
-            isNull(), isNull(), eq(List.of()), eq(List.of()), isNull(), eq("us-east-1"));
+            isNull(), isNull(), eq(List.of()), eq(List.of()), isNull(), isNull(), eq("us-east-1"));
     }
 
     @Test
@@ -152,7 +152,7 @@ class CognitoMessageDispatcherTest {
 
         verify(ses).sendEmail(anyString(), eq(List.of("alice@example.com")),
             any(), any(), any(), isNull(), anyString(), anyString(), isNull(), isNull(), any(), any(),
-            isNull(), anyString());
+            isNull(), isNull(), anyString());
         verifyNoInteractions(sns);
     }
 

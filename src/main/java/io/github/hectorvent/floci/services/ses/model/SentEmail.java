@@ -67,6 +67,20 @@ public class SentEmail {
     private List<MessageTag> emailTags;
 
     /**
+     * The configuration set the send resolved to, which BatchGetMetricData filters on. Absent when
+     * the send named none and no default applied.
+     */
+    @JsonProperty("ConfigurationSetName")
+    private String configurationSetName;
+
+    /**
+     * The tenant the send named, which the TENANT_NAME metric dimension filters on. Absent for a
+     * send that named none, and always absent on the v1 surface, which has no tenants.
+     */
+    @JsonProperty("TenantName")
+    private String tenantName;
+
+    /**
      * Per-recipient event timelines, derived at send time and served by {@code GetMessageInsights}.
      */
     @JsonProperty("Insights")
@@ -166,6 +180,14 @@ public class SentEmail {
 
     public List<MessageTag> getEmailTags() { return emailTags; }
     public void setEmailTags(List<MessageTag> emailTags) { this.emailTags = emailTags; }
+
+    public String getTenantName() { return tenantName; }
+    public void setTenantName(String tenantName) { this.tenantName = tenantName; }
+
+    public String getConfigurationSetName() { return configurationSetName; }
+    public void setConfigurationSetName(String configurationSetName) {
+        this.configurationSetName = configurationSetName;
+    }
 
     public List<EmailInsights> getInsights() { return insights; }
     public void setInsights(List<EmailInsights> insights) { this.insights = insights; }

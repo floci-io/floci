@@ -56,6 +56,14 @@ public class SesSentEmailService {
         return emailStore.scan(k -> k.startsWith(prefix)).size();
     }
 
+    /**
+     * Every stored message for one region, for the metric aggregation behind BatchGetMetricData.
+     */
+    public List<SentEmail> listInRegion(String region) {
+        String prefix = "email::" + region + "::";
+        return emailStore.scan(k -> k.startsWith(prefix));
+    }
+
     public List<SentEmail> listAll() {
         return emailStore.scan(k -> k.startsWith("email::"));
     }
