@@ -46,6 +46,12 @@ class DynamoDbPartiQLHandler {
 
     private Result executeSelect(Stmt.Select stmt, PartiQLExecuteContext ctx, String region) {
         TableDefinition table = service.describeTable(stmt.table(), region);
+        // A vector index is reachable through SearchVectors alone, and PartiQL says so
+        // rather than reporting the index as missing.
+        if (table.findVectorIndex(stmt.index()).isPresent()) {
+            throw new AwsException("ValidationException",
+                    "Scan operation not supported on this index type", 400);
+        }
         // ExecuteStatement omits the index name from the missing-index message,
         // unlike Query/Scan (characterised on real AWS, eu-west-1, 2026-09-02).
         DynamoDbAccessPath accessPath = DynamoDbAccessPath.resolve(table, stmt.index(),
