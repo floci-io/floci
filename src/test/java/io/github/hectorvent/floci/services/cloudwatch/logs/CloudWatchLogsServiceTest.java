@@ -803,6 +803,30 @@ class CloudWatchLogsServiceTest {
     }
 
     @Test
+    void getStoredBytesForLogGroupSumsStreamBytesAndIgnoresOtherGroups() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "stream-1", REGION);
+        service.createLogStream("/app/logs", "stream-2", REGION);
+        service.createLogGroup("/app/other", null, null, REGION);
+        service.createLogStream("/app/other", "stream-1", REGION);
+
+        long now = System.currentTimeMillis();
+        service.putLogEvents("/app/logs", "stream-1",
+                List.of(Map.of("timestamp", now, "message", "one")), REGION);
+        service.putLogEvents("/app/logs", "stream-2",
+                List.of(Map.of("timestamp", now + 1, "message", "two")), REGION);
+        service.putLogEvents("/app/other", "stream-1",
+                List.of(Map.of("timestamp", now + 2, "message", "other")), REGION);
+
+        long expected = service.describeLogStreams("/app/logs", null, REGION).stream()
+                .mapToLong(LogStream::getStoredBytes)
+                .sum();
+        assertTrue(expected > 0);
+        assertEquals(expected, service.getStoredBytesForLogGroup("/app/logs", REGION));
+        assertEquals(0, service.getStoredBytesForLogGroup("/app/empty", REGION));
+    }
+
+    @Test
     void putLogEventsUpdatesStreamMetadata() {
         service.createLogGroup("/app/logs", null, null, REGION);
         service.createLogStream("/app/logs", "stream-1", REGION);

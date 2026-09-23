@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogStream;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsService;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
@@ -124,6 +125,26 @@ class CloudWatchLogsHandlerTest {
         assertTrue(group.path("creationTime").isNumber());
         assertTrue(group.path("creationTime").asLong() > 0);
         assertFalse(group.has("createdTime"));
+    }
+
+    @Test
+    void describeLogGroupsReturnsStoredBytesSummedAcrossStreams() {
+        service.createLogStream(GROUP, "second-stream", REGION);
+        service.putLogEvents(GROUP, STREAM,
+                java.util.List.of(java.util.Map.of("timestamp", 1L, "message", "alpha")), REGION);
+        service.putLogEvents(GROUP, "second-stream",
+                java.util.List.of(java.util.Map.of("timestamp", 2L, "message", "beta")), REGION);
+
+        long expected = service.describeLogStreams(GROUP, null, REGION).stream()
+                .mapToLong(LogStream::getStoredBytes)
+                .sum();
+
+        JsonNode group = ((JsonNode) handler.handle("DescribeLogGroups",
+                MAPPER.createObjectNode().put("logGroupNamePrefix", GROUP), REGION).getEntity())
+                .path("logGroups").get(0);
+
+        assertTrue(expected > 0);
+        assertEquals(expected, group.path("storedBytes").asLong());
     }
 
     @Test
