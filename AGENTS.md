@@ -275,9 +275,9 @@ When adding functionality:
 
 ## Adding a CloudFormation Resource Type
 
-**Do not add cases to `CloudFormationResourceProvisioner`.** That class is a legacy
-monolith being dismantled; new types go in per-service provisioners under
-`services/cloudformation/provisioners/`.
+**Every type is served by a per-service provisioner under
+`services/cloudformation/provisioners/`.** `CfnResourceDispatcher` only routes a resource to
+the registry and stubs what nothing serves; never add type-specific code to it.
 
 1. Add the type to the existing `<Service>CfnProvisioner`, or create one:
    `@ApplicationScoped`, injecting only the service it wraps. CDI discovery via
@@ -514,8 +514,8 @@ Treat release workflows as critical infrastructure.
 - Producing inconsistent URLs or ARNs
 - Testing only with raw HTTP
 - Introducing unnecessary new patterns
-- Adding a CloudFormation type to `CloudFormationResourceProvisioner` instead of a
-  per-service provisioner
+- Adding type-specific code to `CfnResourceDispatcher` instead of a per-service
+  provisioner
 - Setting a CloudFormation resource's physical id but not its `Fn::GetAtt`
   attributes (they are two separate mechanisms, and the miss is silent)
 - Hand-editing the resource-type table in `docs/services/cloudformation.md`, which is

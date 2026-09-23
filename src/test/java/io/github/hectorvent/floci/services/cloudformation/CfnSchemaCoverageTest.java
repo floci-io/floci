@@ -134,10 +134,6 @@ class CfnSchemaCoverageTest {
         for (Map.Entry<String, String> entry : inventory().entrySet()) {
             String type = entry.getKey();
             String owner = entry.getValue();
-            if ("LEGACY_SWITCH".equals(owner)) {
-                // The switch is being dismantled type by type; its arms are audited as they move.
-                continue;
-            }
             Set<String> declared = schemaReadOnlyAttributes(type);
             ProvisionerScan scan = scans.get(owner);
             Set<String> set = scan == null ? Set.of() : scan.attributesFor(type);

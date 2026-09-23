@@ -185,10 +185,10 @@ Always implement the **real AWS wire protocol**. Never invent custom endpoints. 
 
 ## Adding a CloudFormation Resource Type
 
-CloudFormation resource types live in **per-service provisioner classes**, not in
-`CloudFormationResourceProvisioner`. That class is a legacy monolith being dismantled, so please do
-not add cases to it. If the service you need already has a `*CfnProvisioner`, add your type there;
-otherwise create one.
+CloudFormation resource types live in **per-service provisioner classes** under
+`services/cloudformation/provisioners/`; `CfnResourceDispatcher` only routes a resource to the
+registry and stubs what nothing serves, so please do not add type-specific code to it. If the
+service you need already has a `*CfnProvisioner`, add your type there; otherwise create one.
 
 1. Create `services/cloudformation/provisioners/<Service>CfnProvisioner.java`, annotate it
    `@ApplicationScoped`, and inject **only** the service it wraps. Registration is automatic:

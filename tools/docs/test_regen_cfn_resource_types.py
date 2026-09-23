@@ -44,7 +44,7 @@ def test_two_segment_type_keeps_its_prefix():
 # --------------------------------------------------------------------------- #
 def test_renders_one_row_per_namespace_in_configured_order():
     lines, warnings = render(
-        [("AWS::SQS::Queue", "SqsCfnProvisioner"), ("AWS::S3::Bucket", "LEGACY_SWITCH")]
+        [("AWS::SQS::Queue", "SqsCfnProvisioner"), ("AWS::S3::Bucket", "S3CfnProvisioner")]
     )
     assert lines[0] == "| Service | Resource types |"
     # S3 is in the order list, SQS is not, so SQS is appended after it.
@@ -55,9 +55,9 @@ def test_renders_one_row_per_namespace_in_configured_order():
 
 def test_unlisted_types_sort_alphabetically_after_curated_ones():
     inventory = [
-        ("AWS::S3::AccessPoint", "LEGACY_SWITCH"),
-        ("AWS::S3::Bucket", "LEGACY_SWITCH"),
-        ("AWS::S3::BucketPolicy", "LEGACY_SWITCH"),
+        ("AWS::S3::AccessPoint", "S3CfnProvisioner"),
+        ("AWS::S3::Bucket", "S3CfnProvisioner"),
+        ("AWS::S3::BucketPolicy", "S3CfnProvisioner"),
     ]
     lines, _ = render(inventory, type_order={"AWS::S3": ["Bucket", "BucketPolicy"]})
     assert lines[2] == "| S3 | `Bucket`, `BucketPolicy`, `AccessPoint` |"
@@ -65,7 +65,7 @@ def test_unlisted_types_sort_alphabetically_after_curated_ones():
 
 def test_notes_and_row_notes_are_appended():
     lines, _ = render(
-        [("AWS::S3::Bucket", "LEGACY_SWITCH")],
+        [("AWS::S3::Bucket", "S3CfnProvisioner")],
         notes={"AWS::S3::Bucket": "accepted; policy not enforced"},
         row_notes={"AWS::S3": "Trailing prose."},
     )
@@ -74,7 +74,7 @@ def test_notes_and_row_notes_are_appended():
 
 def test_display_names_override_the_leaf():
     lines, _ = render(
-        [("AWS::CDK::Metadata", "LEGACY_SWITCH")],
+        [("AWS::CDK::Metadata", "CdkMetadataCfnProvisioner")],
         service_labels={**BASE_CONFIG["service_labels"], "AWS::CDK": "CDK"},
         display_names={"AWS::CDK::Metadata": "CDK::Metadata"},
     )
@@ -84,8 +84,8 @@ def test_display_names_override_the_leaf():
 def test_merged_namespace_folds_into_one_row():
     lines, _ = render(
         [
-            ("AWS::CloudFormation::CustomResource", "LEGACY_SWITCH"),
-            ("Custom::DynamoDBReplica", "LEGACY_SWITCH"),
+            ("AWS::CloudFormation::CustomResource", "CustomResourceCfnProvisioner"),
+            ("Custom::DynamoDBReplica", "DynamoDbCfnProvisioner"),
         ],
         merge_namespaces={"Custom": "AWS::CloudFormation"},
     )
@@ -96,7 +96,7 @@ def test_merged_namespace_folds_into_one_row():
 
 def test_extra_types_appear_after_inventory_types():
     lines, _ = render(
-        [("AWS::CloudFormation::CustomResource", "LEGACY_SWITCH")],
+        [("AWS::CloudFormation::CustomResource", "CustomResourceCfnProvisioner")],
         extra_types={
             "AWS::CloudFormation": [
                 {"name": "Stack", "note": "nested stacks", "reason": "not a provisioner type"}
@@ -116,7 +116,7 @@ def test_warns_when_a_namespace_has_no_label():
 
 def test_warns_when_type_order_names_a_type_nothing_provisions():
     _, warnings = render(
-        [("AWS::S3::Bucket", "LEGACY_SWITCH")],
+        [("AWS::S3::Bucket", "S3CfnProvisioner")],
         type_order={"AWS::S3": ["Bucket", "Buckett"]},
     )
     assert any("lists Buckett" in w for w in warnings)
@@ -124,24 +124,24 @@ def test_warns_when_type_order_names_a_type_nothing_provisions():
 
 def test_warns_when_an_extra_type_has_no_reason():
     _, warnings = render(
-        [("AWS::CloudFormation::CustomResource", "LEGACY_SWITCH")],
+        [("AWS::CloudFormation::CustomResource", "CustomResourceCfnProvisioner")],
         extra_types={"AWS::CloudFormation": [{"name": "Stack"}]},
     )
     assert any("has no reason" in w for w in warnings)
 
 
-def test_warns_when_a_type_is_claimed_by_both_the_switch_and_a_provisioner():
-    # The registry wins, so the switch arm is dead code that still looks live.
+def test_warns_when_a_type_is_claimed_by_two_provisioners():
+    # The registry throws on a duplicate at boot; the inventory check catches it before that.
     warnings = r.check_no_double_ownership(
-        [("AWS::SQS::Queue", "LEGACY_SWITCH"), ("AWS::SQS::Queue", "SqsCfnProvisioner")]
+        [("AWS::SQS::Queue", "OtherCfnProvisioner"), ("AWS::SQS::Queue", "SqsCfnProvisioner")]
     )
     assert len(warnings) == 1
-    assert "SqsCfnProvisioner" in warnings[0]
+    assert "SqsCfnProvisioner" in warnings[0] and "OtherCfnProvisioner" in warnings[0]
 
 
 def test_no_double_ownership_warning_when_each_type_has_one_owner():
     assert r.check_no_double_ownership(
-        [("AWS::SQS::Queue", "SqsCfnProvisioner"), ("AWS::S3::Bucket", "LEGACY_SWITCH")]
+        [("AWS::SQS::Queue", "SqsCfnProvisioner"), ("AWS::S3::Bucket", "S3CfnProvisioner")]
     ) == []
 
 
