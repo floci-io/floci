@@ -247,6 +247,28 @@ class DynamoDbProjectionIntegrationTest {
             .body("Items[0].data.M.settings.M.'[beta]'", nullValue());
     }
 
+    @Test
+    @Order(9)
+    void getItemRejectsOverlappingPathsBeforeReadingTheItem() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.GetItem")
+            .contentType(CT)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Key": {"pk": {"S": "no-such-item"}},
+                    "ProjectionExpression": "a, a.b"
+                }
+                """.formatted(TABLE))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("Invalid ProjectionExpression: Two document paths overlap with each other; "
+                    + "must remove or rewrite one of these paths; path one: [a], path two: [a, b]"));
+    }
+
     @AfterAll
     static void cleanup() {
         given()

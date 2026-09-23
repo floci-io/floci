@@ -646,8 +646,7 @@ public class DynamoDbJsonHandler {
         // Validate ProjectionExpression syntax and reserved words before item lookup
         if (projectionExpression != null) {
             DynamoDbExpressionSize.checkRead(projectionExpression, "ProjectionExpression");
-            ProjectionEvaluator.validateSyntax(projectionExpression, "ProjectionExpression");
-            DynamoDbReservedWords.check(projectionExpression, "ProjectionExpression");
+            ProjectionEvaluator.validateExpression(projectionExpression, exprAttrNames);
         }
 
         JsonNode item = dynamoDbService.getItem(tableName, key, region);
@@ -1094,7 +1093,7 @@ public class DynamoDbJsonHandler {
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(legacyValues(queryFilter), false);
         ExpressionEvaluator.validateExpression(keyConditionExpr, "KeyConditionExpression", exprAttrNames, exprAttrValues);
         ExpressionEvaluator.validateExpression(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
-        ProjectionEvaluator.validateExpression(projectionExpression);
+        ProjectionEvaluator.validateExpression(projectionExpression, exprAttrNames);
 
         if (select != null && !VALID_SELECT.contains(select)) {
             throw new AwsException("ValidationException",
@@ -1265,7 +1264,7 @@ public class DynamoDbJsonHandler {
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
         DynamoDbNumberUtils.requireStorable(exprAttrValues, false);
         ExpressionEvaluator.validateExpression(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
-        ProjectionEvaluator.validateExpression(projectionExpressionScan);
+        ProjectionEvaluator.validateExpression(projectionExpressionScan, exprAttrNames);
 
         // Reject ExpressionAttributeNames/Values entries not referenced by any expression (AWS parity, #2893)
         checkUnusedEan(exprAttrNames, extractHashTokens(filterExpr, projectionExpressionScan));
@@ -1558,6 +1557,8 @@ public class DynamoDbJsonHandler {
             var projection = entry.getValue().path("ProjectionExpression");
             if (projection.isTextual()) {
                 DynamoDbExpressionSize.checkRead(projection.asText(), "ProjectionExpression");
+                ProjectionEvaluator.validateExpression(projection.asText(),
+                        entry.getValue().get("ExpressionAttributeNames"));
             }
             JsonNode keysNode = entry.getValue().has("Keys") ? entry.getValue().get("Keys") : null;
             if (keysNode != null && keysNode.size() > 100) {
@@ -2128,13 +2129,13 @@ public class DynamoDbJsonHandler {
             }
         }
 
-        // Validate ProjectionExpression syntax in each Get action before executing
+        // Validate the ProjectionExpression in each Get action before executing
         for (JsonNode txItem : transactItemsNode) {
             JsonNode get = txItem.has("Get") ? txItem.get("Get") : null;
             if (get == null) continue;
             String pe = get.has("ProjectionExpression") ? get.get("ProjectionExpression").asText() : null;
             if (pe != null) {
-                ProjectionEvaluator.validateSyntax(pe, "ProjectionExpression");
+                ProjectionEvaluator.validateExpression(pe, get.get("ExpressionAttributeNames"));
             }
         }
 
