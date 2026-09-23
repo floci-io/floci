@@ -682,7 +682,7 @@ A standalone ENI created via `CreateNetworkInterface` can also be handed to `Run
 
 | Action | Description |
 |--------|-------------|
-| DescribeVpnGateways | Lists or returns stored VPN gateways. |
+| DescribeVpnGateways | Returns an empty gateway set (no stored gateways). |
 
 ### EBS Encryption Defaults
 
