@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.lambda.LambdaAliasStore;
 import io.github.hectorvent.floci.services.lambda.LambdaExecutorService;
 import io.github.hectorvent.floci.services.lambda.LambdaFunctionStore;
+import io.github.hectorvent.floci.services.lambda.LambdaTargetResolver;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.LambdaAlias;
@@ -84,8 +85,7 @@ class AslExecutorLambdaInvokeResultTest {
 
         executor = new AslExecutor(
                 lambdaExecutor,
-                functionStore,
-                aliasStore,
+                new LambdaTargetResolver(functionStore, aliasStore),
                 mock(DynamoDbService.class),
                 mock(DynamoDbJsonHandler.class),
                 mock(SqsJsonHandler.class), mock(SnsJsonHandler.class),

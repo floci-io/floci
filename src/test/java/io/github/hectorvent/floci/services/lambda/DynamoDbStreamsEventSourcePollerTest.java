@@ -118,7 +118,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         // A mocked Vertx makes setPeriodic a no-op, so startPolling registers no live timer and
         // the tests drive pollAndInvoke deterministically.
         poller = new DynamoDbStreamsEventSourcePoller(
-                mock(Vertx.class), streamService, executorService, functionStore, aliasStore,
+                mock(Vertx.class), streamService, executorService, new LambdaTargetResolver(functionStore, aliasStore),
                 esmStore, OBJECT_MAPPER, config, filterMatcher, sqsService, snsService, s3Service, clock::get);
     }
 
@@ -192,7 +192,7 @@ class DynamoDbStreamsEventSourcePollerTest {
 
     private DynamoDbStreamsEventSourcePoller pollerWith(EsmStore store) {
         return new DynamoDbStreamsEventSourcePoller(
-                mock(Vertx.class), streamService, executorService, functionStore, aliasStore,
+                mock(Vertx.class), streamService, executorService, new LambdaTargetResolver(functionStore, aliasStore),
                 store, OBJECT_MAPPER, config, filterMatcher, sqsService, snsService, s3Service, clock::get);
     }
 

@@ -57,8 +57,7 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
     private final Vertx vertx;
     private final DynamoDbStreamService streamService;
     private final LambdaExecutorService executorService;
-    private final LambdaFunctionStore functionStore;
-    private final LambdaAliasStore aliasStore;
+    private final LambdaTargetResolver targetResolver;
     private final EsmStore esmStore;
     private final ObjectMapper objectMapper;
     private final PipesFilterMatcher filterMatcher;
@@ -81,8 +80,7 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
     @Inject
     public DynamoDbStreamsEventSourcePoller(Vertx vertx, DynamoDbStreamService streamService,
                                             LambdaExecutorService executorService,
-                                            LambdaFunctionStore functionStore,
-                                            LambdaAliasStore aliasStore,
+                                            LambdaTargetResolver targetResolver,
                                             EsmStore esmStore,
                                             ObjectMapper objectMapper,
                                             EmulatorConfig config,
@@ -90,14 +88,13 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
                                             SqsService sqsService,
                                             SnsService snsService,
                                             S3Service s3Service) {
-        this(vertx, streamService, executorService, functionStore, aliasStore, esmStore, objectMapper, config,
+        this(vertx, streamService, executorService, targetResolver, esmStore, objectMapper, config,
                 filterMatcher, sqsService, snsService, s3Service, System::currentTimeMillis);
     }
 
     DynamoDbStreamsEventSourcePoller(Vertx vertx, DynamoDbStreamService streamService,
                                      LambdaExecutorService executorService,
-                                     LambdaFunctionStore functionStore,
-                                     LambdaAliasStore aliasStore,
+                                     LambdaTargetResolver targetResolver,
                                      EsmStore esmStore,
                                      ObjectMapper objectMapper,
                                      EmulatorConfig config,
@@ -109,8 +106,7 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
         this.vertx = vertx;
         this.streamService = streamService;
         this.executorService = executorService;
-        this.functionStore = functionStore;
-        this.aliasStore = aliasStore;
+        this.targetResolver = targetResolver;
         this.esmStore = esmStore;
         this.objectMapper = objectMapper;
         this.pollIntervalMs = config.services().lambda().pollIntervalMs();
@@ -205,7 +201,7 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
         }
         pollExecutor.submit(() -> {
             try {
-                LambdaFunction fn = EsmFunctionResolver.resolve(functionStore, aliasStore, esm).orElse(null);
+                LambdaFunction fn = targetResolver.resolveMappingTarget(esm).orElse(null);
                 if (fn == null) {
                     LOG.warnv("DynamoDB Streams ESM {0}: function {1} not found, skipping",
                             esm.getUuid(), esm.getFunctionName());

@@ -101,6 +101,7 @@ public class LambdaService implements ResourceProvider {
     private final RegionResolver regionResolver;
     private final EsmStore esmStore;
     private final LambdaAliasStore aliasStore;
+    private final LambdaTargetResolver targetResolver;
     private final S3Service s3Service;
     private final SqsService sqsService;
     private final SqsEventSourcePoller poller;
@@ -174,6 +175,7 @@ public class LambdaService implements ResourceProvider {
         this.regionResolver = regionResolver;
         this.esmStore = storageFactory != null ? new EsmStore(storageFactory) : null;
         this.aliasStore = storageFactory != null ? new LambdaAliasStore(storageFactory) : null;
+        this.targetResolver = new LambdaTargetResolver(functionStore, aliasStore);
         this.s3Service = null;
         this.sqsService = null;
         this.poller = null;
@@ -197,6 +199,7 @@ public class LambdaService implements ResourceProvider {
                           RegionResolver regionResolver,
                           EsmStore esmStore,
                           LambdaAliasStore aliasStore,
+                          LambdaTargetResolver targetResolver,
                           S3Service s3Service,
                           SqsService sqsService,
                           SqsEventSourcePoller poller,
@@ -218,6 +221,7 @@ public class LambdaService implements ResourceProvider {
         this.regionResolver = regionResolver;
         this.esmStore = esmStore;
         this.aliasStore = aliasStore;
+        this.targetResolver = targetResolver;
         this.s3Service = s3Service;
         this.sqsService = sqsService;
         this.poller = poller;
@@ -560,9 +564,9 @@ public class LambdaService implements ResourceProvider {
         }
         if (functionName.startsWith("arn:")) {
             AwsArnUtils.Arn arn = AwsArnUtils.parse(functionName);
-            return resolveReadTargetForAccount(arn.accountId(), region, ref.name(), effective);
+            return targetResolver.resolveReadTargetForAccount(arn.accountId(), region, ref.name(), effective);
         }
-        return resolveReadTarget(region, ref.name(), effective);
+        return targetResolver.resolveReadTarget(region, ref.name(), effective);
     }
 
     /**
@@ -1034,9 +1038,9 @@ public class LambdaService implements ResourceProvider {
         LambdaFunction fn;
         if (functionName.startsWith("arn:")) {
             AwsArnUtils.Arn arn = AwsArnUtils.parse(functionName);
-            fn = resolveInvokeTargetForAccount(arn.accountId(), region, name, qualifier);
+            fn = targetResolver.resolveInvokeTargetForAccount(arn.accountId(), region, name, qualifier);
         } else {
-            fn = resolveInvokeTarget(region, name, qualifier);
+            fn = targetResolver.resolveInvokeTarget(region, name, qualifier);
         }
         reportCustomResourceLiveness(payload);
         InvokeResult result = executorService.invoke(fn, payload, type);
@@ -1048,7 +1052,7 @@ public class LambdaService implements ResourceProvider {
     public InvokeResult invokeArn(String functionArn, byte[] payload, InvocationType type) {
         AwsArnUtils.Arn arn = AwsArnUtils.parse(functionArn);
         LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolve(functionArn);
-        LambdaFunction fn = resolveInvokeTargetForAccount(
+        LambdaFunction fn = targetResolver.resolveInvokeTargetForAccount(
                 arn.accountId(), arn.region(), ref.name(), ref.qualifier());
         InvokeResult result = executorService.invoke(fn, payload, type);
         result.setExecutedVersion(fn.getVersion());
@@ -1068,108 +1072,6 @@ public class LambdaService implements ResourceProvider {
             return;
         }
         CustomResourceLiveness.tokenIn(payload).ifPresent(customResourceLiveness::touch);
-    }
-
-    private LambdaFunction resolveInvokeTarget(String region, String name, String qualifier) {
-        return resolveTarget(region, name, qualifier, this::pickAliasVersion);
-    }
-
-    /**
-     * Resolves a qualifier for a <em>read</em>. Identical to the invoke path except for aliases:
-     * an alias with {@code AdditionalVersionWeights} shifts traffic, so {@link #pickAliasVersion}
-     * chooses randomly among the weighted versions, which is right for running the function and
-     * wrong for describing it. Two reads of one alias must not disagree, so a read follows the
-     * alias's primary {@code FunctionVersion}, which is what AWS reports.
-     */
-    private LambdaFunction resolveReadTarget(String region, String name, String qualifier) {
-        return resolveTarget(region, name, qualifier, LambdaAlias::getFunctionVersion);
-    }
-
-    private LambdaFunction resolveTarget(String region, String name, String qualifier,
-                                         java.util.function.Function<LambdaAlias, String> aliasVersion) {
-        if (qualifier == null || qualifier.equals("$LATEST")) {
-            return functionStore.get(region, name)
-                    .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Function not found: " + name, 404));
-        }
-        if (qualifier.chars().allMatch(Character::isDigit)) {
-            return functionStore.get(region, name, qualifier)
-                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                            "Function version not found: " + name + ":" + qualifier, 404));
-        }
-        // qualifier is an alias name
-        LambdaAlias alias = getAlias(region, name, qualifier);
-        String version = aliasVersion.apply(alias);
-        if (version == null || version.equals("$LATEST")) {
-            return functionStore.get(region, name)
-                    .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Function not found: " + name, 404));
-        }
-        return functionStore.get(region, name, version)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "Function version not found: " + name + ":" + version, 404));
-    }
-
-    private LambdaFunction resolveInvokeTargetForAccount(
-            String accountId, String region, String name, String qualifier) {
-        return resolveTargetForAccount(accountId, region, name, qualifier, this::pickAliasVersion);
-    }
-
-    /** The read counterpart of {@link #resolveInvokeTargetForAccount}; see {@link #resolveReadTarget}. */
-    private LambdaFunction resolveReadTargetForAccount(
-            String accountId, String region, String name, String qualifier) {
-        return resolveTargetForAccount(accountId, region, name, qualifier, LambdaAlias::getFunctionVersion);
-    }
-
-    private LambdaFunction resolveTargetForAccount(
-            String accountId, String region, String name, String qualifier,
-            java.util.function.Function<LambdaAlias, String> aliasVersion) {
-        if (qualifier == null || qualifier.equals("$LATEST")) {
-            return functionStore.getForAccount(accountId, region, name)
-                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                            "Function not found: " + name, 404));
-        }
-        if (qualifier.chars().allMatch(Character::isDigit)) {
-            return functionStore.getForAccount(accountId, region, name, qualifier)
-                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                            "Function version not found: " + name + ":" + qualifier, 404));
-        }
-        LambdaAlias alias = aliasStore != null
-                ? aliasStore.getForAccount(accountId, region, name, qualifier)
-                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                            "Alias not found: " + qualifier, 404))
-                : null;
-        if (alias == null) {
-            throw new AwsException("ResourceNotFoundException", "Alias not found: " + qualifier, 404);
-        }
-        String version = aliasVersion.apply(alias);
-        if (version == null || version.equals("$LATEST")) {
-            return functionStore.getForAccount(accountId, region, name)
-                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                            "Function not found: " + name, 404));
-        }
-        return functionStore.getForAccount(accountId, region, name, version)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "Function version not found: " + name + ":" + version, 404));
-    }
-
-    private String pickAliasVersion(LambdaAlias alias) {
-        java.util.Map<String, Double> weights = alias.getRoutingConfig();
-        if (weights == null || weights.isEmpty()) {
-            return alias.getFunctionVersion();
-        }
-        double rand = java.util.concurrent.ThreadLocalRandom.current().nextDouble();
-        double additionalTotal = weights.values().stream().mapToDouble(Double::doubleValue).sum();
-        double primaryWeight = Math.max(0.0, 1.0 - additionalTotal);
-        if (rand < primaryWeight) {
-            return alias.getFunctionVersion();
-        }
-        double cumulative = primaryWeight;
-        for (java.util.Map.Entry<String, Double> entry : weights.entrySet()) {
-            cumulative += entry.getValue();
-            if (rand < cumulative) {
-                return entry.getKey();
-            }
-        }
-        return alias.getFunctionVersion();
     }
 
     // ──────────────────────────── Event Source Mapping (SQS) ────────────────────────────

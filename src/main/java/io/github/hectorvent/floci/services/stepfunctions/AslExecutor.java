@@ -26,12 +26,11 @@ import io.github.hectorvent.floci.services.scheduler.SchedulerController;
 import io.github.hectorvent.floci.services.scheduler.SchedulerService;
 import io.github.hectorvent.floci.services.scheduler.model.Schedule;
 import io.github.hectorvent.floci.services.scheduler.model.ScheduleRequest;
-import io.github.hectorvent.floci.services.lambda.LambdaAliasStore;
 import io.github.hectorvent.floci.services.lambda.LambdaExecutorService;
 import io.github.hectorvent.floci.services.lambda.LambdaFunctionStore;
+import io.github.hectorvent.floci.services.lambda.LambdaTargetResolver;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
-import io.github.hectorvent.floci.services.lambda.model.LambdaAlias;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.rdsdata.RdsDataService;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
@@ -234,8 +233,7 @@ public class AslExecutor {
             "warning");
 
     private final LambdaExecutorService lambdaExecutor;
-    private final LambdaFunctionStore functionStore;
-    private final LambdaAliasStore aliasStore;
+    private final LambdaTargetResolver targetResolver;
     private final DynamoDbService dynamoDbService;
     private final DynamoDbJsonHandler dynamoDbJsonHandler;
     private final SqsJsonHandler sqsJsonHandler;
@@ -268,8 +266,7 @@ public class AslExecutor {
     });
 
     @Inject
-    public AslExecutor(LambdaExecutorService lambdaExecutor, LambdaFunctionStore functionStore,
-                       LambdaAliasStore aliasStore,
+    public AslExecutor(LambdaExecutorService lambdaExecutor, LambdaTargetResolver targetResolver,
                        DynamoDbService dynamoDbService, DynamoDbJsonHandler dynamoDbJsonHandler,
                        SqsJsonHandler sqsJsonHandler, SnsJsonHandler snsJsonHandler,
                        CloudFormationQueryHandler cloudFormationHandler,
@@ -280,7 +277,7 @@ public class AslExecutor {
                        ObjectMapper objectMapper, JsonataEvaluator jsonataEvaluator,
                        Instance<StepFunctionsService> sfnService, EmulatorConfig config, Vertx vertx,
                        CustomResourceLiveness customResourceLiveness) {
-        this(lambdaExecutor, functionStore, aliasStore, dynamoDbService, dynamoDbJsonHandler,
+        this(lambdaExecutor, targetResolver, dynamoDbService, dynamoDbJsonHandler,
                 sqsJsonHandler, snsJsonHandler, cloudFormationHandler,
                 ec2Service, s3Service, ecsService, ecsJsonHandler,
                 eventBridgeHandler, schedulerService, schedulerController, rdsDataService,
@@ -288,8 +285,7 @@ public class AslExecutor {
                 Clock.systemUTC(), TimeUnit.NANOSECONDS::sleep, null);
     }
 
-    AslExecutor(LambdaExecutorService lambdaExecutor, LambdaFunctionStore functionStore,
-                LambdaAliasStore aliasStore,
+    AslExecutor(LambdaExecutorService lambdaExecutor, LambdaTargetResolver targetResolver,
                 DynamoDbService dynamoDbService, DynamoDbJsonHandler dynamoDbJsonHandler,
                 SqsJsonHandler sqsJsonHandler, SnsJsonHandler snsJsonHandler,
                 CloudFormationQueryHandler cloudFormationHandler,
@@ -303,8 +299,7 @@ public class AslExecutor {
                 Clock clock, Sleeper sleeper, Integer maxWaitSecondsOverride) {
         this.customResourceLiveness = customResourceLiveness;
         this.lambdaExecutor = lambdaExecutor;
-        this.functionStore = functionStore;
-        this.aliasStore = aliasStore;
+        this.targetResolver = targetResolver;
         this.dynamoDbService = dynamoDbService;
         this.dynamoDbJsonHandler = dynamoDbJsonHandler;
         this.sqsJsonHandler = sqsJsonHandler;
@@ -352,7 +347,7 @@ public class AslExecutor {
                 Instance<StepFunctionsService> sfnService, EmulatorConfig config, Vertx vertx,
                 CustomResourceLiveness customResourceLiveness,
                 Clock clock, Sleeper sleeper, Integer maxWaitSecondsOverride) {
-        this(lambdaExecutor, functionStore, null, dynamoDbService, dynamoDbJsonHandler,
+        this(lambdaExecutor, new LambdaTargetResolver(functionStore, null), dynamoDbService, dynamoDbJsonHandler,
                 sqsJsonHandler, snsJsonHandler, cloudFormationHandler, ec2Service, s3Service,
                 ecsService, ecsJsonHandler, eventBridgeHandler, schedulerService,
                 schedulerController, null, objectMapper, jsonataEvaluator, sfnService, config,
@@ -376,7 +371,7 @@ public class AslExecutor {
                 ObjectMapper objectMapper, JsonataEvaluator jsonataEvaluator,
                 Instance<StepFunctionsService> sfnService, EmulatorConfig config, Vertx vertx,
                 CustomResourceLiveness customResourceLiveness) {
-        this(lambdaExecutor, functionStore, null, dynamoDbService, dynamoDbJsonHandler,
+        this(lambdaExecutor, new LambdaTargetResolver(functionStore, null), dynamoDbService, dynamoDbJsonHandler,
                 sqsJsonHandler, snsJsonHandler, cloudFormationHandler, ec2Service, s3Service,
                 ecsService, ecsJsonHandler, eventBridgeHandler, schedulerService,
                 schedulerController, null, objectMapper, jsonataEvaluator, sfnService, config,
@@ -1015,21 +1010,14 @@ public class AslExecutor {
     }
 
     private LambdaFunction resolveLambdaFunction(String region, String name, String qualifier) {
-        if (qualifier == null || qualifier.equals("$LATEST")) {
-            return functionStore.get(region, name).orElse(null);
-        }
-        String version = qualifier;
-        if (!qualifier.chars().allMatch(Character::isDigit)) {
-            LambdaAlias alias = aliasStore == null ? null : aliasStore.get(region, name, qualifier).orElse(null);
-            if (alias == null) {
+        try {
+            return targetResolver.resolveInvokeTarget(region, name, qualifier);
+        } catch (AwsException e) {
+            if ("ResourceNotFoundException".equals(e.getErrorCode())) {
                 return null;
             }
-            version = alias.getFunctionVersion();
-            if (version == null || version.equals("$LATEST")) {
-                return functionStore.get(region, name).orElse(null);
-            }
+            throw e;
         }
-        return functionStore.get(region, name, version).orElse(null);
     }
 
     /**

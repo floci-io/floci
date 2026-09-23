@@ -81,7 +81,7 @@ class KinesisEventSourcePollerTest {
         esmStore = mock(EsmStore.class);
 
         poller = new KinesisEventSourcePoller(mock(Vertx.class), kinesisService, executorService,
-                functionStore, aliasStore, esmStore, config, MAPPER, new PipesFilterMatcher(MAPPER));
+                new LambdaTargetResolver(functionStore, aliasStore), esmStore, config, MAPPER, new PipesFilterMatcher(MAPPER));
     }
 
     private EventSourceMapping esm(String... patterns) {

@@ -40,8 +40,7 @@ public class KinesisEventSourcePoller implements Resettable {
     private final Vertx vertx;
     private final KinesisService kinesisService;
     private final LambdaExecutorService executorService;
-    private final LambdaFunctionStore functionStore;
-    private final LambdaAliasStore aliasStore;
+    private final LambdaTargetResolver targetResolver;
     private final EsmStore esmStore;
     private final long pollIntervalMs;
     private final ObjectMapper objectMapper;
@@ -57,16 +56,14 @@ public class KinesisEventSourcePoller implements Resettable {
     @Inject
     public KinesisEventSourcePoller(Vertx vertx, KinesisService kinesisService,
                                      LambdaExecutorService executorService,
-                                     LambdaFunctionStore functionStore,
-                                     LambdaAliasStore aliasStore,
+                                     LambdaTargetResolver targetResolver,
                                      EsmStore esmStore, EmulatorConfig config,
                                      ObjectMapper objectMapper,
                                      PipesFilterMatcher filterMatcher) {
         this.vertx = vertx;
         this.kinesisService = kinesisService;
         this.executorService = executorService;
-        this.functionStore = functionStore;
-        this.aliasStore = aliasStore;
+        this.targetResolver = targetResolver;
         this.esmStore = esmStore;
         this.pollIntervalMs = config.services().lambda().pollIntervalMs();
         this.objectMapper = objectMapper;
@@ -118,7 +115,7 @@ public class KinesisEventSourcePoller implements Resettable {
         if (activePolls.putIfAbsent(esm.getUuid(), Boolean.TRUE) != null) return;
         pollExecutor.submit(() -> {
             try {
-                LambdaFunction fn = EsmFunctionResolver.resolve(functionStore, aliasStore, esm).orElse(null);
+                LambdaFunction fn = targetResolver.resolveMappingTarget(esm).orElse(null);
                 if (fn == null) return;
 
                 String streamName = streamNameFromArn(esm.getEventSourceArn());
