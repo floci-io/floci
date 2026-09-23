@@ -30,7 +30,6 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import org.jboss.logging.Logger;
 
-import java.io.ByteArrayOutputStream;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -3319,23 +3318,17 @@ public class S3Service implements Resettable, ResourceProvider {
 
         // Concatenate parts in order
         try {
-            ByteArrayOutputStream combined = new ByteArrayOutputStream();
             MessageDigest md = MessageDigest.getInstance("MD5");
-
             for (int num : partNumbers) {
-                byte[] partData = inMemory
-                        ? memoryMultipartStore.get(uploadId).get(num)
-                        : Files.readAllBytes(dataRoot.resolve(".multipart").resolve(uploadId).resolve(String.valueOf(num)));
-                combined.write(partData);
                 // A part ETag is the MD5 of that part, so the composite hashes it without rehashing the data
                 String partETag = stripSurroundingQuotes(upload.getParts().get(num).getETag());
                 md.update(HexFormat.of().parseHex(partETag));
             }
 
-            byte[] allData = combined.toByteArray();
-
             // Composite ETag: MD5 of concatenated part MD5s, suffixed with part count
             String compositeETag = "\"" + bytesToHex(md.digest()) + "-" + partNumbers.size() + "\"";
+
+            byte[] allData = concatenateParts(uploadId, partNumbers);
 
             List<Part> completedParts = partNumbers.stream()
                     .map(num -> copyPart(upload.getParts().get(num)))
@@ -3374,6 +3367,43 @@ public class S3Service implements Resettable, ResourceProvider {
         } catch (NoSuchAlgorithmException e) {
             throw new RuntimeException("MD5 algorithm not available", e);
         }
+    }
+
+    /**
+     * Copies the parts, in order, into one array sized to the total upload. Disk parts are read
+     * straight into their slot, so assembly never holds a second full-size copy of the object.
+     */
+    private byte[] concatenateParts(String uploadId, List<Integer> partNumbers) throws IOException {
+        Path partsDir = dataRoot.resolve(".multipart").resolve(uploadId);
+        Map<Integer, byte[]> memoryParts = inMemory ? memoryMultipartStore.get(uploadId) : null;
+        long[] partSizes = new long[partNumbers.size()];
+        long totalSize = 0;
+        for (int i = 0; i < partNumbers.size(); i++) {
+            int num = partNumbers.get(i);
+            partSizes[i] = inMemory ? memoryParts.get(num).length : Files.size(partsDir.resolve(String.valueOf(num)));
+            totalSize += partSizes[i];
+        }
+        byte[] allData = new byte[Math.toIntExact(totalSize)];
+        int offset = 0;
+        for (int i = 0; i < partNumbers.size(); i++) {
+            int num = partNumbers.get(i);
+            int size = (int) partSizes[i];
+            int copied;
+            if (inMemory) {
+                byte[] partData = memoryParts.get(num);
+                copied = Math.min(partData.length, size);
+                System.arraycopy(partData, 0, allData, offset, copied);
+            } else {
+                try (InputStream in = Files.newInputStream(partsDir.resolve(String.valueOf(num)))) {
+                    copied = in.readNBytes(allData, offset, size);
+                }
+            }
+            if (copied != size) {
+                throw new IOException("Part " + num + " changed size during assembly");
+            }
+            offset += size;
+        }
+        return allData;
     }
 
     private boolean etagsMatch(String storedETag, String submittedETag) {
