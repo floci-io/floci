@@ -841,7 +841,8 @@ public class RedshiftService {
                 } else {
                     try {
                         Files.deleteIfExists(tempDump);
-                    } catch (IOException ignored) {
+                    } catch (IOException ex) {
+                        LOG.warnv(ex, "Failed to clean up temporary dump file {0} after aborted reboot of cluster {1}", tempDump, clusterIdentifier);
                     }
                 }
             }
