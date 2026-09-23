@@ -31,6 +31,7 @@ public class TableDefinition {
     private Map<String, String> tags;
     private List<GlobalSecondaryIndex> globalSecondaryIndexes;
     private List<LocalSecondaryIndex> localSecondaryIndexes;
+    private List<VectorIndex> vectorIndexes;
     private String billingMode; // "PROVISIONED" or "PAY_PER_REQUEST"
     private String ttlAttributeName;
     private boolean ttlEnabled;
@@ -64,6 +65,7 @@ public class TableDefinition {
         this.tags = new HashMap<>();
         this.globalSecondaryIndexes = new ArrayList<>();
         this.localSecondaryIndexes = new ArrayList<>();
+        this.vectorIndexes = new ArrayList<>();
         this.pointInTimeRecoveryRecoveryPeriodInDays = 35;
         this.kinesisStreamingDestinations = new ArrayList<>();
         this.replicaRegions = new ArrayList<>();
@@ -92,6 +94,7 @@ public class TableDefinition {
         this.tags = new HashMap<>();
         this.globalSecondaryIndexes = new ArrayList<>();
         this.localSecondaryIndexes = new ArrayList<>();
+        this.vectorIndexes = new ArrayList<>();
         this.pointInTimeRecoveryRecoveryPeriodInDays = 35;
         this.kinesisStreamingDestinations = new ArrayList<>();
         this.replicaRegions = new ArrayList<>();
@@ -135,6 +138,16 @@ public class TableDefinition {
     public List<LocalSecondaryIndex> getLocalSecondaryIndexes() { return localSecondaryIndexes; }
     public void setLocalSecondaryIndexes(List<LocalSecondaryIndex> localSecondaryIndexes) {
         this.localSecondaryIndexes = localSecondaryIndexes != null ? localSecondaryIndexes : new ArrayList<>();
+    }
+
+    public List<VectorIndex> getVectorIndexes() {
+        if (vectorIndexes == null) {
+            vectorIndexes = new ArrayList<>();
+        }
+        return vectorIndexes;
+    }
+    public void setVectorIndexes(List<VectorIndex> vectorIndexes) {
+        this.vectorIndexes = vectorIndexes != null ? vectorIndexes : new ArrayList<>();
     }
 
     public String getBillingMode() { return billingMode; }
@@ -277,6 +290,16 @@ public class TableDefinition {
         }
         return localSecondaryIndexes.stream()
                 .filter(l -> indexName.equals(l.getIndexName()))
+                .findFirst();
+    }
+
+    @JsonIgnore
+    public Optional<VectorIndex> findVectorIndex(String indexName) {
+        if (vectorIndexes == null || indexName == null) {
+            return Optional.empty();
+        }
+        return vectorIndexes.stream()
+                .filter(v -> indexName.equals(v.getIndexName()))
                 .findFirst();
     }
 }

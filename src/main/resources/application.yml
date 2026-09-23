@@ -303,6 +303,8 @@ floci:
       global-bucket-namespace: false
     dynamodb:
       enabled: true
+      vector-index-allocation-seconds: 4   # FLOCI_SERVICES_DYNAMODB_VECTOR_INDEX_ALLOCATION_SECONDS. Resource allocation phase of a vector index added by UpdateTable.
+      vector-index-backfill-seconds: 10    # FLOCI_SERVICES_DYNAMODB_VECTOR_INDEX_BACKFILL_SECONDS. Backfilling phase that follows it.
     sns:
       enabled: true
     lambda:

@@ -137,6 +137,8 @@ floci:
       global-bucket-namespace: false
     dynamodb:
       enabled: true
+      vector-index-allocation-seconds: 0
+      vector-index-backfill-seconds: 0
     sns:
       enabled: true
     lambda:

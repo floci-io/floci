@@ -191,6 +191,14 @@ public class DynamoDbJsonHandler {
             }
         }
 
+        List<VectorIndex> vectorIndexes = new ArrayList<>();
+        JsonNode vectorIndexArray = request.path("VectorIndexes");
+        if (vectorIndexArray.isArray()) {
+            for (JsonNode vectorIndexNode : vectorIndexArray) {
+                vectorIndexes.add(parseVectorIndex(vectorIndexNode));
+            }
+        }
+
         String billingMode = request.has("BillingMode")
                 ? request.get("BillingMode").asText() : null;
 
@@ -221,7 +229,7 @@ public class DynamoDbJsonHandler {
         }
 
         TableDefinition table = dynamoDbService.createTable(tableName, keySchema, attrDefs,
-                readCapacity, writeCapacity, gsis, lsis, region);
+                readCapacity, writeCapacity, gsis, lsis, vectorIndexes, billingMode, region);
         table.setTableStatus(initialStatus);
 
         table.setDeletionProtectionEnabled(deletionProtection);
@@ -303,6 +311,36 @@ public class DynamoDbJsonHandler {
                     + ".projection.nonKeyAttributes' failed to satisfy constraint: "
                     + "Member must have length greater than or equal to 1", 400);
         }
+    }
+
+    /** Reads a VectorIndex or the CreateVectorIndexAction of a VectorIndexUpdate; same members. */
+    private static VectorIndex parseVectorIndex(JsonNode node) {
+        List<SearchSchemaElement> searchSchema = new ArrayList<>();
+        JsonNode searchSchemaArray = node.path("SearchSchema");
+        if (searchSchemaArray.isArray()) {
+            for (JsonNode element : searchSchemaArray) {
+                searchSchema.add(new SearchSchemaElement(
+                        element.path("AttributeName").asText(null),
+                        element.path("SearchSchemaElementType").asText(null)));
+            }
+        }
+        String projectionType = node.path("Projection").path("ProjectionType").asText("ALL");
+        List<String> nonKeyAttributes = new ArrayList<>();
+        JsonNode nonKeyAttrArray = node.path("Projection").path("NonKeyAttributes");
+        if (nonKeyAttrArray.isArray()) {
+            for (JsonNode nonKeyAttr : nonKeyAttrArray) {
+                nonKeyAttributes.add(nonKeyAttr.asText());
+            }
+        }
+        Long dimensions = node.hasNonNull("Dimensions") ? node.get("Dimensions").asLong() : null;
+        return new VectorIndex(
+                node.path("IndexName").asText(null),
+                node.path("VectorAttribute").path("AttributeName").asText(null),
+                searchSchema,
+                projectionType,
+                nonKeyAttributes,
+                dimensions,
+                node.path("DistanceFunction").asText(null));
     }
 
     // INCLUDE requires the NonKeyAttributes list; every other projection type forbids it.
@@ -1467,6 +1505,22 @@ public class DynamoDbJsonHandler {
             }
         }
 
+        List<VectorIndex> vectorCreates = new ArrayList<>();
+        List<String> vectorDeletes = new ArrayList<>();
+        JsonNode vectorIndexUpdates = request.path("VectorIndexUpdates");
+        if (vectorIndexUpdates.isArray()) {
+            for (JsonNode update : vectorIndexUpdates) {
+                JsonNode createNode = update.path("Create");
+                if (createNode.isObject()) {
+                    vectorCreates.add(parseVectorIndex(createNode));
+                }
+                JsonNode deleteNode = update.path("Delete");
+                if (deleteNode.isObject()) {
+                    vectorDeletes.add(deleteNode.path("IndexName").asText(null));
+                }
+            }
+        }
+
         List<AttributeDefinition> newAttrDefs = new ArrayList<>();
         JsonNode attrDefsNode = request.path("AttributeDefinitions");
         if (!attrDefsNode.isMissingNode() && attrDefsNode.isArray()) {
@@ -1495,7 +1549,8 @@ public class DynamoDbJsonHandler {
         }
 
         TableDefinition table = dynamoDbService.updateTable(tableName, readCapacity, writeCapacity,
-                gsiCreates, gsiDeletes, newAttrDefs, region);
+                gsiCreates, gsiDeletes, newAttrDefs, vectorCreates, vectorDeletes,
+                billingModeCheck, region);
 
         for (JsonNode updateNode : gsiUpdatesToApply) {
             GlobalSecondaryIndex gsi = table.findGsi(updateNode.path("IndexName").asText()).orElseThrow();
@@ -2597,6 +2652,15 @@ public class DynamoDbJsonHandler {
             node.set("LocalSecondaryIndexes", lsiArray);
         }
 
+        List<VectorIndex> vectorIndexes = table.getVectorIndexes();
+        if (!vectorIndexes.isEmpty()) {
+            ArrayNode vectorIndexArray = objectMapper.createArrayNode();
+            for (VectorIndex vectorIndex : vectorIndexes) {
+                vectorIndexArray.add(vectorIndexToNode(vectorIndex));
+            }
+            node.set("VectorIndexes", vectorIndexArray);
+        }
+
         if (table.getStreamArn() != null) {
             ObjectNode streamSpecNode = objectMapper.createObjectNode();
             streamSpecNode.put("StreamEnabled", table.isStreamEnabled());
@@ -2610,6 +2674,54 @@ public class DynamoDbJsonHandler {
         }
 
         return node;
+    }
+
+    /**
+     * Renders a VectorIndexDescription. ItemCount and IndexSizeBytes are always 0. AWS refreshes
+     * those two roughly every six hours, so a freshly built index reports 0 for both there too.
+     */
+    private ObjectNode vectorIndexToNode(VectorIndex vectorIndex) {
+        ObjectNode vectorIndexNode = objectMapper.createObjectNode();
+        vectorIndexNode.put("IndexName", vectorIndex.getIndexName());
+
+        ObjectNode vectorAttribute = objectMapper.createObjectNode();
+        vectorAttribute.put("AttributeName", vectorIndex.getVectorAttributeName());
+        vectorIndexNode.set("VectorAttribute", vectorAttribute);
+
+        List<SearchSchemaElement> searchSchema = vectorIndex.getSearchSchema();
+        if (searchSchema != null && !searchSchema.isEmpty()) {
+            ArrayNode searchSchemaArray = objectMapper.createArrayNode();
+            for (SearchSchemaElement element : searchSchema) {
+                ObjectNode elementNode = objectMapper.createObjectNode();
+                elementNode.put("AttributeName", element.getAttributeName());
+                elementNode.put("SearchSchemaElementType", element.getSearchSchemaElementType());
+                searchSchemaArray.add(elementNode);
+            }
+            vectorIndexNode.set("SearchSchema", searchSchemaArray);
+        }
+
+        ObjectNode projection = objectMapper.createObjectNode();
+        projection.put("ProjectionType",
+                vectorIndex.getProjectionType() != null ? vectorIndex.getProjectionType() : "ALL");
+        if ("INCLUDE".equals(vectorIndex.getProjectionType())) {
+            ArrayNode nonKeyAttributes = objectMapper.createArrayNode();
+            for (String attr : vectorIndex.getNonKeyAttributes()) {
+                nonKeyAttributes.add(attr);
+            }
+            projection.set("NonKeyAttributes", nonKeyAttributes);
+        }
+        vectorIndexNode.set("Projection", projection);
+
+        vectorIndexNode.put("Dimensions", vectorIndex.getDimensions());
+        vectorIndexNode.put("DistanceFunction", vectorIndex.getDistanceFunction());
+        vectorIndexNode.put("IndexStatus", vectorIndex.getIndexStatus());
+        if (dynamoDbService.reportsVectorIndexBackfilling(vectorIndex)) {
+            vectorIndexNode.put("Backfilling", dynamoDbService.isVectorIndexBackfilling(vectorIndex));
+        }
+        vectorIndexNode.put("IndexSizeBytes", 0);
+        vectorIndexNode.put("ItemCount", 0);
+        vectorIndexNode.put("IndexArn", vectorIndex.getIndexArn());
+        return vectorIndexNode;
     }
 
     private String defaultKmsMasterKeyArn(String region) {

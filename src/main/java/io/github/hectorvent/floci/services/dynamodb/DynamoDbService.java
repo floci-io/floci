@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.dynamodb;
 
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -17,6 +18,7 @@ import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.StreamDescription;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
+import io.github.hectorvent.floci.services.dynamodb.model.VectorIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.ConditionalCheckFailedException;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -114,6 +116,10 @@ public class DynamoDbService implements ResourceProvider {
 
     private static final int MAX_MULTI_ATTRIBUTE_KEY_PART_SIZE = 4;
 
+    private static final int MAX_VECTOR_INDEXES_PER_TABLE = 5;
+    private static final int MAX_VECTOR_DIMENSIONS = 4096;
+    private static final int MIN_VECTOR_INDEX_NAME_LENGTH = 3;
+
     private record IdempotencyEntry(String requestHash, long insertedAtNanos,
                                     CompletableFuture<Map<String, DynamoDbWriteCapacity.Cost>> replayCapacity) {}
     private final RegionResolver regionResolver;
@@ -121,6 +127,8 @@ public class DynamoDbService implements ResourceProvider {
     private DynamoDbStreamService streamService;
     private KinesisStreamingForwarder kinesisForwarder;
     private S3Service s3Service;
+    private final int vectorIndexAllocationSeconds;
+    private final int vectorIndexBackfillSeconds;
     private static final long MAX_DYNAMODB_LIST_INDEX = 4_294_967_294L;
 
     @Inject
@@ -128,7 +136,8 @@ public class DynamoDbService implements ResourceProvider {
                            DynamoDbStreamService streamService,
                            KinesisStreamingForwarder kinesisForwarder,
                            S3Service s3Service,
-                           ObjectMapper objectMapper) {
+                           ObjectMapper objectMapper,
+                           EmulatorConfig config) {
         this(storageFactory.create("dynamodb", "dynamodb-tables.json",
                 new TypeReference<Map<String, TableDefinition>>() {}),
              storageFactory.create("dynamodb", "dynamodb-items.json",
@@ -137,7 +146,9 @@ public class DynamoDbService implements ResourceProvider {
                 new TypeReference<Map<String, ExportDescription>>() {}),
              storageFactory.create("dynamodb", "dynamodb-imports.json",
                 new TypeReference<Map<String, ImportTableDescription>>() {}),
-             regionResolver, streamService, kinesisForwarder, s3Service, objectMapper);
+             regionResolver, streamService, kinesisForwarder, s3Service, objectMapper,
+             config.services().dynamodb().vectorIndexAllocationSeconds(),
+             config.services().dynamodb().vectorIndexBackfillSeconds());
     }
 
     /** Package-private constructor for testing. */
@@ -172,6 +183,21 @@ public class DynamoDbService implements ResourceProvider {
                     KinesisStreamingForwarder kinesisForwarder,
                     S3Service s3Service,
                     ObjectMapper objectMapper) {
+        this(tableStore, itemStore, exportStore, importStore, regionResolver, streamService,
+             kinesisForwarder, s3Service, objectMapper, 0, 0);
+    }
+
+    DynamoDbService(StorageBackend<String, TableDefinition> tableStore,
+                    StorageBackend<String, Map<String, JsonNode>> itemStore,
+                    StorageBackend<String, ExportDescription> exportStore,
+                    StorageBackend<String, ImportTableDescription> importStore,
+                    RegionResolver regionResolver,
+                    DynamoDbStreamService streamService,
+                    KinesisStreamingForwarder kinesisForwarder,
+                    S3Service s3Service,
+                    ObjectMapper objectMapper,
+                    int vectorIndexAllocationSeconds,
+                    int vectorIndexBackfillSeconds) {
         this.tableStore = tableStore;
         this.itemStore = itemStore;
         this.exportStore = exportStore;
@@ -181,6 +207,8 @@ public class DynamoDbService implements ResourceProvider {
         this.kinesisForwarder = kinesisForwarder;
         this.s3Service = s3Service;
         this.objectMapper = objectMapper != null ? objectMapper : new ObjectMapper();
+        this.vectorIndexAllocationSeconds = vectorIndexAllocationSeconds;
+        this.vectorIndexBackfillSeconds = vectorIndexBackfillSeconds;
         loadPersistedItems();
         recoverInterruptedJobs();
     }
@@ -261,6 +289,19 @@ public class DynamoDbService implements ResourceProvider {
                                         List<GlobalSecondaryIndex> gsis,
                                         List<LocalSecondaryIndex> lsis,
                                         String region) {
+        return createTable(tableName, keySchema, attributeDefinitions, readCapacity, writeCapacity,
+                           gsis, lsis, List.of(), null, region);
+    }
+
+    public TableDefinition createTable(String tableName,
+                                        List<KeySchemaElement> keySchema,
+                                        List<AttributeDefinition> attributeDefinitions,
+                                        Long readCapacity, Long writeCapacity,
+                                        List<GlobalSecondaryIndex> gsis,
+                                        List<LocalSecondaryIndex> lsis,
+                                        List<VectorIndex> vectorIndexes,
+                                        String billingMode,
+                                        String region) {
         // Enforce at the service boundary: CreateTable persists its input as the
         // canonical table name and derives TableArn from it. An ARN-form input
         // would produce ARN-on-ARN TableArn values. Handler-layer rejection alone
@@ -320,6 +361,8 @@ public class DynamoDbService implements ResourceProvider {
             }
         }
 
+        validateVectorIndexes(vectorIndexes, List.of(), attributeDefinitions, billingMode);
+
         Set<String> referencedAttrs = new HashSet<>();
         keySchema.forEach(k -> referencedAttrs.add(k.getAttributeName()));
         if (gsis != null) {
@@ -327,6 +370,11 @@ public class DynamoDbService implements ResourceProvider {
         }
         if (lsis != null) {
             lsis.forEach(l -> l.getKeySchema().forEach(k -> referencedAttrs.add(k.getAttributeName())));
+        }
+        // A SearchSchema attribute counts as used, so the unused-definition rejection below does
+        // not fire for one that only a vector index reads.
+        if (vectorIndexes != null) {
+            vectorIndexes.forEach(v -> referencedAttrs.addAll(v.getSearchSchemaAttributeNames()));
         }
         Set<String> definedAttrs = attributeDefinitions == null
                 ? Set.of()
@@ -407,6 +455,17 @@ public class DynamoDbService implements ResourceProvider {
             table.setLocalSecondaryIndexes(new ArrayList<>(lsis));
         }
 
+        // AWS reports a vector index created with the table as ACTIVE and never reports
+        // Backfilling for it. Only the UpdateTable path runs the two timed phases.
+        if (vectorIndexes != null && !vectorIndexes.isEmpty()) {
+            for (VectorIndex vectorIndex : vectorIndexes) {
+                vectorIndex.setIndexArn(table.getTableArn() + "/index/" + vectorIndex.getIndexName());
+                vectorIndex.setIndexStatus("ACTIVE");
+                vectorIndex.setCreationStartedAt(null);
+            }
+            table.setVectorIndexes(new ArrayList<>(vectorIndexes));
+        }
+
         tableStore.put(storageKey, table);
         itemsByTable.put(scopedItemsKey(storageKey), new ConcurrentSkipListMap<>());
         LOG.infov("Created table: {0} in region {1}", tableName, region);
@@ -430,11 +489,102 @@ public class DynamoDbService implements ResourceProvider {
         }
     }
 
+    /**
+     * Validates the vector indexes a CreateTable or UpdateTable request carries.
+     *
+     * @param newIndexes           the indexes the request adds
+     * @param existingIndexes      the indexes already on the table, empty on CreateTable
+     * @param attributeDefinitions every definition a SearchSchema element may resolve against
+     * @param billingMode          the billing mode the table will have, null when the request
+     *                             leaves it at the PROVISIONED default
+     */
+    private static void validateVectorIndexes(List<VectorIndex> newIndexes,
+                                              List<VectorIndex> existingIndexes,
+                                              List<AttributeDefinition> attributeDefinitions,
+                                              String billingMode) {
+        if (newIndexes == null || newIndexes.isEmpty()) {
+            return;
+        }
+        // AWS reports the per-member constraints of the "N validation errors detected" family
+        // before any of the "One or more parameter values were invalid" checks below.
+        for (int i = 0; i < newIndexes.size(); i++) {
+            VectorIndex index = newIndexes.get(i);
+            String memberPath = "vectorIndexes." + (i + 1) + ".member";
+            String indexName = index.getIndexName();
+            if (indexName == null || indexName.length() < MIN_VECTOR_INDEX_NAME_LENGTH) {
+                throw new AwsException("ValidationException",
+                        "1 validation error detected: Value '" + indexName + "' at '"
+                        + memberPath + ".indexName' failed to satisfy constraint: "
+                        + "Member must have length greater than or equal to " + MIN_VECTOR_INDEX_NAME_LENGTH, 400);
+            }
+            Long dimensions = index.getDimensions();
+            if (dimensions != null && dimensions < 1) {
+                throw new AwsException("ValidationException",
+                        "1 validation error detected: Value '" + dimensions + "' at '"
+                        + memberPath + ".dimensions' failed to satisfy constraint: "
+                        + "Member must have value greater than or equal to 1", 400);
+            }
+        }
+
+        if (existingIndexes.size() + newIndexes.size() > MAX_VECTOR_INDEXES_PER_TABLE) {
+            throw new AwsException("ValidationException",
+                    "One or more parameter values were invalid: VectorIndex count exceeds "
+                    + "the per-table limit of " + MAX_VECTOR_INDEXES_PER_TABLE, 400);
+        }
+
+        if (!"PAY_PER_REQUEST".equals(billingMode)) {
+            throw new AwsException("ValidationException",
+                    "One or more parameter values were invalid: Vector indexes are only supported "
+                    + "for PAY_PER_REQUEST tables", 400);
+        }
+
+        Set<String> definedAttrs = attributeDefinitions == null
+                ? Set.of()
+                : attributeDefinitions.stream()
+                        .map(AttributeDefinition::getAttributeName)
+                        .collect(Collectors.toSet());
+
+        Map<String, Long> dimensionsByVectorAttribute = new HashMap<>();
+        for (VectorIndex existing : existingIndexes) {
+            if (existing.getVectorAttributeName() != null && existing.getDimensions() != null) {
+                dimensionsByVectorAttribute.put(existing.getVectorAttributeName(), existing.getDimensions());
+            }
+        }
+
+        for (VectorIndex index : newIndexes) {
+            Long dimensions = index.getDimensions();
+            if (dimensions != null && dimensions > MAX_VECTOR_DIMENSIONS) {
+                throw new AwsException("ValidationException",
+                        "One or more parameter values were invalid: Number of dimensions must be "
+                        + "between 1 and " + MAX_VECTOR_DIMENSIONS + " inclusive.", 400);
+            }
+            for (String searchSchemaAttr : index.getSearchSchemaAttributeNames()) {
+                if (!definedAttrs.contains(searchSchemaAttr)) {
+                    throw new AwsException("ValidationException",
+                            "One or more parameter values were invalid: One element in SearchSchema "
+                            + "is not defined in attribute definitions", 400);
+                }
+            }
+            String vectorAttribute = index.getVectorAttributeName();
+            if (vectorAttribute == null || dimensions == null) {
+                continue;
+            }
+            Long seen = dimensionsByVectorAttribute.putIfAbsent(vectorAttribute, dimensions);
+            if (seen != null && !seen.equals(dimensions)) {
+                throw new AwsException("ValidationException",
+                        "One or more parameter values were invalid: Conflicting attribute definition "
+                        + "for '" + vectorAttribute + "'. All VectorIndexes on the same vector "
+                        + "attribute must use the same dimensions.", 400);
+            }
+        }
+    }
+
     public TableDefinition describeTable(String tableName, String region) {
         String canonicalTableName = canonicalTableName(region, tableName);
         String storageKey = regionKey(region, canonicalTableName);
         TableDefinition table = tableStore.get(storageKey)
                 .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
+        settleVectorIndexes(storageKey, table);
 
         // Update dynamic counts
         var items = itemsByTable.get(scopedItemsKey(storageKey));
@@ -442,6 +592,65 @@ public class DynamoDbService implements ResourceProvider {
             table.setItemCount(items.size());
         }
         return table;
+    }
+
+    /**
+     * Advances a vector index added by UpdateTable through its two phases on read, the way
+     * {@code AcmService} settles a pending certificate. Nothing else moves the index along, so
+     * a caller polling DescribeTable is what makes it progress.
+     *
+     * <p>The table leaves UPDATING at the allocation/backfill boundary, together with the switch
+     * from {@code Backfilling: false} to {@code Backfilling: true}, which is what AWS reports.
+     */
+    private void settleVectorIndexes(String storageKey, TableDefinition table) {
+        List<VectorIndex> indexes = table.getVectorIndexes();
+        if (indexes.isEmpty()) {
+            return;
+        }
+        Instant now = Instant.now();
+        boolean changed = false;
+        boolean anyAllocating = false;
+        for (VectorIndex index : indexes) {
+            if (index.getCreationStartedAt() == null || !"CREATING".equals(index.getIndexStatus())) {
+                continue;
+            }
+            Instant backfillStart = index.getCreationStartedAt().plusSeconds(vectorIndexAllocationSeconds);
+            Instant activeAt = backfillStart.plusSeconds(vectorIndexBackfillSeconds);
+            if (!now.isBefore(activeAt)) {
+                index.setIndexStatus("ACTIVE");
+                index.setCreationStartedAt(null);
+                changed = true;
+            } else if (now.isBefore(backfillStart)) {
+                anyAllocating = true;
+            }
+        }
+        if (!anyAllocating && "UPDATING".equals(table.getTableStatus())) {
+            table.setTableStatus("ACTIVE");
+            changed = true;
+        }
+        if (changed) {
+            tableStore.put(storageKey, table);
+        }
+    }
+
+    /**
+     * Whether the index is past resource allocation and still building, which is the only state
+     * where AWS reports {@code Backfilling} at all. A settle must have run first.
+     */
+    public boolean isVectorIndexBackfilling(VectorIndex index) {
+        if (index.getCreationStartedAt() == null || !"CREATING".equals(index.getIndexStatus())) {
+            return false;
+        }
+        return !Instant.now().isBefore(
+                index.getCreationStartedAt().plusSeconds(vectorIndexAllocationSeconds));
+    }
+
+    /**
+     * Whether {@code Backfilling} is reported for this index at all. A vector index created with
+     * the table never reports it; one added by UpdateTable does until it reaches ACTIVE.
+     */
+    public boolean reportsVectorIndexBackfilling(VectorIndex index) {
+        return index.getCreationStartedAt() != null && "CREATING".equals(index.getIndexStatus());
     }
 
     /**
@@ -518,6 +727,12 @@ public class DynamoDbService implements ResourceProvider {
         var table = tableStore.get(storageKey)
                 .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
         requireNotCreating(table);
+        settleVectorIndexes(storageKey, table);
+        if (table.getVectorIndexes().stream().anyMatch(v -> "CREATING".equals(v.getIndexStatus()))) {
+            throw new AwsException("ResourceInUseException",
+                    "Attempt to change a resource which is still in use: Cannot delete table while "
+                    + "indexes are being created, updated, or deleted.", 400);
+        }
         tableStore.delete(storageKey);
         itemsByTable.remove(scopedItemsKey(storageKey));
         itemLocks.remove(scopedItemsKey(storageKey));
@@ -1931,11 +2146,21 @@ public class DynamoDbService implements ResourceProvider {
     public TableDefinition updateTable(String tableName, Long readCapacity, Long writeCapacity,
                                         List<GlobalSecondaryIndex> gsiCreates, List<String> gsiDeletes,
                                         List<AttributeDefinition> newAttrDefs, String region) {
+        return updateTable(tableName, readCapacity, writeCapacity, gsiCreates, gsiDeletes,
+                           newAttrDefs, List.of(), List.of(), null, region);
+    }
+
+    public TableDefinition updateTable(String tableName, Long readCapacity, Long writeCapacity,
+                                        List<GlobalSecondaryIndex> gsiCreates, List<String> gsiDeletes,
+                                        List<AttributeDefinition> newAttrDefs,
+                                        List<VectorIndex> vectorCreates, List<String> vectorDeletes,
+                                        String billingMode, String region) {
         String canonicalTableName = canonicalTableName(region, tableName);
         String storageKey = regionKey(region, canonicalTableName);
         TableDefinition table = tableStore.get(storageKey)
                 .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
         requireNotCreating(table);
+        settleVectorIndexes(storageKey, table);
 
         if (readCapacity != null && readCapacity <= 0) {
             throw new AwsException("ValidationException",
@@ -1985,6 +2210,15 @@ public class DynamoDbService implements ResourceProvider {
             }
         }
 
+        List<VectorIndex> vectorIndexCreates = vectorCreates != null ? vectorCreates : List.of();
+        List<String> vectorIndexDeletes = vectorDeletes != null ? vectorDeletes : List.of();
+        List<AttributeDefinition> knownAttrDefs = new ArrayList<>(table.getAttributeDefinitions());
+        if (newAttrDefs != null) {
+            knownAttrDefs.addAll(newAttrDefs);
+        }
+        validateVectorIndexUpdates(table, vectorIndexCreates, vectorIndexDeletes, knownAttrDefs,
+                billingMode != null ? billingMode : table.getBillingMode());
+
         if (readCapacity != null) {
             table.getProvisionedThroughput().setReadCapacityUnits(readCapacity);
         }
@@ -1999,6 +2233,18 @@ public class DynamoDbService implements ResourceProvider {
         for (GlobalSecondaryIndex gsi : gsiCreates) {
             gsi.setIndexArn(table.getTableArn() + "/index/" + gsi.getIndexName());
             table.getGlobalSecondaryIndexes().add(gsi);
+        }
+
+        for (String indexName : vectorIndexDeletes) {
+            table.getVectorIndexes().removeIf(v -> indexName.equals(v.getIndexName()));
+        }
+
+        for (VectorIndex vectorIndex : vectorIndexCreates) {
+            vectorIndex.setIndexArn(table.getTableArn() + "/index/" + vectorIndex.getIndexName());
+            vectorIndex.setIndexStatus("CREATING");
+            vectorIndex.setCreationStartedAt(Instant.now());
+            table.getVectorIndexes().add(vectorIndex);
+            table.setTableStatus("UPDATING");
         }
 
         if (newAttrDefs != null && !newAttrDefs.isEmpty()) {
@@ -2016,6 +2262,61 @@ public class DynamoDbService implements ResourceProvider {
         tableStore.put(storageKey, table);
         LOG.infov("Updated table: {0} in region {1}", canonicalTableName, region);
         return table;
+    }
+
+    /**
+     * Validates the {@code VectorIndexUpdates} of an UpdateTable request against the table's
+     * current lifecycle state.
+     *
+     * <p>AWS allows one online index operation per table at a time. That limit binds the table,
+     * not the request, so two creates in one request and a create issued while an earlier index
+     * still builds are refused the same way. Deleting an index that is still in its resource
+     * allocation phase is refused with a different error, and the same delete is accepted once
+     * the index reaches backfilling.
+     */
+    private void validateVectorIndexUpdates(TableDefinition table, List<VectorIndex> creates,
+                                            List<String> deletes,
+                                            List<AttributeDefinition> attributeDefinitions,
+                                            String billingMode) {
+        if (creates.isEmpty() && deletes.isEmpty()) {
+            return;
+        }
+        for (VectorIndex create : creates) {
+            if (table.findVectorIndex(create.getIndexName()).isPresent()) {
+                throw new AwsException("ValidationException",
+                        "One or more parameter values were invalid: Duplicate index name: "
+                        + create.getIndexName(), 400);
+            }
+        }
+        int deletesOfBuildingIndexes = 0;
+        for (String indexName : deletes) {
+            VectorIndex target = table.findVectorIndex(indexName)
+                    .orElseThrow(() -> new AwsException("ValidationException",
+                            "The table does not have the specified index: " + indexName, 400));
+            if (!"CREATING".equals(target.getIndexStatus())) {
+                continue;
+            }
+            if (!isVectorIndexBackfilling(target)) {
+                throw new AwsException("ResourceInUseException",
+                        "Attempt to change a resource which is still in use: Index creation is in "
+                        + "resource allocation phase. Retry deletion during backfilling phase or "
+                        + "when the index is active. Table: " + table.getTableName()
+                        + " Index: " + indexName, 400);
+            }
+            deletesOfBuildingIndexes++;
+        }
+        long building = table.getVectorIndexes().stream()
+                .filter(v -> "CREATING".equals(v.getIndexStatus()))
+                .count();
+        // Deleting an index that is still backfilling takes over the slot that index already
+        // holds, so it does not need one of its own.
+        long onlineOperations = building + creates.size() + deletes.size() - deletesOfBuildingIndexes;
+        if (onlineOperations > 1) {
+            throw new AwsException("LimitExceededException",
+                    "Subscriber limit exceeded: Only 1 online index can be created or deleted "
+                    + "simultaneously per table", 400);
+        }
+        validateVectorIndexes(creates, table.getVectorIndexes(), attributeDefinitions, billingMode);
     }
 
     /**
@@ -2038,6 +2339,9 @@ public class DynamoDbService implements ResourceProvider {
             for (KeySchemaElement k : gsi.getKeySchema()) {
                 used.add(k.getAttributeName());
             }
+        }
+        for (VectorIndex vectorIndex : table.getVectorIndexes()) {
+            used.addAll(vectorIndex.getSearchSchemaAttributeNames());
         }
         List<AttributeDefinition> kept = table.getAttributeDefinitions().stream()
                 .filter(ad -> used.contains(ad.getAttributeName()))

@@ -1283,6 +1283,24 @@ public interface EmulatorConfig {
     interface DynamoDbServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /**
+         * Seconds a vector index added by UpdateTable spends in the resource allocation phase,
+         * where the table reads UPDATING, the index reads CREATING with Backfilling false, and a
+         * delete of that index is refused.
+         * Env: FLOCI_SERVICES_DYNAMODB_VECTOR_INDEX_ALLOCATION_SECONDS
+         */
+        @WithDefault("4")
+        int vectorIndexAllocationSeconds();
+
+        /**
+         * Seconds the same index then spends backfilling, where the table reads ACTIVE and the
+         * index reads CREATING with Backfilling true. A vector index created by CreateTable skips
+         * both phases and is ACTIVE at once, which is what AWS reports there.
+         * Env: FLOCI_SERVICES_DYNAMODB_VECTOR_INDEX_BACKFILL_SECONDS
+         */
+        @WithDefault("10")
+        int vectorIndexBackfillSeconds();
     }
 
     interface SnsServiceConfig {
