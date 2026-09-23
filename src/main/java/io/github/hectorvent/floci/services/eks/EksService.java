@@ -58,6 +58,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -74,6 +75,8 @@ import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 public class EksService implements TagHandler, ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(EksService.class);
+
+    private record UserDataClaim(String userData, CompletableFuture<UserDataPipeline.ExecutionResult> future) {}
 
     private static final List<String> ALL_LOG_TYPES = List.of(
             "api", "audit", "authenticator", "controllerManager", "scheduler"
@@ -98,7 +101,7 @@ public class EksService implements TagHandler, ResourceProvider {
     private final EksPodIdentityAssociationService podIdentityAssociations;
     private final EksAddonService addons;
     private final ScheduledExecutorService poller = Executors.newSingleThreadScheduledExecutor();
-    private final Map<String, String> appliedClusterUserData = new ConcurrentHashMap<>();
+    private final Map<String, UserDataClaim> appliedClusterUserData = new ConcurrentHashMap<>();
 
     @Inject
     public EksService(StorageFactory storageFactory, EmulatorConfig config,
@@ -1136,15 +1139,38 @@ public class EksService implements TagHandler, ResourceProvider {
         return health;
     }
 
+    static volatile Runnable userDataClaimWaitingHook;
+
     private void applyNodeGroupUserData(Cluster cluster, String nodegroupName, String userData, Nodegroup nodeGroup) {
         String clusterKey = cluster.getArn() != null ? cluster.getArn() : cluster.getName();
-        // putIfAbsent claims the slot with the user data itself, the same value a successful run
-        // would leave behind, so a racing caller sees the eventual "applied" state immediately and
-        // can still tell identical from differing user data. Losing the race never blocks on the
-        // exec below: only the winner runs it.
-        String claimedBy = appliedClusterUserData.putIfAbsent(clusterKey, userData);
-        if (claimedBy != null) {
-            if (claimedBy.equals(userData)) {
+        CompletableFuture<UserDataPipeline.ExecutionResult> future = new CompletableFuture<>();
+        UserDataClaim claim = new UserDataClaim(userData, future);
+
+        // putIfAbsent claims the slot atomically. If another caller is already executing, we wait
+        // for their execution to complete so that failure in the winner propagates to all racing
+        // nodegroups rather than letting them proceed ACTIVE on a failed bootstrap.
+        UserDataClaim existing = appliedClusterUserData.putIfAbsent(clusterKey, claim);
+        if (existing != null) {
+            Runnable hook = userDataClaimWaitingHook;
+            if (hook != null) {
+                hook.run();
+            }
+
+            UserDataPipeline.ExecutionResult winnerResult;
+            try {
+                winnerResult = existing.future().join();
+            } catch (Throwable t) {
+                Throwable cause = t.getCause() != null ? t.getCause() : t;
+                winnerResult = UserDataPipeline.ExecutionResult.failed(
+                        -1L, 1, 1, "UserData execution failed: " + cause.getMessage());
+            }
+
+            if (winnerResult != null && !winnerResult.isSuccess()) {
+                failNodeGroupUserData(nodeGroup, nodegroupName, cluster, winnerResult);
+                return;
+            }
+
+            if (existing.userData().equals(userData)) {
                 LOG.infov("Nodegroup {0} specifies identical launch template user data already applied to cluster {1}; skipping",
                         nodegroupName, cluster.getName());
             } else {
@@ -1155,30 +1181,44 @@ public class EksService implements TagHandler, ResourceProvider {
         }
 
         if (clusterManager == null) {
+            claim.future().complete(UserDataPipeline.ExecutionResult.skipped("No cluster manager"));
             return;
         }
 
         UserDataPipeline.ExecutionResult result = null;
         try {
             result = clusterManager.executeUserData(cluster, nodegroupName, userData);
+            if (result == null) {
+                result = UserDataPipeline.ExecutionResult.skipped("UserData execution returned no result");
+            }
+            claim.future().complete(result);
+        } catch (Throwable t) {
+            claim.future().completeExceptionally(t);
+            appliedClusterUserData.remove(clusterKey, claim);
+            throw t;
         } finally {
-            if (result == null || !result.isSuccess()) {
+            if (result != null && !result.isSuccess()) {
                 // Release the claim so a later node group can retry the bootstrap. The conditional
                 // remove only drops our own claim, not one a concurrent delete/recreate or a newer
                 // caller has since put in its place.
-                appliedClusterUserData.remove(clusterKey, userData);
+                appliedClusterUserData.remove(clusterKey, claim);
             }
         }
 
-        if (!result.isSuccess()) {
-            nodeGroup.setStatus(NodegroupStatus.CREATE_FAILED);
-            String failureDetail = result.getFailureMessage() != null
-                    ? result.getFailureMessage()
-                    : "UserData execution failed for EKS cluster " + cluster.getName();
-            nodeGroup.setHealth(failedNodeGroupHealth(nodegroupName, failureDetail));
-            LOG.warnv("Nodegroup {0} failed to execute launch template user data: {1}",
-                    nodegroupName, failureDetail);
+        if (result != null && !result.isSuccess()) {
+            failNodeGroupUserData(nodeGroup, nodegroupName, cluster, result);
         }
+    }
+
+    private void failNodeGroupUserData(Nodegroup nodeGroup, String nodegroupName, Cluster cluster,
+            UserDataPipeline.ExecutionResult result) {
+        nodeGroup.setStatus(NodegroupStatus.CREATE_FAILED);
+        String failureDetail = result != null && result.getFailureMessage() != null
+                ? result.getFailureMessage()
+                : "UserData execution failed for EKS cluster " + cluster.getName();
+        nodeGroup.setHealth(failedNodeGroupHealth(nodegroupName, failureDetail));
+        LOG.warnv("Nodegroup {0} failed to execute launch template user data: {1}",
+                nodegroupName, failureDetail);
     }
 
     private FargateProfile.Health defaultFargateProfileHealth() {

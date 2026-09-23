@@ -32,6 +32,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -212,34 +213,148 @@ class EksLaunchTemplateUserDataTest {
         String ltId = createLaunchTemplate("lt-concurrent", encoded);
 
         CountDownLatch enteredExecution = new CountDownLatch(1);
+        CountDownLatch ng2WaitingOnClaim = new CountDownLatch(1);
         CountDownLatch releaseExecution = new CountDownLatch(1);
 
-        when(clusterManager.executeUserData(any(Cluster.class), eq("ng-1"), eq(encoded)))
-                .thenAnswer(invocation -> {
-                    enteredExecution.countDown();
-                    assertTrue(releaseExecution.await(5, TimeUnit.SECONDS));
-                    return UserDataPipeline.ExecutionResult.success(0L, "ok");
-                });
+        EksService.userDataClaimWaitingHook = ng2WaitingOnClaim::countDown;
 
-        CreateNodeGroupRequest req1 = nodeGroupRequest("ng-1");
-        req1.setLaunchTemplate(Map.of("id", ltId));
-        Thread first = new Thread(() -> eksService.createNodeGroup(CLUSTER_NAME, req1));
-        first.start();
+        try {
+            when(clusterManager.executeUserData(any(Cluster.class), eq("ng-1"), eq(encoded)))
+                    .thenAnswer(invocation -> {
+                        enteredExecution.countDown();
+                        assertTrue(releaseExecution.await(5, TimeUnit.SECONDS));
+                        return UserDataPipeline.ExecutionResult.success(0L, "ok");
+                    });
 
-        // Wait until the first caller has claimed the slot and is blocked inside the container
-        // exec, then race a second node group in on the same user data.
-        assertTrue(enteredExecution.await(5, TimeUnit.SECONDS));
+            CreateNodeGroupRequest req1 = nodeGroupRequest("ng-1");
+            req1.setLaunchTemplate(Map.of("id", ltId));
+            AtomicReference<Nodegroup> ng1Ref = new AtomicReference<>();
+            Thread first = new Thread(() -> ng1Ref.set(eksService.createNodeGroup(CLUSTER_NAME, req1)));
+            first.start();
 
-        CreateNodeGroupRequest req2 = nodeGroupRequest("ng-2");
-        req2.setLaunchTemplate(Map.of("id", ltId));
-        Nodegroup ng2 = eksService.createNodeGroup(CLUSTER_NAME, req2);
-        assertEquals(NodegroupStatus.ACTIVE, ng2.getStatus());
+            // Wait until the first caller has claimed the slot and is blocked inside the container exec
+            assertTrue(enteredExecution.await(5, TimeUnit.SECONDS));
 
-        releaseExecution.countDown();
-        first.join(5000);
+            AtomicReference<Nodegroup> ng2Ref = new AtomicReference<>();
+            CreateNodeGroupRequest req2 = nodeGroupRequest("ng-2");
+            req2.setLaunchTemplate(Map.of("id", ltId));
+            Thread second = new Thread(() -> ng2Ref.set(eksService.createNodeGroup(CLUSTER_NAME, req2)));
+            second.start();
 
-        verify(clusterManager, times(1)).executeUserData(any(Cluster.class), any(), any());
-        verify(clusterManager, never()).executeUserData(any(Cluster.class), eq("ng-2"), any());
+            // Wait until second caller observes the claim and begins waiting for winner's future
+            assertTrue(ng2WaitingOnClaim.await(5, TimeUnit.SECONDS));
+
+            releaseExecution.countDown();
+            first.join(5000);
+            second.join(5000);
+
+            Nodegroup ng1 = ng1Ref.get();
+            Nodegroup ng2 = ng2Ref.get();
+            assertNotNull(ng1);
+            assertNotNull(ng2);
+            assertEquals(NodegroupStatus.ACTIVE, ng1.getStatus());
+            assertEquals(NodegroupStatus.ACTIVE, ng2.getStatus());
+
+            verify(clusterManager, times(1)).executeUserData(any(Cluster.class), any(), any());
+            verify(clusterManager, never()).executeUserData(any(Cluster.class), eq("ng-2"), any());
+        } finally {
+            EksService.userDataClaimWaitingHook = null;
+        }
+    }
+
+    @Test
+    void concurrentNodeGroupCreationFailsBothWhenWinnerFails() throws InterruptedException {
+        String script = "#!/bin/bash\nexit 1\n";
+        String encoded = Base64.getEncoder().encodeToString(script.getBytes(StandardCharsets.UTF_8));
+        String ltId = createLaunchTemplate("lt-concurrent-fail", encoded);
+
+        CountDownLatch enteredExecution = new CountDownLatch(1);
+        CountDownLatch ng2WaitingOnClaim = new CountDownLatch(1);
+        CountDownLatch releaseExecution = new CountDownLatch(1);
+
+        EksService.userDataClaimWaitingHook = ng2WaitingOnClaim::countDown;
+
+        try {
+            when(clusterManager.executeUserData(any(Cluster.class), eq("ng-1"), eq(encoded)))
+                    .thenAnswer(invocation -> {
+                        enteredExecution.countDown();
+                        assertTrue(releaseExecution.await(5, TimeUnit.SECONDS));
+                        return UserDataPipeline.ExecutionResult.failed(1L, 1, 1, "bootstrap failed");
+                    });
+
+            CreateNodeGroupRequest req1 = nodeGroupRequest("ng-1");
+            req1.setLaunchTemplate(Map.of("id", ltId));
+            AtomicReference<Nodegroup> ng1Ref = new AtomicReference<>();
+            Thread first = new Thread(() -> ng1Ref.set(eksService.createNodeGroup(CLUSTER_NAME, req1)));
+            first.start();
+
+            // Wait until first caller has claimed the slot and is blocked inside executeUserData
+            assertTrue(enteredExecution.await(5, TimeUnit.SECONDS));
+
+            AtomicReference<Nodegroup> ng2Ref = new AtomicReference<>();
+            CreateNodeGroupRequest req2 = nodeGroupRequest("ng-2");
+            req2.setLaunchTemplate(Map.of("id", ltId));
+            Thread second = new Thread(() -> ng2Ref.set(eksService.createNodeGroup(CLUSTER_NAME, req2)));
+            second.start();
+
+            // Wait until second caller has observed the claim and is waiting on the future
+            assertTrue(ng2WaitingOnClaim.await(5, TimeUnit.SECONDS));
+
+            // Let execution finish with failure
+            releaseExecution.countDown();
+            first.join(5000);
+            second.join(5000);
+
+            Nodegroup ng1 = ng1Ref.get();
+            Nodegroup ng2 = ng2Ref.get();
+
+            assertNotNull(ng1);
+            assertNotNull(ng2);
+            assertEquals(NodegroupStatus.CREATE_FAILED, ng1.getStatus());
+            assertEquals(NodegroupStatus.CREATE_FAILED, ng2.getStatus());
+
+            Map<?, ?> health1 = (Map<?, ?>) ng1.getHealth();
+            assertNotNull(health1);
+            List<?> issues1 = (List<?>) health1.get("issues");
+            assertEquals(1, issues1.size());
+            assertTrue(((Map<?, ?>) issues1.getFirst()).get("message").toString().contains("bootstrap failed"));
+
+            Map<?, ?> health2 = (Map<?, ?>) ng2.getHealth();
+            assertNotNull(health2);
+            List<?> issues2 = (List<?>) health2.get("issues");
+            assertEquals(1, issues2.size());
+            assertTrue(((Map<?, ?>) issues2.getFirst()).get("message").toString().contains("bootstrap failed"));
+
+            // Slot should be released, so subsequent retry ng-3 can run
+            when(clusterManager.executeUserData(any(Cluster.class), eq("ng-3"), eq(encoded)))
+                    .thenReturn(UserDataPipeline.ExecutionResult.success(0L, "ok"));
+
+            CreateNodeGroupRequest req3 = nodeGroupRequest("ng-3");
+            req3.setLaunchTemplate(Map.of("id", ltId));
+            Nodegroup ng3 = eksService.createNodeGroup(CLUSTER_NAME, req3);
+
+            assertEquals(NodegroupStatus.ACTIVE, ng3.getStatus());
+            verify(clusterManager, times(1)).executeUserData(any(Cluster.class), eq("ng-1"), eq(encoded));
+            verify(clusterManager, never()).executeUserData(any(Cluster.class), eq("ng-2"), eq(encoded));
+            verify(clusterManager, times(1)).executeUserData(any(Cluster.class), eq("ng-3"), eq(encoded));
+        } finally {
+            EksService.userDataClaimWaitingHook = null;
+        }
+    }
+
+    @Test
+    void unstubbedClusterManagerDoesNotThrowNpe() {
+        String script = "#!/bin/bash\necho 'unstubbed'\n";
+        String encoded = Base64.getEncoder().encodeToString(script.getBytes(StandardCharsets.UTF_8));
+        String ltId = createLaunchTemplate("lt-unstubbed", encoded);
+
+        // clusterManager is a mock and executeUserData is not stubbed (returns null by default)
+        CreateNodeGroupRequest req = nodeGroupRequest("ng-unstubbed");
+        req.setLaunchTemplate(Map.of("id", ltId));
+
+        Nodegroup ng = eksService.createNodeGroup(CLUSTER_NAME, req);
+        assertNotNull(ng);
+        assertEquals(NodegroupStatus.ACTIVE, ng.getStatus());
     }
 
     @Test
