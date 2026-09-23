@@ -1,11 +1,15 @@
 package io.github.hectorvent.floci.services.cloudfront;
 
+import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import io.github.hectorvent.floci.services.cloudfront.model.CacheBehavior;
 import io.github.hectorvent.floci.services.cloudfront.model.DefaultCacheBehavior;
 import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
 import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
+import io.github.hectorvent.floci.services.cloudfront.model.KeyGroup;
 import io.github.hectorvent.floci.services.cloudfront.model.Origin;
+import io.github.hectorvent.floci.services.cloudfront.model.PublicKey;
 import io.github.hectorvent.floci.services.cloudfront.model.ResponseHeadersPolicy;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
@@ -17,13 +21,21 @@ import org.junit.jupiter.api.Test;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
+import java.security.Signature;
+import java.time.Instant;
+import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -218,6 +230,315 @@ class CloudFrontCustomOriginServingTest {
         assertEquals("CloudFront", removeOnlyResponse.getHeader("Server"));
         assertNotEquals("Wed, 01 Jan 2020 00:00:00 GMT",
                 removeOnlyResponse.getHeader("Date"));
+    }
+
+    @Test
+    void forwardsWriteMethodsWithTheirBodyToTheOrigin() throws Exception {
+        AtomicReference<ReceivedRequest> received = new AtomicReference<>();
+        AtomicInteger hits = new AtomicInteger();
+        startRecordingOrigin(received, hits);
+        Distribution created = cloudFrontService.createDistribution(
+                customOriginDistribution(allMethodsBehavior()), Map.of());
+
+        String json = "{\"name\":\"widget\",\"note\":\"café\"}";
+        given()
+            .header("Host", created.getDomainName())
+            .contentType("application/json; charset=UTF-8")
+            .body(json.getBytes(StandardCharsets.UTF_8))
+        .when()
+            .post("/api/things")
+        .then()
+            .statusCode(201)
+            .header("X-Origin-Method", equalTo("POST"))
+            .body(equalTo("created"));
+        ReceivedRequest post = received.get();
+        assertEquals("POST", post.method());
+        assertEquals("/api/things", post.path());
+        assertEquals("application/json; charset=UTF-8", post.header("Content-Type"));
+        assertEquals(Integer.toString(json.getBytes(StandardCharsets.UTF_8).length),
+                post.header("Content-Length"));
+        assertArrayEquals(json.getBytes(StandardCharsets.UTF_8), post.body());
+
+        byte[] binary = new byte[] {0, 1, 2, (byte) 0xff, (byte) 0xfe, 10, 13};
+        given()
+            .header("Host", created.getDomainName())
+            .contentType("application/octet-stream")
+            .body(binary)
+        .when()
+            .put("/api/things/1")
+        .then()
+            .statusCode(200)
+            .header("X-Origin-Method", equalTo("PUT"));
+        assertEquals("PUT", received.get().method());
+        assertTrue(received.get().header("Content-Type").startsWith("application/octet-stream"));
+        assertArrayEquals(binary, received.get().body());
+
+        given()
+            .header("Host", created.getDomainName())
+            .contentType("application/x-www-form-urlencoded")
+            .body("name=widget&size=2")
+        .when()
+            .patch("/api/things/1")
+        .then()
+            .statusCode(200)
+            .header("X-Origin-Method", equalTo("PATCH"));
+        assertEquals("PATCH", received.get().method());
+        assertTrue(received.get().header("Content-Type")
+                .startsWith("application/x-www-form-urlencoded"));
+        assertEquals("name=widget&size=2",
+                new String(received.get().body(), StandardCharsets.UTF_8));
+
+        given()
+            .header("Host", created.getDomainName())
+        .when()
+            .delete("/api/things/1")
+        .then()
+            .statusCode(200)
+            .header("X-Origin-Method", equalTo("DELETE"));
+        assertEquals("DELETE", received.get().method());
+        assertEquals("/api/things/1", received.get().path());
+        assertEquals(0, received.get().body().length);
+        assertNull(received.get().header("Content-Type"));
+
+        given()
+            .header("Host", created.getDomainName())
+        .when()
+            .post("/api/empty")
+        .then()
+            .statusCode(201);
+        assertEquals("0", received.get().header("Content-Length"));
+        assertEquals(5, hits.get());
+    }
+
+    @Test
+    void forwardsTheViewerAuthorizationOnWriteMethodsOnly() throws Exception {
+        AtomicReference<ReceivedRequest> received = new AtomicReference<>();
+        AtomicInteger hits = new AtomicInteger();
+        startRecordingOrigin(received, hits);
+        Distribution created = cloudFrontService.createDistribution(
+                customOriginDistribution(allMethodsBehavior()), Map.of());
+
+        for (String method : List.of("POST", "PUT", "PATCH", "DELETE")) {
+            given()
+                .header("Host", created.getDomainName())
+                .header("Authorization", "Bearer viewer-token")
+            .when()
+                .request(method, "/api/things/1")
+            .then()
+                .header("X-Origin-Method", equalTo(method));
+            assertEquals("Bearer viewer-token", received.get().header("Authorization"), method);
+        }
+
+        // CloudFront removes Authorization from GET and HEAD requests.
+        given()
+            .header("Host", created.getDomainName())
+            .header("Authorization", "Bearer viewer-token")
+        .when()
+            .get("/api/things/1")
+        .then()
+            .statusCode(200)
+            .header("X-Origin-Method", equalTo("GET"));
+        assertNull(received.get().header("Authorization"));
+        assertEquals(5, hits.get());
+    }
+
+    @Test
+    void customErrorPageForAWriteIsFetchedWithoutTheViewerAuthorization() throws Exception {
+        Map<String, String> authorizationByRequest = new ConcurrentHashMap<>();
+        originServer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        originServer.createContext("/", exchange -> {
+            String request = exchange.getRequestMethod() + " "
+                    + exchange.getRequestURI().getRawPath();
+            authorizationByRequest.put(request,
+                    String.valueOf(exchange.getRequestHeaders().getFirst("Authorization")));
+            boolean errorPage = "GET /errors/500.html".equals(request);
+            byte[] body = (errorPage ? "error-page" : "failed").getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().add("Content-Type", "text/plain");
+            exchange.sendResponseHeaders(errorPage ? 200 : 500, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
+        originServer.start();
+
+        Map<String, Object> errorPage = new LinkedHashMap<>(Map.of(
+                "ErrorCode", "500", "ResponseCode", "503", "ResponsePagePath", "/errors/500.html"));
+        Distribution distribution = customOriginDistribution(allMethodsBehavior());
+        distribution.getConfig().setCustomErrorResponses(List.of(errorPage));
+        Distribution created = cloudFrontService.createDistribution(distribution, Map.of());
+
+        given()
+            .header("Host", created.getDomainName())
+            .header("Authorization", "Bearer viewer-token")
+            .contentType("application/json")
+            .body("{}")
+        .when()
+            .post("/api/things")
+        .then()
+            .statusCode(503)
+            .body(equalTo("error-page"));
+        assertEquals(Map.of(
+                "POST /api/things", "Bearer viewer-token",
+                "GET /errors/500.html", "null"), authorizationByRequest);
+    }
+
+    @Test
+    void rejectsMethodsTheMatchedBehaviorDoesNotAllowWithoutContactingTheOrigin() throws Exception {
+        AtomicReference<ReceivedRequest> received = new AtomicReference<>();
+        AtomicInteger hits = new AtomicInteger();
+        startRecordingOrigin(received, hits);
+
+        CacheBehavior readOnly = new CacheBehavior();
+        readOnly.setPathPattern("/static/*");
+        readOnly.setTargetOriginId("custom-origin");
+        readOnly.setViewerProtocolPolicy("allow-all");
+        readOnly.setAllowedMethods(List.of("GET", "HEAD"));
+        DistributionConfig config = customOriginDistribution(allMethodsBehavior()).getConfig();
+        config.setCacheBehaviors(List.of(readOnly));
+        Distribution distribution = new Distribution();
+        distribution.setConfig(config);
+        Distribution created = cloudFrontService.createDistribution(distribution, Map.of());
+
+        for (String method : List.of("POST", "PUT", "PATCH", "DELETE")) {
+            given()
+                .header("Host", created.getDomainName())
+                .body("ignored")
+            .when()
+                .request(method, "/static/app.js")
+            .then()
+                .statusCode(403)
+                .body(equalTo("Invalid method."));
+        }
+        assertEquals(0, hits.get());
+
+        // A behavior without AllowedMethods keeps CloudFront's GET/HEAD minimum.
+        Distribution defaultsOnly = cloudFrontService.createDistribution(
+                customOriginDistribution(defaultBehavior("custom-origin")), Map.of());
+        given()
+            .header("Host", defaultsOnly.getDomainName())
+            .body("ignored")
+        .when()
+            .post("/api/things")
+        .then()
+            .statusCode(403)
+            .body(equalTo("Invalid method."));
+        assertEquals(0, hits.get());
+    }
+
+    @Test
+    void signedBehaviorsRequireASignatureForWriteMethods() throws Exception {
+        AtomicReference<ReceivedRequest> received = new AtomicReference<>();
+        AtomicInteger hits = new AtomicInteger();
+        startRecordingOrigin(received, hits);
+
+        String suffix = Long.toString(System.nanoTime(), 36);
+        KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
+        generator.initialize(2048);
+        KeyPair keyPair = generator.generateKeyPair();
+        PublicKey publicKey = new PublicKey();
+        publicKey.setName("pk-" + suffix);
+        publicKey.setCallerReference("cr-" + suffix);
+        publicKey.setEncodedKey("-----BEGIN PUBLIC KEY-----\n"
+                + Base64.getMimeEncoder().encodeToString(keyPair.getPublic().getEncoded())
+                + "\n-----END PUBLIC KEY-----");
+        publicKey = cloudFrontService.createPublicKey(publicKey);
+        KeyGroup keyGroup = new KeyGroup();
+        keyGroup.setName("kg-" + suffix);
+        keyGroup.setItems(List.of(publicKey.getId()));
+        keyGroup = cloudFrontService.createKeyGroup(keyGroup);
+
+        DefaultCacheBehavior behavior = allMethodsBehavior();
+        behavior.setTrustedKeyGroups(List.of(keyGroup.getId()));
+        Distribution created = cloudFrontService.createDistribution(
+                customOriginDistribution(behavior), Map.of());
+
+        given()
+            .header("Host", created.getDomainName())
+            .contentType("application/json")
+            .body("{\"unsigned\":true}")
+        .when()
+            .post("/api/things")
+        .then()
+            .statusCode(403);
+        assertEquals(0, hits.get());
+
+        long expires = Instant.now().getEpochSecond() + 3600;
+        String policy = "{\"Statement\":[{\"Resource\":\"*\",\"Condition\":{\"DateLessThan\":"
+                + "{\"AWS:EpochTime\":" + expires + "}}}]}";
+        Signature signer = Signature.getInstance("SHA1withRSA");
+        signer.initSign(keyPair.getPrivate());
+        signer.update(policy.getBytes(StandardCharsets.UTF_8));
+
+        given()
+            .header("Host", created.getDomainName())
+            .queryParam("Policy", cfBase64(policy.getBytes(StandardCharsets.UTF_8)))
+            .queryParam("Signature", cfBase64(signer.sign()))
+            .queryParam("Key-Pair-Id", publicKey.getId())
+            .contentType("application/json")
+            .body("{\"signed\":true}")
+        .when()
+            .post("/api/things")
+        .then()
+            .statusCode(201);
+        assertEquals(1, hits.get());
+        assertEquals("{\"signed\":true}",
+                new String(received.get().body(), StandardCharsets.UTF_8));
+        assertNull(received.get().query());
+    }
+
+    private void startRecordingOrigin(AtomicReference<ReceivedRequest> received, AtomicInteger hits)
+            throws IOException {
+        originServer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        originServer.createContext("/", exchange -> {
+            hits.incrementAndGet();
+            received.set(new ReceivedRequest(
+                    exchange.getRequestMethod(),
+                    exchange.getRequestURI().getRawPath(),
+                    exchange.getRequestURI().getRawQuery(),
+                    exchange.getRequestHeaders(),
+                    exchange.getRequestBody().readAllBytes()));
+            byte[] body = ("POST".equals(exchange.getRequestMethod()) ? "created" : "ok")
+                    .getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().add("Content-Type", "text/plain");
+            exchange.getResponseHeaders().add("X-Origin-Method", exchange.getRequestMethod());
+            exchange.sendResponseHeaders(
+                    "POST".equals(exchange.getRequestMethod()) ? 201 : 200, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
+        originServer.start();
+    }
+
+    private Distribution customOriginDistribution(DefaultCacheBehavior behavior) {
+        Origin customOrigin = new Origin();
+        customOrigin.setId("custom-origin");
+        customOrigin.setDomainName("127.0.0.1");
+        customOrigin.setCustomOriginConfig(customOriginConfig(originServer.getAddress().getPort()));
+        DistributionConfig config = new DistributionConfig();
+        config.setEnabled(true);
+        config.setOrigins(List.of(customOrigin));
+        config.setDefaultCacheBehavior(behavior);
+        Distribution distribution = new Distribution();
+        distribution.setConfig(config);
+        return distribution;
+    }
+
+    private static DefaultCacheBehavior allMethodsBehavior() {
+        DefaultCacheBehavior behavior = defaultBehavior("custom-origin");
+        behavior.setAllowedMethods(List.of("GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"));
+        behavior.setCachedMethods(List.of("GET", "HEAD"));
+        return behavior;
+    }
+
+    private static String cfBase64(byte[] bytes) {
+        return Base64.getEncoder().encodeToString(bytes)
+                .replace('+', '-').replace('=', '_').replace('/', '~');
+    }
+
+    private record ReceivedRequest(String method, String path, String query, Headers headers,
+                                   byte[] body) {
+        String header(String name) {
+            return headers.getFirst(name);
+        }
     }
 
     private static void respond(HttpExchange exchange, AtomicReference<String> receivedQuery,

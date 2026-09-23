@@ -3,7 +3,8 @@
 CloudFront management-plane and local content-delivery emulation. Supports distribution lifecycle,
 cache policies, origin request policies, response headers policies, origin access controls, origin
 access identities, public keys, trusted key groups, CloudFront Functions, invalidations, tagging, and
-GET/HEAD/OPTIONS delivery from S3 or custom origins.
+viewer delivery from S3 or custom origins for every CloudFront viewer method (GET, HEAD, OPTIONS, POST,
+PUT, PATCH and DELETE).
 
 **Protocol:** REST XML  
 **API version:** `2020-05-31`  
@@ -150,9 +151,17 @@ GET/HEAD/OPTIONS delivery from S3 or custom origins.
 - CNAME aliases are globally unique. `AssociateAlias` atomically transfers an alias from its current
   owner to the target distribution. Exact aliases take precedence over the most-specific matching
   wildcard alias.
-- Viewer GET/HEAD requests, and OPTIONS requests allowed by the matched cache behavior, addressed to
-  an enabled distribution's generated domain or alias are routed to the matching S3 or custom
-  origin. Origin forwarding preserves the raw path; custom-origin redirects are not followed.
+- Viewer requests addressed to an enabled distribution's generated domain or alias are routed to the
+  matching S3 or custom origin when the matched cache behavior's `AllowedMethods` includes the
+  method; any other method returns 403 `Invalid method.`. A behavior without `AllowedMethods` allows
+  GET and HEAD. Origin forwarding preserves the raw path; custom-origin redirects are not followed.
+- POST, PUT, PATCH and DELETE are forwarded to custom origins with the viewer request body and its
+  `Content-Type`; `Content-Length` is set from the body. Their responses are never cached, as on AWS.
+  Signed URL and signed cookie enforcement applies to them like any other method. Request bodies are
+  bounded by the emulator-wide `floci.protocols.max-request-size` limit.
+- The viewer's `Authorization` header is forwarded to custom origins on POST, PUT, PATCH and DELETE
+  and removed from GET and HEAD requests, as on AWS. Floci also removes it from OPTIONS requests;
+  AWS removes it there only when OPTIONS is a cached method.
 - Every distribution is also served as `{id}.cloudfront.{host}` for each endpoint host Floci
   resolves: `localhost`, `localhost.floci.io`, `localhost.localstack.cloud`, `FLOCI_HOSTNAME` and
   every `FLOCI_DNS_EXTRA_SUFFIXES` entry. `{id}.cloudfront.localhost.floci.io` and
@@ -160,7 +169,7 @@ GET/HEAD/OPTIONS delivery from S3 or custom origins.
   HTTPS certificate, so a signed URL for either can be downloaded over `https://`. See
   [Downloading over HTTPS](#downloading-over-https).
 - Origin custom headers are persisted through the CloudFront API and CloudFormation. They replace
-  same-named viewer headers on custom-origin GET/HEAD/OPTIONS requests. For in-process S3 origins, a
+  same-named viewer headers on every custom-origin request. For in-process S3 origins, a
   configured `Origin` header is used for S3 CORS evaluation. AWS-prohibited names, malformed
   values, inconsistent quantities, duplicates, and quota violations are rejected with modeled
   CloudFront errors when the distribution is created or updated.
@@ -339,3 +348,6 @@ as it is.
 - CloudFormation provisioning of custom `AWS::CloudFront::ResponseHeadersPolicy` resources
   (literal custom or managed policy IDs are supported on distributions)
 - Persistent edge caching and global CDN propagation
+- Forwarding POST, PUT, PATCH and DELETE to S3 origins. AWS passes them to S3, which evaluates them
+  against the bucket policy (OAC supports `PUT` and `DELETE`); Floci's in-process S3 origin answers
+  them with 403 `Access Denied`, as S3 does for a request that holds no write grant.
