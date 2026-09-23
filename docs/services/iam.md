@@ -138,6 +138,9 @@ type.
 | AddRoleToInstanceProfile | Adds a role to an instance profile. |
 | RemoveRoleFromInstanceProfile | Removes a role from an instance profile. |
 | ListInstanceProfilesForRole | Lists instance profiles associated with a role. |
+| TagInstanceProfile | Adds tags to an instance profile. |
+| UntagInstanceProfile | Removes tags from an instance profile. |
+| ListInstanceProfileTags | Lists tags stored for an instance profile. |
 
 ### Access Keys
 
@@ -235,6 +238,23 @@ was never added, both succeed and change nothing, as they do on AWS.
 Thumbprints are stored and echoed back but never validated against the remote endpoint, since
 nothing here performs the TLS handshake they describe.
 
+### SAML Identity Providers
+
+| Action | Description |
+|--------|-------------|
+| CreateSAMLProvider | Creates a SAML identity provider from a metadata document. |
+| GetSAMLProvider | Returns a provider's creation date and a metadata document rebuilt from its stored entity ID and signing certificate. |
+| ListSAMLProviders | Lists the stored SAML providers of the calling account. |
+
+A provider is identified by name, giving an ARN of the form `arn:aws:iam::<account>:saml-provider/<name>`.
+The name must match `[A-Za-z0-9+=,.@_-]{1,128}`, and creating the same name twice returns
+`EntityAlreadyExists`. An empty or unparseable metadata document returns `InvalidInput`.
+
+Floci stores only the entity ID and signing certificate parsed from the metadata, so `GetSAMLProvider`
+returns a minimal rebuilt document rather than the one that was uploaded. `UpdateSAMLProvider`,
+`DeleteSAMLProvider` and the SAML provider tag operations are not implemented. Providers created here
+are used by `AssumeRoleWithSAML` for trust-policy and assertion validation.
+
 ### Login Profiles
 
 | Action | Description |
@@ -272,12 +292,56 @@ name still refers to it after a rename.
 | Action | Description |
 |--------|-------------|
 | SimulatePrincipalPolicy | Evaluates requested actions and resources against the resolved principal's policies. |
+| SimulateCustomPolicy | Evaluates requested actions and resources against a standalone set of policy documents, with an optional permissions boundary. |
+| GetContextKeysForCustomPolicy | Lists the context keys referenced across a set of policy documents. |
+| GetContextKeysForPrincipalPolicy | Lists the context keys referenced across a resolved principal's policies, plus any additional documents supplied. |
+
+`GetContextKeysForCustomPolicy` and `GetContextKeysForPrincipalPolicy` return every Condition
+operator's key, and every `${...}` policy variable found in a Resource pattern or a Condition
+value, in the order statements are found. A variable's default value (`${key, 'default'}`) is
+stripped, and the three single-character escapes (`${*}`, `${?}`, `${$}`) are excluded, since
+they substitute a literal character rather than naming a context key. The list is neither sorted
+nor de-duplicated, matching AWS's own documented
+example response, which repeats a key referenced by more than one statement.
+
+`PolicySourceArn` on `SimulatePrincipalPolicy` and `GetContextKeysForPrincipalPolicy` resolves an IAM
+user or role only, not a group. `SimulateCustomPolicy` accepts only one
+`PermissionsBoundaryPolicyInputList` document, matching AWS's own documented limit; extra documents
+beyond the first are ignored. Neither simulation action evaluates a resource-based policy
+(`ResourcePolicy`) or `OrderedOrganizationPolicyInputList`, and neither returns
+`MatchedStatements`, `ResourceSpecificResults`, or a `PermissionsBoundaryDecisionDetail`: only the
+top-level `EvalDecision` is populated. `ContextEntries.member.N.ContextKeyType` is accepted but not
+read; the comparison is driven entirely by the policy's own condition operator (`Bool`,
+`NumericEquals`, `DateEquals`, and so on), not by the declared type.
 
 ### Account
 
 | Action | Description |
 |--------|-------------|
-| GetAccountSummary | Returns entity counts (users, groups, roles, customer-managed policies, instance profiles) and IAM quota values. Resources Floci does not track (MFA devices, SAML/OIDC providers, server certificates) are reported as zero rather than omitted. |
+| GetAccountSummary | Returns entity counts (users, groups, roles, customer-managed policies, instance profiles) and IAM quota values. `Providers` counts OIDC providers only; SAML providers are not included. Resources Floci does not track (MFA devices, server certificates) are reported as zero rather than omitted. |
+
+### Organizations Root Access
+
+| Action | Description |
+|--------|-------------|
+| ListOrganizationsFeatures | Lists the centralized root access features that are currently enabled. |
+| EnableOrganizationsRootCredentialsManagement | Enables the `RootCredentialsManagement` feature. |
+| DisableOrganizationsRootCredentialsManagement | Disables the `RootCredentialsManagement` feature. |
+| EnableOrganizationsRootSessions | Enables the `RootSessions` feature. |
+| DisableOrganizationsRootSessions | Disables the `RootSessions` feature. |
+
+Only the set of enabled features is stored, and enabling a feature twice is idempotent. Floci does not
+model root credentials or root sessions themselves, so the flags change what `ListOrganizationsFeatures`
+returns and nothing else.
+
+### Unmodeled Lists
+
+| Action | Description |
+|--------|-------------|
+| ListMFADevices | Always returns an empty list. It does not check that the user exists, where AWS returns `NoSuchEntity` for an unknown user. |
+| ListServerCertificates | Always returns an empty list. |
+
+MFA devices and server certificates are not stored, and no action creates them.
 
 ## AWS Managed Policies
 

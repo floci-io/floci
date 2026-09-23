@@ -27,6 +27,7 @@ import software.amazon.awssdk.services.ecs.model.DescribeTasksResponse;
 import software.amazon.awssdk.services.ecs.model.EcsException;
 import software.amazon.awssdk.services.ecs.model.KeyValuePair;
 import software.amazon.awssdk.services.ecs.model.EphemeralStorage;
+import software.amazon.awssdk.services.ecs.model.ExecuteCommandRequest;
 import software.amazon.awssdk.services.ecs.model.LaunchType;
 import software.amazon.awssdk.services.ecs.model.NetworkConfiguration;
 import software.amazon.awssdk.services.ecs.model.NetworkMode;
@@ -209,6 +210,37 @@ class EcsFargateTest {
 
         ecs.stopTask(StopTaskRequest.builder()
                 .cluster(clusterName).task(task.taskArn()).build());
+    }
+
+    @Test
+    @Order(5)
+    @DisplayName("ExecuteCommand - refused for a task that was not run with it enabled")
+    void executeCommandRequiresTheTaskToHaveItEnabled() {
+        Task plain = ecs.runTask(RunTaskRequest.builder()
+                .cluster(clusterName)
+                .taskDefinition(family)
+                .launchType(LaunchType.FARGATE)
+                .networkConfiguration(NetworkConfiguration.builder()
+                        .awsvpcConfiguration(AwsVpcConfiguration.builder()
+                                .subnets(subnetId)
+                                .build())
+                        .build())
+                .build()).tasks().get(0);
+
+        try {
+            assertThatThrownBy(() -> ecs.executeCommand(ExecuteCommandRequest.builder()
+                    .cluster(clusterName)
+                    .task(plain.taskArn())
+                    .container("app")
+                    .command("/bin/sh")
+                    .interactive(true)
+                    .build()))
+                    .isInstanceOf(EcsException.class)
+                    .hasMessageContaining("execute command was not enabled");
+        } finally {
+            ecs.stopTask(StopTaskRequest.builder()
+                    .cluster(clusterName).task(plain.taskArn()).build());
+        }
     }
 
     @Test

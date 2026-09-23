@@ -210,11 +210,16 @@ challenge. It requires the user pool's tier to be Essentials or higher. `WEB_AUT
 
 Any other `AuthFlow` value is rejected with `InvalidParameterException` and no tokens are issued.
 
-When an app client sets `ExplicitAuthFlows`, only the flows it lists are accepted (`ALLOW_USER_PASSWORD_AUTH`,
-`ALLOW_USER_SRP_AUTH`, `ALLOW_CUSTOM_AUTH`, `ALLOW_USER_AUTH`, `ALLOW_ADMIN_USER_PASSWORD_AUTH`,
-`ALLOW_REFRESH_TOKEN_AUTH`, and the legacy `USER_PASSWORD_AUTH`, `ADMIN_NO_SRP_AUTH` and
-`CUSTOM_AUTH_FLOW_ONLY`); any other flow fails with `InvalidParameterException`. A client created without `ExplicitAuthFlows` is not gated, unlike AWS, which defaults
-such a client to SRP, custom and refresh auth.
+An app client only accepts the flows in its `ExplicitAuthFlows`: `ALLOW_USER_PASSWORD_AUTH`,
+`ALLOW_USER_SRP_AUTH`, `ALLOW_CUSTOM_AUTH`, `ALLOW_USER_AUTH`, `ALLOW_ADMIN_USER_PASSWORD_AUTH` and
+`ALLOW_REFRESH_TOKEN_AUTH`, or the legacy `USER_PASSWORD_AUTH`, `ADMIN_NO_SRP_AUTH` and
+`CUSTOM_AUTH_FLOW_ONLY`. Any other flow fails with `InvalidParameterException`.
+
+A client created without `ExplicitAuthFlows`, or with it cleared to an empty list, stores and describes an
+empty list, matching AWS. It is enforced as if it had `ALLOW_REFRESH_TOKEN_AUTH`, `ALLOW_USER_SRP_AUTH` and
+`ALLOW_CUSTOM_AUTH`, the default AWS documents for such a client: only the enforcement uses that default, not
+the stored or returned value. A client that signs in with `USER_PASSWORD_AUTH`, `ADMIN_USER_PASSWORD_AUTH` or
+`USER_AUTH` must list the matching `ALLOW_` value.
 
 ## User Attribute Update Verification
 

@@ -69,14 +69,23 @@ public class AppSyncErrorFormatter {
         if (path != null) {
             map.put("path", path);
         }
-        String classification = null;
-        Object extensions = error.get("extensions");
-        if (extensions instanceof Map<?, ?> extensionsMap) {
-            Object raw = extensionsMap.get("classification");
-            classification = raw == null ? null : String.valueOf(raw);
+        // A resolver that called util.error chose its own errorType, errorInfo and data, and AppSync
+        // reports all three on the error itself. The sidecar's resolver callback copies them onto
+        // the error's extensions as type/data/info; anything else keeps the classification-derived
+        // type and the null errorInfo that a server-side failure has.
+        Map<?, ?> extensions = error.get("extensions") instanceof Map<?, ?> map1 ? map1 : null;
+        Object suppliedType = extensions == null ? null : extensions.get("type");
+        if (suppliedType instanceof String type && !type.isBlank()) {
+            map.put("errorType", type);
+        } else {
+            Object raw = extensions == null ? null : extensions.get("classification");
+            map.put("errorType", toAppSyncErrorType(raw == null ? null : String.valueOf(raw)));
         }
-        map.put("errorType", toAppSyncErrorType(classification));
-        map.put("errorInfo", null);
+        map.put("errorInfo", extensions == null ? null : extensions.get("info"));
+        Object suppliedData = extensions == null ? null : extensions.get("data");
+        if (suppliedData != null) {
+            map.put("data", suppliedData);
+        }
         return map;
     }
 

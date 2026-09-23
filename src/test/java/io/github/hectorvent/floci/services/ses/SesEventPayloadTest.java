@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ses;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.services.ses.SesRecipientEvent.Cause;
 import io.github.hectorvent.floci.services.ses.model.MessageHeader;
 import io.github.hectorvent.floci.services.ses.model.MessageTag;
 import org.junit.jupiter.api.Test;
@@ -12,6 +13,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -27,10 +29,7 @@ class SesEventPayloadTest {
 
     @Test
     void send_buildsMailBlockWithCommonHeadersAndTags() {
-        ObjectNode node = SesEventPayload.build(mapper, "SEND", "msg-1", "from@example.com",
-                "arn:aws:ses:us-east-1:000000000000:identity/from@example.com",
-                "000000000000", "Hello", List.of("to@example.com"), List.of("cc@example.com"),
-                List.of(), List.of("to@example.com", "cc@example.com"), List.of(), List.of(), "my-cs", List.of(), List.of(), ts);
+        ObjectNode node = SesEventPayload.build(mapper, SesRecipientEvent.of("SEND", Cause.SIMULATOR, List.of()), "msg-1", "from@example.com", "arn:aws:ses:us-east-1:000000000000:identity/from@example.com", "000000000000", "Hello", List.of("to@example.com"), List.of("cc@example.com"), List.of(), List.of("to@example.com", "cc@example.com"), "my-cs", List.of(), List.of(), ts);
 
         assertEquals("Send", node.get("eventType").asText());
         assertTrue(node.has("send"));
@@ -65,10 +64,7 @@ class SesEventPayloadTest {
 
     @Test
     void delivery_includesRecipientsAndSmtpResponse() {
-        ObjectNode node = SesEventPayload.build(mapper, "DELIVERY", "msg-1", "from@example.com",
-                null, "000000000000", "",
-                List.of("success@simulator.amazonses.com"), List.of(), List.of(),
-                List.of("success@simulator.amazonses.com"), List.of(), List.of(), "cs", List.of(), List.of(), ts);
+        ObjectNode node = SesEventPayload.build(mapper, SesRecipientEvent.of("DELIVERY", Cause.SIMULATOR, List.of("success@simulator.amazonses.com")), "msg-1", "from@example.com", null, "000000000000", "", List.of("success@simulator.amazonses.com"), List.of(), List.of(), List.of("success@simulator.amazonses.com"), "cs", List.of(), List.of(), ts);
 
         assertEquals("Delivery", node.get("eventType").asText());
         ObjectNode delivery = (ObjectNode) node.get("delivery");
@@ -80,10 +76,7 @@ class SesEventPayloadTest {
 
     @Test
     void bounce_includesBouncedRecipientsAndPermanentType() {
-        ObjectNode node = SesEventPayload.build(mapper, "BOUNCE", "msg-1", "from@example.com",
-                null, "000000000000", "",
-                List.of("bounce@simulator.amazonses.com"), List.of(), List.of(),
-                List.of("bounce@simulator.amazonses.com"), List.of(), List.of(), "cs", List.of(), List.of(), ts);
+        ObjectNode node = SesEventPayload.build(mapper, SesRecipientEvent.of("BOUNCE", Cause.SIMULATOR, List.of("bounce@simulator.amazonses.com")), "msg-1", "from@example.com", null, "000000000000", "", List.of("bounce@simulator.amazonses.com"), List.of(), List.of(), List.of("bounce@simulator.amazonses.com"), "cs", List.of(), List.of(), ts);
 
         assertEquals("Bounce", node.get("eventType").asText());
         ObjectNode bounce = (ObjectNode) node.get("bounce");
@@ -95,74 +88,18 @@ class SesEventPayloadTest {
 
     @Test
     void complaint_includesComplainedRecipients() {
-        ObjectNode node = SesEventPayload.build(mapper, "COMPLAINT", "msg-1", "from@example.com",
-                null, "000000000000", "",
-                List.of("complaint@simulator.amazonses.com"), List.of(), List.of(),
-                List.of("complaint@simulator.amazonses.com"), List.of(), List.of(), "cs", List.of(), List.of(), ts);
+        ObjectNode node = SesEventPayload.build(mapper, SesRecipientEvent.of("COMPLAINT", Cause.SIMULATOR, List.of("complaint@simulator.amazonses.com")), "msg-1", "from@example.com", null, "000000000000", "", List.of("complaint@simulator.amazonses.com"), List.of(), List.of(), List.of("complaint@simulator.amazonses.com"), "cs", List.of(), List.of(), ts);
 
         assertEquals("Complaint", node.get("eventType").asText());
         assertEquals("complaint@simulator.amazonses.com",
                 node.get("complaint").get("complainedRecipients").get(0).get("emailAddress").asText());
-    }
-
-    @Test
-    void bounce_filtersBouncedRecipientsToBounceSimulatorOnly() {
-        ObjectNode node = SesEventPayload.build(mapper, "BOUNCE", "msg-1", "from@example.com",
-                null, "000000000000", "",
-                List.of("normal@example.com", "bounce@simulator.amazonses.com"),
-                List.of(), List.of(),
-                List.of("normal@example.com", "bounce@simulator.amazonses.com"),
-                List.of(), List.of(), "cs", List.of(), List.of(), ts);
-
-        var bounced = (com.fasterxml.jackson.databind.node.ArrayNode)
-                node.get("bounce").get("bouncedRecipients");
-        assertEquals(1, bounced.size());
-        assertEquals("bounce@simulator.amazonses.com",
-                bounced.get(0).get("emailAddress").asText());
-        // mail.destination retains the full envelope
-        assertEquals(2, node.get("mail").get("destination").size());
-    }
-
-    @Test
-    void delivery_filtersRecipientsToSuccessSimulatorOnly() {
-        ObjectNode node = SesEventPayload.build(mapper, "DELIVERY", "msg-1", "from@example.com",
-                null, "000000000000", "",
-                List.of("normal@example.com", "success@simulator.amazonses.com"),
-                List.of(), List.of(),
-                List.of("normal@example.com", "success@simulator.amazonses.com"),
-                List.of(), List.of(), "cs", List.of(), List.of(), ts);
-
-        var recipients = node.get("delivery").get("recipients");
-        assertEquals(1, recipients.size());
-        assertEquals("success@simulator.amazonses.com", recipients.get(0).asText());
-    }
-
-    @Test
-    void complaint_filtersComplainedRecipientsToComplaintSimulatorOnly() {
-        ObjectNode node = SesEventPayload.build(mapper, "COMPLAINT", "msg-1", "from@example.com",
-                null, "000000000000", "",
-                List.of("normal@example.com", "complaint@simulator.amazonses.com"),
-                List.of(), List.of(),
-                List.of("normal@example.com", "complaint@simulator.amazonses.com"),
-                List.of(), List.of(), "cs", List.of(), List.of(), ts);
-
-        var complained = node.get("complaint").get("complainedRecipients");
-        assertEquals(1, complained.size());
-        assertEquals("complaint@simulator.amazonses.com",
-                complained.get(0).get("emailAddress").asText());
+        assertEquals(node.get("complaint").get("timestamp").asText(),
+                node.get("complaint").get("arrivalDate").asText());
     }
 
     @Test
     void send_emailTagsAppearInMailTagsAlongsideConfigurationSet() {
-        ObjectNode node = SesEventPayload.build(mapper, "SEND", "msg-1", "from@example.com",
-                null, "000000000000", "Hello",
-                List.of("to@example.com"), List.of(), List.of(),
-                List.of("to@example.com"),
-                List.of(), List.of(),
-                "my-cs",
-                List.of(new MessageTag("campaign", "launch"), new MessageTag("env", "prod")),
-                List.of(),
-                ts);
+        ObjectNode node = SesEventPayload.build(mapper, SesRecipientEvent.of("SEND", Cause.SIMULATOR, List.of()), "msg-1", "from@example.com", null, "000000000000", "Hello", List.of("to@example.com"), List.of(), List.of(), List.of("to@example.com"), "my-cs", List.of(new MessageTag("campaign", "launch"), new MessageTag("env", "prod")), List.of(), ts);
 
         ObjectNode tags = (ObjectNode) node.get("mail").get("tags");
         assertEquals("my-cs", tags.get("ses:configuration-set").get(0).asText());
@@ -172,15 +109,7 @@ class SesEventPayloadTest {
 
     @Test
     void send_emailTagsTolerateNullValueAndDuplicateKey() {
-        ObjectNode node = SesEventPayload.build(mapper, "SEND", "msg-1", "from@example.com",
-                null, "000000000000", "",
-                List.of("to@example.com"), List.of(), List.of(),
-                List.of("to@example.com"),
-                List.of(), List.of(),
-                "cs",
-                List.of(new MessageTag("k", null), new MessageTag("k", "v2")),
-                List.of(),
-                ts);
+        ObjectNode node = SesEventPayload.build(mapper, SesRecipientEvent.of("SEND", Cause.SIMULATOR, List.of()), "msg-1", "from@example.com", null, "000000000000", "", List.of("to@example.com"), List.of(), List.of(), List.of("to@example.com"), "cs", List.of(new MessageTag("k", null), new MessageTag("k", "v2")), List.of(), ts);
 
         var arr = node.get("mail").get("tags").get("k");
         assertEquals(2, arr.size(), "duplicate keys append into the same array");
@@ -190,17 +119,9 @@ class SesEventPayloadTest {
 
     @Test
     void send_additionalHeadersAppendToMailHeadersAfterAutoHeaders() {
-        ObjectNode node = SesEventPayload.build(mapper, "SEND", "msg-1", "from@example.com",
-                null, "000000000000", "Hi",
-                List.of("to@example.com"), List.of(), List.of(),
-                List.of("to@example.com"),
-                List.of(), List.of(),
-                "cs",
-                List.of(),
-                List.of(
+        ObjectNode node = SesEventPayload.build(mapper, SesRecipientEvent.of("SEND", Cause.SIMULATOR, List.of()), "msg-1", "from@example.com", null, "000000000000", "Hi", List.of("to@example.com"), List.of(), List.of(), List.of("to@example.com"), "cs", List.of(), List.of(
                         new MessageHeader("X-Mailer", "floci"),
-                        new MessageHeader("List-Unsubscribe", "<mailto:u@example.com>")),
-                ts);
+                        new MessageHeader("List-Unsubscribe", "<mailto:u@example.com>")), ts);
 
         ArrayNode headers = (ArrayNode) node.get("mail").get("headers");
         // From, To, Subject auto-emitted first; then user headers in order.
@@ -214,18 +135,10 @@ class SesEventPayloadTest {
 
     @Test
     void send_additionalHeadersSkipNullOrBlankName() {
-        ObjectNode node = SesEventPayload.build(mapper, "SEND", "msg-1", "from@example.com",
-                null, "000000000000", "Hi",
-                List.of("to@example.com"), List.of(), List.of(),
-                List.of("to@example.com"),
-                List.of(), List.of(),
-                "cs",
-                List.of(),
-                List.of(
+        ObjectNode node = SesEventPayload.build(mapper, SesRecipientEvent.of("SEND", Cause.SIMULATOR, List.of()), "msg-1", "from@example.com", null, "000000000000", "Hi", List.of("to@example.com"), List.of(), List.of(), List.of("to@example.com"), "cs", List.of(), List.of(
                         new MessageHeader(null, "ignored"),
                         new MessageHeader("", "ignored-too"),
-                        new MessageHeader("X-Real", "ok")),
-                ts);
+                        new MessageHeader("X-Real", "ok")), ts);
 
         ArrayNode headers = (ArrayNode) node.get("mail").get("headers");
         // Only the auto headers (From/To/Subject) and the single valid X-Real.
@@ -241,69 +154,78 @@ class SesEventPayloadTest {
     }
 
     @Test
-    void bounce_unionsSimulatorAndSuppressionRecipients() {
-        // simulator-bounce@... is detected from the envelope, while
-        // suppressed-bounce@... comes from the suppression-list group.
-        // The emitted bouncedRecipients list contains both, deduplicated.
-        ObjectNode node = SesEventPayload.build(mapper, "BOUNCE", "msg-1", "from@example.com",
-                null, "000000000000", "",
+    void bounce_forAccountSuppression_rendersOnlyItsOwnRecipientsWithTheSuppressionSubtype() {
+        // The envelope carries both a simulator bounce and a suppressed address, but this event is
+        // the suppression one: the simulator recipient belongs to a separate BOUNCE event.
+        ObjectNode node = SesEventPayload.build(mapper,
+                SesRecipientEvent.of("BOUNCE", Cause.ACCOUNT_SUPPRESSION, List.of("suppressed-bounce@example.com")),
+                "msg-1", "from@example.com", null, "000000000000", "",
+                List.of("bounce@simulator.amazonses.com", "suppressed-bounce@example.com"), List.of(), List.of(),
                 List.of("bounce@simulator.amazonses.com", "suppressed-bounce@example.com"),
-                List.of(), List.of(),
-                List.of("bounce@simulator.amazonses.com", "suppressed-bounce@example.com"),
-                List.of("suppressed-bounce@example.com"),
-                List.of(),
                 "cs", List.of(), List.of(), ts);
 
-        var bounced = node.get("bounce").get("bouncedRecipients");
-        assertEquals(2, bounced.size());
-        assertEquals("bounce@simulator.amazonses.com",
-                bounced.get(0).get("emailAddress").asText());
-        assertEquals("suppressed-bounce@example.com",
-                bounced.get(1).get("emailAddress").asText());
+        ObjectNode bounce = (ObjectNode) node.get("bounce");
+        assertEquals("OnAccountSuppressionList", bounce.get("bounceSubType").asText());
+        assertEquals(1, bounce.get("bouncedRecipients").size());
+        ObjectNode recipient = (ObjectNode) bounce.get("bouncedRecipients").get(0);
+        assertEquals("suppressed-bounce@example.com", recipient.get("emailAddress").asText());
+        assertEquals("failed", recipient.get("action").asText());
+        assertEquals("5.1.1", recipient.get("status").asText());
+        assertEquals(SesEventPayload.ACCOUNT_SUPPRESSION_DIAGNOSTIC, recipient.get("diagnosticCode").asText());
+        assertEquals(2, node.get("mail").get("destination").size(), "mail.destination keeps the full envelope");
     }
 
     @Test
-    void complaint_unionsSimulatorAndSuppressionRecipients() {
-        ObjectNode node = SesEventPayload.build(mapper, "COMPLAINT", "msg-1", "from@example.com",
-                null, "000000000000", "",
+    void complaint_forAccountSuppression_rendersOnlyItsOwnRecipientsWithTheSuppressionSubtype() {
+        ObjectNode node = SesEventPayload.build(mapper,
+                SesRecipientEvent.of("COMPLAINT", Cause.ACCOUNT_SUPPRESSION, List.of("suppressed-complaint@example.com")),
+                "msg-1", "from@example.com", null, "000000000000", "",
+                List.of("complaint@simulator.amazonses.com", "suppressed-complaint@example.com"), List.of(), List.of(),
                 List.of("complaint@simulator.amazonses.com", "suppressed-complaint@example.com"),
-                List.of(), List.of(),
-                List.of("complaint@simulator.amazonses.com", "suppressed-complaint@example.com"),
-                List.of(),
-                List.of("suppressed-complaint@example.com"),
                 "cs", List.of(), List.of(), ts);
 
-        var complained = node.get("complaint").get("complainedRecipients");
-        assertEquals(2, complained.size());
-        assertEquals("complaint@simulator.amazonses.com",
-                complained.get(0).get("emailAddress").asText());
+        ObjectNode complaint = (ObjectNode) node.get("complaint");
+        assertEquals("OnAccountSuppressionList", complaint.get("complaintSubType").asText());
+        assertEquals(1, complaint.get("complainedRecipients").size());
         assertEquals("suppressed-complaint@example.com",
-                complained.get(1).get("emailAddress").asText());
+                complaint.get("complainedRecipients").get(0).get("emailAddress").asText());
     }
 
     @Test
-    void bounce_simulatorAndSuppressionSameAddressNotDuplicated() {
-        // If an address is both a bounce simulator AND on the suppression list with
-        // reason BOUNCE, it should appear once in bouncedRecipients.
-        ObjectNode node = SesEventPayload.build(mapper, "BOUNCE", "msg-1", "from@example.com",
-                null, "000000000000", "",
-                List.of("bounce@simulator.amazonses.com"),
-                List.of(), List.of(),
-                List.of("bounce@simulator.amazonses.com"),
-                List.of("bounce@simulator.amazonses.com"),
-                List.of(),
-                "cs", List.of(), List.of(), ts);
+    void bounce_listManagementOptOutIsAGeneralBounceCarryingOnlyTheAddress() {
+        ObjectNode node = SesEventPayload.build(mapper, SesRecipientEvent.of("BOUNCE", Cause.LIST_MANAGEMENT, List.of("unsub@example.com")), "msg-1", "from@example.com", null, "000000000000", "", List.of("unsub@example.com"), List.of(), List.of(), List.of("unsub@example.com"), "cs", List.of(), List.of(), ts);
 
-        var bounced = node.get("bounce").get("bouncedRecipients");
-        assertEquals(1, bounced.size());
+        ObjectNode bounce = (ObjectNode) node.get("bounce");
+        assertEquals("General", bounce.get("bounceSubType").asText());
+        ObjectNode entry = (ObjectNode) bounce.get("bouncedRecipients").get(0);
+        assertEquals("unsub@example.com", entry.get("emailAddress").asText());
+        assertFalse(entry.has("diagnosticCode"));
+    }
+
+    @Test
+    void feedbackIdsDifferBetweenTheEventsOfOneSend() {
+        List<String> envelope = List.of("bounce@simulator.amazonses.com", "blocked@example.com");
+        ObjectNode simulator = SesEventPayload.build(mapper, SesRecipientEvent.of("BOUNCE", Cause.SIMULATOR, List.of("bounce@simulator.amazonses.com")), "msg-1", "from@example.com", null, "000000000000", "", envelope, List.of(), List.of(), envelope, "cs", List.of(), List.of(), ts);
+        ObjectNode suppressed = SesEventPayload.build(mapper, SesRecipientEvent.of("BOUNCE", Cause.ACCOUNT_SUPPRESSION, List.of("blocked@example.com")), "msg-1", "from@example.com", null, "000000000000", "", envelope, List.of(), List.of(), envelope, "cs", List.of(), List.of(), ts);
+
+        assertNotEquals(simulator.get("bounce").get("feedbackId").asText(),
+                suppressed.get("bounce").get("feedbackId").asText());
+    }
+
+    @Test
+    void feedbackIdIsTheSameOnTheEventAndOnTheIdentityNotificationOfOneOutcome() {
+        SesRecipientEvent bounce = SesRecipientEvent.of("BOUNCE", Cause.SIMULATOR, List.of("bounce@simulator.amazonses.com"));
+        List<String> envelope = List.of("bounce@simulator.amazonses.com");
+        ObjectNode event = SesEventPayload.build(mapper, bounce, "msg-1", "from@example.com", null, "000000000000", "", envelope, List.of(), List.of(), envelope, "cs", List.of(), List.of(), ts);
+        ObjectNode notification = SesEventPayload.buildIdentityNotification(mapper, bounce, "msg-1", "from@example.com", null, "000000000000", "", envelope, List.of(), List.of(), envelope, List.of(), ts, false);
+
+        assertEquals(event.get("bounce").get("feedbackId").asText(),
+                notification.get("bounce").get("feedbackId").asText());
     }
 
     @Test
     void reject_hasReason() {
-        ObjectNode node = SesEventPayload.build(mapper, "REJECT", "msg-1", "from@example.com",
-                null, "000000000000", "",
-                List.of("suppressionlist@simulator.amazonses.com"), List.of(), List.of(),
-                List.of("suppressionlist@simulator.amazonses.com"), List.of(), List.of(), "cs", List.of(), List.of(), ts);
+        ObjectNode node = SesEventPayload.build(mapper, SesRecipientEvent.of("REJECT", Cause.CONTENT_REJECTED, List.of()), "msg-1", "from@example.com", null, "000000000000", "", List.of("suppressionlist@simulator.amazonses.com"), List.of(), List.of(), List.of("suppressionlist@simulator.amazonses.com"), "cs", List.of(), List.of(), ts);
 
         assertEquals("Reject", node.get("eventType").asText());
         assertNotNull(node.get("reject").get("reason"));

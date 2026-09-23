@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -110,6 +111,7 @@ class DynamoDbCfnProvisionerTest {
     void globalTableIsProvisionedAsATableAndPublishesTableId() throws Exception {
         when(dynamoDb.createTable(anyString(), anyList(), anyList(), any(), any(), anyList(), anyList(), anyString()))
                 .thenReturn(table(false));
+        when(dynamoDb.describeTable(TABLE_NAME, "us-east-1")).thenReturn(table(false));
         StackResource r = resource("AWS::DynamoDB::GlobalTable", "Orders");
 
         provisioner.provision(r, props("{\"TableName\":\"orders\"}"), ctx());
@@ -119,6 +121,54 @@ class DynamoDbCfnProvisionerTest {
         assertEquals(TABLE_NAME, r.getPhysicalId());
         assertEquals(Set.of("Arn", "TableId"), r.getAttributes().keySet());
         assertEquals(TABLE_ID, r.getAttributes().get("TableId"));
+        // No Replicas declared and none tracked, so nothing to reconcile.
+        verify(dynamoDb, never()).applyReplicaUpdates(anyString(), anyList(), anyList(), anyString());
+    }
+
+    @Test
+    void globalTableCreateAddsDeclaredReplicaRegionsFilteringTheDeploymentRegion() throws Exception {
+        when(dynamoDb.createTable(anyString(), anyList(), anyList(), any(), any(), anyList(), anyList(), anyString()))
+                .thenReturn(table(false));
+        when(dynamoDb.describeTable(TABLE_NAME, "us-east-1")).thenReturn(table(false));
+        StackResource r = resource("AWS::DynamoDB::GlobalTable", "Orders");
+
+        provisioner.provision(r, props("{\"TableName\":\"orders\",\"Replicas\":["
+                + "{\"Region\":\"us-east-1\"},{\"Region\":\"us-west-2\"},{\"Region\":\"eu-west-1\"}]}"), ctx());
+
+        // us-east-1 is the deployment region served by the table itself, so it is filtered out.
+        verify(dynamoDb).applyReplicaUpdates(TABLE_NAME, List.of("us-west-2", "eu-west-1"), List.of(), "us-east-1");
+    }
+
+    @Test
+    void globalTableUpdateAddsNewReplicasAndRemovesDroppedOnes() throws Exception {
+        when(dynamoDb.createTable(anyString(), anyList(), anyList(), any(), any(), anyList(), anyList(), anyString()))
+                .thenReturn(table(false));
+        TableDefinition existing = table(false);
+        existing.setReplicaRegions(new ArrayList<>(List.of("us-west-2", "eu-west-1")));
+        when(dynamoDb.describeTable(TABLE_NAME, "us-east-1")).thenReturn(existing);
+        StackResource r = resource("AWS::DynamoDB::GlobalTable", "Orders");
+        r.setPhysicalId(TABLE_NAME);
+
+        provisioner.provision(r, props("{\"TableName\":\"orders\",\"Replicas\":["
+                + "{\"Region\":\"us-west-2\"},{\"Region\":\"ap-south-1\"}]}"), updateCtx(TABLE_NAME));
+
+        verify(dynamoDb).applyReplicaUpdates(TABLE_NAME, List.of("ap-south-1"), List.of("eu-west-1"), "us-east-1");
+    }
+
+    @Test
+    void globalTableWithUnchangedReplicasSkipsTheReplicaUpdate() throws Exception {
+        when(dynamoDb.createTable(anyString(), anyList(), anyList(), any(), any(), anyList(), anyList(), anyString()))
+                .thenReturn(table(false));
+        TableDefinition existing = table(false);
+        existing.setReplicaRegions(new ArrayList<>(List.of("us-west-2")));
+        when(dynamoDb.describeTable(TABLE_NAME, "us-east-1")).thenReturn(existing);
+        StackResource r = resource("AWS::DynamoDB::GlobalTable", "Orders");
+        r.setPhysicalId(TABLE_NAME);
+
+        provisioner.provision(r, props("{\"TableName\":\"orders\",\"Replicas\":[{\"Region\":\"us-west-2\"}]}"),
+                updateCtx(TABLE_NAME));
+
+        verify(dynamoDb, never()).applyReplicaUpdates(anyString(), anyList(), anyList(), anyString());
     }
 
     @Test

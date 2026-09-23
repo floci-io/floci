@@ -1206,6 +1206,19 @@ class EcsFargateEdgeCaseIntegrationTest {
                 .then().body("message", containsString("containerInstances"));
     }
 
+    @Test
+    void executeCommandOnlySupportsInteractiveSessions() {
+        String family = seed("edge-interactive");
+        String taskArn = call("RunTask", "{\"cluster\":\"" + CLUSTER + "\",\"taskDefinition\":\""
+                + family + "\",\"launchType\":\"FARGATE\"," + NETWORK
+                + ",\"enableExecuteCommand\":true}", 200)
+                .jsonPath().getString("tasks[0].taskArn");
+
+        call("ExecuteCommand", "{\"cluster\":\"" + CLUSTER + "\",\"task\":\"" + taskArn
+                + "\",\"container\":\"app\",\"command\":\"/bin/sh\",\"interactive\":false}", 400)
+                .then().body("message", containsString("interactive"));
+    }
+
     // ── The Service shape's own members ──────────────────────────────────────
 
     @Test

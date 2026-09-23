@@ -6,6 +6,8 @@ import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.services.codeartifact.CodeArtifactService.AuthorizationToken;
+import io.github.hectorvent.floci.services.codeartifact.CodeArtifactService.AuthorizationTokenScope;
 import io.github.hectorvent.floci.services.codeartifact.CodeArtifactService.DomainView;
 import io.github.hectorvent.floci.services.codeartifact.CodeArtifactService.ResourcePolicy;
 import io.github.hectorvent.floci.services.codeartifact.CodeArtifactService.PackageVersionAssetResult;
@@ -21,6 +23,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -28,6 +31,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -41,11 +45,12 @@ class CodeArtifactServiceTest {
 
     private CodeArtifactService service;
     private RegionResolver regionResolver;
+    private AccountAwareStorageBackend<CodeArtifactRepository> repoStore;
 
     @BeforeEach
     void setUp() {
         AccountAwareStorageBackend<CodeArtifactDomain> domainStore = AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
-        AccountAwareStorageBackend<CodeArtifactRepository> repoStore = AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
+        repoStore = AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
         AccountAwareStorageBackend<CodeArtifactPackageVersion> packageVersionStore =
                 AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
 
@@ -279,6 +284,53 @@ class CodeArtifactServiceTest {
         AwsException e = assertThrows(AwsException.class,
                 () -> service.createRepository(REGION, "dom", null, "repo", null, List.of("repo"), Map.of()));
         assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    @Test
+    void createRepositoryAssignsAFreshMavenRepositoryIdEvenAfterDeleteAndRecreate() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository first = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        assertTrue(first.getMavenRepositoryId() != null && !first.getMavenRepositoryId().isBlank());
+
+        service.deleteRepository(REGION, "dom", null, "repo");
+        CodeArtifactRepository recreated = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        assertTrue(!first.getMavenRepositoryId().equals(recreated.getMavenRepositoryId()),
+                "a recreated repository must never reuse the previous one's Maven repository id, "
+                        + "or it would inherit its leftover artifacts");
+    }
+
+    @Test
+    void ensureMavenRepositoryIdBackfillsALegacyRepositoryMissingOne() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        // Simulates a repository persisted before mavenRepositoryId existed: Jackson would
+        // deserialize the missing field as null exactly like this.
+        created.setMavenRepositoryId(null);
+        repoStore.putForAccount(ACCOUNT_ID, REGION + "::dom::repo", created);
+
+        String backfilled = service.ensureMavenRepositoryId(REGION, "dom", null, "repo");
+
+        assertTrue(backfilled != null && !backfilled.isBlank());
+        assertEquals(backfilled, service.describeRepository(REGION, "dom", null, "repo").getMavenRepositoryId());
+    }
+
+    @Test
+    void ensureMavenRepositoryIdIsIdempotentForAnAlreadyAssignedRepository() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        String result = service.ensureMavenRepositoryId(REGION, "dom", null, "repo");
+
+        assertEquals(created.getMavenRepositoryId(), result);
+    }
+
+    @Test
+    void ensureMavenRepositoryIdRequiresExistingRepository() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.ensureMavenRepositoryId(REGION, "dom", null, "missing-repo"));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
     }
 
     @Test
@@ -522,6 +574,59 @@ class CodeArtifactServiceTest {
         AwsException e = assertThrows(AwsException.class,
                 () -> service.describeRepository(REGION, "dom", null, "repo"));
         assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    // ---------------------------------------------------- authorization tokens
+
+    @Test
+    void getAuthorizationTokenRequiresExistingDomain() {
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.getAuthorizationToken(REGION, "missing-domain", null, null));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    @Test
+    void getAuthorizationTokenDefaultsToTwelveHoursAndValidatesForItsDomain() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        AuthorizationToken token = service.getAuthorizationToken(REGION, "dom", null, null);
+
+        Optional<AuthorizationTokenScope> scope = service.resolveAuthorizationToken(token.token(), "dom");
+        assertTrue(scope.isPresent());
+        assertEquals(REGION, scope.get().region());
+        assertEquals(ACCOUNT_ID, scope.get().owner());
+        assertTrue(service.resolveAuthorizationToken(token.token(), "other-dom").isEmpty());
+        assertTrue(service.resolveAuthorizationToken("not-a-real-token", "dom").isEmpty());
+        assertTrue(service.resolveAuthorizationToken(null, "dom").isEmpty());
+    }
+
+    @Test
+    void getAuthorizationTokenAcceptsZeroAndTheDocumentedRange() {
+        service.createDomain(REGION, "dom", null, Map.of());
+
+        service.getAuthorizationToken(REGION, "dom", null, 0L);
+        service.getAuthorizationToken(REGION, "dom", null, 900L);
+        service.getAuthorizationToken(REGION, "dom", null, 43200L);
+    }
+
+    @Test
+    void getAuthorizationTokenRejectsDurationsOutsideTheDocumentedRange() {
+        service.createDomain(REGION, "dom", null, Map.of());
+
+        AwsException tooShort = assertThrows(AwsException.class,
+                () -> service.getAuthorizationToken(REGION, "dom", null, 899L));
+        assertEquals("ValidationException", tooShort.getErrorCode());
+
+        AwsException tooLong = assertThrows(AwsException.class,
+                () -> service.getAuthorizationToken(REGION, "dom", null, 43201L));
+        assertEquals("ValidationException", tooLong.getErrorCode());
+    }
+
+    @Test
+    void clearInvalidatesOutstandingAuthorizationTokens() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        AuthorizationToken token = service.getAuthorizationToken(REGION, "dom", null, null);
+        service.clear();
+        assertTrue(service.resolveAuthorizationToken(token.token(), "dom").isEmpty());
     }
 
     // -------------------------------------------------------- package versions

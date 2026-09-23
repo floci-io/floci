@@ -132,6 +132,7 @@ public class ContainerBuilder {
         private boolean readonlyRootfs;
         private final Map<Integer, Integer> portBindings = new HashMap<>();
         private final List<Integer> loopbackPortBindings = new ArrayList<>();
+        private final Map<Integer, String> portBindingHostIps = new HashMap<>();
         private final List<Integer> exposedPorts = new ArrayList<>();
         private String networkMode;
         private final List<Mount> mounts = new ArrayList<>();
@@ -145,6 +146,7 @@ public class ContainerBuilder {
         private String user;
         private final List<String> groupAdd = new ArrayList<>();
         private final List<String> dnsServers = new ArrayList<>();
+        private final List<String> linkLocalIps = new ArrayList<>();
         private final List<DeviceRequest> deviceRequests = new ArrayList<>();
 
         Builder(String image, EmulatorConfig config, DockerHostResolver dockerHostResolver,
@@ -263,6 +265,21 @@ public class ContainerBuilder {
         }
 
         /**
+         * Adds a port binding to a specific host port on a specific host interface.
+         *
+         * <p>Use this for a port whose reachability is an operator decision rather than a fixed
+         * property of the container: the caller passes the configured address through, and a null
+         * or blank one falls back to Docker's own default of publishing on every interface.
+         */
+        public Builder withPortBinding(int containerPort, int hostPort, String hostIp) {
+            withPortBinding(containerPort, hostPort);
+            if (hostIp != null && !hostIp.isBlank()) {
+                this.portBindingHostIps.put(containerPort, hostIp.strip());
+            }
+            return this;
+        }
+
+        /**
          * Publishes a container port to the host loopback interface only.
          *
          * <p>Use this for implementation backends reached through Floci's public data plane,
@@ -297,6 +314,19 @@ public class ContainerBuilder {
          */
         public Builder withNetworkMode(String networkMode) {
             this.networkMode = networkMode;
+            return this;
+        }
+
+        /**
+         * Adds a link-local IPv4 address to the container's endpoint on the configured Docker
+         * network, which must be user-defined. Only that one network is supported. The spec is
+         * rejected at {@link #build()} when the address or the network is not valid for this.
+         * Docker does not check that an address is unique on the network, so callers allocate them.
+         */
+        public Builder withLinkLocalIp(String ip) {
+            if (ip != null && !ip.isBlank() && !linkLocalIps.contains(ip.trim())) {
+                linkLocalIps.add(ip.trim());
+            }
             return this;
         }
 
@@ -642,7 +672,9 @@ public class ContainerBuilder {
                     List.copyOf(deviceRequests),
                     nanoCpus,
                     cpuShares,
-                    readonlyRootfs
+                    readonlyRootfs,
+                    List.copyOf(linkLocalIps),
+                    Map.copyOf(portBindingHostIps)
             );
         }
     }

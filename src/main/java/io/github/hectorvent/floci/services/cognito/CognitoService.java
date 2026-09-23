@@ -84,6 +84,8 @@ import static io.github.hectorvent.floci.core.common.ReservedTags.rejectUnknownR
 @ApplicationScoped
 public class CognitoService implements ResourceProvider {
     private static final int DEFAULT_REFRESH_TOKEN_VALIDITY_DAYS = 30;
+    static final List<String> DEFAULT_EXPLICIT_AUTH_FLOWS =
+            List.of("ALLOW_REFRESH_TOKEN_AUTH", "ALLOW_USER_SRP_AUTH", "ALLOW_CUSTOM_AUTH");
     private static final String COGNITO_PASSWORD_SYMBOLS =
             "^$*.[]{}()?\"!@#%&/\\,><':;|_~`=+-";
     // JVM-local stripes bound lock memory without retaining one lock for every user key.

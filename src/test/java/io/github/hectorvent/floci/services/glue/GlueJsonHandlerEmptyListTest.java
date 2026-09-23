@@ -22,9 +22,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Verifies the wire-accurate empty-list responses for the read-only Glue actions on resources
- * the emulator does not model (ListDataQualityRulesets, GetSecurityConfigurations).
- * Each must return HTTP 200, an empty list under its result key, and omit NextToken.
+ * Verifies the wire-accurate empty-list responses for an unmodeled Glue action and an
+ * empty newly modeled resource collection. Each must return HTTP 200, an empty list
+ * under its result key, and omit NextToken.
  */
 class GlueJsonHandlerEmptyListTest {
 
@@ -42,8 +42,8 @@ class GlueJsonHandlerEmptyListTest {
         GlueSchemaRegistryService schemaRegistryService =
                 new GlueSchemaRegistryService(storageFactory, regionResolver);
         GlueService glueService = new GlueService(
-                storageFactory, schemaRegistryService, regionResolver, new ResourceGroupsTaggingService(storageFactory),
-                new KmsService(storageFactory, regionResolver));
+            storageFactory, schemaRegistryService, regionResolver,
+            new ResourceGroupsTaggingService(storageFactory), new KmsService(storageFactory, regionResolver));
         handler = new GlueJsonHandler(glueService, schemaRegistryService, mapper);
     }
 

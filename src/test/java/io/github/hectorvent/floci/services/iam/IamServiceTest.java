@@ -102,6 +102,44 @@ class IamServiceTest {
         assertTrue(stored.getForAccount("123456789012", restored.getAccessKeyId()).isEmpty());
     }
 
+    @Test
+    void ecsTaskRoleSessionUsesTaskIdentityTokenAndOwningAccount() {
+        SessionCredential session = new SessionCredential("ASIAECSSESSION", "secret", "token",
+                "arn:aws:iam::123456789012:role/path/worker", Instant.now().plusSeconds(3600), null, "123456789012");
+        session.setEcsTaskArn("arn:aws:ecs:us-east-1:123456789012:task/cluster/abc123");
+        AccountAwareStorageBackend<SessionCredential> stored = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        iamService = iamService(false, new InMemoryStorage<>(), stored);
+        iamService.registerEcsTaskRoleSession(session);
+        assertTrue(stored.getForAccount("000000000000", session.getAccessKeyId()).isEmpty());
+        assertEquals("arn:aws:ecs:us-east-1:123456789012:task/cluster/abc123",
+                stored.getForAccount("123456789012", session.getAccessKeyId()).orElseThrow().getEcsTaskArn());
+
+        iamService.registerSession("ASIAOTHER", "other-secret", "other-token", session.getRoleArn(),
+                Instant.now().plusSeconds(3600), null);
+        assertEquals(1, iamService.sweepOrphanedEcsTaskRoleSessions());
+        assertTrue(iamService.findSecretKey(session.getAccessKeyId(), "token").isEmpty());
+        assertTrue(iamService.findSecretKey("ASIAOTHER", "other-token").isPresent());
+    }
+
+    @Test
+    void ecsTaskRoleSessionMarkerSurvivesPersistenceAndExpiredCredentialsCannotAuthenticate() throws Exception {
+        SessionCredential expired = new SessionCredential("ASIAEXPIREDECS", "secret", "token",
+                "arn:aws:iam::123456789012:role/worker", Instant.now().minusSeconds(1), null, "123456789012");
+        expired.setEcsTaskArn("arn:aws:ecs:us-east-1:123456789012:task/cluster/expired");
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        SessionCredential restored = mapper.readValue(mapper.writeValueAsBytes(expired), SessionCredential.class);
+        assertEquals("arn:aws:ecs:us-east-1:123456789012:task/cluster/expired", restored.getEcsTaskArn());
+        AccountAwareStorageBackend<SessionCredential> stored = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        IamService service = iamService(false, new InMemoryStorage<>(), stored);
+        service.registerEcsTaskRoleSession(restored);
+        assertTrue(service.findSecretKey(restored.getAccessKeyId(), "token").isEmpty());
+        IamService restarted = iamService(false, new InMemoryStorage<>(), stored);
+        assertEquals(1, restarted.sweepOrphanedEcsTaskRoleSessions());
+        assertTrue(stored.getForAccount("123456789012", restored.getAccessKeyId()).isEmpty());
+    }
+
     // =========================================================================
     // Users
     // =========================================================================

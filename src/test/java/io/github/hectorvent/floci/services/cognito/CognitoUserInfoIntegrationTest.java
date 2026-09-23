@@ -49,7 +49,8 @@ class CognitoUserInfoIntegrationTest {
         JsonNode clientResponse = cognitoJson("CreateUserPoolClient", """
                 {
                   "UserPoolId": "%s",
-                  "ClientName": "userinfo-client"
+                  "ClientName": "userinfo-client",
+                  "ExplicitAuthFlows": ["ALLOW_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"]
                 }
                 """.formatted(poolId));
         clientId = clientResponse.path("UserPoolClient").path("ClientId").asText();

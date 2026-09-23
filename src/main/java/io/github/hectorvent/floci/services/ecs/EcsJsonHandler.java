@@ -111,6 +111,7 @@ public class EcsJsonHandler {
             case "ListTasks" -> handleListTasks(request, region);
             case "UpdateTaskProtection" -> handleUpdateTaskProtection(request, region);
             case "GetTaskProtection" -> handleGetTaskProtection(request, region);
+            case "ExecuteCommand" -> handleExecuteCommand(request, region);
 
             case "CreateService" -> handleCreateService(request, region);
             case "UpdateService" -> handleUpdateService(request, region);
@@ -511,6 +512,31 @@ public class EcsJsonHandler {
         result.forEach(pt -> arr.add(writer.protectedTaskNode(pt)));
         resp.set("protectedTasks", arr);
         resp.set("failures", objectMapper.createArrayNode());
+        return Response.ok(resp).build();
+    }
+
+    private Response handleExecuteCommand(JsonNode req, String region) {
+        String cluster = req.has("cluster") ? req.path("cluster").asText() : null;
+        String task = req.path("task").asText();
+        String container = req.hasNonNull("container") ? req.path("container").asText() : null;
+        String command = req.path("command").asText(null);
+        boolean interactive = req.path("interactive").asBoolean(false);
+
+        EcsService.ExecuteCommandResult result =
+                service.executeCommand(cluster, task, container, command, interactive, region);
+
+        ObjectNode resp = objectMapper.createObjectNode();
+        resp.put("clusterArn", result.task().getClusterArn());
+        resp.put("taskArn", result.task().getTaskArn());
+        resp.put("containerName", result.container().getName());
+        if (result.container().getContainerArn() != null) {
+            resp.put("containerArn", result.container().getContainerArn());
+        }
+        resp.put("interactive", interactive);
+        ObjectNode session = resp.putObject("session");
+        session.put("sessionId", result.session().sessionId());
+        session.put("streamUrl", service.execStreamUrl(result.session()));
+        session.put("tokenValue", result.session().tokenValue());
         return Response.ok(resp).build();
     }
 

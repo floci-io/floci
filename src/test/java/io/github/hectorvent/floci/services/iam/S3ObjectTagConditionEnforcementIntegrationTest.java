@@ -1,12 +1,10 @@
 package io.github.hectorvent.floci.services.iam;
 
+import io.github.hectorvent.floci.testing.IamEnforcementProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.specification.RequestSpecification;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.Test;
-
-import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -31,7 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * and everything was denied - including what AWS allows.
  */
 @QuarkusTest
-@TestProfile(S3ObjectTagConditionEnforcementIntegrationTest.IamEnforcementProfile.class)
+@TestProfile(IamEnforcementProfile.class)
 class S3ObjectTagConditionEnforcementIntegrationTest {
 
     private static final String ADMIN = "test";
@@ -237,12 +235,5 @@ class S3ObjectTagConditionEnforcementIntegrationTest {
     private static String auth(String accessKeyId, String service) {
         return "AWS4-HMAC-SHA256 Credential=" + accessKeyId + "/20260629/" + REGION + "/" + service
                 + "/aws4_request, SignedHeaders=host, Signature=abc";
-    }
-
-    public static final class IamEnforcementProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.iam.enforcement-enabled", "true");
-        }
     }
 }

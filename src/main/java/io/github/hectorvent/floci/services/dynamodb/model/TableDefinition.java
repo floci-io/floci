@@ -51,6 +51,7 @@ public class TableDefinition {
     // Replica regions for a global table (single-process emulator backs them all with this table's
     // data; the list drives the DescribeTable Replicas/GlobalTableVersion projection).
     private List<String> replicaRegions;
+    private String globalTableHomeRegion;
     // Resource-based policy attached via PutResourcePolicy (JSON policy document text), and the
     // opaque revision id AWS hands back so callers can pass ExpectedRevisionId for optimistic
     // concurrency on subsequent Put/DeleteResourcePolicy calls. Null when no policy is attached.
@@ -204,6 +205,13 @@ public class TableDefinition {
     }
     public void setReplicaRegions(List<String> replicaRegions) {
         this.replicaRegions = replicaRegions != null ? replicaRegions : new ArrayList<>();
+    }
+
+    // The region that owns the table once it has become a global table. On AWS a global table lists
+    // its own home region as an ACTIVE replica alongside the others; null means a plain table.
+    public String getGlobalTableHomeRegion() { return globalTableHomeRegion; }
+    public void setGlobalTableHomeRegion(String globalTableHomeRegion) {
+        this.globalTableHomeRegion = globalTableHomeRegion;
     }
 
     public Integer getOnDemandMaxReadRequestUnits() { return onDemandMaxReadRequestUnits; }

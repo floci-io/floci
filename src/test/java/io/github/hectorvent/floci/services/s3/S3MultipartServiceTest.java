@@ -19,6 +19,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Base64;
 import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -274,6 +275,23 @@ class S3MultipartServiceTest {
 
         assertTrue(result.getETag().endsWith("-2\""), result.getETag());
         assertEquals(Set.of(result.getETag()), Set.copyOf(firstStoredETags.values()));
+    }
+
+    @Test
+    void completeMultipartUploadReturnsTheMd5OfThePartMd5s() throws NoSuchAlgorithmException {
+        MultipartUpload upload = s3Service.initiateMultipartUpload("test-bucket", "composite-etag.bin", null);
+        byte[] part1 = "part1".getBytes(StandardCharsets.UTF_8);
+        byte[] part2 = "part2".getBytes(StandardCharsets.UTF_8);
+        s3Service.uploadPart("test-bucket", "composite-etag.bin", upload.getUploadId(), 1, part1);
+        s3Service.uploadPart("test-bucket", "composite-etag.bin", upload.getUploadId(), 2, part2);
+
+        S3Object result = s3Service.completeMultipartUpload("test-bucket", "composite-etag.bin",
+                upload.getUploadId(), List.of(1, 2), null, null);
+
+        MessageDigest composite = MessageDigest.getInstance("MD5");
+        composite.update(MessageDigest.getInstance("MD5").digest(part1));
+        composite.update(MessageDigest.getInstance("MD5").digest(part2));
+        assertEquals("\"" + HexFormat.of().formatHex(composite.digest()) + "-2\"", result.getETag());
     }
 
     @Test

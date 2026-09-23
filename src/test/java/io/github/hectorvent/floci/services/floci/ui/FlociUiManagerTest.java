@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.E
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
+import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
 import com.github.dockerjava.api.exception.DockerClientException;
@@ -41,6 +42,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -74,6 +76,8 @@ class FlociUiManagerTest {
         when(ui.statusReadyField()).thenReturn(Optional.empty());
         when(ui.statusReadyValue()).thenReturn(Optional.empty());
         when(ui.statusUnavailableValue()).thenReturn(Optional.empty());
+        when(ui.bindAddress()).thenReturn(Optional.empty());
+        when(ui.dockerNetwork()).thenReturn(Optional.empty());
     }
 
     private FlociUiManager newManager() {
@@ -896,6 +900,104 @@ class FlociUiManagerTest {
                 "a pre-contract sidecar must be recreated so it gains the canonical variable");
     }
 
+    // --- where the console is published ---
+
+    @Test
+    void anUnsetBindAddressLeavesDockersOwnDefault() {
+        // Unset is what the console has always had: published on every interface, the same as a
+        // bare "4500:4500" mapping, which is what the documented compose files give the API too.
+        withUiConfig();
+        when(ui.enabled()).thenReturn(true);
+        when(ui.image()).thenReturn("floci/floci-ui:latest");
+        when(ui.containerName()).thenReturn("floci-ui");
+        when(ui.port()).thenReturn(4500);
+        when(ui.endpoint()).thenReturn(Optional.of("http://custom:4566"));
+        when(regionResolver.getDefaultRegion()).thenReturn("us-east-1");
+
+        ContainerBuilder.Builder specBuilder = newStartedSidecar();
+
+        verify(specBuilder).withPortBinding(4500, 4500, null);
+    }
+
+    @Test
+    void aConfiguredBindAddressReachesThePortBinding() {
+        withUiConfig();
+        when(ui.enabled()).thenReturn(true);
+        when(ui.image()).thenReturn("floci/floci-ui:latest");
+        when(ui.containerName()).thenReturn("floci-ui");
+        when(ui.port()).thenReturn(4500);
+        when(ui.endpoint()).thenReturn(Optional.of("http://custom:4566"));
+        when(ui.bindAddress()).thenReturn(Optional.of("127.0.0.1"));
+        when(regionResolver.getDefaultRegion()).thenReturn("us-east-1");
+
+        ContainerBuilder.Builder specBuilder = newStartedSidecar();
+
+        verify(specBuilder).withPortBinding(4500, 4500, "127.0.0.1");
+    }
+
+    @Test
+    void anUnsetBindAddressResolvesToNoAddressAtAll() {
+        assertNull(FlociUiManager.resolveBindAddress(Optional.empty()));
+    }
+
+    @Test
+    void aConfiguredBindAddressIsTakenAsGiven() {
+        assertEquals("127.0.0.1", FlociUiManager.resolveBindAddress(Optional.of("127.0.0.1")));
+        assertEquals("0.0.0.0", FlociUiManager.resolveBindAddress(Optional.of("0.0.0.0")));
+        assertEquals("192.168.1.10", FlociUiManager.resolveBindAddress(Optional.of(" 192.168.1.10 ")));
+    }
+
+    @Test
+    void aBlankBindAddressFailsFastRatherThanSilentlyPickingOne() {
+        assertThrows(IllegalStateException.class,
+                () -> FlociUiManager.resolveBindAddress(Optional.of("")));
+        assertThrows(IllegalStateException.class,
+                () -> FlociUiManager.resolveBindAddress(Optional.of("  ")));
+    }
+
+    @Test
+    void aBlankBindAddressIsReportedInsteadOfStartingTheConsole() {
+        withUiConfig();
+        when(ui.enabled()).thenReturn(true);
+        when(ui.image()).thenReturn("floci/floci-ui:latest");
+        when(ui.bindAddress()).thenReturn(Optional.of("  "));
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+
+        FlociUiManager manager = new FlociUiManager(
+                mock(ContainerBuilder.class), lifecycleManager, logStreamer, containerDetector,
+                mock(CurrentContainerNetworkResolver.class), dockerHostResolver,
+                new LaunchedContainerAwsEnv(mock(ContainerReachableEndpoint.class)),
+                config, regionResolver, new ObjectMapper());
+        manager.ensureStarted();
+
+        assertFalse(manager.status().started());
+        assertTrue(manager.status().error().contains("floci.services.ui.bind-address"),
+                manager.status().error());
+        // Rejected before the image is resolved, so a console that is not going to be published
+        // is never pulled.
+        verify(lifecycleManager, times(0)).findByName(anyString());
+    }
+
+    /**
+     * Runs a full {@code ensureStarted()} against a stubbed builder and returns the spec builder,
+     * so a test can assert on how the container was asked to be published.
+     */
+    private ContainerBuilder.Builder newStartedSidecar() {
+        String image = "floci/floci-ui:latest";
+        ContainerBuilder containerBuilder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        ContainerSpec spec = new ContainerSpec(image);
+        when(containerBuilder.resolveImage(image)).thenReturn(image);
+        when(containerBuilder.newContainer(image)).thenReturn(specBuilder);
+        when(specBuilder.build()).thenReturn(spec);
+        when(lifecycleManager.imageLabels(image)).thenReturn(Optional.empty());
+        when(lifecycleManager.createAndStart(spec)).thenReturn(
+                new ContainerInfo("ui-container", Map.of(4500, new EndpointInfo("127.0.0.1", 4500))));
+
+        newManager(containerBuilder).ensureStarted();
+        return specBuilder;
+    }
+
     /** Adopts a console that resolves to the built-in floci-ui profile. */
     private FlociUiManager adoptSidecar(int port) {
         return adoptSidecar(port, "floci/floci-ui:latest",
@@ -926,6 +1028,7 @@ class FlociUiManagerTest {
         when(ui.statusReadyValue()).thenReturn(readyValue);
         when(ui.statusUnavailableValue()).thenReturn(Optional.empty());
         when(ui.endpoint()).thenReturn(Optional.of("http://custom:4566"));
+        when(ui.bindAddress()).thenReturn(Optional.empty());
 
         ContainerBuilder containerBuilder = mock(ContainerBuilder.class);
         when(containerBuilder.resolveImage(image)).thenReturn(image);

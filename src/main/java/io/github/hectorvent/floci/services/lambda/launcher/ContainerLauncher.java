@@ -291,7 +291,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         // and the create->start copy block agree.
         boolean useCodeVolume = false;
         if (fn.isHotReload()) {
-            specBuilder.withBind(fn.getHotReloadHostPath(), TASK_DIR);
+            specBuilder.withReadOnlyBind(fn.getHotReloadHostPath(), TASK_DIR);
         } else if (fn.getCodeLocalPath() != null) {
             useCodeVolume = shouldUseCodeVolume(Path.of(fn.getCodeLocalPath()));
             if (useCodeVolume) {

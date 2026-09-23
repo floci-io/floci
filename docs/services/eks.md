@@ -93,9 +93,7 @@ Floci supports the EKS Pod Identity association management plane. You can map a 
 
 ### Credential injection at admission
 
-Injection is off by default. Set `FLOCI_SERVICES_EKS_POD_IDENTITY_WEBHOOK=true` to turn it on, and read the warning at the end of this section first: nothing answers the injected URI yet, so an injected pod is worse off than an uninjected one.
-
-With it on, Floci registers a `MutatingWebhookConfiguration` in every real-mode cluster, scoped to pod `CREATE`. When a pod is created, Floci looks up an association matching the pod's namespace and its `spec.serviceAccountName`. A pod that matches nothing is admitted unchanged.
+Floci registers a `MutatingWebhookConfiguration` in every real-mode cluster, scoped to pod `CREATE`. When a pod is created, Floci looks up an association matching the pod's namespace and its `spec.serviceAccountName`. A pod that matches nothing is admitted unchanged.
 
 Injection happens only when the `eks-pod-identity-agent` addon is installed on the cluster, which is what real EKS requires too. Install it with `CreateAddon` before expecting pods to be mutated.
 
@@ -109,7 +107,16 @@ A matching pod is patched exactly the way real EKS patches it. Every init contai
 
 The volume is a projected service account token with audience `pods.eks.amazonaws.com`, `expirationSeconds: 86400` and path `eks-pod-identity-token`. A name the pod already carries (a volume, a mount, or either environment variable) is left as the workload set it.
 
-**Nothing answers `169.254.170.23` yet, which is why this is off by default.** An injected pod has the token and the environment variables, so the AWS SDK credential chain takes the container credentials path, and that path fails: the request to the URI goes nowhere. A workload that was picking up credentials earlier in the chain loses them. Leave the setting off until the credential endpoint lands, unless you are working on that endpoint.
+### Credential endpoint
+
+Floci serves pod identity credentials through a link-local relay bound to `169.254.170.23:80` inside the cluster container, forwarding requests to Floci's credentials endpoint (`GET /v1/credentials`). Workloads reach this endpoint using the injected `AWS_CONTAINER_CREDENTIALS_FULL_URI` environment variable, passing their projected token in the `Authorization` header (`Authorization: <token>` or `Authorization: Bearer <token>`).
+
+The credentials endpoint performs the following validations:
+1. Validates token format and extracts the issuer URL without verifying signatures yet.
+2. Identifies the matching EKS cluster by comparing the token issuer URL to cluster OIDC issuer URLs.
+3. Validates the token signature against the cluster OIDC public key, confirming the token is unexpired and carries audience `pods.eks.amazonaws.com`.
+4. Extracts the subject claim (`system:serviceaccount:<namespace>:<serviceAccount>`) and looks up the pod identity association for the cluster, namespace, and service account.
+5. Issues temporary session credentials (`ASIA...`) for the associated IAM role and returns them in standard AWS container credentials format (`AccessKeyId`, `SecretAccessKey`, `Token`, `AccountId`, `Expiration`).
 
 #### TLS is required
 
@@ -120,11 +127,6 @@ The webhook URL uses the hostname containers reach Floci on. When Floci runs nat
 The webhook carries `failurePolicy: Ignore`, and Floci admits the pod unchanged on any internal error, so a webhook that cannot be registered or cannot be reached never prevents a pod from being created. Registration failures log a warning and leave the cluster running.
 
 The manifest is written into the cluster's k3s server manifests directory (`/var/lib/rancher/k3s/server/manifests`) before the container starts, so k3s applies it as the API server comes up.
-
-### Limitations and Scope
-
-- The link-local credential endpoint (`169.254.170.23`) that answers the injected URI is not implemented, so injected pods cannot yet obtain credentials.
-- Token validation, association-to-role resolution and STS credential issuance belong to that endpoint and do not exist yet.
 
 ## Addon management
 
@@ -225,7 +227,12 @@ EKS clusters support configuring KMS envelope encryption for secrets and control
 - **Response normalization**: AWS EKS always returns the status of all five log types. Enabled types are returned first (`enabled: true`), followed by disabled types (`enabled: false`).
 - **Default logging**: When omitted or empty at creation time, Floci returns all five log types disabled in a single entry (`enabled: false`).
 - **Backfill**: Existing persisted clusters created before this feature was introduced are automatically backfilled on startup with default disabled logging.
-- **Scope**: Floci stores and returns control plane logging configuration. Shipping log streams to Amazon CloudWatch Logs log groups is out of scope.
+- **CloudWatch Logs delivery**:
+  - When the `api` log type is enabled on a cluster, Floci creates the CloudWatch Logs log group `/aws/eks/<cluster-name>/cluster` and streams control plane container output to a log stream named `kube-apiserver-<hash>`, where `<hash>` is the first 32 characters of the container ID.
+  - When the `audit` log type is enabled on a cluster, Floci configures k3s with the Amazon EKS control plane audit policy, writes audit logs to `/var/log/audit.log` inside the container, and streams audit records to a log stream named `kube-apiserver-audit-<hash>`.
+  - When both `api` and `audit` are enabled, both streams are created and populated under `/aws/eks/<cluster-name>/cluster`. When neither is enabled, no log group or streams are created.
+- **Component streams deviation**: AWS EKS provisions separate log streams for each component (`kube-apiserver-*`, `kube-apiserver-audit-*`, `kube-controller-manager-*`, `kube-scheduler-*`, `authenticator-*`). Because Floci runs clusters on k3s, which embeds the Kubernetes API server, controller manager, and scheduler within a single process, control plane container logs are delivered to the single `kube-apiserver-<hash>` stream when `api` is enabled, and API server audit logs are delivered to `kube-apiserver-audit-<hash>` when `audit` is enabled. Other control plane log types (`authenticator`, `controllerManager`, `scheduler`) do not provision separate streams.
+- **Authenticator logs**: Authenticator webhook authentication events are logged directly by Floci.
 
 ## Node group inputs
 
@@ -261,14 +268,26 @@ EKS clusters support configuring KMS envelope encryption for secrets and control
 ```
 
 - **Omission**: When a structured input is not supplied, it is omitted from `CreateNodegroup` and `DescribeNodegroup` responses rather than serialized as an explicit `null`. The exception is `updateConfig`, which receives the AWS default of `{"maxUnavailable": 1}`.
-- **Validation**: Floci does not validate these structures. A `launchTemplate` is not resolved against EC2, so a reference to a launch template that does not exist is accepted where real EKS would reject it.
+- **Validation**: When `launchTemplate` is supplied, Floci validates it against EC2. Requests must specify either `id` or `name`, but not both; supplying neither or both is rejected with `InvalidParameterException` (HTTP 400). The template and requested version (defaulting to the template's default version when omitted) must exist in EC2, otherwise the request is rejected with `InvalidParameterException` (HTTP 400). The other structured inputs (`remoteAccess`, `taints`, `nodeRepairConfig`, `warmPoolConfig`) are not validated against external resources.
 - **No backfill**: Node groups created before this was supported genuinely had no launch template, taints, remote access, node repair config, or warm pool config, so there is nothing to reconstruct. They continue to omit those members, which is the correct answer for them.
 
-### Metadata only
+### Launch template user data execution
 
-**These inputs are recorded as metadata and have no effect on the cluster.** Floci does not act on any of them:
+When a node group specifies a `launchTemplate`, Floci resolves the launch template from EC2 (by ID or name, and version) and executes any provided user data inside the cluster's running k3s container. If the referenced launch template carries no user data, execution is skipped.
 
-- A `launchTemplate` association is stored and returned, but **its user data is never executed** and its AMI, instance type, block device mappings, and network settings are not applied to anything Floci runs.
+- **Execution target**: Floci runs one k3s container per cluster. Launch template user data executes inside this cluster container via `docker exec`.
+- **Single-container mapping rule**:
+  - The first node group specifying user data executes its scripts in the container.
+  - Subsequent node groups on the same cluster with identical user data skip execution as a no-op.
+  - Subsequent node groups on the same cluster with differing user data log a warning and skip execution without failing the node group.
+- **Timing and tradeoffs**: User data runs post-start when `CreateNodegroup` is invoked. Because the k3s process is already running, bootstrap configurations requiring pre-kubelet drop-ins (such as `/etc/rancher/k3s/config.yaml`) cannot be reloaded dynamically without restarting the container.
+- **Failure handling**: If any user data script exits with a non-zero status or times out (30-minute limit), the node group status is set to `CREATE_FAILED` and `health.issues` is populated with code `NodeCreationFailure`, the failure message, and the node group name in `resourceIds`.
+- **Differences from EC2**: Scripts run inside the existing shared k3s container rather than an isolated VM instance. Other launch template settings (AMI, instance type, block device mappings, network interfaces) remain metadata-only and do not alter container provisioning.
+
+### Metadata only inputs
+
+The remaining structured inputs are recorded as metadata:
+
 - `remoteAccess` does not open SSH access, and the referenced key pair and security groups are not wired up.
 - `taints` are not applied to Kubernetes nodes, so pods are not repelled from them.
 - `nodeRepairConfig` starts no repair loop, and `warmPoolConfig` pre-initializes no instances.
@@ -296,7 +315,7 @@ aws eks update-kubeconfig --name my-cluster
 kubectl get nodes
 ```
 
-`aws eks update-kubeconfig` wires `aws eks get-token` into the kubeconfig as an exec credential. The bearer token contains a SigV4-presigned STS `GetCallerIdentity` request. Floci validates its signature and 60-second presign expiry, then verifies the signed `x-k8s-aws-id` header against the cluster-specific `/_floci/eks/clusters/<cluster-name>/token-webhook` endpoint before resolving the caller identity. Instance-profile sessions require an EC2_LINUX access entry as described above; non-worker callers retain the `system:masters` mapping (bound to `cluster-admin`). No `aws-iam-authenticator` is required.
+`aws eks update-kubeconfig` wires `aws eks get-token` into the kubeconfig as an exec credential. The bearer token contains a SigV4-presigned STS `GetCallerIdentity` request. Floci validates its signature and 15-minute token lifetime matching `aws-iam-authenticator` rather than the presigned expiry, then verifies the signed `x-k8s-aws-id` header against the cluster-specific `/_floci/eks/clusters/<cluster-name>/token-webhook` endpoint before resolving the caller identity. Instance-profile sessions require an EC2_LINUX access entry as described above; non-worker callers retain the `system:masters` mapping (bound to `cluster-admin`). No `aws-iam-authenticator` is required.
 
 Create an IAM access key before using EKS authentication. The public local-development pairs `test`/`test` and `floci`/`floci` are deliberately rejected because the webhook grants cluster-admin access.
 
@@ -367,7 +386,7 @@ back (for example Docker is unavailable), the cluster is marked `FAILED` instead
 | `FLOCI_SERVICES_EKS_IAM_AUTH_WEBHOOK` | `true` | Wire a token-auth webhook into k3s so `aws eks get-token` works |
 | `FLOCI_SERVICES_EKS_ECR_REGISTRY_MIRROR` | `true` | Inject a containerd `registries.yaml` so pods can pull images pushed to [Floci ECR](ecr.md) |
 | `FLOCI_SERVICES_EKS_IRSA_SIGNING_KEY` | `true` | Pass the cluster OIDC signing key to k3s so in-cluster projected service account tokens can assume IAM roles via Floci STS |
-| `FLOCI_SERVICES_EKS_POD_IDENTITY_WEBHOOK` | `false` | Register a mutating admission webhook that injects pod identity credentials. Needs `FLOCI_TLS_ENABLED=true`. Off until the credential endpoint exists |
+| `FLOCI_SERVICES_EKS_POD_IDENTITY_WEBHOOK` | `true` | Register a mutating admission webhook that injects pod identity credentials. Needs `FLOCI_TLS_ENABLED=true` |
 | `FLOCI_SERVICES_EKS_IMDS` | `false` | Enable link-local IMDS (`169.254.169.254`) proxy in cluster containers |
 
 ### Kubernetes versions and network configuration

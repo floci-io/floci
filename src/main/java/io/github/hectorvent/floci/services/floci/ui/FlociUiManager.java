@@ -174,6 +174,9 @@ public class FlociUiManager {
         this.lastError = null;
         String image = config.services().ui().image();
         try {
+            // Before the image pull: a rejected bind address is a configuration error, and
+            // downloading a console that is not going to be published is wasted work.
+            String bindAddress = resolveBindAddress(config.services().ui().bindAddress());
             this.profile = resolveProfile(image);
             String name = ContainerStorageHelper.dockerName(config, config.services().ui().containerName());
 
@@ -190,7 +193,7 @@ public class FlociUiManager {
             ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                     .withName(name)
                     .withEnv(injectedEnv(profile))
-                    .withPortBinding(internalPort, chosenPort)
+                    .withPortBinding(internalPort, chosenPort, bindAddress)
                     .withDockerNetwork(resolveDockerNetwork())
                     .withLogRotation();
             if (!containerDetector.isRunningInContainer()) {
@@ -205,8 +208,13 @@ public class FlociUiManager {
             this.probeUrl = resolveProbeUrl(profile, endpoint, hostPort);
             this.started = true;
             this.lastError = null;
-            LOG.infov("Started web console sidecar {0} from {1} on host port {2}",
-                    name, image, String.valueOf(hostPort));
+            if (bindAddress == null) {
+                LOG.infov("Started web console sidecar {0} from {1} on host port {2}",
+                        name, image, String.valueOf(hostPort));
+            } else {
+                LOG.infov("Started web console sidecar {0} from {1} on {2}:{3}",
+                        name, image, bindAddress, String.valueOf(hostPort));
+            }
             attachLogStream(false);
         } catch (IllegalStateException e) {
             // replaceIfEndpointDrifted() records its own specific message for a container with an
@@ -495,6 +503,31 @@ public class FlociUiManager {
         if (host == null || host.isBlank()) {
             throw new IllegalStateException(
                     "floci.services.ui.endpoint must be an absolute http:// or https:// URL, was: " + value);
+        }
+        return value;
+    }
+
+    /**
+     * The host interface the console is published on, or null to publish on every interface.
+     *
+     * <p>Unset is the default and is Docker's own behaviour, which is what the console has always
+     * had. Setting it is how an operator who keeps Floci's own port on loopback keeps the console
+     * there too: the console is unauthenticated and drives every emulated service, so a wildcard
+     * publish would hand out an authority the API mapping deliberately withholds.
+     *
+     * <p>A blank value is an error rather than a silent fall back to the wildcard: an operator who
+     * set the key meant to choose an address, and substituting a different one is how a binding
+     * ends up somewhere nobody intended.
+     */
+    static String resolveBindAddress(Optional<String> configured) {
+        if (configured.isEmpty()) {
+            return null;
+        }
+        String value = configured.get().trim();
+        if (value.isEmpty()) {
+            throw new IllegalStateException(
+                    "floci.services.ui.bind-address is set but blank: remove it to publish the "
+                            + "console on every interface, or give it a host address to bind.");
         }
         return value;
     }

@@ -803,6 +803,15 @@ public interface EmulatorConfig {
     interface CodeArtifactServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /** When set, Floci uses this URL and skips Reposilite sidecar container management. */
+        Optional<String> mavenUrl();
+
+        /** {@code name:secret} access token for a pre-configured {@link #mavenUrl()}. */
+        Optional<String> mavenToken();
+
+        @WithDefault("dzikoysk/reposilite:3.6.3")
+        String mavenImage();
     }
 
     interface ConnectServiceConfig {
@@ -1512,6 +1521,14 @@ public interface EmulatorConfig {
         /** Hostname advertised for RDS endpoints. Uses published Docker ports when configured. */
         Optional<String> endpointHost();
 
+        /** Whether a PostgreSQL IAM auth token must have been generated for the endpoint the
+         *  instance publishes (hostname, port and region), as on RDS. On by default; turn it off
+         *  when clients generate tokens for a container name or DNS alias the endpoint does not
+         *  publish. MySQL and MariaDB always require it.
+         *  Env: FLOCI_SERVICES_RDS_IAM_TOKEN_ENDPOINT_BINDING */
+        @WithDefault("true")
+        boolean iamTokenEndpointBinding();
+
         /** Docker network to attach DB containers to. Empty = default bridge. */
         Optional<String> dockerNetwork();
 
@@ -1646,9 +1663,10 @@ public interface EmulatorConfig {
         int maxEventsPerQuery();
 
         /**
-         * Upper bound on log events kept across all groups. The store is one JSON document rewritten
-         * in full on every flush, so an unbounded store turns a chatty or retrying Lambda into a
-         * sustained multi-hundred-MB/s disk writer. Oldest events are evicted first once exceeded.
+         * Upper bound on log events kept across all groups. The store is compacted into one JSON
+         * document on every flush (under persistent mode it is journaled in between), so an
+         * unbounded store turns a chatty or retrying Lambda into a sustained multi-hundred-MB/s
+         * disk writer. Oldest events are evicted first once exceeded.
          */
         @WithDefault("20000")
         int maxStoredEvents();
@@ -1690,6 +1708,14 @@ public interface EmulatorConfig {
     interface KinesisServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /**
+         * Lifetime of a ListShards NextToken, in milliseconds. AWS expires these tokens 300000
+         * milliseconds after they are issued; lowering it lets tests exercise the expiry path
+         * without waiting.
+         */
+        @WithDefault("300000")
+        long listShardsNextTokenTtlMillis();
     }
 
     interface FirehoseServiceConfig {
@@ -1748,6 +1774,13 @@ public interface EmulatorConfig {
          * compatibility with Step Functions Local.
          */
         Optional<String> mockConfigFile();
+
+        /**
+         * Ceiling, in seconds, on a Wait state pause and a Retry backoff. AWS allows waits far longer
+         * than this, but the emulator caps them to keep runs fast. Raise it to exercise longer waits.
+         */
+        @WithDefault("30")
+        int maxWaitSeconds();
     }
 
     interface SwfServiceConfig {
@@ -2132,6 +2165,79 @@ public interface EmulatorConfig {
 
         @WithDefault("floci/floci-sidecar-graphql:0.2.0")
         String graphqlImage();
+
+        JsRuntimeConfig jsRuntime();
+    }
+
+    /**
+     * The Node sidecar that evaluates {@code APPSYNC_JS} resolver code.
+     *
+     * <p>A sidecar rather than an embedded engine because Floci's published image is a Mandrel
+     * native executable, and Mandrel carries no Truffle languages: there is no in-process
+     * JavaScript to embed. Running real Node also means a resolver bundle executes as written,
+     * ES modules included, instead of through a rewrite that only approximates AppSync.
+     *
+     * <p>Started lazily, on the first resolver that needs it, so an API with no JS resolvers, or
+     * a Floci with no Docker, costs nothing.
+     */
+    interface JsRuntimeConfig {
+        /**
+         * Env: {@code FLOCI_SERVICES_APPSYNC_JS_RUNTIME_ENABLED}. Turned off, a JS resolver fails
+         * with an explanatory error instead of silently resolving to null.
+         */
+        @WithDefault("true")
+        boolean enabled();
+
+        /**
+         * When set, Floci evaluates resolver code against this already-running server and skips
+         * container management entirely. Same contract as {@code floci.services.duck.url}: useful
+         * for running the sidecar by hand while working on it, and for an environment with no
+         * Docker socket to reach.
+         * Env: {@code FLOCI_SERVICES_APPSYNC_JS_RUNTIME_URL}
+         */
+        Optional<String> url();
+
+        /** Env: {@code FLOCI_SERVICES_APPSYNC_JS_RUNTIME_IMAGE} */
+        @WithDefault("node:22-alpine")
+        String image();
+
+        /** Env: {@code FLOCI_SERVICES_APPSYNC_JS_RUNTIME_CONTAINER_NAME} */
+        @WithDefault("appsync-js-runtime")
+        String containerName();
+
+        /** Host port to publish, or 0 to let Docker choose one. */
+        @WithDefault("0")
+        int port();
+
+        /** Seconds to wait for the sidecar to answer its health probe. */
+        @WithDefault("60")
+        int startTimeoutSeconds();
+
+        /** Seconds a single resolver evaluation may take. */
+        @WithDefault("30")
+        int evaluationTimeoutSeconds();
+
+        /**
+         * Rejects resolver code that uses JavaScript the APPSYNC_JS runtime does not have, before
+         * evaluating it. Env: {@code FLOCI_SERVICES_APPSYNC_JS_RUNTIME_ENFORCE_APPSYNC_SUBSET}
+         *
+         * <p>On by default, because the sidecar is real Node and would otherwise accept async
+         * functions, promises, classes, try/catch, while loops and Node builtin imports, none of
+         * which AWS accepts. Running code locally that cannot deploy is the one failure an emulator
+         * must not have. Turn it off only if Floci rejects something AWS accepts, and please report
+         * it.
+         */
+        @WithDefault("true")
+        boolean enforceAppsyncSubset();
+
+        /**
+         * Keeps the sidecar running when Floci stops, so the next start reuses it and skips the
+         * Node boot. Off by default: a stopped Floci leaving containers behind is surprising.
+         */
+        @WithDefault("false")
+        boolean keepRunningOnShutdown();
+
+        Optional<String> dockerNetwork();
     }
 
     interface OamServiceConfig {
@@ -2207,6 +2313,21 @@ public interface EmulatorConfig {
         /** Single fixed host port the UI is published on (single-instance service). */
         @WithDefault("4500")
         int port();
+
+        /**
+         * Host interface {@link #port()} is published on.
+         * Env: {@code FLOCI_SERVICES_UI_BIND_ADDRESS}
+         *
+         * <p>Unset by default, which is Docker's own default of publishing on every interface.
+         * Set it to {@code 127.0.0.1} when Floci's own port is published on loopback only
+         * (a {@code "127.0.0.1:4566:4566"} mapping, say): the console is unauthenticated and
+         * drives every emulated service, so leaving it on every interface would hand out an
+         * authority the API deliberately withholds.
+         *
+         * <p>A blank value is a hard error rather than a silent fall back to the wildcard: an
+         * operator who set the key meant to choose an address.
+         */
+        Optional<String> bindAddress();
 
         /**
          * Port the console listens on <em>inside</em> its container, published as {@link #port()}.
@@ -2585,6 +2706,9 @@ public interface EmulatorConfig {
     }
 
     interface Ec2ServiceConfig {
+        /** Optional full EC2 catalog file for locally built guest images. */
+        Optional<String> imageCatalogPath();
+
         @WithDefault("true")
         boolean enabled();
 
@@ -2896,16 +3020,11 @@ public interface EmulatorConfig {
          * whose service account has an EKS Pod Identity association are mutated at admission with a
          * projected pod identity token and the container credentials environment variables.
          *
-         * <p>Off by default until the credential endpoint on {@code 169.254.170.23} exists. An
-         * injected pod points its SDK at that endpoint, and nothing answers it yet, so turning this
-         * on today takes a workload off whatever credentials it was using and gives it a container
-         * credentials path that fails.
-         *
          * <p>Requires {@link EmulatorConfig#tls()} to be enabled: Kubernetes rejects an admission
          * webhook URL that is not {@code https}. With TLS off the webhook is skipped with a warning
          * and pods start unmutated.
          */
-        @WithDefault("false")
+        @WithDefault("true")
         boolean podIdentityWebhook();
     }
 

@@ -9,7 +9,6 @@ import io.github.hectorvent.floci.services.ses.model.MessageTag;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 
@@ -32,18 +31,16 @@ final class SesEventPayload {
 
     private SesEventPayload() {}
 
-    static ObjectNode build(ObjectMapper mapper, String eventType, String messageId, String source,
-                            String sourceArn, String sendingAccountId, String subject,
+    static ObjectNode build(ObjectMapper mapper, SesRecipientEvent event, String messageId,
+                            String source, String sourceArn, String sendingAccountId, String subject,
                             List<String> toAddresses, List<String> ccAddresses,
                             List<String> bccAddresses, List<String> envelopeDestinations,
-                            List<String> suppressionBounceRecipients,
-                            List<String> suppressionComplaintRecipients,
                             String configurationSetName, List<MessageTag> emailTags,
                             List<MessageHeader> additionalHeaders, Instant timestamp) {
-        return buildRoot(mapper, "eventType", eventType, messageId, source, sourceArn,
+        return buildRoot(mapper, "eventType", event, messageId, source, sourceArn,
                 sendingAccountId, subject, toAddresses, ccAddresses, bccAddresses,
-                envelopeDestinations, suppressionBounceRecipients, suppressionComplaintRecipients,
-                configurationSetName, emailTags, additionalHeaders, timestamp, true, true);
+                envelopeDestinations, configurationSetName, emailTags, additionalHeaders, timestamp,
+                true, true);
     }
 
     /**
@@ -59,40 +56,33 @@ final class SesEventPayload {
      * the {@code BOUNCE}, {@code COMPLAINT}, and {@code DELIVERY} event types are ever published
      * through this path.
      */
-    static ObjectNode buildIdentityNotification(ObjectMapper mapper, String eventType,
+    static ObjectNode buildIdentityNotification(ObjectMapper mapper, SesRecipientEvent event,
                             String messageId, String source, String sourceArn,
                             String sendingAccountId, String subject,
                             List<String> toAddresses, List<String> ccAddresses,
                             List<String> bccAddresses, List<String> envelopeDestinations,
-                            List<String> suppressionBounceRecipients,
-                            List<String> suppressionComplaintRecipients,
                             List<MessageHeader> additionalHeaders, Instant timestamp,
                             boolean includeHeaders) {
-        return buildRoot(mapper, "notificationType", eventType, messageId, source, sourceArn,
+        return buildRoot(mapper, "notificationType", event, messageId, source, sourceArn,
                 sendingAccountId, subject, toAddresses, ccAddresses, bccAddresses,
-                envelopeDestinations, suppressionBounceRecipients, suppressionComplaintRecipients,
-                null, null, additionalHeaders, timestamp, includeHeaders, false);
+                envelopeDestinations, null, null, additionalHeaders, timestamp, includeHeaders, false);
     }
 
-    private static ObjectNode buildRoot(ObjectMapper mapper, String typeField, String eventType,
+    private static ObjectNode buildRoot(ObjectMapper mapper, String typeField, SesRecipientEvent event,
                             String messageId, String source, String sourceArn,
                             String sendingAccountId, String subject,
                             List<String> toAddresses, List<String> ccAddresses,
                             List<String> bccAddresses, List<String> envelopeDestinations,
-                            List<String> suppressionBounceRecipients,
-                            List<String> suppressionComplaintRecipients,
                             String configurationSetName, List<MessageTag> emailTags,
                             List<MessageHeader> additionalHeaders, Instant timestamp,
                             boolean includeHeaders, boolean includeTags) {
         ObjectNode root = mapper.createObjectNode();
-        root.put(typeField, eventTypeLabel(eventType));
+        root.put(typeField, eventTypeLabel(event.eventType()));
         root.set("mail", buildMail(mapper, messageId, source, sourceArn, sendingAccountId,
                 subject, toAddresses, ccAddresses, bccAddresses, envelopeDestinations,
                 configurationSetName, emailTags, additionalHeaders, timestamp,
                 includeHeaders, includeTags));
-        root.set(blockName(eventType),
-                buildEventBlock(mapper, eventType, messageId, envelopeDestinations,
-                        suppressionBounceRecipients, suppressionComplaintRecipients, timestamp));
+        root.set(blockName(event.eventType()), buildEventBlock(mapper, event, messageId, timestamp));
         return root;
     }
 
@@ -199,42 +189,61 @@ final class SesEventPayload {
         headers.add(h);
     }
 
-    private static ObjectNode buildEventBlock(ObjectMapper mapper, String eventType, String messageId,
-                                              List<String> destination,
-                                              List<String> suppressionBounceRecipients,
-                                              List<String> suppressionComplaintRecipients,
-                                              Instant timestamp) {
+    // Probed against real SES on 2026-09-21: an account-suppressed recipient bounces with this
+    // subtype and diagnostic, or is complained about with this subtype and no feedback type, while
+    // suppressionlist@simulator is an ordinary General bounce whose diagnostic names the suppression.
+    static final String ON_ACCOUNT_SUPPRESSION_LIST = "OnAccountSuppressionList";
+    static final String ACCOUNT_SUPPRESSION_DIAGNOSTIC = "Amazon SES did not send the message to this "
+            + "address because it is on the suppression list for your account. For more information "
+            + "about removing addresses from the suppression list, see the Amazon SES Developer Guide "
+            + "at https://docs.aws.amazon.com/ses/latest/dg/sending-email-suppression-list.html";
+
+    private static ObjectNode buildEventBlock(ObjectMapper mapper, SesRecipientEvent event,
+                                              String messageId, Instant timestamp) {
         ObjectNode body = mapper.createObjectNode();
-        switch (eventType) {
+        switch (event.eventType()) {
             case "DELIVERY" -> {
                 body.put("timestamp", ISO_MILLIS.format(timestamp));
                 body.put("processingTimeMillis", 0);
                 ArrayNode recipients = body.putArray("recipients");
-                for (String d : destination) {
-                    if (SimulatorAddresses.isSuccess(d)) {
-                        recipients.add(d.trim());
-                    }
+                for (String recipient : event.recipients()) {
+                    recipients.add(recipient);
                 }
                 body.put("smtpResponse", "250 ok");
                 body.put("reportingMTA", "floci");
             }
             case "BOUNCE" -> {
+                boolean suppressed = event.cause() == SesRecipientEvent.Cause.ACCOUNT_SUPPRESSION;
                 body.put("bounceType", "Permanent");
-                body.put("bounceSubType", "General");
-                emitDedupedRecipientObjects(body.putArray("bouncedRecipients"),
-                        destination, SimulatorAddresses::isBounce,
-                        suppressionBounceRecipients);
+                body.put("bounceSubType", suppressed ? ON_ACCOUNT_SUPPRESSION_LIST : "General");
+                ArrayNode bounced = body.putArray("bouncedRecipients");
+                for (String recipient : event.recipients()) {
+                    ObjectNode entry = bounced.addObject();
+                    entry.put("emailAddress", recipient);
+                    // The shape of a list-management opt-out bounce has not been probed, so it
+                    // carries only the address, as it did before the per-cause split.
+                    if (event.cause() != SesRecipientEvent.Cause.LIST_MANAGEMENT) {
+                        entry.put("action", "failed");
+                        entry.put("status", "5.1.1");
+                        entry.put("diagnosticCode", bounceDiagnosticCode(recipient, suppressed));
+                    }
+                }
                 body.put("timestamp", ISO_MILLIS.format(timestamp));
-                body.put("feedbackId", "feedback-" + messageId);
+                body.put("feedbackId", feedbackId(messageId, event));
             }
             case "COMPLAINT" -> {
-                emitDedupedRecipientObjects(body.putArray("complainedRecipients"),
-                        destination, SimulatorAddresses::isComplaint,
-                        suppressionComplaintRecipients);
+                if (event.cause() == SesRecipientEvent.Cause.ACCOUNT_SUPPRESSION) {
+                    body.put("complaintSubType", ON_ACCOUNT_SUPPRESSION_LIST);
+                }
+                ArrayNode complained = body.putArray("complainedRecipients");
+                for (String recipient : event.recipients()) {
+                    complained.addObject().put("emailAddress", recipient);
+                }
                 body.put("timestamp", ISO_MILLIS.format(timestamp));
-                body.put("feedbackId", "feedback-" + messageId);
+                body.put("arrivalDate", ISO_MILLIS.format(timestamp));
+                body.put("feedbackId", feedbackId(messageId, event));
             }
-            case "REJECT" -> body.put("reason", "Bad content");
+            case "REJECT" -> body.put("reason", SesRecipientEvents.CONTENT_REJECT_REASON);
             default -> {
                 // SEND and other not-yet-modelled event types: empty block.
             }
@@ -242,31 +251,23 @@ final class SesEventPayload {
         return body;
     }
 
-    /**
-     * Emit `{emailAddress: ...}` objects into {@code arr} for every recipient that either
-     * matches {@code simulatorPredicate} in {@code envelope} or is listed in
-     * {@code suppressionRecipients}. Addresses are trimmed and deduplicated by trimmed
-     * form so the same address never appears twice when both inputs claim it.
-     */
-    private static void emitDedupedRecipientObjects(ArrayNode arr,
-                                                    List<String> envelope,
-                                                    java.util.function.Predicate<String> simulatorPredicate,
-                                                    List<String> suppressionRecipients) {
-        LinkedHashSet<String> emitted = new LinkedHashSet<>();
-        if (envelope != null) {
-            for (String d : envelope) {
-                if (d != null && simulatorPredicate.test(d) && emitted.add(d.trim())) {
-                    arr.addObject().put("emailAddress", d.trim());
-                }
-            }
+    // SES gives every bounce and complaint notification its own id, so the events split from one
+    // send (a simulator bounce and a suppression bounce) never share one; the id is derived rather
+    // than random so the configuration-set event and the identity notification of one outcome agree.
+    private static String feedbackId(String messageId, SesRecipientEvent event) {
+        return "feedback-" + messageId + "-" + event.eventType().toLowerCase(Locale.ROOT) + "-"
+                + event.cause().name().toLowerCase(Locale.ROOT);
+    }
+
+    static String bounceDiagnosticCode(String recipient, boolean suppressed) {
+        if (suppressed) {
+            return ACCOUNT_SUPPRESSION_DIAGNOSTIC;
         }
-        if (suppressionRecipients != null) {
-            for (String d : suppressionRecipients) {
-                if (d != null && emitted.add(d.trim())) {
-                    arr.addObject().put("emailAddress", d.trim());
-                }
-            }
+        if (SimulatorAddresses.isSuppressionList(recipient)) {
+            return "smtp; 550 5.1.1 As requested: user unknown (suppressed address: " + recipient + ")";
         }
+        // The simulator documents bounce@ as an SMTP 550 5.1.1 "Unknown User" response.
+        return "smtp; 550 5.1.1 user unknown";
     }
 
     static String eventTypeLabel(String eventType) {

@@ -1,13 +1,11 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.testing.RdsMockProfile;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
-
-import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -27,7 +25,7 @@ import static org.junit.jupiter.api.Assertions.fail;
  * leaves the whole suite green and breaks {@code ssm-secure} on the one resource that accepts it.
  */
 @QuarkusTest
-@TestProfile(CloudFormationRdsDynamicReferenceIntegrationTest.RdsMockProfile.class)
+@TestProfile(RdsMockProfile.class)
 class CloudFormationRdsDynamicReferenceIntegrationTest {
 
     private static final String CFN_AUTH =
@@ -189,12 +187,5 @@ class CloudFormationRdsDynamicReferenceIntegrationTest {
             Thread.sleep(50);
         }
         fail("stack " + stackName + " was not deleted within the timeout");
-    }
-
-    public static final class RdsMockProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.rds.mock", "true");
-        }
     }
 }

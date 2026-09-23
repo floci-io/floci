@@ -1,7 +1,7 @@
 package io.github.hectorvent.floci.services.elbv2;
 
+import io.github.hectorvent.floci.testing.RealElbV2DataPlaneProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.Vertx;
@@ -20,7 +20,6 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
@@ -31,15 +30,8 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 @QuarkusTest
-@TestProfile(ElbV2PreserveHostHeaderIntegrationTest.RealElbV2DataPlaneProfile.class)
+@TestProfile(RealElbV2DataPlaneProfile.class)
 class ElbV2PreserveHostHeaderIntegrationTest {
-
-    public static final class RealElbV2DataPlaneProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.elbv2.mock", "false");
-        }
-    }
 
     private static final String AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260803/us-east-1/elasticloadbalancing/aws4_request";

@@ -5,6 +5,8 @@ import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
+import java.util.Map;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
@@ -160,6 +162,82 @@ class CloudFormationRdsIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString(groupName));
+    }
+
+    @Test
+    void getAttResolvesTheSubnetAndParameterGroupArns() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String subnetGroupName = "cfn-rds-arn-subnets-" + suffix;
+        String parameterGroupName = "cfn-rds-arn-params-" + suffix;
+        String stackName = "cfn-rds-arn-stack-" + suffix;
+        String template = """
+                {
+                  "Resources": {
+                    "DbSubnets": {
+                      "Type": "AWS::RDS::DBSubnetGroup",
+                      "Properties": {
+                        "DBSubnetGroupName": "%s",
+                        "DBSubnetGroupDescription": "managed by cfn",
+                        "SubnetIds": ["%s", "%s"]
+                      }
+                    },
+                    "DbParams": {
+                      "Type": "AWS::RDS::DBParameterGroup",
+                      "Properties": {
+                        "DBParameterGroupName": "%s",
+                        "Family": "postgres16",
+                        "Description": "managed by cfn"
+                      }
+                    }
+                  },
+                  "Outputs": {
+                    "SubnetGroupArn": {"Value": {"Fn::GetAtt": ["DbSubnets", "DBSubnetGroupArn"]}},
+                    "ParameterGroupArn": {"Value": {"Fn::GetAtt": ["DbParams", "DBParameterGroupArn"]}}
+                  }
+                }
+                """.formatted(subnetGroupName, Ec2Service.defaultSubnetId("us-east-1", "a"),
+                Ec2Service.defaultSubnetId("us-east-1", "b"), parameterGroupName);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        try {
+            String xml = given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", CFN_AUTH)
+                .formParam("Action", "DescribeStacks")
+                .formParam("StackName", stackName)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"))
+                .extract().asString();
+            Map<String, String> outputs = XmlParser.extractPairs(xml, "Outputs", "OutputKey", "OutputValue");
+
+            assertEquals("arn:aws:rds:us-east-1:000000000000:subgrp:" + subnetGroupName,
+                    outputs.get("SubnetGroupArn"));
+            assertEquals("arn:aws:rds:us-east-1:000000000000:pg:" + parameterGroupName,
+                    outputs.get("ParameterGroupArn"));
+        } finally {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", CFN_AUTH)
+                .formParam("Action", "DeleteStack")
+                .formParam("StackName", stackName)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+        }
     }
 
     private static String dbSubnetGroupTemplate(String groupName) {

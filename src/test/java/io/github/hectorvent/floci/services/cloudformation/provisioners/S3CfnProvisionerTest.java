@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -12,9 +13,11 @@ import org.mockito.ArgumentCaptor;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -198,40 +201,69 @@ class S3CfnProvisionerTest {
         verify(s3, never()).putBucketVersioning("c", null);
     }
 
+    /**
+     * primaryIdentifier in the registry schema is /properties/Bucket, so the bucket name is the
+     * physical id. The type has no readOnlyProperties, so it has no Fn::GetAtt and the attribute
+     * map stays empty.
+     */
     @Test
-    void bucketPolicyIsAcceptedWithAPhysicalIdAndNoAttributes() {
+    void aBucketPolicyIsIdentifiedByItsBucketAndCarriesNoAttributes() {
         StackResource r = resource("Policy", "AWS::S3::BucketPolicy");
         provisioner.provision(r, props("""
                 {"Bucket": "b", "PolicyDocument": {"Version": "2012-10-17"}}
                 """), ctx);
 
-        assertTrue(r.getPhysicalId().startsWith("bucket-policy-"), r.getPhysicalId());
+        assertEquals("b", r.getPhysicalId());
         assertTrue(r.getAttributes().isEmpty());
     }
 
     /**
-     * provision runs again on every UpdateStack, so minting a fresh id each time made an unchanged
-     * policy look like a replaced resource and changed what Ref returned.
+     * provision runs again on every UpdateStack. The id follows the bucket, which is create-only,
+     * so an unchanged policy keeps its id and does not look like a replaced resource.
      */
     @Test
     void aBucketPolicyKeepsItsIdAcrossUpdates() {
         StackResource r = resource("Policy", "AWS::S3::BucketPolicy");
-        r.setPhysicalId("bucket-policy-abc12345");
+        r.setPhysicalId("b");
         provisioner.provision(r, props("""
                 {"Bucket": "b", "PolicyDocument": {"Version": "2012-10-17"}}
                 """),
-                new ProvisionContext(ctx.engine(), REGION, "000000000000", "my-stack",
-                        "bucket-policy-abc12345"));
+                new ProvisionContext(ctx.engine(), REGION, "000000000000", "my-stack", "b"));
 
-        assertEquals("bucket-policy-abc12345", r.getPhysicalId());
+        assertEquals("b", r.getPhysicalId());
     }
 
     @Test
-    void deletingABucketReachesTheServiceButAPolicyHasNothingToDelete() {
+    void deletingABucketReachesTheService() {
         provisioner.delete("AWS::S3::Bucket", "b", REGION);
-        verify(s3).deleteBucket("b");
 
-        provisioner.delete("AWS::S3::BucketPolicy", "bucket-policy-abc", REGION);
-        verify(s3, never()).deleteBucket("bucket-policy-abc");
+        verify(s3).deleteBucket("b");
+        verify(s3, never()).deleteBucketPolicy(anyString());
+    }
+
+    @Test
+    void deletingABucketPolicyClearsItFromTheBucketAndLeavesTheBucket() {
+        provisioner.delete("AWS::S3::BucketPolicy", "b", REGION);
+
+        verify(s3).deleteBucketPolicy("b");
+        verify(s3, never()).deleteBucket(anyString());
+    }
+
+    /** The bucket in the same stack may be deleted first, leaving no policy to clear. */
+    @Test
+    void deletingTheBucketPolicyOfAVanishedBucketIsTolerated() {
+        doThrow(new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404))
+                .when(s3).deleteBucketPolicy("gone");
+
+        provisioner.delete("AWS::S3::BucketPolicy", "gone", REGION);
+
+        verify(s3).deleteBucketPolicy("gone");
+    }
+
+    @Test
+    void aBucketPolicyDeleteThatFailsForAnyOtherReasonPropagates() {
+        doThrow(new AwsException("AccessDenied", "nope", 403)).when(s3).deleteBucketPolicy("b");
+
+        assertThrows(AwsException.class, () -> provisioner.delete("AWS::S3::BucketPolicy", "b", REGION));
     }
 }

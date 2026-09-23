@@ -14,6 +14,8 @@ import io.github.hectorvent.floci.services.ec2.Ec2ContainerManager;
 import io.github.hectorvent.floci.services.ec2.Ec2ImageCatalog;
 import io.github.hectorvent.floci.services.ec2.Ec2InstanceTypeCatalog;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
+import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
@@ -66,6 +68,7 @@ class EksServiceTest {
     private EksService eksService;
     private StorageFactory storageFactory;
     private RegionResolver regionResolver;
+    private Ec2Service ec2Service;
 
     @BeforeEach
     void setUp() {
@@ -79,7 +82,13 @@ class EksServiceTest {
 
         EmulatorConfig config = testConfig();
         EksClusterManager clusterManager = null;
-        Ec2Service ec2Service = null;
+        ec2Service = realEc2Service();
+        ec2Service.createLaunchTemplate("us-east-1", "my-node-launch-template",
+                new LaunchTemplateData(), null, null);
+        ec2Service.createLaunchTemplateVersion("us-east-1", null, "my-node-launch-template",
+                "1", new LaunchTemplateData());
+        ec2Service.createLaunchTemplateVersion("us-east-1", null, "my-node-launch-template",
+                "2", new LaunchTemplateData());
         regionResolver = new RegionResolver("us-east-1", "000000000000");
         eksService = new EksService(storageFactory, config, regionResolver, clusterManager, ec2Service,
                 new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class),
@@ -1058,13 +1067,13 @@ class EksServiceTest {
         CreateClusterRequest request = new CreateClusterRequest();
         request.setName("probe-eks");
         request.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
-        request.setTags(Map.of("tofu-estate", "probe1"));
+        request.setTags(Map.of("team", "probe1"));
 
         Cluster cluster = service.createCluster(request);
 
         assertEquals(ClusterStatus.ACTIVE, cluster.getStatus());
         assertEquals("https://localhost:6500", cluster.getEndpoint());
-        assertEquals("probe1", cluster.getTags().get("tofu-estate"));
+        assertEquals("probe1", cluster.getTags().get("team"));
         // No k3s API server exists. The empty CA is what says so.
         assertEquals("", cluster.getCertificateAuthority().getData());
         assertNull(cluster.getContainerId());
@@ -1079,12 +1088,12 @@ class EksServiceTest {
         CreateClusterRequest request = new CreateClusterRequest();
         request.setName("probe-eks");
         request.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
-        request.setTags(Map.of("tofu-estate", "probe1"));
+        request.setTags(Map.of("team", "probe1"));
         String arn = service.createCluster(request).getArn();
 
         assertEquals(ClusterStatus.ACTIVE, service.describeCluster("probe-eks").getStatus());
         assertEquals(List.of("probe-eks"), service.listClusters());
-        assertEquals("probe1", service.listTagsForResource(arn).get("tofu-estate"));
+        assertEquals("probe1", service.listTagsForResource(arn).get("team"));
 
         service.tagResource(arn, Map.of("Name", "probe-eks"));
         assertEquals("probe-eks", service.listTagsForResource(arn).get("Name"));
@@ -2040,7 +2049,6 @@ class EksServiceTest {
     }
 
     private static final Map<String, Object> LAUNCH_TEMPLATE = Map.of(
-            "id", "lt-0a1b2c3d4e5f60718",
             "name", "my-node-launch-template",
             "version", "3");
 
@@ -2103,7 +2111,7 @@ class EksServiceTest {
         // The nested members are what OpenTofu diffs against its declared block, so spot-check
         // them individually rather than trusting the whole-map comparison alone.
         Map<?, ?> launchTemplate = (Map<?, ?>) described.getLaunchTemplate();
-        assertEquals("lt-0a1b2c3d4e5f60718", launchTemplate.get("id"));
+        assertNull(launchTemplate.get("id"));
         assertEquals("my-node-launch-template", launchTemplate.get("name"));
         assertEquals("3", launchTemplate.get("version"));
         Map<?, ?> remoteAccess = (Map<?, ?>) described.getRemoteAccess();
@@ -2161,11 +2169,200 @@ class EksServiceTest {
         assertEquals(created.getTaints(), described.getTaints());
     }
 
+    @Test
+    void createNodeGroupWithValidLaunchTemplateIdAndVersionSucceeds() {
+        createTestCluster("lt-cluster");
+        LaunchTemplate lt = ec2Service.createLaunchTemplate("us-east-1", "test-lt-id",
+                new LaunchTemplateData(), null, null);
+
+        CreateNodeGroupRequest request = nodeGroupRequest("valid-lt-id-ng");
+        request.setLaunchTemplate(Map.of("id", lt.getLaunchTemplateId(), "version", "1"));
+
+        Nodegroup created = eksService.createNodeGroup("lt-cluster", request);
+        assertNotNull(created);
+        assertEquals(Map.of("id", lt.getLaunchTemplateId(), "version", "1"), created.getLaunchTemplate());
+    }
+
+    @Test
+    void createNodeGroupWithValidLaunchTemplateNameAndVersionSucceeds() {
+        createTestCluster("lt-cluster");
+        ec2Service.createLaunchTemplate("us-east-1", "test-lt-name",
+                new LaunchTemplateData(), null, null);
+
+        CreateNodeGroupRequest request = nodeGroupRequest("valid-lt-name-ng");
+        request.setLaunchTemplate(Map.of("name", "test-lt-name", "version", "1"));
+
+        Nodegroup created = eksService.createNodeGroup("lt-cluster", request);
+        assertNotNull(created);
+        assertEquals(Map.of("name", "test-lt-name", "version", "1"), created.getLaunchTemplate());
+    }
+
+    @Test
+    void createNodeGroupWithValidLaunchTemplateWithoutVersionDefaultsVersion() {
+        createTestCluster("lt-cluster");
+        LaunchTemplate lt = ec2Service.createLaunchTemplate("us-east-1", "test-lt-default-ver",
+                new LaunchTemplateData(), null, null);
+
+        CreateNodeGroupRequest request = nodeGroupRequest("default-ver-ng");
+        request.setLaunchTemplate(Map.of("id", lt.getLaunchTemplateId()));
+
+        Nodegroup created = eksService.createNodeGroup("lt-cluster", request);
+        assertNotNull(created);
+    }
+
+    @Test
+    void createNodeGroupWithNonExistentLaunchTemplateIdFails() {
+        createTestCluster("lt-cluster");
+        CreateNodeGroupRequest request = nodeGroupRequest("missing-lt-id-ng");
+        request.setLaunchTemplate(Map.of("id", "lt-missing123456789", "version", "1"));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> eksService.createNodeGroup("lt-cluster", request));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertTrue(ex.getMessage().contains("Launch template could not be found"));
+    }
+
+    @Test
+    void createNodeGroupWithNonExistentLaunchTemplateNameFails() {
+        createTestCluster("lt-cluster");
+        CreateNodeGroupRequest request = nodeGroupRequest("missing-lt-name-ng");
+        request.setLaunchTemplate(Map.of("name", "non-existent-template", "version", "1"));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> eksService.createNodeGroup("lt-cluster", request));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertTrue(ex.getMessage().contains("Launch template could not be found"));
+    }
+
+    @Test
+    void createNodeGroupWithNonExistentLaunchTemplateVersionFails() {
+        createTestCluster("lt-cluster");
+        LaunchTemplate lt = ec2Service.createLaunchTemplate("us-east-1", "test-lt-missing-ver",
+                new LaunchTemplateData(), null, null);
+
+        CreateNodeGroupRequest request = nodeGroupRequest("missing-ver-ng");
+        request.setLaunchTemplate(Map.of("id", lt.getLaunchTemplateId(), "version", "99"));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> eksService.createNodeGroup("lt-cluster", request));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("The specified launch template version does not exist.", ex.getMessage());
+    }
+
+    @Test
+    void createNodeGroupWithMalformedLaunchTemplateVersionFails() {
+        createTestCluster("lt-cluster");
+        LaunchTemplate lt = ec2Service.createLaunchTemplate("us-east-1", "test-lt-malformed-ver",
+                new LaunchTemplateData(), null, null);
+
+        CreateNodeGroupRequest request = nodeGroupRequest("malformed-ver-ng");
+        request.setLaunchTemplate(Map.of("id", lt.getLaunchTemplateId(), "version", "not-a-number"));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> eksService.createNodeGroup("lt-cluster", request));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("The specified launch template version is not valid.", ex.getMessage());
+    }
+
+    @Test
+    void createNodeGroupUsesClusterRegionForArnAndLaunchTemplate() {
+        Cluster cluster = new Cluster();
+        cluster.setName("regional-cluster");
+        cluster.setArn("arn:aws:eks:eu-west-1:000000000000:cluster/regional-cluster");
+        cluster.setStatus(ClusterStatus.ACTIVE);
+        eksService.putClusterForAccount("000000000000", cluster);
+
+        LaunchTemplate lt = ec2Service.createLaunchTemplate("eu-west-1", "eu-lt",
+                new LaunchTemplateData(), null, null);
+
+        CreateNodeGroupRequest request = nodeGroupRequest("regional-ng");
+        request.setLaunchTemplate(Map.of("id", lt.getLaunchTemplateId(), "version", "1"));
+
+        Nodegroup created = eksService.createNodeGroup("regional-cluster", request);
+        assertNotNull(created);
+        assertTrue(created.getNodegroupArn().startsWith(
+                "arn:aws:eks:eu-west-1:000000000000:nodegroup/regional-cluster/regional-ng/"));
+    }
+
+    @Test
+    void createNodeGroupValidatesLaunchTemplateInClusterRegion() {
+        Cluster cluster = new Cluster();
+        cluster.setName("eu-cluster");
+        cluster.setArn("arn:aws:eks:eu-west-1:000000000000:cluster/eu-cluster");
+        cluster.setStatus(ClusterStatus.ACTIVE);
+        eksService.putClusterForAccount("000000000000", cluster);
+
+        LaunchTemplate lt = ec2Service.createLaunchTemplate("us-east-1", "us-only-lt",
+                new LaunchTemplateData(), null, null);
+
+        CreateNodeGroupRequest request = nodeGroupRequest("eu-ng");
+        request.setLaunchTemplate(Map.of("id", lt.getLaunchTemplateId(), "version", "1"));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> eksService.createNodeGroup("eu-cluster", request));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertTrue(ex.getMessage().contains("Launch template could not be found"));
+    }
+
+    @Test
+    void createNodeGroupWithBothLaunchTemplateIdAndNameFails() {
+        createTestCluster("lt-cluster");
+        LaunchTemplate lt = ec2Service.createLaunchTemplate("us-east-1", "test-lt-both",
+                new LaunchTemplateData(), null, null);
+
+        CreateNodeGroupRequest request = nodeGroupRequest("both-id-name-ng");
+        request.setLaunchTemplate(Map.of(
+                "id", lt.getLaunchTemplateId(),
+                "name", lt.getLaunchTemplateName(),
+                "version", "1"));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> eksService.createNodeGroup("lt-cluster", request));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("You must specify either the launch template ID or the launch template name in the request, but not both.",
+                ex.getMessage());
+    }
+
+    @Test
+    void createNodeGroupWithNeitherLaunchTemplateIdNorNameFails() {
+        createTestCluster("lt-cluster");
+        CreateNodeGroupRequest request = nodeGroupRequest("neither-id-name-ng");
+        request.setLaunchTemplate(Map.of("version", "1"));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> eksService.createNodeGroup("lt-cluster", request));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("You must specify either the launch template ID or the launch template name in the request, but not both.",
+                ex.getMessage());
+    }
+
+    @Test
+    void createNodeGroupWithNoLaunchTemplateUnaffected() {
+        createTestCluster("lt-cluster");
+        CreateNodeGroupRequest request = nodeGroupRequest("no-lt-ng");
+        request.setLaunchTemplate(null);
+
+        Nodegroup created = eksService.createNodeGroup("lt-cluster", request);
+        assertNotNull(created);
+        assertNull(created.getLaunchTemplate());
+    }
+
     /**
      * A service whose stores are real JSON files under {@code directory}, one per store name, so a
      * second instance over the same directory reloads through Jackson exactly as a restart does.
      */
     private EksService persistentEksService(Path directory) {
+        return persistentEksService(directory, ec2Service);
+    }
+
+    private EksService persistentEksService(Path directory, Ec2Service ec2) {
         StorageFactory storageFactory = new StorageFactory(null, null) {
             @Override
             public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
@@ -2177,7 +2374,7 @@ class EksServiceTest {
             }
         };
         return new EksService(storageFactory, testConfig(true),
-                new RegionResolver("us-east-1", "000000000000"), null, realEc2Service(),
+                new RegionResolver("us-east-1", "000000000000"), null, ec2,
                 new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class),
                 mock(EksPodIdentityAssociationService.class));
     }

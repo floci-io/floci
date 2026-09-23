@@ -212,10 +212,11 @@ public class RedshiftAuthProxy {
                 backendSocket.setTcpNoDelay(true);
                 return backendSocket;
             };
-            // iamEnabled = false: the SigV4 branch inside authenticate is never taken.
+            // iamEnabled = false: the SigV4 branch inside authenticate is never taken, so no
+            // token binding is needed.
             session = PostgresProtocolHandler.authenticate(
                             client, connector, masterUsername, masterPassword, dbName,
-                            false, sigV4, tlsCertificates, passwordValidator,
+                            false, sigV4, null, tlsCertificates, passwordValidator,
                             handshakeTimeoutMillis);
             if (session != null) {
                 // Redshift-only DDL (DISTKEY/SORTKEY/ENCODE/...) is rewritten for the plain

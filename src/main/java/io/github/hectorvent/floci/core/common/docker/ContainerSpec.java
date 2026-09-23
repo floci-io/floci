@@ -8,6 +8,9 @@ import com.github.dockerjava.api.model.VolumesFrom;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Immutable specification for a Docker container to be created.
@@ -39,6 +42,9 @@ import java.util.Map;
  * @param nanoCpus Hard CPU quota in billionths of a CPU (null = no quota)
  * @param cpuShares Relative CPU weight against other containers (null = daemon default)
  * @param readonlyRootfs Whether the container's own filesystem is mounted read only
+ * @param linkLocalIps Link-local IPv4 addresses assigned to the container's endpoint on the configured network
+ * @param portBindingHostIps Host interface each published port binds to, keyed by container port.
+ *        A port with no entry here, and not in {@code loopbackPortBindings}, binds every interface
  */
 public record ContainerSpec(
         String image,
@@ -66,8 +72,20 @@ public record ContainerSpec(
         List<DeviceRequest> deviceRequests,
         Long nanoCpus,
         Integer cpuShares,
-        boolean readonlyRootfs
+        boolean readonlyRootfs,
+        List<String> linkLocalIps,
+        Map<Integer, String> portBindingHostIps
 ) {
+    private static final Pattern LINK_LOCAL_IPV4 = Pattern.compile("^169\\.254\\.(\\d{1,3})\\.(\\d{1,3})$");
+    private static final Set<String> NETWORKS_WITHOUT_ENDPOINT_IPAM = Set.of("bridge", "default", "host", "none");
+
+    public ContainerSpec {
+        if (linkLocalIps != null && !linkLocalIps.isEmpty()) {
+            requireUserDefinedNetwork(networkMode);
+            linkLocalIps.forEach(ContainerSpec::requireLinkLocalIpv4);
+        }
+    }
+
     /**
      * Creates a minimal spec with just the image name.
      * All other fields will be null or empty lists.
@@ -75,7 +93,7 @@ public record ContainerSpec(
     public ContainerSpec(String image) {
         this(image, null, List.of(), null, null, null, Map.of(), List.of(), List.of(), null,
                 List.of(), List.of(), List.of(), List.of(), Map.of(), null, false, null, List.of(),
-                null, null, List.of(), List.of(), null, null, false);
+                null, null, List.of(), List.of(), null, null, false, List.of(), Map.of());
     }
 
     /**
@@ -106,7 +124,8 @@ public record ContainerSpec(
     ) {
         this(image, name, env, cmd, entrypoint, memoryBytes, portBindings, List.of(), exposedPorts,
                 networkMode, mounts, binds, List.of(), extraHosts, labels, logConfig, privileged,
-                cgroupnsMode, dnsServers, workingDir, user, groupAdd, List.of(), null, null, false);
+                cgroupnsMode, dnsServers, workingDir, user, groupAdd, List.of(), null, null, false,
+                List.of(), Map.of());
     }
 
     /**
@@ -140,7 +159,7 @@ public record ContainerSpec(
         this(image, name, env, cmd, entrypoint, memoryBytes, portBindings, loopbackPortBindings,
                 exposedPorts, networkMode, mounts, binds, List.of(), extraHosts, labels, logConfig,
                 privileged, cgroupnsMode, dnsServers, workingDir, user, groupAdd, List.of(),
-                null, null, false);
+                null, null, false, List.of(), Map.of());
     }
 
     /**
@@ -174,7 +193,7 @@ public record ContainerSpec(
         this(image, name, env, cmd, entrypoint, memoryBytes, portBindings, loopbackPortBindings,
                 exposedPorts, networkMode, mounts, binds, List.of(), extraHosts, labels, logConfig,
                 privileged, cgroupnsMode, dnsServers, workingDir, user, groupAdd, deviceRequests,
-                null, null, false);
+                null, null, false, List.of(), Map.of());
     }
 
     /**
@@ -203,5 +222,36 @@ public record ContainerSpec(
      */
     public boolean hasDeviceRequests() {
         return deviceRequests != null && !deviceRequests.isEmpty();
+    }
+
+    private static void requireUserDefinedNetwork(String networkMode) {
+        if (networkMode == null || networkMode.isBlank()
+                || NETWORKS_WITHOUT_ENDPOINT_IPAM.contains(networkMode) || networkMode.startsWith("container:")) {
+            throw new IllegalArgumentException(
+                    "Link-local addresses need a user-defined Docker network, but the network is '"
+                            + networkMode + "'");
+        }
+    }
+
+    private static void requireLinkLocalIpv4(String ip) {
+        Matcher matcher = ip == null ? null : LINK_LOCAL_IPV4.matcher(ip);
+        if (matcher == null || !matcher.matches()
+                || Integer.parseInt(matcher.group(1)) > 255 || Integer.parseInt(matcher.group(2)) > 255) {
+            throw new IllegalArgumentException("'" + ip + "' is not an IPv4 address in 169.254.0.0/16");
+        }
+    }
+
+    /**
+     * Returns true when the container asks for link-local addresses on its network endpoint.
+     */
+    public boolean hasLinkLocalIps() {
+        return linkLocalIps != null && !linkLocalIps.isEmpty();
+    }
+
+    /**
+     * Returns true when the configured network must be attached with endpoint settings before start.
+     */
+    public boolean hasNetworkConfiguration() {
+        return networkMode != null && !networkMode.isBlank() && hasLinkLocalIps();
     }
 }

@@ -141,6 +141,7 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
                 state, description, roleArn, Map.of(), ctx.region());
         r.setPhysicalId(ruleName);
         r.getAttributes().put("Arn", rule.getArn());
+        r.getAttributes().put("RuleName", ruleName);
         // A rule on a custom bus is keyed by that bus; remember it so the resource delete can target
         // the right bus (the physical id is only the rule name, which resolves to the default bus).
         if (busName != null && !busName.isBlank()) {

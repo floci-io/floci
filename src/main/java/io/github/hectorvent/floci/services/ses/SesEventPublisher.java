@@ -61,21 +61,19 @@ public class SesEventPublisher {
         this.objectMapper = objectMapper;
     }
 
-    public void publish(ConfigurationSet configurationSet, String eventType, String messageId,
+    public void publish(ConfigurationSet configurationSet, SesRecipientEvent event, String messageId,
                         String source, String sourceArn, String sendingAccountId,
                         String subject, List<String> toAddresses, List<String> ccAddresses,
                         List<String> bccAddresses, List<String> envelopeDestinations,
-                        List<String> suppressionBounceRecipients,
-                        List<String> suppressionComplaintRecipients,
                         List<MessageTag> emailTags, List<MessageHeader> additionalHeaders,
                         Instant timestamp, String defaultRegion) {
         if (configurationSet == null || configurationSet.getEventDestinations().isEmpty()) {
             return;
         }
-        ObjectNode payload = SesEventPayload.build(objectMapper, eventType, messageId, source,
+        String eventType = event.eventType();
+        ObjectNode payload = SesEventPayload.build(objectMapper, event, messageId, source,
                 sourceArn, sendingAccountId, subject,
                 toAddresses, ccAddresses, bccAddresses, envelopeDestinations,
-                suppressionBounceRecipients, suppressionComplaintRecipients,
                 configurationSet.getName(), emailTags, additionalHeaders, timestamp);
         String payloadJson = payload.toString();
         for (EventDestination ed : configurationSet.getEventDestinations()) {
@@ -105,20 +103,18 @@ public class SesEventPublisher {
      * {@code mail.tags}, and includes the original headers only when {@code includeHeaders} is set
      * (i.e. the identity has headers-in-notifications enabled for the type).
      */
-    public void publishIdentityNotification(String topicArn, boolean includeHeaders, String eventType,
-                        String messageId, String source, String sourceArn, String sendingAccountId,
-                        String subject, List<String> toAddresses, List<String> ccAddresses,
-                        List<String> bccAddresses, List<String> envelopeDestinations,
-                        List<String> suppressionBounceRecipients,
-                        List<String> suppressionComplaintRecipients,
-                        List<MessageHeader> additionalHeaders, Instant timestamp, String defaultRegion) {
+    public void publishIdentityNotification(String topicArn, boolean includeHeaders,
+                        SesRecipientEvent event, String messageId, String source, String sourceArn,
+                        String sendingAccountId, String subject, List<String> toAddresses,
+                        List<String> ccAddresses, List<String> bccAddresses,
+                        List<String> envelopeDestinations, List<MessageHeader> additionalHeaders,
+                        Instant timestamp, String defaultRegion) {
         if (topicArn == null || topicArn.isBlank()) {
             return;
         }
-        ObjectNode payload = SesEventPayload.buildIdentityNotification(objectMapper, eventType,
+        ObjectNode payload = SesEventPayload.buildIdentityNotification(objectMapper, event,
                 messageId, source, sourceArn, sendingAccountId, subject,
                 toAddresses, ccAddresses, bccAddresses, envelopeDestinations,
-                suppressionBounceRecipients, suppressionComplaintRecipients,
                 additionalHeaders, timestamp, includeHeaders);
         publishSns(topicArn, payload.toString(), defaultRegion);
     }

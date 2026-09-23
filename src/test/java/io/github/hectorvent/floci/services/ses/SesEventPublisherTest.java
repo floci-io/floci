@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsService;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.firehose.FirehoseService;
+import io.github.hectorvent.floci.services.ses.SesRecipientEvent.Cause;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
 import io.github.hectorvent.floci.services.ses.model.EventBridgeDestination;
 import io.github.hectorvent.floci.services.ses.model.EventDestination;
@@ -72,10 +73,7 @@ class SesEventPublisherTest {
         when(eventBridgeService.putEvents(any(), anyString()))
                 .thenReturn(new EventBridgeService.PutEventsResult(0, List.of()));
 
-        publisher.publish(configurationSetWithEventBridgeDestination(DEFAULT_BUS_ARN),
-                "SEND", "msg-1", null, null, "000000000000", "subj",
-                List.of("to@example.com"), null, null, List.of("to@example.com"),
-                null, null, null, null, Instant.now(), "us-east-1");
+        publisher.publish(configurationSetWithEventBridgeDestination(DEFAULT_BUS_ARN), SesRecipientEvent.of("SEND", Cause.SIMULATOR, List.of()), "msg-1", null, null, "000000000000", "subj", List.of("to@example.com"), null, null, List.of("to@example.com"), null, null, Instant.now(), "us-east-1");
 
         Map<String, Object> entry = captureSingleEntry();
         assertTrue(entry.containsKey("Resources"),
@@ -94,10 +92,7 @@ class SesEventPublisherTest {
         when(eventBridgeService.putEvents(any(), anyString()))
                 .thenReturn(new EventBridgeService.PutEventsResult(0, List.of()));
 
-        publisher.publish(configurationSetWithEventBridgeDestination(DEFAULT_BUS_ARN),
-                "SEND", "msg-1", "sender@example.com", arn, "000000000000", "subj",
-                List.of("to@example.com"), null, null, List.of("to@example.com"),
-                null, null, null, null, Instant.now(), "us-east-1");
+        publisher.publish(configurationSetWithEventBridgeDestination(DEFAULT_BUS_ARN), SesRecipientEvent.of("SEND", Cause.SIMULATOR, List.of()), "msg-1", "sender@example.com", arn, "000000000000", "subj", List.of("to@example.com"), null, null, List.of("to@example.com"), null, null, Instant.now(), "us-east-1");
 
         Map<String, Object> entry = captureSingleEntry();
         Object resources = entry.get("Resources");

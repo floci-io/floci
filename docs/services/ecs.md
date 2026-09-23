@@ -166,7 +166,7 @@ object ARN with `Invalid arn syntax`. A Fargate task can still take its config f
 documents, by giving the aws-for-fluent-bit init process its `aws_fluent_bit_init_s3_*`
 environment variables. ECS never inspects those and Floci passes them through, so that
 registration is accepted here too; the init process reads the task metadata endpoint before
-downloading.
+downloading, and Floci serves one (see [Task metadata endpoint](#task-metadata-endpoint)).
 Floci does not validate a task definition's `compatibilities` /
 `requiresCompatibilities` against `RunTask` `launchType`; a Fargate-compatible
 definition can still be run with `launchType=EC2` (and the reverse).
@@ -194,6 +194,7 @@ cycles involving both volume inheritance and log routing are rejected before con
 | `ListTasks` | List task ARNs (filterable by cluster, family, service, status) |
 | `UpdateTaskProtection` | Set scale-in protection for tasks |
 | `GetTaskProtection` | Get current task protection state |
+| `ExecuteCommand` | Open an ECS Exec session into a container (see [ECS Exec](#ecs-exec)) |
 
 ### Fargate
 
@@ -296,6 +297,81 @@ launch type, which is what AWS documents for the `Service` shape.
 
 With no launch type, no strategy and no cluster default, a task keeps Floci's `FARGATE` default: a
 local cluster has no container instances, so an EC2 default would have nowhere to place it.
+
+#### Task metadata endpoint
+
+Floci serves the [task metadata endpoint version
+4](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-metadata-endpoint-v4-fargate.html)
+and injects `ECS_CONTAINER_METADATA_URI_V4` into every container it launches. AWS serves it on the
+link-local address `169.254.170.2`, which a local container cannot be given, so Floci serves the
+same paths on its own port; applications and the AWS SDKs read the environment variable rather than
+the address, so they work unchanged.
+
+| Path | Returns |
+|---|---|
+| `/v4/{id}` | The container's metadata |
+| `/v4/{id}/task` | The task's metadata, including every container |
+| `/v4/{id}/taskWithTags` | The task's metadata with its tags and its container instance's (EC2 only) |
+| `/v4/{id}/stats` | The container's Docker stats |
+| `/v4/{id}/task/stats` | The Docker stats of every container in the task, keyed by Docker id |
+
+The `{id}` is minted per container at launch, as the ECS agent mints it. The task document carries
+`Cluster`, `TaskARN`, `Family`, `Revision`, the statuses, `Limits` (CPU in vCPUs), the pull
+timestamps, `AvailabilityZone`, `LaunchType`, `ServiceName` for a service's task, `VPCID` for an
+EC2 task, and, for Fargate, `ClockDrift` and `EphemeralStorageMetrics`. Floci has no clock drift to
+report and does not meter the disk, so those two report a synchronized clock and zero usage.
+
+An `awsvpc` container's `Networks` object describes the task ENI and the subnet it sits in:
+`NetworkMode`, `IPv4Addresses`, `AttachmentIndex`, `MACAddress`, `PrivateDNSName`,
+`IPv4SubnetCIDRBlock`, `SubnetGatewayIpv4Address`, `DomainNameServers` and `DomainNameSearchList`.
+A local ENI has no DHCP option set behind it, so the gateway is derived as the first address of the
+subnet's CIDR, the resolver as the third address of the VPC's, and the search domain from the
+region, the way a real VPC assigns them.
+
+The stats paths read the Docker daemon when the request arrives, so they return the same
+[ContainerStats](https://docs.docker.com/engine/api/v1.30/#operation/ContainerStats) document AWS
+returns, plus the `network_rate_stats` the ECS agent adds. Docker reports cumulative counters only,
+so the rates are taken across two consecutive samples: as on Fargate, that means a container has to
+have run for about a second before its stats are there. A container Floci has no running Docker
+container for reports an empty document instead, and one sampled only once reports its stats
+without `network_rate_stats`: the path exists for every container in the task, whether or not the
+daemon can measure it.
+
+`/v4/{id}/task/stats` samples the task's containers in one pass, with every stream open at once,
+rather than one after another. A sidecar polls that path for network metrics, so the response costs
+about the single collection tick one container costs however many containers the task has.
+
+`taskWithTags` is the container agent's path, so it answers for an EC2 task and 404s for a Fargate
+one, as on AWS. A container's `CreatedAt`, `StartedAt` and `FinishedAt` are Docker's own for that
+container, read when it starts and again when it stops; a task that never reached a daemon, which
+means `mock: true` or one restored from storage, reports the task's timestamps instead.
+
+#### ECS Exec
+
+`ExecuteCommand` opens a real shell in a task's container. The session must be `interactive`, which
+is the only mode ECS supports. The task must belong to the cluster the request names, must be
+`RUNNING`, must have been run with
+`enableExecuteCommand`, and must have a container behind it, which means Docker mode:
+a mock-mode task reports the `ExecuteCommandAgent` as running but has no runtime to exec into, and
+`ExecuteCommand` answers `TargetNotConnectedException`.
+
+The response carries a `session` with a `streamUrl` pointing at Floci's own data channel and a
+single-use `tokenValue`, so the AWS CLI works as documented:
+
+```bash
+aws ecs execute-command --cluster my-cluster --task <task-arn> \
+  --container app --interactive --command "/bin/sh" \
+  --endpoint-url $AWS_ENDPOINT_URL
+```
+
+Floci plays the SSM agent's half of the Session Manager protocol on that channel (the binary
+`AgentMessage` framing, the handshake, sequenced acknowledgements and terminal resizes) and bridges
+it to a `docker exec` in the container. Deliberate limits:
+
+- The command runs through `/bin/sh -c`, so an image without a shell cannot be exec'd into.
+- Sessions are in memory, single use, and expire after five minutes if nobody connects.
+- `ExecuteCommand` logging (the `executeCommandConfiguration` on a cluster, which sends session
+  transcripts to S3 or CloudWatch) is not implemented.
 
 ### Services
 
@@ -628,7 +704,7 @@ A task's `efsVolumeConfiguration` volumes are backed by shared local Docker volu
 
 ### Mock mode
 
-Set `FLOCI_SERVICES_ECS_MOCK=true` to run without Docker. In this mode tasks skip container launch and immediately transition to `RUNNING`, then to `STOPPED` when stopped. The task still reports a container per container definition and, for `awsvpc`, a real ENI, so a client reading `containers[]` or waiting on the task's address behaves as it does against AWS; nothing is running behind those containers, so no logs are streamed. This is the recommended mode for unit/integration tests and CI pipelines where Docker-in-Docker is unavailable.
+Set `FLOCI_SERVICES_ECS_MOCK=true` to run without Docker. In this mode tasks skip container launch and immediately transition to `RUNNING`, then to `STOPPED` when stopped. The task still reports a container per container definition and, for `awsvpc`, a real ENI, so a client reading `containers[]` or waiting on the task's address behaves as it does against AWS; nothing is running behind those containers, so ECS Exec answers `TargetNotConnectedException` and no logs are streamed. This is the recommended mode for unit/integration tests and CI pipelines where Docker-in-Docker is unavailable.
 
 ```yaml
 # docker-compose.yml — CI / test environment

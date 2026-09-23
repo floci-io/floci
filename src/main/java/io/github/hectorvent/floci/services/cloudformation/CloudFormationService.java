@@ -2418,7 +2418,13 @@ public class CloudFormationService implements ResourceProvider {
             resource.setStatus("CREATE_COMPLETE");
         } else {
             resource.setStatus("CREATE_FAILED");
-            resource.setStatusReason("Nested stack " + childStackName + " failed: " + childStack.getStatusReason());
+            String reason = childStack.getStatusReason();
+            if (reason == null || reason.isBlank()) {
+                reason = "Nested stack " + childStackName + " rolled back or failed with status " + childStack.getStatus();
+            } else {
+                reason = "Nested stack " + childStackName + " failed: " + reason;
+            }
+            resource.setStatusReason(reason);
         }
 
         return resource;

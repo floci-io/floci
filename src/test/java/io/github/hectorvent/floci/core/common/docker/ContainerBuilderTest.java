@@ -128,6 +128,57 @@ class ContainerBuilderTest {
     }
 
     @Test
+    void withLinkLocalIpRoundTripsIntoSpecIgnoringBlanksAndDuplicates() {
+        TestFixture fixture = new TestFixture();
+
+        ContainerSpec spec = fixture.builder.newContainer("alpine")
+                .withDockerNetwork(Optional.of("test-network"))
+                .withLinkLocalIp("169.254.170.3")
+                .withLinkLocalIp(" 169.254.170.3 ")
+                .withLinkLocalIp("   ")
+                .build();
+
+        assertEquals(List.of("169.254.170.3"), spec.linkLocalIps());
+    }
+
+    @Test
+    void linkLocalIpWithoutUserDefinedNetworkIsRejected() {
+        TestFixture fixture = new TestFixture();
+
+        assertThrows(IllegalArgumentException.class,
+                () -> fixture.builder.newContainer("alpine").withLinkLocalIp("169.254.170.3").build());
+        for (String network : List.of("bridge", "host", "none", "container:router")) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> fixture.builder.newContainer("alpine")
+                            .withDockerNetwork(Optional.of(network))
+                            .withLinkLocalIp("169.254.170.3")
+                            .build(),
+                    network);
+        }
+    }
+
+    @Test
+    void nonLinkLocalAddressIsRejected() {
+        TestFixture fixture = new TestFixture();
+
+        for (String ip : List.of("10.0.0.5", "169.254.300.1", "169.254.1", "not-an-ip")) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> fixture.builder.newContainer("alpine")
+                            .withDockerNetwork(Optional.of("test-network"))
+                            .withLinkLocalIp(ip)
+                            .build(),
+                    ip);
+        }
+    }
+
+    @Test
+    void linkLocalIpsDefaultToNone() {
+        TestFixture fixture = new TestFixture();
+
+        assertEquals(List.of(), fixture.builder.newContainer("alpine").build().linkLocalIps());
+    }
+
+    @Test
     void withGpuCountRequestsThatManyGpus() {
         TestFixture fixture = new TestFixture();
 

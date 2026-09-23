@@ -87,6 +87,7 @@ class EventsCfnProvisionerTest {
         provisioner.provision(r, mapper.createObjectNode(), ctx("my-stack-Rule-ab12cd"));
 
         assertEquals("my-stack-Rule-ab12cd", r.getPhysicalId());
+        assertEquals("my-stack-Rule-ab12cd", r.getAttributes().get("RuleName"));
         verify(events).putRule(eq("my-stack-Rule-ab12cd"), any(), any(), any(), any(), any(), any(),
                 any(), anyString());
     }
@@ -100,6 +101,7 @@ class EventsCfnProvisionerTest {
 
         assertEquals("orders", r.getPhysicalId());
         assertEquals(RULE_ARN, r.getAttributes().get("Arn"));
+        assertEquals("orders", r.getAttributes().get("RuleName"));
     }
 
     // ── targets are driven to the template's desired state ───────────────────

@@ -156,6 +156,7 @@ services:
 | `FLOCI_SERVICES_UI_IMAGE` | `floci/floci-ui:latest` | Console image to run |
 | `FLOCI_SERVICES_UI_CONTAINER_NAME` | `floci-ui` | Name of the sidecar container |
 | `FLOCI_SERVICES_UI_PORT` | `4500` | Host port the console is published on |
+| `FLOCI_SERVICES_UI_BIND_ADDRESS` | _(none)_ | Host interface that port is published on. Unset publishes on every interface; set `127.0.0.1` when Floci's own port is loopback-only |
 | `FLOCI_SERVICES_UI_KEEP_RUNNING_ON_SHUTDOWN` | `false` | Leave the sidecar running when Floci stops |
 
 ### Running a different console

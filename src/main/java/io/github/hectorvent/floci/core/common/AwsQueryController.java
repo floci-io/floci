@@ -102,10 +102,12 @@ public class AwsQueryController {
             "TagUser", "UntagUser", "ListUserTags",
             "TagRole", "UntagRole", "ListRoleTags",
             "TagPolicy", "UntagPolicy", "ListPolicyTags",
+            "TagInstanceProfile", "UntagInstanceProfile", "ListInstanceProfileTags",
             "CreateLoginProfile", "GetLoginProfile", "DeleteLoginProfile", "UpdateLoginProfile",
             "GenerateCredentialReport", "GetCredentialReport",
             "GetAccountSummary", "GetAccountAuthorizationDetails",
-            "SimulatePrincipalPolicy"
+            "SimulatePrincipalPolicy", "SimulateCustomPolicy",
+            "GetContextKeysForCustomPolicy", "GetContextKeysForPrincipalPolicy"
     );
 
     private static final Set<String> AUTOSCALING_ACTIONS = Set.of(

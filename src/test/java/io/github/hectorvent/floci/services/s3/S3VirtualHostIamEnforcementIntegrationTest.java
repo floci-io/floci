@@ -1,11 +1,10 @@
 package io.github.hectorvent.floci.services.s3;
 
+import io.github.hectorvent.floci.testing.IamEnforcementProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.Test;
 
-import java.util.Map;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
@@ -27,7 +26,7 @@ import static org.hamcrest.Matchers.containsString;
  * itself being checked.
  */
 @QuarkusTest
-@TestProfile(S3VirtualHostIamEnforcementIntegrationTest.IamEnforcementProfile.class)
+@TestProfile(IamEnforcementProfile.class)
 class S3VirtualHostIamEnforcementIntegrationTest {
 
     private static final String REGION = "us-east-1";
@@ -143,12 +142,5 @@ class S3VirtualHostIamEnforcementIntegrationTest {
     private static String auth(String accessKeyId, String service) {
         return "AWS4-HMAC-SHA256 Credential=" + accessKeyId + "/20260629/" + REGION + "/" + service
                 + "/aws4_request, SignedHeaders=host, Signature=abc";
-    }
-
-    public static final class IamEnforcementProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.iam.enforcement-enabled", "true");
-        }
     }
 }

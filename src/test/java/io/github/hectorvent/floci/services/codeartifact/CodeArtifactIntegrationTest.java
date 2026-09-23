@@ -217,6 +217,27 @@ class CodeArtifactIntegrationTest {
                 .then().statusCode(400).body("__type", equalTo("ValidationException"));
     }
 
+    @Test
+    void getAuthorizationTokenReturnsATokenAndExpiration() {
+        given().contentType("application/json").header("Authorization", AUTH).body("{}")
+                .post("/v1/domain?domain=token-domain")
+                .then().statusCode(200);
+
+        given().header("Authorization", AUTH)
+                .post("/v1/authorization-token?domain=token-domain")
+                .then().statusCode(200)
+                .body("authorizationToken", notNullValue())
+                .body("expiration", notNullValue());
+
+        given().header("Authorization", AUTH)
+                .post("/v1/authorization-token?domain=does-not-exist")
+                .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+
+        given().header("Authorization", AUTH)
+                .post("/v1/authorization-token?domain=token-domain&duration=899")
+                .then().statusCode(400).body("__type", equalTo("ValidationException"));
+    }
+
     private static String sha256Hex(byte[] content) {
         try {
             return SigV4RequestValidator.sha256Hex(content);

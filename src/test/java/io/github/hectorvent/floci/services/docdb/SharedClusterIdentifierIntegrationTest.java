@@ -1,8 +1,8 @@
 package io.github.hectorvent.floci.services.docdb;
 
 import io.github.hectorvent.floci.services.rds.RdsService;
+import io.github.hectorvent.floci.testing.RdsAndDocDbMockProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
@@ -23,19 +23,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <p>A live account refuses to create an Aurora cluster named like an existing DocumentDB one with
  * {@code DBClusterAlreadyExistsFault}, and the reverse has to be refused too: two clusters of that
  * name in different stores would share one ARN, and no tag call could say which was meant.
+ *
+ * <p>Neither engine's container is what this is about, so both container layers are mocked:
+ * starting one costs the test about 30 seconds.
  */
 @QuarkusTest
-@TestProfile(SharedClusterIdentifierIntegrationTest.NoContainersProfile.class)
+@TestProfile(RdsAndDocDbMockProfile.class)
 class SharedClusterIdentifierIntegrationTest {
-
-    /** Neither engine's container is what this is about, and starting one costs the test 30s. */
-    public static class NoContainersProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.rds.mock", "true",
-                          "floci.services.docdb.mock", "true");
-        }
-    }
 
     @Inject
     DocDbService docDbService;

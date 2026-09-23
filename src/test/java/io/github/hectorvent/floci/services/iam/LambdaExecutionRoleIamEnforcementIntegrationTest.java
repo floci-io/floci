@@ -3,8 +3,8 @@ package io.github.hectorvent.floci.services.iam;
 import io.github.hectorvent.floci.services.iam.model.SessionCreds;
 import io.github.hectorvent.floci.services.lambda.launcher.LambdaExecutionRoleCredentials;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
+import io.github.hectorvent.floci.testing.IamEnforcementProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
@@ -17,7 +17,7 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 
 @QuarkusTest
-@TestProfile(LambdaExecutionRoleIamEnforcementIntegrationTest.IamEnforcementProfile.class)
+@TestProfile(IamEnforcementProfile.class)
 class LambdaExecutionRoleIamEnforcementIntegrationTest {
 
     private static final String ACCOUNT_ID = "000000000000";
@@ -139,12 +139,5 @@ class LambdaExecutionRoleIamEnforcementIntegrationTest {
     private static String auth(String accessKeyId, String service) {
         return "AWS4-HMAC-SHA256 Credential=" + accessKeyId + "/20260720/" + REGION + "/" + service
                 + "/aws4_request, SignedHeaders=host, Signature=abc";
-    }
-
-    public static final class IamEnforcementProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.iam.enforcement-enabled", "true");
-        }
     }
 }

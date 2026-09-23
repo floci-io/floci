@@ -2,7 +2,10 @@ package io.github.hectorvent.floci.services.eks;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 import io.quarkus.test.junit.QuarkusTest;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -30,7 +33,7 @@ class EksNodegroupStructuredInputsIntegrationTest {
     private static final String BARE_NODEGROUP = "ng-bare";
 
     private static final String STRUCTURED_INPUTS = """
-            "launchTemplate":{"id":"lt-0a1b2c3d4e5f60718","name":"node-lt","version":"3"},\
+            "launchTemplate":{"name":"node-lt","version":"3"},\
             "remoteAccess":{"ec2SshKey":"my-keypair","sourceSecurityGroups":["sg-0123456789abcdef0"]},\
             "taints":[{"key":"dedicated","value":"gpu","effect":"NO_SCHEDULE"},\
             {"key":"spot","value":"true","effect":"PREFER_NO_SCHEDULE"}],\
@@ -40,9 +43,16 @@ class EksNodegroupStructuredInputsIntegrationTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
+    @Inject
+    Ec2Service ec2Service;
+
     @Test
     @Order(1)
     void createCluster() {
+        ec2Service.createLaunchTemplate("us-east-1", "node-lt", new LaunchTemplateData(), null, null);
+        ec2Service.createLaunchTemplateVersion("us-east-1", null, "node-lt", "1", new LaunchTemplateData());
+        ec2Service.createLaunchTemplateVersion("us-east-1", null, "node-lt", "2", new LaunchTemplateData());
+
         given().contentType(JSON)
                 .body("{\"name\":\"" + CLUSTER + "\",\"roleArn\":\"arn:aws:iam::000000000000:role/eks-role\","
                         + "\"version\":\"1.29\"}")
@@ -59,7 +69,6 @@ class EksNodegroupStructuredInputsIntegrationTest {
                 .when().post("/clusters/" + CLUSTER + "/node-groups")
                 .then().statusCode(200)
                 .body("nodegroup.nodegroupName", equalTo(NODEGROUP))
-                .body("nodegroup.launchTemplate.id", equalTo("lt-0a1b2c3d4e5f60718"))
                 .body("nodegroup.launchTemplate.name", equalTo("node-lt"))
                 .body("nodegroup.launchTemplate.version", equalTo("3"))
                 .body("nodegroup.remoteAccess.ec2SshKey", equalTo("my-keypair"))
@@ -118,6 +127,7 @@ class EksNodegroupStructuredInputsIntegrationTest {
         given().contentType(JSON)
                 .when().delete("/clusters/" + CLUSTER)
                 .then().statusCode(200);
+        ec2Service.deleteLaunchTemplate("us-east-1", null, "node-lt");
     }
 
     private String structuredNodeGroupBody(String nodegroupName) {

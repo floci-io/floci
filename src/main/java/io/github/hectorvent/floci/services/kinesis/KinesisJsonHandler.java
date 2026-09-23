@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.kinesis;
 
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsEventStreamEncoder;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -35,11 +36,17 @@ public class KinesisJsonHandler {
 
     private final KinesisService service;
     private final ObjectMapper objectMapper;
+    private final long listShardsNextTokenTtlMillis;
 
     @Inject
-    public KinesisJsonHandler(KinesisService service, ObjectMapper objectMapper) {
+    public KinesisJsonHandler(KinesisService service, ObjectMapper objectMapper, EmulatorConfig config) {
+        this(service, objectMapper, config.services().kinesis().listShardsNextTokenTtlMillis());
+    }
+
+    KinesisJsonHandler(KinesisService service, ObjectMapper objectMapper, long listShardsNextTokenTtlMillis) {
         this.service = service;
         this.objectMapper = objectMapper;
+        this.listShardsNextTokenTtlMillis = listShardsNextTokenTtlMillis;
     }
 
     public Response handle(String action, JsonNode request, String region) {
@@ -696,7 +703,12 @@ public class KinesisJsonHandler {
     }
 
     private Response handleListShards(JsonNode request, String region) {
-        String resolvedStreamName = resolveStreamName(request);
+        String nextToken = request.hasNonNull("NextToken") ? request.path("NextToken").asText() : null;
+        ShardToken token = nextToken == null ? null : decodeShardToken(nextToken);
+        String resolvedStreamName = token == null
+                ? resolveStreamName(request)
+                : streamNameFromToken(request, token);
+
         KinesisStream stream = service.describeStream(resolvedStreamName, region);
 
         List<KinesisShard> shards = stream.getShards();
@@ -709,7 +721,14 @@ public class KinesisJsonHandler {
         }
 
         int maxResults = request.has("MaxResults") ? request.path("MaxResults").asInt(1000) : 1000;
-        List<KinesisShard> page = paginateShards(shards, maxResults);
+
+        List<KinesisShard> snapshot = List.copyOf(shards);
+        int start = token == null ? 0 : resumeShardIndex(token, snapshot);
+        List<KinesisShard> page = paginateShards(snapshot.subList(start, snapshot.size()), maxResults);
+        String nextCursor = start + page.size() < snapshot.size() && !page.isEmpty()
+                ? encodeShardToken(resolvedStreamName, page.get(page.size() - 1).getShardId(),
+                        System.currentTimeMillis())
+                : null;
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode shardsArray = response.putArray("Shards");
@@ -732,9 +751,86 @@ public class KinesisJsonHandler {
             }
         }
 
-        response.putNull("NextToken");
+        if (nextCursor != null) {
+            response.put("NextToken", nextCursor);
+        }
 
         return Response.ok(response).build();
+    }
+
+    /**
+     * Opaque, stream-bound cursor for ListShards. It carries the stream name, the last shard id of
+     * the emitted page, and the issue time, so a client can resume from the token alone without
+     * resending the stream name and without depending on a shard's position in the live list.
+     */
+    static String encodeShardToken(String streamName, String lastShardId, long issuedAtEpochMilli) {
+        String raw = streamName + "|" + lastShardId + "|" + issuedAtEpochMilli;
+        return Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(raw.getBytes(StandardCharsets.UTF_8));
+    }
+
+    ShardToken decodeShardToken(String nextToken) {
+        String decoded;
+        try {
+            decoded = new String(Base64.getUrlDecoder().decode(nextToken), StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException e) {
+            throw invalidNextToken();
+        }
+        String[] parts = decoded.split("\\|", -1);
+        if (parts.length != 3 || parts[0].isEmpty() || parts[1].isEmpty()) {
+            throw invalidNextToken();
+        }
+        long issuedAtEpochMilli;
+        try {
+            issuedAtEpochMilli = Long.parseLong(parts[2]);
+        } catch (NumberFormatException e) {
+            throw invalidNextToken();
+        }
+        if (System.currentTimeMillis() - issuedAtEpochMilli >= listShardsNextTokenTtlMillis) {
+            throw new AwsException("ExpiredNextTokenException", "The NextToken has expired.", 400);
+        }
+        return new ShardToken(parts[0], parts[1], issuedAtEpochMilli);
+    }
+
+    /**
+     * The reference says the {@code NextToken} unambiguously identifies the stream and that
+     * {@code StreamName} cannot be sent with it, so a lone token is the documented paging form. A
+     * {@code StreamARN} is tolerated when it names the same stream the token does, which keeps an
+     * SDK that fills the ARN in for routing working, and rejected when it names a different one.
+     */
+    private String streamNameFromToken(JsonNode request, ShardToken token) {
+        if (request.hasNonNull("StreamName")) {
+            throw new AwsException("InvalidArgumentException",
+                    "StreamName cannot be specified together with NextToken.", 400);
+        }
+        if (request.hasNonNull("StreamARN")) {
+            String arnStreamName = parseStreamNameFromArn(request.path("StreamARN").asText());
+            if (!token.streamName().equals(arnStreamName)) {
+                throw new AwsException("InvalidArgumentException",
+                        "The NextToken does not belong to the stream named by StreamARN.", 400);
+            }
+        }
+        return token.streamName();
+    }
+
+    private static int resumeShardIndex(ShardToken token, List<KinesisShard> shards) {
+        for (int i = 0; i < shards.size(); i++) {
+            if (shards.get(i).getShardId().equals(token.lastShardId())) {
+                return i + 1;
+            }
+        }
+        throw invalidNextToken();
+    }
+
+    private static AwsException invalidNextToken() {
+        return new AwsException("InvalidArgumentException", "The NextToken is not valid.", 400);
+    }
+
+    /**
+     * Decoded ListShards cursor: the stream it belongs to, the last shard id it covered, and when it
+     * was issued (epoch millis, for expiry).
+     */
+    record ShardToken(String streamName, String lastShardId, long issuedAtEpochMilli) {
     }
 
     /**

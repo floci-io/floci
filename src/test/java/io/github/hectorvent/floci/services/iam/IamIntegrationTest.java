@@ -377,6 +377,195 @@ class IamIntegrationTest {
     }
 
     @Test
+    @Order(36)
+    void simulateCustomPolicyEvaluatesProvidedDocuments() {
+        given()
+            .formParam("Action", "SimulateCustomPolicy")
+            .formParam("PolicyInputList.member.1", POLICY_DOCUMENT)
+            .formParam("PolicyInputList.member.2", EXPLICIT_DENY_POLICY_DOCUMENT)
+            .formParam("ActionNames.member.1", "s3:GetObject")
+            .formParam("ActionNames.member.2", "ec2:RunInstances")
+            .formParam("ActionNames.member.3", "ssm:GetParameter")
+            .formParam("ResourceArns.member.1", "*")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("SimulateCustomPolicyResponse.SimulateCustomPolicyResult.EvaluationResults.member.find { it.EvalActionName == 's3:GetObject' }.EvalDecision",
+                    equalTo("allowed"))
+            .body("SimulateCustomPolicyResponse.SimulateCustomPolicyResult.EvaluationResults.member.find { it.EvalActionName == 'ec2:RunInstances' }.EvalDecision",
+                    equalTo("explicitDeny"))
+            .body("SimulateCustomPolicyResponse.SimulateCustomPolicyResult.EvaluationResults.member.find { it.EvalActionName == 'ssm:GetParameter' }.EvalDecision",
+                    equalTo("implicitDeny"));
+    }
+
+    @Test
+    @Order(37)
+    void simulateCustomPolicyAppliesPermissionsBoundary() {
+        given()
+            .formParam("Action", "SimulateCustomPolicy")
+            .formParam("PolicyInputList.member.1", POLICY_DOCUMENT)
+            .formParam("PermissionsBoundaryPolicyInputList.member.1", EXPLICIT_DENY_POLICY_DOCUMENT)
+            .formParam("ActionNames.member.1", "s3:GetObject")
+            .formParam("ResourceArns.member.1", "*")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            // The identity policy allows s3:GetObject, but the boundary policy (denying only
+            // ec2:RunInstances) has no explicit allow for it, so the boundary intersection denies.
+            .body("SimulateCustomPolicyResponse.SimulateCustomPolicyResult.EvaluationResults.member.find { it.EvalActionName == 's3:GetObject' }.EvalDecision",
+                    equalTo("implicitDeny"));
+    }
+
+    @Test
+    @Order(38)
+    void simulateCustomPolicyWithoutPolicyInputListReturnsValidationError() {
+        given()
+            .formParam("Action", "SimulateCustomPolicy")
+            .formParam("ActionNames.member.1", "s3:GetObject")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"));
+    }
+
+    @Test
+    @Order(39)
+    void getContextKeysForCustomPolicyReturnsKeysFromEveryDocumentIncludingRepeats() {
+        String conditionPolicyA = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Action\":\"s3:GetObject\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:PrincipalArn\":\"arn:aws:iam::111111111111:user/a\"}}}]}";
+        String conditionPolicyB = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Action\":\"s3:PutObject\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:PrincipalArn\":\"arn:aws:iam::111111111111:user/a\","
+                + "\"s3:VersionId\":\"abc\"}}}]}";
+
+        given()
+            .formParam("Action", "GetContextKeysForCustomPolicy")
+            .formParam("PolicyInputList.member.1", conditionPolicyA)
+            .formParam("PolicyInputList.member.2", conditionPolicyB)
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            // Not sorted and not de-duplicated, matching AWS's own documented example response
+            // for this method's sibling, which repeats a key referenced by more than one policy.
+            .body("GetContextKeysForCustomPolicyResponse.GetContextKeysForCustomPolicyResult.ContextKeyNames.member",
+                    contains("aws:PrincipalArn", "aws:PrincipalArn", "s3:VersionId"));
+    }
+
+    // AWS's own primary documented example for GetContextKeysForCustomPolicy: a ${...} policy
+    // variable inside a Resource ARN is reported as a referenced context key, alongside the
+    // key from a Condition operator in the same statement.
+    @Test
+    @Order(43)
+    void getContextKeysForCustomPolicyIncludesPolicyVariablesFromResourcePatterns() {
+        String policyWithResourceVariable = "{\"Version\":\"2012-10-17\",\"Statement\":{\"Effect\":\"Allow\","
+                + "\"Action\":\"dynamodb:*\","
+                + "\"Resource\":\"arn:aws:dynamodb:us-east-2:123456789012:table/${aws:username}\","
+                + "\"Condition\":{\"DateGreaterThan\":{\"aws:CurrentTime\":\"2015-08-16T12:00:00Z\"}}}}";
+
+        given()
+            .formParam("Action", "GetContextKeysForCustomPolicy")
+            .formParam("PolicyInputList.member.1", policyWithResourceVariable)
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("GetContextKeysForCustomPolicyResponse.GetContextKeysForCustomPolicyResult.ContextKeyNames.member",
+                    contains("aws:CurrentTime", "aws:username"));
+    }
+
+    @Test
+    @Order(41)
+    void getContextKeysForPrincipalPolicyMergesAttachedAndExtraPolicies() {
+        String extraConditionPolicy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Action\":\"dynamodb:GetItem\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"dynamodb:LeadingKeys\":\"USER_alice\"}}}]}";
+
+        given()
+            .formParam("Action", "CreateUser")
+            .formParam("UserName", "context-keys-user")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .formParam("Action", "PutUserPolicy")
+            .formParam("UserName", "context-keys-user")
+            .formParam("PolicyName", "inline-with-condition")
+            .formParam("PolicyDocument", "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                    + "\"Action\":\"s3:GetObject\",\"Resource\":\"*\","
+                    + "\"Condition\":{\"StringEquals\":{\"aws:PrincipalArn\":\"arn:aws:iam::111111111111:user/a\"}}}]}")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // No extra PolicyInputList: only the attached policy's key comes back.
+        given()
+            .formParam("Action", "GetContextKeysForPrincipalPolicy")
+            .formParam("PolicySourceArn", "arn:aws:iam::000000000000:user/context-keys-user")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            // A single-element XML list decodes as a bare string rather than a list.
+            .body("GetContextKeysForPrincipalPolicyResponse.GetContextKeysForPrincipalPolicyResult.ContextKeyNames.member",
+                    equalTo("aws:PrincipalArn"));
+
+        // With an extra PolicyInputList document, both keys come back, merged.
+        given()
+            .formParam("Action", "GetContextKeysForPrincipalPolicy")
+            .formParam("PolicySourceArn", "arn:aws:iam::000000000000:user/context-keys-user")
+            .formParam("PolicyInputList.member.1", extraConditionPolicy)
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("GetContextKeysForPrincipalPolicyResponse.GetContextKeysForPrincipalPolicyResult.ContextKeyNames.member",
+                    contains("aws:PrincipalArn", "dynamodb:LeadingKeys"));
+    }
+
+    @Test
+    @Order(42)
+    void getContextKeysForPrincipalPolicyOfUnknownUserReturnsNoSuchEntity() {
+        given()
+            .formParam("Action", "GetContextKeysForPrincipalPolicy")
+            .formParam("PolicySourceArn", "arn:aws:iam::000000000000:user/no-such-context-keys-user")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(404)
+            .body("ErrorResponse.Error.Code", equalTo("NoSuchEntity"));
+    }
+
+    @Test
     @Order(35)
     void attachManagedPolicyToRole() {
         given()

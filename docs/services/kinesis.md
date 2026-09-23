@@ -96,6 +96,7 @@ action, so that limit is intentionally unenforced here.
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_KINESIS_ENABLED` | `true` | Enable or disable the service |
+| `FLOCI_SERVICES_KINESIS_LIST_SHARDS_NEXT_TOKEN_TTL_MILLIS` | `300000` | Lifetime of a `ListShards` `NextToken` in milliseconds; AWS expires tokens after 300000 ms. Lower it to exercise `ExpiredNextTokenException` without waiting |
 
 ## Enhanced Fan-Out (EFO)
 

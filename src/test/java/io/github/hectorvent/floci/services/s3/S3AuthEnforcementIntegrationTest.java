@@ -669,6 +669,49 @@ class S3AuthEnforcementIntegrationTest {
     }
 
     @Test
+    @Order(25)
+    void presignedPutWithUnsignedChecksumHeaderIsRejected() {
+        String bucket = "auth-presigned-checksum-bucket";
+        String key = "part.bin";
+        String path = "/" + bucket + "/" + key;
+        given().filter(LOCAL_SIGNER).when().put("/" + bucket).then().statusCode(200);
+
+        try {
+            String signature = presignedSignature("PUT", path, "test", "test", "3600");
+            Map<String, String> checksumHeaders = Map.of(
+                    "x-amz-checksum-algorithm", "CRC32",
+                    "x-amz-checksum-crc32", "y/Q5Jg==",
+                    "x-amz-checksum-crc32c", "4waSgw==",
+                    "x-amz-checksum-crc64nvme", "rosUhgp5mIg=",
+                    "x-amz-checksum-sha1", "98O8HYCOBHMq32eZZczDTKeuNEE=",
+                    "x-amz-checksum-sha256", "FeKw08M4keuw8e9gnsQZQgwg4yDOlMZfvIwzEkSOsiU=",
+                    "x-amz-sdk-checksum-algorithm", "CRC32");
+            for (Map.Entry<String, String> checksum : checksumHeaders.entrySet()) {
+                presignedRequest(signature)
+                    .header(checksum.getKey(), checksum.getValue())
+                    .body("123456789")
+                .when()
+                    .put(path)
+                .then()
+                    .statusCode(403)
+                    .body("Error.Code", equalTo("AccessDenied"))
+                    .body("Error.Message", equalTo(
+                            "There were headers present in the request which were not signed"))
+                    .body("Error.HeadersNotSigned", equalTo(checksum.getKey()));
+            }
+
+            given()
+                .filter(LOCAL_SIGNER)
+            .when()
+                .get(path)
+            .then()
+                .statusCode(404);
+        } finally {
+            given().filter(LOCAL_SIGNER).when().delete("/" + bucket);
+        }
+    }
+
+    @Test
     @Order(26)
     void presignedRequestWithExpiresExceedingMaxIsRejected() {
         given()

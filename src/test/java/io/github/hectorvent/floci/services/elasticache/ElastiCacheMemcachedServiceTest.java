@@ -17,8 +17,10 @@ import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -31,10 +33,12 @@ class ElastiCacheMemcachedServiceTest {
 
     private ElastiCacheMemcachedService service;
     private ElastiCacheMemcachedContainerManager containerManager;
+    private ElastiCacheProvisioningIds provisioningIds;
 
     @BeforeEach
     void setUp() {
         containerManager = mock(ElastiCacheMemcachedContainerManager.class);
+        provisioningIds = new ElastiCacheProvisioningIds();
         StorageFactory storageFactory = mock(StorageFactory.class);
         EmulatorConfig config = mock(EmulatorConfig.class);
 
@@ -49,7 +53,7 @@ class ElastiCacheMemcachedServiceTest {
         when(containerManager.tryStart(anyString(), anyString()))
                 .thenReturn(new ElastiCacheContainerHandle("cid", "cluster", "localhost", 11211));
 
-        service = new ElastiCacheMemcachedService(containerManager, storageFactory, config);
+        service = new ElastiCacheMemcachedService(containerManager, storageFactory, config, provisioningIds);
     }
 
     @Test
@@ -67,7 +71,29 @@ class ElastiCacheMemcachedServiceTest {
         service.createCacheCluster("my-cluster");
 
         AwsException ex = assertThrows(AwsException.class, () -> service.createCacheCluster("my-cluster"));
-        assertEquals("CacheClusterAlreadyExistsFault", ex.getErrorCode());
+        assertEquals("CacheClusterAlreadyExists", ex.getErrorCode());
+    }
+
+    @Test
+    void createIsRefusedWhileARedisCreateHoldsTheSameIdInFlight() {
+        // What a concurrent CreateReplicationGroup or redis CreateCacheCluster leaves in the
+        // shared set between claiming the id and persisting its record. The three stores are
+        // still empty in that window, so the store checks alone would let this create through
+        // and both would write the same id.
+        assertTrue(provisioningIds.claim("racing-cluster"));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.createCacheCluster("racing-cluster"));
+        assertEquals("CacheClusterAlreadyExists", ex.getErrorCode());
+        verify(containerManager, never()).tryStart(eq("racing-cluster"), anyString());
+
+        // The refusal must not have released the claim the other create still holds.
+        assertFalse(provisioningIds.claim("racing-cluster"));
+
+        // Once that create finishes and releases, the id is free again.
+        provisioningIds.release("racing-cluster");
+        assertEquals("racing-cluster",
+                service.createCacheCluster("racing-cluster").getCacheClusterId());
     }
 
     @Test
@@ -122,7 +148,8 @@ class ElastiCacheMemcachedServiceTest {
                 .thenReturn(new ElastiCacheContainerHandle("cid", "cluster", "172.20.0.10", 11211));
 
         ElastiCacheMemcachedService containerModeService =
-                new ElastiCacheMemcachedService(containerManager, storageFactory, config);
+                new ElastiCacheMemcachedService(containerManager, storageFactory, config,
+                        new ElastiCacheProvisioningIds());
 
         CacheCluster cluster = containerModeService.createCacheCluster("container-cluster");
 
@@ -236,6 +263,7 @@ class ElastiCacheMemcachedServiceTest {
         when(servicesConfig.elasticache()).thenReturn(ecConfig);
         when(ecConfig.defaultMemcachedImage()).thenReturn("memcached:1.6");
         when(config.hostname()).thenReturn(Optional.of("localhost"));
-        return new ElastiCacheMemcachedService(containerManager, storageFactory, config);
+        return new ElastiCacheMemcachedService(containerManager, storageFactory, config,
+                new ElastiCacheProvisioningIds());
     }
 }

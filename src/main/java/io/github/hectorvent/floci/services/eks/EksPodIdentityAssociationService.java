@@ -23,6 +23,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -117,9 +118,19 @@ public class EksPodIdentityAssociationService {
         }
 
         String associationId = generateAssociationId();
-        String[] clusterArn = cluster.getArn().split(":", 6);
-        String associationArn = "arn:" + clusterArn[1] + ":eks:" + clusterArn[3] + ":"
-                + clusterArn[4] + ":podidentityassociation/" + cluster.getName() + "/" + associationId;
+        String partition = "aws";
+        String region = "us-east-1";
+        String accountId = cluster.getAccountId() != null ? cluster.getAccountId() : "000000000000";
+        if (cluster.getArn() != null) {
+            String[] clusterArn = cluster.getArn().split(":", 6);
+            if (clusterArn.length == 6) {
+                partition = clusterArn[1];
+                region = clusterArn[3];
+                accountId = clusterArn[4];
+            }
+        }
+        String associationArn = "arn:" + partition + ":eks:" + region + ":"
+                + accountId + ":podidentityassociation/" + cluster.getName() + "/" + associationId;
         double now = Instant.now().toEpochMilli() / 1000.0;
         String externalId = UUID.randomUUID().toString();
 
@@ -277,8 +288,22 @@ public class EksPodIdentityAssociationService {
         }
     }
 
+    public synchronized Optional<PodIdentityAssociation> findAssociation(Cluster cluster,
+                                                                         String namespace,
+                                                                         String serviceAccount) {
+        if (cluster == null || cluster.getStatus() != ClusterStatus.ACTIVE) {
+            return Optional.empty();
+        }
+        String prefix = prefix(cluster);
+        return associations.scan(key -> key.startsWith(prefix)).stream()
+                .map(StoredAssociation::association)
+                .filter(a -> a.namespace().equals(namespace) && a.serviceAccount().equals(serviceAccount))
+                .findFirst();
+    }
+
     private static String prefix(Cluster cluster) {
-        return cluster.getArn() + "/" + Objects.toString(cluster.getCreatedAt()) + "/";
+        String base = cluster.getArn() != null ? cluster.getArn() : cluster.getName();
+        return base + "/" + Objects.toString(cluster.getCreatedAt()) + "/";
     }
 
     private static void requireActiveCluster(Cluster cluster) {
@@ -292,8 +317,14 @@ public class EksPodIdentityAssociationService {
 
     private void validateRoleArn(Cluster cluster, String roleArn, String fieldName) {
         String[] arn = roleArn.split(":", 6);
-        String[] clusterArn = cluster.getArn().split(":", 6);
-        if (arn.length != 6 || !"arn".equals(arn[0]) || !arn[1].equals(clusterArn[1])
+        String expectedPartition = "aws";
+        if (cluster != null && cluster.getArn() != null) {
+            String[] clusterArn = cluster.getArn().split(":", 6);
+            if (clusterArn.length > 1) {
+                expectedPartition = clusterArn[1];
+            }
+        }
+        if (arn.length != 6 || !"arn".equals(arn[0]) || !arn[1].equals(expectedPartition)
                 || !"iam".equals(arn[2]) || !arn[3].isEmpty() || !arn[4].matches("[0-9]{12}")
                 || !arn[5].startsWith("role/") || arn[5].startsWith("role/aws-service-role/")
                 || roleArn.endsWith("/")) {
@@ -307,8 +338,14 @@ public class EksPodIdentityAssociationService {
 
     private static void validateTargetRoleArn(Cluster cluster, String targetRoleArn) {
         String[] arn = targetRoleArn.split(":", 6);
-        String[] clusterArn = cluster.getArn().split(":", 6);
-        if (arn.length != 6 || !"arn".equals(arn[0]) || !arn[1].equals(clusterArn[1])
+        String expectedPartition = "aws";
+        if (cluster != null && cluster.getArn() != null) {
+            String[] clusterArn = cluster.getArn().split(":", 6);
+            if (clusterArn.length > 1) {
+                expectedPartition = clusterArn[1];
+            }
+        }
+        if (arn.length != 6 || !"arn".equals(arn[0]) || !arn[1].equals(expectedPartition)
                 || !"iam".equals(arn[2]) || !arn[3].isEmpty() || !arn[4].matches("[0-9]{12}")
                 || !arn[5].startsWith("role/") || targetRoleArn.endsWith("/")) {
             throw invalid("targetRoleArn must identify an IAM role");

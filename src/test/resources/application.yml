@@ -235,6 +235,7 @@ floci:
       default-recovery-window-days: 30
     kinesis:
       enabled: true
+      list-shards-next-token-ttl-millis: 300000
     firehose:
       enabled: true
       tick-interval-seconds: 10
@@ -248,6 +249,7 @@ floci:
       enabled: true
       allow-plaintext-http: true
       mock-config-file: ${SFN_MOCK_CONFIG:src/test/resources/fixtures/sfn-mock-config.json}
+      max-wait-seconds: 30
     swf:
       enabled: true
       timeout-sweep-enabled: true
@@ -276,6 +278,8 @@ floci:
       proxy-base-port: 9400
       proxy-max-port: 9499
     ec2:
+      # Optional complete catalog override for locally built guest images.
+      image-catalog-path: ${FLOCI_SERVICES_EC2_IMAGE_CATALOG_PATH:}
       enabled: true
       imds-port: 9169
       ssh-port-range-start: 2200

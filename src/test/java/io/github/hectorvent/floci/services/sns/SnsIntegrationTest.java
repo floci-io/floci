@@ -1148,6 +1148,76 @@ class SnsIntegrationTest {
         }
     }
 
+    @Test
+    @Order(69)
+    void publish_toQueueWithDelaySeconds_withholdsTheMessage() {
+        String delayQueueUrl = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", "sns-delay-fanout-queue")
+            .formParam("Attribute.1.Name", "DelaySeconds")
+            .formParam("Attribute.1.Value", "2")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+
+        String delayTopicArn = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateTopic")
+            .formParam("Name", "sns-delay-fanout-topic")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("CreateTopicResponse.CreateTopicResult.TopicArn");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "Subscribe")
+            .formParam("TopicArn", delayTopicArn)
+            .formParam("Protocol", "sqs")
+            .formParam("Endpoint", delayQueueUrl)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "Publish")
+            .formParam("TopicArn", delayTopicArn)
+            .formParam("Message", "delayed fanout")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ReceiveMessage")
+            .formParam("QueueUrl", delayQueueUrl)
+            .formParam("MaxNumberOfMessages", "1")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(not(containsString("<Message>")));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetQueueAttributes")
+            .formParam("QueueUrl", delayQueueUrl)
+            .formParam("AttributeName.1", "ApproximateNumberOfMessagesDelayed")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("GetQueueAttributesResponse.GetQueueAttributesResult.Attribute.Value",
+                    equalTo("1"));
+    }
+
     /**
      * Drains all pending messages from the given SQS queue using PurgeQueue.
      */

@@ -1,30 +1,21 @@
 package io.github.hectorvent.floci.services.elbv2;
 
+import io.github.hectorvent.floci.testing.RealElbV2DataPlaneProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
-import java.util.Map;
-
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.anyOf;
 import static org.hamcrest.Matchers.equalTo;
 
 @QuarkusTest
-@TestProfile(ElbV2SamePortHostDispatchIntegrationTest.RealElbV2DataPlaneProfile.class)
+@TestProfile(RealElbV2DataPlaneProfile.class)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class ElbV2SamePortHostDispatchIntegrationTest {
-
-    public static final class RealElbV2DataPlaneProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.elbv2.mock", "false");
-        }
-    }
 
     private static final String AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260629/us-east-1/elasticloadbalancing/aws4_request";

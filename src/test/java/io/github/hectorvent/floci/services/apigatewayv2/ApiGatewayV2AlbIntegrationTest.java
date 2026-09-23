@@ -1,8 +1,8 @@
 package io.github.hectorvent.floci.services.apigatewayv2;
 
 import com.sun.net.httpserver.HttpServer;
+import io.github.hectorvent.floci.testing.RealElbV2DataPlaneProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.http.ContentType;
 import io.restassured.response.Response;
@@ -21,24 +21,15 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
-import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 
 /** End-to-end: HTTP API → ALB listener ARN → ELBv2 data plane → registered stub target. */
 @QuarkusTest
-@TestProfile(ApiGatewayV2AlbIntegrationTest.RealElbV2Profile.class)
+@TestProfile(RealElbV2DataPlaneProfile.class)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class ApiGatewayV2AlbIntegrationTest {
-
-    /** Overrides the default {@code elbv2.mock=true} so the listener actually binds. */
-    public static class RealElbV2Profile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.elbv2.mock", "false");
-        }
-    }
 
     private static final String AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260520/us-east-1/elasticloadbalancing/aws4_request";
