@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.services.iam.model.AccessKey;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.iam.model.IamGroup;
 import io.github.hectorvent.floci.services.iam.model.IamPolicy;
@@ -23,7 +24,12 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -319,6 +325,46 @@ class IamManagedPolicyAccountScopeTest {
     }
 
     @Test
+    void managedPolicyAuthorizationDoesNotScanPrincipalsForAttachmentCounts() {
+        InMemoryStorage<String, IamUser> users = spy(new InMemoryStorage<>());
+        InMemoryStorage<String, IamGroup> groups = spy(new InMemoryStorage<>());
+        InMemoryStorage<String, IamRole> roles = spy(new InMemoryStorage<>());
+        IamService service = new IamService(
+                users, groups, roles, new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver("us-east-1", DEFAULT_ACCT));
+        String managedArn = AwsManagedPolicies.ARN_PREFIX + "/service-role/AWSLambdaBasicExecutionRole";
+        String boundaryArn = AwsManagedPolicies.ARN_PREFIX + "/PowerUserAccess";
+
+        service.createUser("auth-user", "/");
+        service.createGroup("auth-group", "/");
+        IamRole role = service.createRole("auth-role", "/", "{}", null, 0, null);
+        service.addUserToGroup("auth-group", "auth-user");
+        service.attachUserPolicy("auth-user", managedArn);
+        service.attachGroupPolicy("auth-group", boundaryArn);
+        service.attachRolePolicy("auth-role", managedArn);
+        service.putUserPermissionsBoundary("auth-user", boundaryArn);
+        service.putRolePermissionsBoundary("auth-role", boundaryArn);
+        AccessKey accessKey = service.createAccessKey("auth-user");
+        clearInvocations(users, groups, roles);
+
+        CallerContext userContext = service.resolveCallerContext(accessKey.getAccessKeyId());
+        CallerContext roleContext = service.resolvePrincipalContext(role.getArn());
+
+        assertNotNull(userContext);
+        assertEquals(2, userContext.identityPolicies().size());
+        assertTrue(userContext.identityPolicies().stream()
+                .anyMatch(document -> document.contains("logs:CreateLogGroup")));
+        assertTrue(userContext.boundaryPolicyDocument().contains("NotAction"));
+        assertEquals(1, roleContext.identityPolicies().size());
+        assertTrue(roleContext.identityPolicies().get(0).contains("logs:CreateLogGroup"));
+        assertTrue(roleContext.boundaryPolicyDocument().contains("NotAction"));
+        verify(users, never()).scan(any());
+        verify(groups, never()).scan(any());
+        verify(roles, never()).scan(any());
+    }
+
+    @Test
     void managedPolicyAttachmentCountIsScopedToTheCurrentAccount() {
         AtomicReference<String> accountId = new AtomicReference<>(REQUEST_ACCT);
         Instance<RequestContext> ctx = requestContextFor(accountId);
@@ -345,9 +391,9 @@ class IamManagedPolicyAccountScopeTest {
 
         assertEquals(3, service.getPolicy(managedArn).getAttachmentCount());
         assertEquals(3, managedPolicyFromList(service, managedArn).getAttachmentCount());
-        assertEquals(3, service.listAttachedUserPolicies("account-a-user", null).get(0).getAttachmentCount());
-        assertEquals(3, service.listAttachedGroupPolicies("account-a-group", null).get(0).getAttachmentCount());
-        assertEquals(3, service.listAttachedRolePolicies("account-a-role", null).get(0).getAttachmentCount());
+        assertEquals(managedArn, service.listAttachedUserPolicies("account-a-user", null).get(0).getArn());
+        assertEquals(managedArn, service.listAttachedGroupPolicies("account-a-group", null).get(0).getArn());
+        assertEquals(managedArn, service.listAttachedRolePolicies("account-a-role", null).get(0).getArn());
 
         accountId.set(OTHER_ACCT);
         assertEquals(0, service.getPolicy(managedArn).getAttachmentCount());

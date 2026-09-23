@@ -869,17 +869,15 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public IamPolicy getPolicy(String policyArn) {
-        // AWS-managed policies (arn:aws:iam::aws:policy/...) are global — not owned by any
-        // account — so they are served from the catalog rather than the account-partitioned
-        // store, which would otherwise make them visible only to the default account.
-        if (policyArn != null && policyArn.startsWith(AwsManagedPolicies.ARN_PREFIX)) {
-            IamPolicy managed = awsManagedPolicies.get(policyArn);
-            if (managed != null) {
-                return managedPolicySnapshot(managed, managedPolicyAttachmentCount(policyArn));
-            }
-            throw new AwsException("NoSuchEntity", "Policy " + policyArn + " does not exist.", 404);
+        IamPolicy policy = requirePolicy(policyArn);
+        if (policyArn.startsWith(AwsManagedPolicies.ARN_PREFIX)) {
+            return managedPolicySnapshot(policy, managedPolicyAttachmentCount(policyArn));
         }
-        return policies.get(policyArn)
+        return policy;
+    }
+
+    private IamPolicy requirePolicy(String policyArn) {
+        return resolvePolicy(policyArn)
                 .orElseThrow(() -> new AwsException("NoSuchEntity",
                         "Policy " + policyArn + " does not exist.", 404));
     }
@@ -893,8 +891,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      */
     private Optional<IamPolicy> resolvePolicy(String arn) {
         if (arn != null && arn.startsWith(AwsManagedPolicies.ARN_PREFIX)) {
-            return Optional.ofNullable(awsManagedPolicies.get(arn))
-                    .map(policy -> managedPolicySnapshot(policy, managedPolicyAttachmentCount(arn)));
+            // Authorization and ListAttached* need policy documents or names, not attachment counts.
+            return Optional.ofNullable(awsManagedPolicies.get(arn));
         }
         return policies.get(arn);
     }
@@ -981,7 +979,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * succeed. Attachments are tracked on the principals, so this scans them for the given ARN.
      */
     public PolicyEntities listEntitiesForPolicy(String policyArn) {
-        getPolicy(policyArn); // AWS raises NoSuchEntity for an unknown policy ARN; fail fast likewise.
+        requirePolicy(policyArn); // AWS raises NoSuchEntity for an unknown policy ARN; fail fast likewise.
         List<IamRole> attachedRoles = roles.scan(k -> true).stream()
                 .filter(r -> r.getAttachedPolicyArns().contains(policyArn))
                 .toList();
@@ -1135,7 +1133,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public PolicyVersion getPolicyVersion(String policyArn, String versionId) {
-        IamPolicy policy = getPolicy(policyArn);
+        IamPolicy policy = requirePolicy(policyArn);
         PolicyVersion version = policy.getVersions().get(versionId);
         if (version == null) {
             throw new AwsException("NoSuchEntity",
@@ -1163,7 +1161,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public List<PolicyVersion> listPolicyVersions(String policyArn) {
-        Map<String, PolicyVersion> versions = getPolicy(policyArn).getVersions();
+        Map<String, PolicyVersion> versions = requirePolicy(policyArn).getVersions();
         synchronized (versions) {
             return new ArrayList<>(versions.values());
         }
@@ -1200,7 +1198,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public Map<String, String> listPolicyTags(String policyArn) {
-        return getPolicy(policyArn).getTags();
+        return requirePolicy(policyArn).getTags();
     }
 
     // =========================================================================
@@ -1209,7 +1207,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     public void attachUserPolicy(String userName, String policyArn) {
         IamUser user = getUser(userName);
-        IamPolicy policy = getPolicy(policyArn);
+        IamPolicy policy = requirePolicy(policyArn);
         if (!user.getAttachedPolicyArns().contains(policyArn)) {
             user.getAttachedPolicyArns().add(policyArn);
             users.put(userName, user);
@@ -1240,7 +1238,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     public void attachGroupPolicy(String groupName, String policyArn) {
         IamGroup group = getGroup(groupName);
-        IamPolicy policy = getPolicy(policyArn);
+        IamPolicy policy = requirePolicy(policyArn);
         if (!group.getAttachedPolicyArns().contains(policyArn)) {
             group.getAttachedPolicyArns().add(policyArn);
             groups.put(groupName, group);
@@ -1272,7 +1270,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public void attachRolePolicy(String roleName, String policyArn) {
         IamRole role = getRole(roleName);
         requireNotServiceLinked(role, roleName);
-        IamPolicy policy = getPolicy(policyArn);
+        IamPolicy policy = requirePolicy(policyArn);
         if (!role.getAttachedPolicyArns().contains(policyArn)) {
             role.getAttachedPolicyArns().add(policyArn);
             roles.put(roleName, role);
@@ -2519,7 +2517,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     // =========================================================================
 
     public void putUserPermissionsBoundary(String userName, String permissionsBoundaryArn) {
-        getPolicy(permissionsBoundaryArn); // validate policy exists
+        requirePolicy(permissionsBoundaryArn); // validate policy exists
         IamUser user = getUser(userName);
         user.setPermissionsBoundaryArn(permissionsBoundaryArn);
         users.put(userName, user);
@@ -2540,7 +2538,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public void putRolePermissionsBoundary(String roleName, String permissionsBoundaryArn) {
         IamRole role = getRole(roleName);
         requireNotServiceLinked(role, roleName);
-        getPolicy(permissionsBoundaryArn); // validate policy exists
+        requirePolicy(permissionsBoundaryArn); // validate policy exists
         role.setPermissionsBoundaryArn(permissionsBoundaryArn);
         roles.put(roleName, role);
         LOG.infov("Set permissions boundary for role {0}: {1}", roleName, permissionsBoundaryArn);
