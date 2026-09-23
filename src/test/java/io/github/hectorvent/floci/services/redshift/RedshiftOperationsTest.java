@@ -155,7 +155,7 @@ public class RedshiftOperationsTest {
             .body(containsString("<ClusterAvailabilityStatus>Available</ClusterAvailabilityStatus>"))
             .body(containsString("<AvailabilityZoneRelocationStatus>disabled</AvailabilityZoneRelocationStatus>"));
 
-        // 1b. RebootCluster — must preserve data (no Docker volume backs this container)
+        // 1b. RebootCluster: must preserve data (no Docker volume backs this container)
         when(containerManager.getContainer(any(), eq("cluster-src")))
                 .thenReturn(Optional.of(new RedshiftContainerHandle("c1", "cluster-src", "localhost", 5439)));
         given()

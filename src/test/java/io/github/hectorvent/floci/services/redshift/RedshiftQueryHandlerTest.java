@@ -637,7 +637,7 @@ class RedshiftQueryHandlerTest {
         assertEquals(200, response.getStatus());
         String xml = (String) response.getEntity();
         // The real AWS wire format wraps the fields in a *Result element matching the
-        // operation name — verified against the SDK's own deserializer, not guessed.
+        // operation name, verified against the SDK's own deserializer, not guessed.
         assertTrue(xml.contains("<DescribeLoggingStatusResult>"));
         assertTrue(xml.contains("<LoggingEnabled>true</LoggingEnabled>"));
         assertTrue(xml.contains("<BucketName>my-bucket</BucketName>"));

@@ -345,7 +345,7 @@ class RedshiftContainerManagerTest {
         assertEquals("cont-existing", handle.getContainerId());
         assertEquals(6000, handle.getPort());
         assertTrue(manager.getContainer(ACCOUNT_ID, "test-cluster").isPresent());
-        // Data lives only in the container's writable layer (no volume) — recreating it
+        // Data lives only in the container's writable layer (no volume): recreating it
         // would silently discard it, so a container found by name must never be recreated.
         verify(lifecycleManager, never()).createAndStart(any());
     }

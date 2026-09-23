@@ -635,8 +635,8 @@ class RedshiftServiceTest {
         assertThrows(AwsException.class, () -> service.rebootCluster("c1"));
 
         // The proxy started during the reboot must be stopped again on failure, and the
-        // replacement container must be stopped too — once before the restart, once in
-        // rollback — so it is not left running behind a "failed" cluster.
+        // replacement container must be stopped too, once before the restart, once in
+        // rollback, so it is not left running behind a "failed" cluster.
         verify(proxyManager).startProxy(eq("111111111111:c1"), eq(7107), any(), anyInt(),
                 any(), any(), any(), any(), any(), any());
         verify(proxyManager, times(2)).stopProxy("111111111111:c1");
@@ -676,7 +676,7 @@ class RedshiftServiceTest {
         assertThrows(AwsException.class, () -> service.rebootCluster("c1"));
 
         // start() can create the container before throwing (readiness check); the
-        // original is already gone, so rollback removes anything under the name —
+        // original is already gone, so rollback removes anything under the name:
         // once for the original teardown, once for the possible orphan.
         verify(cm, times(2)).stop("111111111111", "c1");
 
@@ -1121,7 +1121,7 @@ class RedshiftServiceTest {
     @Test
     void restoreFromClusterSnapshotRejectsUntrustedDumpPathBeforeProvisioning() {
         // A dump path persisted outside the account dir (e.g. by pre-validation code) must be
-        // rejected up front — no cluster record, no container.
+        // rejected up front: no cluster record, no container.
         Snapshot snapshot = new Snapshot("my-snapshot", "source-cluster", "available", 5439, "admin", "/etc/shadow");
         when(clusterBackend.get("restored-cluster")).thenReturn(Optional.empty());
         when(snapshotBackend.get("my-snapshot")).thenReturn(Optional.of(snapshot));
