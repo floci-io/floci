@@ -429,8 +429,13 @@ public class EksService implements TagHandler, ResourceProvider {
     public void shutdown() {
         poller.shutdownNow();
         if (!config.services().eks().mock()) {
+            boolean keepRunning = config.services().eks().keepRunningOnShutdown();
             for (Cluster cluster : allClusters()) {
-                clusterManager.stopCluster(cluster);
+                if (keepRunning) {
+                    clusterManager.detachCluster(cluster);
+                } else {
+                    clusterManager.stopCluster(cluster);
+                }
             }
         }
     }

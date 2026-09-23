@@ -100,10 +100,15 @@ class EksServiceTest {
     }
 
     private EmulatorConfig testConfig(boolean mock) {
+        return testConfig(mock, false);
+    }
+
+    private EmulatorConfig testConfig(boolean mock, boolean keepRunningOnShutdown) {
         EmulatorConfig.EksServiceConfig eksConfig = proxy(EmulatorConfig.EksServiceConfig.class,
                 (proxy, method, args) -> switch (method.getName()) {
                     case "enabled" -> true;
                     case "mock" -> mock;
+                    case "keepRunningOnShutdown" -> keepRunningOnShutdown;
                     case "apiServerBasePort" -> 6500;
                     default -> defaultValue(method);
                 });
@@ -485,6 +490,48 @@ class EksServiceTest {
     }
 
     @SuppressWarnings("unchecked")
+    @Test
+    void shutdownLeavesClusterContainersRunningWhenRetentionIsEnabled() {
+        Cluster cluster = activeCluster();
+        EksClusterManager clusterManager = mock(EksClusterManager.class);
+        EksService service = serviceWithCluster(cluster, clusterManager, true);
+
+        service.shutdown();
+
+        verify(clusterManager).detachCluster(cluster);
+        verify(clusterManager, never()).stopCluster(any(Cluster.class));
+    }
+
+    @Test
+    void shutdownStopsClusterContainersWhenRetentionIsDisabled() {
+        Cluster cluster = activeCluster();
+        EksClusterManager clusterManager = mock(EksClusterManager.class);
+        EksService service = serviceWithCluster(cluster, clusterManager, false);
+
+        service.shutdown();
+
+        verify(clusterManager).stopCluster(cluster);
+        verify(clusterManager, never()).detachCluster(any(Cluster.class));
+    }
+
+    private static Cluster activeCluster() {
+        Cluster cluster = new Cluster();
+        cluster.setName("running-cluster");
+        cluster.setStatus(ClusterStatus.ACTIVE);
+        return cluster;
+    }
+
+    private EksService serviceWithCluster(Cluster cluster, EksClusterManager clusterManager,
+            boolean keepRunningOnShutdown) {
+        AccountAwareStorageBackend<Cluster> clusterStore =
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, "000000000000");
+        clusterStore.putForAccount("000000000000", cluster.getName(), cluster);
+        return new EksService(fixedStorageFactory(clusterStore), testConfig(false, keepRunningOnShutdown),
+                new RegionResolver("us-east-1", "000000000000"), clusterManager, null,
+                new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()),
+                        new ObjectMapper()), mock(EksAccessEntryService.class));
+    }
+
     private StorageFactory fixedStorageFactory(StorageBackend<String, ?> backend) {
         return new StorageFactory(null, null) {
             @Override

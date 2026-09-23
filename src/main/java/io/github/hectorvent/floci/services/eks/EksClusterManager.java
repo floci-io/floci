@@ -576,14 +576,22 @@ public class EksClusterManager {
             closeQuietly(logStream);
             return;
         }
-        if (config.services().eks().keepRunningOnShutdown()) {
-            closeQuietly(logStream);
-            LOG.infov("Leaving k3s container for cluster {0} running", cluster.getName());
-            return;
-        }
         lifecycleManager.stopAndRemove(cluster.getContainerId(), logStream);
         ContainerStorageHelper.removeNamedVolume(config, lifecycleManager, clusterResourceName(cluster));
         LOG.infov("Stopped k3s container for cluster {0}", cluster.getName());
+    }
+
+    /**
+     * Releases Floci's hold on the given cluster (its metadata endpoint and log stream) and leaves
+     * the k3s container running, so a later Floci start can re-latch it through
+     * {@link #restoreCluster}. Used on shutdown when keep-running-on-shutdown is enabled.
+     */
+    public void detachCluster(Cluster cluster) {
+        unregisterMetadataEndpoint(cluster);
+        closeQuietly(clusterLogHandles.remove(clusterResourceName(cluster)));
+        if (cluster.getContainerId() != null) {
+            LOG.infov("Leaving k3s container for cluster {0} running", cluster.getName());
+        }
     }
 
     private static void closeQuietly(Closeable closeable) {

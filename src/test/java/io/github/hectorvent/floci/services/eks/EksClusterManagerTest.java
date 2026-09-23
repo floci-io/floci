@@ -1797,8 +1797,13 @@ class EksClusterManagerTest {
             assertNull(manager.getLogHandle(cluster));
         }
 
+        /**
+         * Explicit DeleteCluster tears down through {@code stopCluster}. The shutdown retention
+         * option is decided by {@link EksService#shutdown()}, so it must not leave a deleted
+         * cluster's container running.
+         */
         @Test
-        void logHandleClosedWhenKeepRunningOnShutdownIsTrue() throws Exception {
+        void stopClusterRemovesTheContainerEvenWhenShutdownRetentionIsEnabled() {
             when(eks.keepRunningOnShutdown()).thenReturn(true);
 
             Cluster cluster = new Cluster();
@@ -1806,9 +1811,20 @@ class EksClusterManagerTest {
             cluster.setLogging(new Logging(List.of(new LogSetup(List.of("api"), true))));
 
             manager.startCluster(cluster);
-            assertEquals(mockHandle, manager.getLogHandle(cluster));
-
             manager.stopCluster(cluster);
+
+            verify(lifecycleManager).stopAndRemove("container-id-123456789012345678901234567890", mockHandle);
+            assertNull(manager.getLogHandle(cluster));
+        }
+
+        @Test
+        void detachClusterClosesTheLogStreamAndLeavesTheContainerRunning() throws Exception {
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+            cluster.setLogging(new Logging(List.of(new LogSetup(List.of("api"), true))));
+
+            manager.startCluster(cluster);
+            manager.detachCluster(cluster);
 
             verify(mockHandle).close();
             verify(lifecycleManager, never()).stopAndRemove(anyString(), any());
