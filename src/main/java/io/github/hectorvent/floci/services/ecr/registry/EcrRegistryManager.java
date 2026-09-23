@@ -160,7 +160,14 @@ public class EcrRegistryManager {
         return config.services().ecr().tlsUri() && config.tls().enabled();
     }
 
-    /** Returns the proxy endpoint a docker daemon should log into for any ECR repo. */
+    /**
+     * Returns the proxy endpoint a docker daemon should log into for any ECR repo.
+     *
+     * <p>An ECR registry is regional, so the region in the endpoint is the region of the
+     * calling request, matching the one in the {@link #getRepositoryUri} of every repository
+     * in that registry. A client logs in to this endpoint and then pushes to those URIs, so
+     * the two must name the same host.
+     */
     public String getProxyEndpoint() {
         if (tlsUriEnabled()) {
             String host = "path".equalsIgnoreCase(config.services().ecr().uriStyle())
@@ -171,7 +178,7 @@ public class EcrRegistryManager {
         }
         String scheme = config.services().ecr().tlsEnabled() ? "https" : "http";
         return scheme + "://" + regionResolver.getAccountId() + ".dkr.ecr."
-                + regionResolver.getDefaultRegion() + ".localhost:" + config.port();
+                + regionResolver.getRegion() + ".localhost:" + config.port();
     }
 
     /** Returns the effective registry port. Stable across calls once {@link #ensureStarted} runs. */

@@ -73,6 +73,7 @@ class EcrRegistryManagerTest {
     private ContainerBuilder.Builder builder;
     private DockerClient dockerClient;
     private InspectImageCmd inspectImage;
+    private RegionResolver regionResolver;
     private EcrRegistryManager manager;
 
     @BeforeEach
@@ -98,7 +99,7 @@ class EcrRegistryManagerTest {
         when(logStreamer.generateLogStreamName(anyString())).thenReturn("registry-log-stream");
         containerDetector = Mockito.mock(ContainerDetector.class);
         currentContainerNetworkResolver = Mockito.mock(CurrentContainerNetworkResolver.class);
-        RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
+        regionResolver = Mockito.spy(new RegionResolver("us-east-1", "000000000000"));
 
         config = Mockito.mock(EmulatorConfig.class);
         ecr = Mockito.mock(EmulatorConfig.EcrServiceConfig.class);
@@ -397,6 +398,27 @@ class EcrRegistryManagerTest {
         assertTrue(manager.getRepositoryUri("123456789012", "us-east-1", "backend-user")
                 .contains("localhost.floci.io:"));
         assertEquals(expectedImage, manager.rewriteImageUri(AWS_ECR_IMAGE));
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "false, http://000000000000.dkr.ecr.eu-central-1.localhost:4566",
+            "true, https://000000000000.dkr.ecr.eu-central-1.localhost.floci.io:4566"
+    })
+    void getProxyEndpoint_nonDefaultRequestRegion_followsTheRequestRegion(boolean tlsUris,
+                                                                         String proxyEndpoint) {
+        EmulatorConfig.TlsConfig tls = Mockito.mock(EmulatorConfig.TlsConfig.class);
+        when(config.tls()).thenReturn(tls);
+        when(tls.enabled()).thenReturn(tlsUris);
+        when(ecr.uriStyle()).thenReturn("hostname");
+        when(ecr.tlsUri()).thenReturn(tlsUris);
+        Mockito.doReturn("eu-central-1").when(regionResolver).getRegion();
+
+        // A docker login target that named another region than the push target would be unusable.
+        assertEquals(proxyEndpoint, manager.getProxyEndpoint());
+        assertTrue(manager.getRepositoryUri("000000000000", "eu-central-1", "app")
+                .startsWith(proxyEndpoint.substring(proxyEndpoint.indexOf("://") + 3) + "/"));
+        verify(regionResolver, never()).getDefaultRegion();
     }
 
     @Test
