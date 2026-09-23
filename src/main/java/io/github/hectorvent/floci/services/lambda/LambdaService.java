@@ -1040,19 +1040,26 @@ public class LambdaService implements ResourceProvider {
             fn = resolveInvokeTarget(region, name, qualifier);
         }
         reportCustomResourceLiveness(payload);
-        InvokeResult result = executorService.invoke(fn, payload, type);
+        InvokeResult result = executorService.invoke(fn, payload, type,
+                LambdaInvocationChain.currentDepth());
         result.setExecutedVersion(fn.getVersion());
         return result;
     }
 
-    /** Invokes a Lambda target ARN using the account encoded in that ARN. */
+    /**
+     * Invokes a Lambda target ARN using the account encoded in that ARN.
+     *
+     * <p>The chain position comes from the calling thread, so a delivery that arrives here through
+     * an EventBridge target or an SNS subscription keeps counting from where it was rather than
+     * starting a fresh chain.
+     */
     public InvokeResult invokeArn(String functionArn, byte[] payload, InvocationType type) {
-        return invokeArn(functionArn, payload, type, 0);
+        return invokeArn(functionArn, payload, type, LambdaInvocationChain.currentDepth());
     }
 
     /**
-     * Invokes a Lambda destination, carrying the number of destination deliveries that reached it
-     * so {@link AsyncInvokeDestinationRouter} can bound a chain that leads back into itself.
+     * Invokes a Lambda destination at the position in the chain the delivery reached, so that a
+     * chain leading back into a function already in it is stopped at the bound.
      */
     InvokeResult invokeArnFromDestination(String functionArn, byte[] payload, int chainDepth) {
         return invokeArn(functionArn, payload, InvocationType.Event, chainDepth);

@@ -70,13 +70,6 @@ public class AsyncInvokeDestinationRouter {
     private static final String DEFAULT_VERSION = "$LATEST";
     /** Floci does not retry a failed asynchronous invocation, so every record is the first attempt. */
     private static final int APPROXIMATE_INVOKE_COUNT = 1;
-    /**
-     * How many Lambda destination hops a single originating invocation may take. A function whose
-     * destination leads back into itself would otherwise invoke forever, which on a laptop is a
-     * worse failure than on AWS, where recursive loop detection halts the chain. The bound matches
-     * the depth AWS stops at.
-     */
-    private static final int MAX_DESTINATION_CHAIN_DEPTH = 16;
 
     private final Instance<LambdaService> lambdaService;
     private final Instance<EventBridgeService> eventBridgeService;
@@ -109,8 +102,10 @@ public class AsyncInvokeDestinationRouter {
      * finished, so a destination that rejects the record has nowhere left to be reported and is
      * logged instead.
      *
-     * @param chainDepth how many Lambda destination deliveries led to this invocation, which
-     *                   bounds a chain of them that leads back into itself
+     * @param chainDepth how many destination deliveries led to this invocation. The delivery runs
+     *                   one hop further along, so a chain that leads back into Lambda, through a
+     *                   function ARN or through SNS or EventBridge, is stopped at the bound in
+     *                   {@link LambdaInvocationChain} instead of running forever
      */
     public void route(LambdaFunction fn, byte[] requestPayload, InvokeResult result, int chainDepth) {
         // A runtime that never started, timed out, or crashed is reported as a function error by
@@ -200,49 +195,41 @@ public class AsyncInvokeDestinationRouter {
 
         // The invocation ran on a pool thread that carries no request context, so the account the
         // destination lives in has to be re-established before any account-aware store is read.
-        boolean delivered = switch (AwsArnUtils.isArn(arn) ? AwsArnUtils.parse(arn).service() : "") {
-            case "events" -> {
-                RequestScopes.runAs(accountId, () ->
-                        putOnEventBus(arn, body, region, failed, fn.getFunctionArn()));
-                yield true;
-            }
-            case "sqs" -> {
-                RequestScopes.runAs(accountId, () ->
-                        sqsService.get().sendMessage(AwsArnUtils.arnToQueueUrl(arn, baseUrl), body, 0, region));
-                yield true;
-            }
-            case "sns" -> {
-                RequestScopes.runAs(accountId, () ->
-                        snsService.get().publish(arn, null, body, "Lambda", region));
-                yield true;
-            }
-            case "lambda" -> invokeDestinationFunction(arn, fn, body, accountId, failed, chainDepth);
-            default -> {
-                LOG.warnv("Unsupported Lambda {0} destination, dropping the record: {1}", side(failed), arn);
-                yield false;
-            }
-        };
+        // The whole delivery runs one hop further along the chain, which is what bounds a
+        // destination that comes back into Lambda through SNS or EventBridge rather than naming a
+        // function outright: those deliver to their Lambda targets on this very thread.
+        boolean delivered = LambdaInvocationChain.callAtDepth(chainDepth + 1, () ->
+                switch (AwsArnUtils.isArn(arn) ? AwsArnUtils.parse(arn).service() : "") {
+                    case "events" -> {
+                        RequestScopes.runAs(accountId, () ->
+                                putOnEventBus(arn, body, region, failed, fn.getFunctionArn()));
+                        yield true;
+                    }
+                    case "sqs" -> {
+                        RequestScopes.runAs(accountId, () ->
+                                sqsService.get().sendMessage(AwsArnUtils.arnToQueueUrl(arn, baseUrl), body, 0, region));
+                        yield true;
+                    }
+                    case "sns" -> {
+                        RequestScopes.runAs(accountId, () ->
+                                snsService.get().publish(arn, null, body, "Lambda", region));
+                        yield true;
+                    }
+                    case "lambda" -> {
+                        RequestScopes.runAs(accountId, () ->
+                                lambdaService.get().invokeArnFromDestination(
+                                        arn, body.getBytes(StandardCharsets.UTF_8), chainDepth + 1));
+                        yield true;
+                    }
+                    default -> {
+                        LOG.warnv("Unsupported Lambda {0} destination, dropping the record: {1}",
+                                side(failed), arn);
+                        yield false;
+                    }
+                });
         if (delivered) {
             LOG.debugv("Lambda {0} destination delivered to {1}", side(failed), arn);
         }
-    }
-
-    /**
-     * Invokes a Lambda destination unless the chain that reached it is already at its bound, and
-     * answers whether it did.
-     */
-    private boolean invokeDestinationFunction(String arn, LambdaFunction fn, String body,
-                                              String accountId, boolean failed, int chainDepth) {
-        if (chainDepth >= MAX_DESTINATION_CHAIN_DEPTH) {
-            LOG.warnv("Lambda {0} destination chain from {1} reached {2} hops at {3}; dropping the "
-                    + "record rather than continuing a chain that leads back into itself",
-                    side(failed), fn.getFunctionArn(), MAX_DESTINATION_CHAIN_DEPTH, arn);
-            return false;
-        }
-        RequestScopes.runAs(accountId, () ->
-                lambdaService.get().invokeArnFromDestination(
-                        arn, body.getBytes(StandardCharsets.UTF_8), chainDepth + 1));
-        return true;
     }
 
     /**

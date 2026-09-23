@@ -23,16 +23,17 @@ import org.mockito.quality.Strictness;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -190,23 +191,73 @@ class AsyncInvokeDestinationRouterTest {
     }
 
     @Test
-    void lambdaDestinationAtTheChainLimit_stopsRatherThanInvokingAgain() {
-        configure(COLLECTOR_ARN, null);
-
-        router.route(fn, request(), success("{\"rate\":3.5}"), 16);
-
-        verify(lambdaService, never()).invokeArnFromDestination(anyString(), any(), anyInt());
-    }
-
-    @Test
     void nonLambdaDestinationAtTheChainLimit_isStillDelivered() {
-        // The bound exists to stop a chain re-entering Lambda; a queue is the end of one.
+        // The bound exists to stop a chain re-entering Lambda; a queue is the end of one, and AWS
+        // lets the message through and stops the invocation it would cause instead.
         configure(QUEUE_ARN, null);
 
         router.route(fn, request(), success("{\"rate\":3.5}"), 16);
 
         verify(sqsService).sendMessage(eq("http://localhost:4566/000000000000/quotes-queue"),
                 anyString(), eq(0), eq("us-east-1"));
+    }
+
+    @Test
+    void snsDestination_publishesOneHopFurtherAlongTheChain() {
+        // SnsService invokes a Lambda subscriber on the publishing thread, so the depth it reads
+        // there is what stops a topic that fans straight back into the function.
+        configure(TOPIC_ARN, null);
+        AtomicInteger depthWhilePublishing = new AtomicInteger(-1);
+        doAnswer(invocation -> {
+            depthWhilePublishing.set(LambdaInvocationChain.currentDepth());
+            return null;
+        }).when(snsService).publish(anyString(), any(), anyString(), anyString(), anyString());
+
+        router.route(fn, request(), success("{\"rate\":3.5}"), 3);
+
+        assertEquals(4, depthWhilePublishing.get());
+        assertEquals(0, LambdaInvocationChain.currentDepth(), "the thread must be left as it was found");
+    }
+
+    @Test
+    void eventBridgeDestination_putsTheEventOneHopFurtherAlongTheChain() {
+        configure(BUS_ARN, null);
+        AtomicInteger depthWhilePutting = new AtomicInteger(-1);
+        when(eventBridgeService.putEvents(any(), any(), any())).thenAnswer(invocation -> {
+            depthWhilePutting.set(LambdaInvocationChain.currentDepth());
+            return new EventBridgeService.PutEventsResult(0, List.of());
+        });
+
+        router.route(fn, request(), success("{\"rate\":3.5}"), 3);
+
+        assertEquals(4, depthWhilePutting.get());
+        assertEquals(0, LambdaInvocationChain.currentDepth(), "the thread must be left as it was found");
+    }
+
+    @Test
+    void snsDestinationFanningBackIntoTheFunction_stopsAtTheChainBound() {
+        // The reported cycle: the function's OnSuccess is a topic the function itself subscribes
+        // to. The stand-in below re-enters where SnsService would, on the publishing thread, and
+        // refuses the invocation on the same rule LambdaExecutorService applies. Before the depth
+        // travelled through SNS every hop started a fresh chain and this never came back.
+        configure(TOPIC_ARN, null);
+        AtomicInteger invocations = new AtomicInteger();
+        doAnswer(invocation -> {
+            int depth = LambdaInvocationChain.currentDepth();
+            if (LambdaInvocationChain.exhausted(depth)) {
+                return null;
+            }
+            invocations.incrementAndGet();
+            router.route(fn, request(), success("{\"rate\":3.5}"), depth);
+            return null;
+        }).when(snsService).publish(anyString(), any(), anyString(), anyString(), anyString());
+
+        router.route(fn, request(), success("{\"rate\":3.5}"), 0);
+
+        assertEquals(LambdaInvocationChain.MAX_DEPTH - 1, invocations.get(),
+                "the originating invocation plus these re-entrant ones is the bound");
+        verify(snsService, times(LambdaInvocationChain.MAX_DEPTH))
+                .publish(anyString(), any(), anyString(), anyString(), anyString());
     }
 
     @Test

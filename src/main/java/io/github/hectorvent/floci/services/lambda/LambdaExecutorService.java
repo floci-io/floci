@@ -70,15 +70,27 @@ public class LambdaExecutorService {
     }
 
     /**
-     * Invokes {@code fn}, carrying the number of Lambda destination deliveries that led here.
-     * A direct invoke starts at zero; each delivery to a Lambda destination adds one, which is
-     * what bounds a destination chain that points back at a function already in it.
+     * Invokes {@code fn}, carrying the number of invocations that the same originating event has
+     * already caused. A direct invoke starts at zero; each destination delivery adds one, whether
+     * it names the next function outright or reaches it back through SNS or EventBridge.
+     *
+     * <p>An asynchronous invocation past the bound is dropped rather than run, which is how AWS
+     * breaks a recursive loop: the event goes no further and the caller, which was answered with
+     * 202 long before, sees nothing. Only the asynchronous path is guarded because it is the only
+     * one a destination chain can re-enter through.
      */
     InvokeResult invoke(LambdaFunction fn, byte[] payload, InvocationType type, int chainDepth) {
         String requestId = UUID.randomUUID().toString();
 
         if (type == InvocationType.DryRun) {
             return new InvokeResult(204, null, new byte[0], null, requestId);
+        }
+
+        if (type == InvocationType.Event && LambdaInvocationChain.exhausted(chainDepth)) {
+            LOG.warnv("Dropping the asynchronous invocation of {0}: the same event already caused "
+                    + "{1} invocations, so something in the chain is feeding itself",
+                    fn.getFunctionArn(), chainDepth);
+            return new InvokeResult(202, null, new byte[0], null, requestId);
         }
 
         LambdaConcurrencyLimiter.Permit permit = concurrencyLimiter.acquire(fn);
