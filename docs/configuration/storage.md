@@ -7,7 +7,7 @@ Floci supports four storage backends. You can set a global default and override 
 | Mode | Data survives restart | Write performance | Use case |
 |---|---|---|---|
 | `memory` | No | Fastest | Unit tests, CI pipelines |
-| `persistent` | Yes | Synchronous disk write on every change | Development with durable state |
+| `persistent` | Yes | Synchronous disk write on every change; append-heavy stores are journaled (see below) | Development with durable state |
 | `hybrid` | Yes | In-memory reads, async flush to disk | General local development |
 | `wal` | Yes | Append-only write-ahead log with compaction | High-write workloads |
 
@@ -21,6 +21,18 @@ Floci supports four storage backends. You can set a global default and override 
 
 !!! note "Code default vs shipped default"
     The Java `@WithDefault` for `storage.mode` is `hybrid`, but the published Docker image ships with `memory` set in `application.yml`. Running the stock image gives you `memory` unless you set `FLOCI_STORAGE_MODE`.
+
+### Journaled stores under `persistent` mode
+
+Most stores under `persistent` mode are rewritten in full on every change, which keeps the file
+current after every call but makes the cost of one write grow with the size of the store.
+Append-heavy stores are journaled instead: a change is appended to a `.wal` file next to the
+store, and the store's JSON file is rewritten from memory on the `FLOCI_STORAGE_WAL_COMPACTION_INTERVAL_MS`
+cadence and at shutdown, and only when something changed. Today this applies to CloudWatch Logs
+events (`cwlogs-events.json` with `cwlogs-events.wal`). After a clean shutdown the JSON file holds
+every event; while Floci runs it can be up to one compaction interval behind, and the journal is
+replayed on the next start. An existing `cwlogs-events.json` from an older version is picked up as
+the first snapshot without any migration.
 
 ## Per-Service Override
 
@@ -39,7 +51,7 @@ When not set for a service, it inherits `FLOCI_STORAGE_MODE`. Only override when
 | `FLOCI_STORAGE_SERVICES_LAMBDA_MODE` | global default | Lambda storage mode |
 | `FLOCI_STORAGE_SERVICES_LAMBDA_FLUSH_INTERVAL_MS` | `5000` | Lambda flush interval (ms) |
 | `FLOCI_STORAGE_SERVICES_CLOUDWATCHLOGS_MODE` | global default | CloudWatch Logs storage mode |
-| `FLOCI_STORAGE_SERVICES_CLOUDWATCHLOGS_FLUSH_INTERVAL_MS` | `5000` | CloudWatch Logs flush interval (ms) |
+| `FLOCI_STORAGE_SERVICES_CLOUDWATCHLOGS_FLUSH_INTERVAL_MS` | `15000` | CloudWatch Logs flush interval (ms) |
 | `FLOCI_STORAGE_SERVICES_CLOUDWATCHMETRICS_MODE` | global default | CloudWatch Metrics storage mode |
 | `FLOCI_STORAGE_SERVICES_CLOUDWATCHMETRICS_FLUSH_INTERVAL_MS` | `5000` | CloudWatch Metrics flush interval (ms) |
 | `FLOCI_STORAGE_SERVICES_SECRETSMANAGER_MODE` | global default | Secrets Manager storage mode |

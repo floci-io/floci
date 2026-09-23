@@ -43,11 +43,15 @@ import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.ssm.SsmService;
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.InspectContainerResponse;
+import com.github.dockerjava.api.command.StatsCmd;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.ExposedPort;
 import com.github.dockerjava.api.model.LogConfig;
+import com.github.dockerjava.api.model.StatisticNetworksConfig;
+import com.github.dockerjava.api.model.Statistics;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
@@ -61,7 +65,9 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.Duration;
 import java.time.Instant;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.HexFormat;
@@ -70,7 +76,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 import java.util.stream.Stream;
 
 /**
@@ -92,6 +102,13 @@ public class EcsContainerManager {
     private static final long DEPENDENCY_POLL_MILLIS = 200;
     /** How long a killed container gets to register as exited before its code is read. */
     private static final int KILL_SETTLE_SECONDS = 5;
+    /** How long a stats sample gets before the task metadata endpoint answers without one. */
+    private static final int STATS_SAMPLE_SECONDS = 5;
+    /**
+     * Docker writes {@code 0001-01-01T00:00:00Z} for an event that has not happened. Anything at
+     * or before the Unix epoch is that zero value rather than a time a container reached.
+     */
+    private static final Instant DOCKER_ZERO_TIMESTAMP = Instant.EPOCH;
 
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
@@ -199,8 +216,14 @@ public class EcsContainerManager {
         Map<ContainerDefinition, List<String>> envVarsByContainer = new LinkedHashMap<>();
         // Resolved before any container is created, so a registry-startup failure can't leak one already started.
         Map<ContainerDefinition, String> imagesByContainer = new LinkedHashMap<>();
+        // The task metadata id has to exist before the container does: its own environment carries
+        // the URI, so it cannot be derived from the Docker id the daemon hands back afterwards.
+        Map<String, String> metadataIdsByContainer = new LinkedHashMap<>();
         for (ContainerDefinition def : launchOrder) {
-            envVarsByContainer.put(def, buildEnvVars(def, overridesByName.get(def.getName()), region));
+            String metadataId = UUID.randomUUID().toString().replace("-", "");
+            metadataIdsByContainer.put(def.getName(), metadataId);
+            envVarsByContainer.put(def, buildEnvVars(def, overridesByName.get(def.getName()), region,
+                    metadataId));
             imagesByContainer.put(def, ecrRegistryManager.rewriteImageUri(def.getImage()));
         }
 
@@ -410,7 +433,8 @@ public class EcsContainerManager {
                         protectedNetwork == null ? dockerId : protectedNetwork.namespace().helperId(), def);
 
                 // Build ECS container model
-                Container container = buildContainer(task.getTaskArn(), def, dockerId, networkBindings, region);
+                Container container = buildContainer(task.getTaskArn(), def, dockerId, networkBindings, region,
+                        metadataIdsByContainer.get(def.getName()));
                 runtimeContainers.add(container);
                 containerIds.put(def.getName(), dockerId);
 
@@ -603,6 +627,211 @@ public class EcsContainerManager {
         } catch (Exception e) {
             LOG.debugv("Could not read the health of container {0}: {1}", dockerId, e.getMessage());
             return null;
+        }
+    }
+
+    /**
+     * A container's Docker stats as the task metadata endpoint reports them: the latest sample,
+     * plus the network byte rates. The rates are null when they cannot be derived, and Docker
+     * never reports them itself: they are a delta the ECS agent takes across two samples.
+     */
+    public record ContainerStats(Statistics statistics, Double rxBytesPerSecond, Double txBytesPerSecond) {}
+
+    /**
+     * Reads a container's stats from the daemon. Empty when there is nothing to read: the
+     * container has no Docker id, it has already gone, or the daemon is unreachable.
+     *
+     * <p>The stats stream is read rather than a single {@code stream=false} document, because the
+     * network rates are a delta between consecutive samples. Docker sends the first sample at once
+     * and the next on its collection tick a second later, which is the same second AWS documents a
+     * container as having to run before its stats are available.
+     */
+    public Optional<ContainerStats> sampleContainerStats(String dockerId) {
+        if (dockerId == null || dockerId.isBlank()) {
+            return Optional.empty();
+        }
+        return Optional.ofNullable(sampleContainerStats(List.of(dockerId)).get(dockerId));
+    }
+
+    /**
+     * Reads several containers' stats in one pass, keyed by Docker id. A container the daemon has
+     * nothing to say about is absent from the map rather than present with an empty sample.
+     *
+     * <p>Every stream is opened before any of them is waited on, and the waits share one deadline.
+     * Docker's stats stream is asynchronous, so the containers tick alongside each other and the
+     * call costs about the single collection tick one container costs, however many containers the
+     * task has. That matters on {@code /task/stats}, which is the path a sidecar polls: sampling
+     * the containers one after another would cost a tick each.
+     */
+    public Map<String, ContainerStats> sampleContainerStats(List<String> dockerIds) {
+        Map<String, ContainerStats> sampled = new LinkedHashMap<>();
+        if (dockerIds == null || dockerIds.isEmpty()) {
+            return sampled;
+        }
+        Map<String, OpenStatsStream> streams = openStatsStreams(dockerIds);
+        try {
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(STATS_SAMPLE_SECONDS);
+            for (Map.Entry<String, OpenStatsStream> stream : streams.entrySet()) {
+                awaitPair(stream.getKey(), stream.getValue().samples(), deadline);
+                containerStats(stream.getValue().samples().collected())
+                        .ifPresent(stats -> sampled.put(stream.getKey(), stats));
+            }
+        } finally {
+            for (OpenStatsStream stream : streams.values()) {
+                closeQuietly(stream.samples());
+                closeQuietly(stream.command());
+            }
+        }
+        return sampled;
+    }
+
+    /** A stats stream the daemon is already filling, and the command that has to be closed with it. */
+    private record OpenStatsStream(StatsCmd command, ConsecutiveStatsSamples samples) {}
+
+    /** Starts every container's stats stream, skipping the ones the daemon will not open. */
+    private Map<String, OpenStatsStream> openStatsStreams(List<String> dockerIds) {
+        Map<String, OpenStatsStream> streams = new LinkedHashMap<>();
+        for (String dockerId : dockerIds) {
+            if (dockerId == null || dockerId.isBlank() || streams.containsKey(dockerId)) {
+                continue;
+            }
+            StatsCmd command = null;
+            try {
+                command = lifecycleManager.getDockerClient().statsCmd(dockerId);
+                ConsecutiveStatsSamples samples = new ConsecutiveStatsSamples();
+                command.exec(samples);
+                streams.put(dockerId, new OpenStatsStream(command, samples));
+            } catch (RuntimeException e) {
+                closeQuietly(command);
+                LOG.debugv("Could not sample stats for container {0}: {1}", dockerId, e.getMessage());
+            }
+        }
+        return streams;
+    }
+
+    /** Waits for one stream's pair of samples, never past the deadline the whole pass shares. */
+    private static void awaitPair(String dockerId, ConsecutiveStatsSamples samples, long deadlineNanos) {
+        long remaining = deadlineNanos - System.nanoTime();
+        try {
+            if (remaining <= 0 || !samples.awaitPair(remaining, TimeUnit.NANOSECONDS)) {
+                LOG.debugv("Docker sent fewer than two stats samples for container {0} within {1}s",
+                        dockerId, STATS_SAMPLE_SECONDS);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            LOG.debugv("Interrupted while sampling stats for container {0}", dockerId);
+        }
+    }
+
+    private static void closeQuietly(Closeable closeable) {
+        if (closeable == null) {
+            return;
+        }
+        try {
+            closeable.close();
+        } catch (IOException | RuntimeException e) {
+            LOG.debugv("Could not close a Docker stats stream: {0}", e.getMessage());
+        }
+    }
+
+    /** The latest sample, with rates when two samples a measurable interval apart arrived. */
+    private static Optional<ContainerStats> containerStats(List<Statistics> samples) {
+        if (samples.isEmpty()) {
+            return Optional.empty();
+        }
+        Statistics latest = samples.getLast();
+        if (samples.size() < 2) {
+            return Optional.of(new ContainerStats(latest, null, null));
+        }
+        Statistics earlier = samples.getFirst();
+        double seconds = secondsBetween(earlier.getRead(), latest.getRead());
+        Long rxDelta = byteDelta(earlier, latest, StatisticNetworksConfig::getRxBytes);
+        Long txDelta = byteDelta(earlier, latest, StatisticNetworksConfig::getTxBytes);
+        if (seconds <= 0 || rxDelta == null || txDelta == null) {
+            return Optional.of(new ContainerStats(latest, null, null));
+        }
+        return Optional.of(new ContainerStats(latest, rxDelta / seconds, txDelta / seconds));
+    }
+
+    /** The counter's movement across the two samples, or null when neither reports an interface. */
+    private static Long byteDelta(Statistics earlier, Statistics latest,
+                                  Function<StatisticNetworksConfig, Long> counter) {
+        Long earlierBytes = totalBytes(earlier, counter);
+        Long latestBytes = totalBytes(latest, counter);
+        if (earlierBytes == null || latestBytes == null) {
+            return null;
+        }
+        return Math.max(0, latestBytes - earlierBytes);
+    }
+
+    private static Long totalBytes(Statistics statistics,
+                                   Function<StatisticNetworksConfig, Long> counter) {
+        Map<String, StatisticNetworksConfig> networks = statistics.getNetworks();
+        if (networks == null || networks.isEmpty()) {
+            return null;
+        }
+        long total = 0;
+        for (StatisticNetworksConfig network : networks.values()) {
+            Long bytes = counter.apply(network);
+            total += bytes != null ? bytes : 0;
+        }
+        return total;
+    }
+
+    /** The interval between two Docker read timestamps, or 0 when either cannot be read. */
+    private static double secondsBetween(String earlier, String latest) {
+        if (earlier == null || latest == null) {
+            return 0;
+        }
+        try {
+            return Duration.between(Instant.parse(earlier), Instant.parse(latest)).toNanos() / 1_000_000_000.0;
+        } catch (DateTimeParseException e) {
+            LOG.debugv("Docker stats carried an unreadable read timestamp: {0}", e.getMessage());
+            return 0;
+        }
+    }
+
+    /** Docker's stats stream never ends on its own; this takes the first two samples and stops. */
+    private static final class ConsecutiveStatsSamples extends ResultCallback.Adapter<Statistics> {
+
+        private static final int WANTED = 2;
+
+        private final CountDownLatch enough = new CountDownLatch(WANTED);
+        private final List<Statistics> collected = new CopyOnWriteArrayList<>();
+
+        @Override
+        public void onNext(Statistics statistics) {
+            if (collected.size() < WANTED) {
+                collected.add(statistics);
+                enough.countDown();
+            }
+        }
+
+        @Override
+        public void onError(Throwable throwable) {
+            releaseWaiter();
+            super.onError(throwable);
+        }
+
+        @Override
+        public void onComplete() {
+            releaseWaiter();
+            super.onComplete();
+        }
+
+        /** A stream that ends or fails early must not hold the caller until the timeout. */
+        private void releaseWaiter() {
+            while (enough.getCount() > 0) {
+                enough.countDown();
+            }
+        }
+
+        boolean awaitPair(long timeout, TimeUnit unit) throws InterruptedException {
+            return enough.await(timeout, unit);
+        }
+
+        List<Statistics> collected() {
+            return List.copyOf(collected);
         }
     }
 
@@ -899,6 +1128,8 @@ public class EcsContainerManager {
             String name = entry.getKey();
             String dockerId = entry.getValue();
             exitCodes.put(name, getExitCodeIfStopped(dockerId));
+            // Read before the removal below, which is the last moment the daemon still knows it.
+            handle.recordFinishedAt(name, getFinishedAtIfStopped(dockerId));
             try {
                 lifecycleManager.getDockerClient().removeContainerCmd(dockerId).withForce(true).exec();
                 terminatedContainerIds.add(dockerId);
@@ -1231,7 +1462,8 @@ public class EcsContainerManager {
         }
     }
 
-    private List<String> buildEnvVars(ContainerDefinition def, ContainerOverride override, String region) {
+    private List<String> buildEnvVars(ContainerDefinition def, ContainerOverride override, String region,
+                                      String metadataId) {
         // AWS SDK baseline (endpoint + region + credentials) first so the task can reach the
         // emulator, then the task-def environment, then task-def secrets, then the override
         // environment. Later entries win on key conflict, so an explicit task-def value or
@@ -1242,6 +1474,12 @@ public class EcsContainerManager {
             if (eq > 0) {
                 envMap.put(kv.substring(0, eq), kv.substring(eq + 1));
             }
+        }
+        // The task metadata endpoint, which an application, the ECS SDK integrations and the
+        // aws-for-fluent-bit init process all read from this variable.
+        String flociEndpoint = awsEnv.flociEndpoint();
+        if (metadataId != null && flociEndpoint != null) {
+            envMap.put("ECS_CONTAINER_METADATA_URI_V4", flociEndpoint + "/v4/" + metadataId);
         }
         if (def.getEnvironment() != null) {
             for (var kv : def.getEnvironment()) {
@@ -1440,7 +1678,8 @@ public class EcsContainerManager {
     }
 
     private Container buildContainer(String taskArn, ContainerDefinition def, String dockerId,
-                                     List<NetworkBinding> networkBindings, String region) {
+                                     List<NetworkBinding> networkBindings, String region,
+                                     String metadataId) {
         Container container = new Container();
         container.setTaskArn(taskArn);
         container.setName(def.getName());
@@ -1449,6 +1688,7 @@ public class EcsContainerManager {
         container.setNetworkBindings(networkBindings);
         container.setDockerId(dockerId);
         container.setRuntimeId(dockerId);
+        container.setMetadataId(metadataId);
         container.setHealthStatus(def.getHealthCheck() != null ? "UNKNOWN" : null);
         if (def.getCpu() != null) {
             container.setCpu(String.valueOf(def.getCpu()));
@@ -1461,7 +1701,60 @@ public class EcsContainerManager {
         }
         container.setContainerArn(regionResolver.buildArn("ecs", region,
                 "container/" + extractTaskId(taskArn) + "/" + def.getName()));
+        applyLaunchTimestamps(container, dockerId);
         return container;
+    }
+
+    /**
+     * Stamps the container with Docker's own create and start times. A task's containers start one
+     * at a time, holding for each other's {@code dependsOn} conditions, so these are the container's
+     * and not the task's.
+     */
+    private void applyLaunchTimestamps(Container container, String dockerId) {
+        InspectContainerResponse inspect = inspectOrNull(dockerId);
+        if (inspect == null) {
+            return;
+        }
+        container.setCreatedAt(dockerTimestamp(inspect.getCreated()));
+        if (inspect.getState() != null) {
+            container.setStartedAt(dockerTimestamp(inspect.getState().getStartedAt()));
+        }
+    }
+
+    /**
+     * When a container that has already stopped finished. Read before the container is removed,
+     * since the daemon forgets it afterwards.
+     */
+    public Instant getFinishedAtIfStopped(String dockerId) {
+        InspectContainerResponse inspect = inspectOrNull(dockerId);
+        if (inspect == null || inspect.getState() == null
+                || Boolean.TRUE.equals(inspect.getState().getRunning())) {
+            return null;
+        }
+        return dockerTimestamp(inspect.getState().getFinishedAt());
+    }
+
+    private InspectContainerResponse inspectOrNull(String dockerId) {
+        try {
+            return lifecycleManager.getDockerClient().inspectContainerCmd(dockerId).exec();
+        } catch (Exception e) {
+            LOG.debugv("Could not inspect container {0}: {1}", dockerId, e.getMessage());
+            return null;
+        }
+    }
+
+    /** A Docker RFC 3339 timestamp, or null for its zero value, which means "never happened". */
+    private static Instant dockerTimestamp(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            Instant instant = Instant.parse(value);
+            return instant.isAfter(DOCKER_ZERO_TIMESTAMP) ? instant : null;
+        } catch (DateTimeParseException e) {
+            LOG.debugv("Docker reported an unreadable timestamp {0}: {1}", value, e.getMessage());
+            return null;
+        }
     }
 
     private static String extractTaskId(String arn) {

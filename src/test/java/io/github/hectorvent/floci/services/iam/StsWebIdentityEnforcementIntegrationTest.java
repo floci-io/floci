@@ -1,17 +1,15 @@
 package io.github.hectorvent.floci.services.iam;
 
+import io.github.hectorvent.floci.testing.IamEnforcementProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.Test;
-
-import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 
 @QuarkusTest
-@TestProfile(StsWebIdentityEnforcementIntegrationTest.EnforcementProfile.class)
+@TestProfile(IamEnforcementProfile.class)
 class StsWebIdentityEnforcementIntegrationTest {
 
     @Test
@@ -46,12 +44,5 @@ class StsWebIdentityEnforcementIntegrationTest {
             .formParam("WebIdentityToken", token)
         .when()
             .post("/");
-    }
-
-    public static final class EnforcementProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.iam.enforcement-enabled", "true");
-        }
     }
 }

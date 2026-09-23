@@ -85,7 +85,7 @@ class EksCfnProvisionerTest {
     }
 
     @Test
-    void nodegroupRefIsItsNameAndItStoresTheClusterNameForDelete() throws Exception {
+    void nodegroupRefIsTheCompositeIdAndItStoresNamesForDelete() throws Exception {
         Nodegroup created = new Nodegroup();
         created.setNodegroupName("workers");
         created.setClusterName("prod");
@@ -98,8 +98,11 @@ class EksCfnProvisionerTest {
                  "NodeRole": "arn:aws:iam::000000000000:role/nodes", "Subnets": ["subnet-1", "subnet-2"]}
                 """), ctx());
 
-        assertEquals("workers", r.getPhysicalId());
+        // Ref and Id are the composite clusterName/nodegroupName, matching AWS.
+        assertEquals("prod/workers", r.getPhysicalId());
+        assertEquals("prod/workers", r.getAttributes().get("Id"));
         assertEquals("prod", r.getAttributes().get("ClusterName"));
+        assertEquals("workers", r.getAttributes().get("NodegroupName"));
         assertEquals("arn:aws:eks:us-east-1:000000000000:nodegroup/prod/workers/uuid",
                 r.getAttributes().get("Arn"));
         ArgumentCaptor<Nodegroup> request = ArgumentCaptor.forClass(Nodegroup.class);
@@ -118,10 +121,11 @@ class EksCfnProvisionerTest {
     }
 
     @Test
-    void deleteRemovesTheNodegroupUsingTheStoredClusterName() {
+    void deleteRemovesTheNodegroupUsingTheStoredNames() {
         StackResource r = resource("AWS::EKS::Nodegroup", "Workers");
-        r.setPhysicalId("workers");
+        r.setPhysicalId("prod/workers");
         r.getAttributes().put("ClusterName", "prod");
+        r.getAttributes().put("NodegroupName", "workers");
 
         provisioner.delete(r, "us-east-1");
 

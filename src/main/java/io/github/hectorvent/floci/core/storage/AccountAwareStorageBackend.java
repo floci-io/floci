@@ -75,6 +75,14 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
     }
 
     @Override
+    public void putAll(Map<String, V> entries) {
+        String prefix = prefix() + "/";
+        Map<String, V> prefixedEntries = new LinkedHashMap<>();
+        entries.forEach((key, value) -> prefixedEntries.put(prefix + key, value));
+        delegate.putAll(prefixedEntries);
+    }
+
+    @Override
     public Optional<V> get(String key) {
         String prefixedKey = prefixed(key);
         Optional<V> result = delegate.get(prefixedKey);
@@ -382,6 +390,13 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
     public void putForAccount(String accountId, String key, V value) {
         delegate.put(accountId + "/" + key, value);
         trackOwner(accountId);
+    }
+
+    public void putAllForAccount(String accountId, Map<String, V> entries) {
+        String prefix = accountId + "/";
+        Map<String, V> prefixedEntries = new LinkedHashMap<>();
+        entries.forEach((key, value) -> prefixedEntries.put(prefix + key, value));
+        delegate.putAll(prefixedEntries);
     }
 
     public void deleteForAccount(String accountId, String key) {

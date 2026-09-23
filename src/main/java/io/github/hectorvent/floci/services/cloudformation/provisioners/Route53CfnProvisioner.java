@@ -4,32 +4,44 @@ import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.route53.Route53Service;
+import io.github.hectorvent.floci.services.route53.model.AliasTarget;
+import io.github.hectorvent.floci.services.route53.model.HostedZone;
+import io.github.hectorvent.floci.services.route53.model.ResourceRecord;
+import io.github.hectorvent.floci.services.route53.model.ResourceRecordSet;
 import io.github.hectorvent.floci.services.route53.model.VpcAssociation;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
-import java.util.UUID;
 
 /**
  * Provisions {@code AWS::Route53::HostedZone} and {@code AWS::Route53::RecordSet}.
  *
- * <p>A record set is a name-only resource here, as it was in the legacy
- * {@code CloudFormationResourceProvisioner} it moved out of: nothing is written to the zone,
- * {@code Ref} is the record name (or a generated {@code record-} id when the template gives
- * none), and no {@code Fn::GetAtt} attribute is published. The registry schema lists {@code Id}
- * as read-only, but the type has no registry handlers and the CloudFormation resource
- * specification gives it no attributes, so {@code Ref} is its only reference. Writing the record
- * through {@code ChangeResourceRecordSets} is a follow-up.
+ * <p>A record set is written into its hosted zone through {@code ChangeResourceRecordSets}: the
+ * declared record is applied as an UPSERT so create and update both converge, {@code Ref} is the
+ * record name, and stack delete removes the record with a matching DELETE change. The schema-required
+ * {@code Type} and {@code Name} are validated, and the zone is taken from {@code HostedZoneId} (or
+ * resolved from {@code HostedZoneName}), since a record cannot be written without one. No
+ * {@code Fn::GetAtt} attribute is published: the registry lists {@code Id} as read-only, but the
+ * type has no registry handlers and the resource specification gives it no attributes, so
+ * {@code Ref} is its only reference.
  */
 @ApplicationScoped
 public class Route53CfnProvisioner implements CfnResourceProvisioner {
     static final String HOSTED_ZONE = "AWS::Route53::HostedZone";
     static final String RECORD_SET = "AWS::Route53::RecordSet";
+
+    // Create-time values a record's delete needs to build a matching DELETE change; kept off the
+    // published attributes by the __Floci prefix, as the other provisioners do.
+    private static final String RECORD_ZONE_ATTR = "__FlociRoute53RecordZoneId";
+    private static final String RECORD_TYPE_ATTR = "__FlociRoute53RecordType";
+    private static final String RECORD_SET_ID_ATTR = "__FlociRoute53RecordSetIdentifier";
 
     private static final Logger LOG = Logger.getLogger(Route53CfnProvisioner.class);
 
@@ -56,9 +68,149 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
     }
 
     private void provisionRecordSet(StackResource resource, JsonNode props, ProvisionContext ctx) {
+        Map<String, String> priorAttributes = new HashMap<>(resource.getAttributes());
         String name = ctx.resolveOptional(props, "Name");
-        String id = name != null ? name : "record-" + UUID.randomUUID().toString().substring(0, 8);
-        resource.setPhysicalId(id);
+        String type = ctx.resolveOptional(props, "Type");
+        // Type and Name are the schema's required properties; reject rather than write a nameless
+        // or typeless record the zone would refuse.
+        if (name == null || name.isBlank()) {
+            throw new AwsException("ValidationError", "AWS::Route53::RecordSet requires Name.", 400);
+        }
+        if (type == null || type.isBlank()) {
+            throw new AwsException("ValidationError", "AWS::Route53::RecordSet requires Type.", 400);
+        }
+        String zoneId = resolveZoneId(props, ctx);
+
+        ResourceRecordSet rrs = new ResourceRecordSet();
+        rrs.setName(name);
+        rrs.setType(type);
+        String ttl = ctx.resolveOptional(props, "TTL");
+        if (ttl != null && !ttl.isBlank()) {
+            // TTL is a string in the schema, so a non-numeric value is valid template JSON; reject it
+            // as a ValidationError like Name and Type rather than letting a raw NumberFormatException
+            // escape.
+            try {
+                rrs.setTtl(Long.parseLong(ttl.trim()));
+            } catch (NumberFormatException e) {
+                throw new AwsException("ValidationError",
+                        "AWS::Route53::RecordSet TTL must be an integer: " + ttl, 400);
+            }
+        }
+        String setIdentifier = ctx.resolveOptional(props, "SetIdentifier");
+        rrs.setSetIdentifier(setIdentifier);
+        rrs.setRecords(parseResourceRecords(props, ctx));
+        rrs.setAliasTarget(parseAliasTarget(props, ctx));
+
+        // UPSERT: provision serves create and update, and re-applying the same record must not fail
+        // with "already exists" the way a CREATE would on the second UpdateStack.
+        Map<String, Object> change = new HashMap<>();
+        change.put("action", "UPSERT");
+        change.put("rrs", rrs);
+        route53Service.changeResourceRecordSets(zoneId, List.of(change),
+                "CloudFormation " + ctx.stackName() + "/" + resource.getLogicalId());
+
+        // The record's identity is Name + Type + SetIdentifier within a zone. When an update changes
+        // any of them, the UPSERT writes a new record and the prior one is orphaned, so remove it,
+        // otherwise it lingers in the zone and later blocks the zone's own delete.
+        removeSupersededRecord(ctx, priorAttributes, zoneId, name, type, setIdentifier);
+
+        resource.setPhysicalId(name);
+        resource.getAttributes().put(RECORD_ZONE_ATTR, zoneId);
+        resource.getAttributes().put(RECORD_TYPE_ATTR, type);
+        if (setIdentifier != null && !setIdentifier.isBlank()) {
+            resource.getAttributes().put(RECORD_SET_ID_ATTR, setIdentifier);
+        } else {
+            resource.getAttributes().remove(RECORD_SET_ID_ATTR);
+        }
+    }
+
+    /**
+     * Removes the record a prior provision wrote when this update changed the record's identity
+     * (zone, Name, Type or SetIdentifier). Reads the prior identity from the attributes the last
+     * provision recorded plus the prior physical id (the prior Name). A no-op on create, and when
+     * the identity is unchanged the UPSERT already replaced the record in place.
+     */
+    private void removeSupersededRecord(ProvisionContext ctx, Map<String, String> priorAttributes,
+                                        String zoneId, String name, String type, String setIdentifier) {
+        if (!ctx.isUpdate()) {
+            return;
+        }
+        String priorZoneId = priorAttributes.get(RECORD_ZONE_ATTR);
+        String priorName = ctx.priorPhysicalId();
+        String priorType = priorAttributes.get(RECORD_TYPE_ATTR);
+        String priorSetId = priorAttributes.get(RECORD_SET_ID_ATTR);
+        if (priorZoneId == null || priorZoneId.isBlank() || priorName == null || priorName.isBlank()
+                || priorType == null || priorType.isBlank()) {
+            return;
+        }
+        boolean sameIdentity = priorZoneId.equals(zoneId) && priorName.equals(name)
+                && priorType.equals(type) && Objects.equals(priorSetId, setIdentifier);
+        if (sameIdentity) {
+            return;
+        }
+        removeRecord(priorZoneId, priorName, priorType, priorSetId, "CloudFormation supersede");
+    }
+
+    /**
+     * The hosted zone the record belongs to: {@code HostedZoneId} when given (a Ref resolves to the
+     * real zone id), otherwise the zone matching {@code HostedZoneName}. One of the two is required,
+     * since a record cannot be written without a zone.
+     */
+    private String resolveZoneId(JsonNode props, ProvisionContext ctx) {
+        String zoneId = ctx.resolveOptional(props, "HostedZoneId");
+        if (zoneId != null && !zoneId.isBlank()) {
+            return zoneId;
+        }
+        String zoneName = ctx.resolveOptional(props, "HostedZoneName");
+        if (zoneName != null && !zoneName.isBlank()) {
+            return zoneIdByName(zoneName);
+        }
+        throw new AwsException("ValidationError",
+                "AWS::Route53::RecordSet requires HostedZoneId or HostedZoneName.", 400);
+    }
+
+    /**
+     * The id of the single hosted zone whose name equals {@code zoneName}. {@code listHostedZonesByName}
+     * is a starts-at paginator, so it must be filtered to an exact match rather than trusting the first
+     * result, or a record lands in whatever zone happens to sort at or after the name. AWS rejects the
+     * stack both when no zone matches and when more than one carries the name, so only a single match
+     * resolves.
+     */
+    private String zoneIdByName(String zoneName) {
+        String normalized = zoneName.endsWith(".") ? zoneName : zoneName + ".";
+        List<HostedZone> matches = route53Service.listHostedZonesByName(zoneName, 0).stream()
+                .filter(zone -> normalized.equals(zone.getName()))
+                .toList();
+        if (matches.size() == 1) {
+            return matches.get(0).getId();
+        }
+        throw new AwsException("InvalidChangeBatch", matches.isEmpty()
+                ? "AWS::Route53::RecordSet references HostedZoneName " + zoneName
+                        + " but no such hosted zone exists."
+                : "AWS::Route53::RecordSet HostedZoneName " + zoneName
+                        + " matches more than one hosted zone; use HostedZoneId.", 400);
+    }
+
+    private List<ResourceRecord> parseResourceRecords(JsonNode props, ProvisionContext ctx) {
+        List<ResourceRecord> records = new ArrayList<>();
+        for (String value : ctx.resolveStringList(props, "ResourceRecords")) {
+            if (value != null && !value.isBlank()) {
+                records.add(new ResourceRecord(value));
+            }
+        }
+        return records;
+    }
+
+    private AliasTarget parseAliasTarget(JsonNode props, ProvisionContext ctx) {
+        JsonNode node = ctx.engine().resolveNode(props != null ? props.get("AliasTarget") : null);
+        if (node == null || node.isNull() || !node.isObject()) {
+            return null;
+        }
+        AliasTarget target = new AliasTarget();
+        target.setDnsName(node.path("DNSName").asText(null));
+        target.setHostedZoneId(node.path("HostedZoneId").asText(null));
+        target.setEvaluateTargetHealth(node.path("EvaluateTargetHealth").asBoolean(false));
+        return target;
     }
 
     private void provisionHostedZone(StackResource resource, JsonNode props, ProvisionContext ctx) {
@@ -157,18 +309,78 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
+    /**
+     * A record set's delete needs the zone id and type recorded at create time to build a matching
+     * DELETE change; the physical id alone only carries the name. The zone-backed types fall through
+     * to the id-only overload.
+     */
+    @Override
+    public void delete(StackResource resource, String region) {
+        if (RECORD_SET.equals(resource.getResourceType())) {
+            deleteRecordSet(resource);
+        } else {
+            delete(resource.getResourceType(), resource.getPhysicalId(), region);
+        }
+    }
+
     @Override
     public void delete(String resourceType, String physicalId, String region) {
         switch (resourceType) {
             case "AWS::Route53::HostedZone" -> route53Service.deleteHostedZone(physicalId);
-            // Nothing was written for the record, so there is nothing to remove; the warning
-            // mirrors the legacy dispatcher's default arm so the gap stays visible in the log.
+            // The record's zone and type live on the StackResource, not the physical id, so the
+            // id-only path has nothing to match a DELETE change against; delete(resource, region)
+            // is the real removal.
             case "AWS::Route53::RecordSet" -> LOG.warnv(
-                    "No delete implemented for resource type {0}: {1} is not removed here.",
-                    resourceType, physicalId);
+                    "No delete from the physical id alone for resource type {0}: {1} is removed via "
+                            + "delete(resource, region).", resourceType, physicalId);
             default -> throw new IllegalStateException(
                     "Route53CfnProvisioner received an unsupported type: " + resourceType);
         }
+    }
+
+    private void deleteRecordSet(StackResource resource) {
+        Map<String, String> attributes = resource.getAttributes() != null
+                ? resource.getAttributes() : Map.of();
+        String zoneId = attributes.get(RECORD_ZONE_ATTR);
+        String type = attributes.get(RECORD_TYPE_ATTR);
+        String name = resource.getPhysicalId();
+        if (zoneId == null || zoneId.isBlank() || type == null || type.isBlank()
+                || name == null || name.isBlank()) {
+            // A record from before this write path stored no zone, so there is nothing to remove.
+            LOG.warnv("No stored zone for Route53 record {0}; nothing to delete.", resource.getLogicalId());
+            return;
+        }
+        String setIdentifier = attributes.get(RECORD_SET_ID_ATTR);
+        // Removing a record the zone no longer has is a no-op, and a zone already gone tolerated; any
+        // other failure must reach the stack as DELETE_FAILED.
+        removeRecord(zoneId, name, type, setIdentifier, "CloudFormation delete " + resource.getLogicalId());
+    }
+
+    /**
+     * Removes a record by its identity, tolerating a zone or record already gone. A zone still
+     * holding the record blocks its own delete, so a superseded or deleted record must actually go.
+     */
+    private void removeRecord(String zoneId, String name, String type, String setIdentifier, String comment) {
+        CfnDeletes.safeDelete("Route53 record set", name + " " + type, () -> {
+            ResourceRecordSet existing = findRecord(zoneId, name, type, setIdentifier);
+            if (existing == null) {
+                return;
+            }
+            Map<String, Object> change = new HashMap<>();
+            change.put("action", "DELETE");
+            change.put("rrs", existing);
+            route53Service.changeResourceRecordSets(zoneId, List.of(change), comment);
+        }, "NoSuchHostedZone", "InvalidChangeBatch");
+    }
+
+    private ResourceRecordSet findRecord(String zoneId, String name, String type, String setIdentifier) {
+        for (ResourceRecordSet rrs : route53Service.listResourceRecordSets(zoneId, null, null, 0)) {
+            if (name.equals(rrs.getName()) && type.equals(rrs.getType())
+                    && Objects.equals(setIdentifier, rrs.getSetIdentifier())) {
+                return rrs;
+            }
+        }
+        return null;
     }
 
     private List<VpcAssociation> parseVpcs(JsonNode node) {

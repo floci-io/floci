@@ -82,6 +82,8 @@ class LogsMetricFilterCfnProvisionerTest {
                 "cwlogs-metric-filters.json".equals(i.getArgument(1))
                         ? canonicalStore
                         : AccountAwareStorageBackend.inMemory("000000000000"));
+        when(storage.create(any(), any(), any(), any())).thenAnswer(i ->
+                AccountAwareStorageBackend.inMemory("000000000000"));
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().cloudwatchlogs().maxStoredEvents()).thenReturn(Integer.MAX_VALUE);
         logs = new CloudWatchLogsService(storage, config, resolver, null, null);

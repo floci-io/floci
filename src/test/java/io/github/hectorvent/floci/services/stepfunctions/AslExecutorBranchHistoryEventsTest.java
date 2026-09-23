@@ -31,6 +31,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -61,6 +62,8 @@ class AslExecutorBranchHistoryEventsTest {
     void setUp() {
         Instance<StepFunctionsService> sfnService = mock(Instance.class);
         when(sfnService.get()).thenReturn(mock(StepFunctionsService.class));
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().stepfunctions().maxWaitSeconds()).thenReturn(30);
         executor = new AslExecutor(
                 mock(LambdaExecutorService.class),
                 mock(LambdaFunctionStore.class),
@@ -77,7 +80,7 @@ class AslExecutorBranchHistoryEventsTest {
                 mock(io.github.hectorvent.floci.services.scheduler.SchedulerController.class),
                 objectMapper,
                 new JsonataEvaluator(objectMapper),
-                sfnService, mock(EmulatorConfig.class), vertx,
+                sfnService, config, vertx,
                 mock(io.github.hectorvent.floci.core.common.CustomResourceLiveness.class));
     }
 

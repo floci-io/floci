@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.ecs.model.CapacityProviderStrategyIte
 import io.github.hectorvent.floci.services.ecs.model.Container;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDependency;
+import io.github.hectorvent.floci.services.ecs.model.ContainerImage;
 import io.github.hectorvent.floci.services.ecs.model.ContainerInstance;
 import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
 import io.github.hectorvent.floci.services.ecs.model.Deployment;
@@ -30,6 +31,7 @@ import io.github.hectorvent.floci.services.ecs.model.ProtectedTask;
 import io.github.hectorvent.floci.services.ecs.model.RuntimePlatform;
 import io.github.hectorvent.floci.services.ecs.model.Secret;
 import io.github.hectorvent.floci.services.ecs.model.ServiceDeployment;
+import io.github.hectorvent.floci.services.ecs.model.ServiceEvent;
 import io.github.hectorvent.floci.services.ecs.model.ServiceRevision;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.ecs.model.TaskNetworkInterface;
@@ -47,6 +49,7 @@ import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Renders ECS domain objects to the JSON 1.1 shapes the data plane returns.
@@ -69,7 +72,25 @@ public class EcsResponseWriter {
 
     // ── Clusters ──────────────────────────────────────────────────────────────
 
+    /**
+     * The include values DescribeClusters understands. Every operation other than DescribeClusters
+     * returns the cluster whole, so {@link #clusterNode(EcsCluster)} passes all of them.
+     */
+    public static final Set<String> ALL_CLUSTER_INCLUDES =
+            Set.of("ATTACHMENTS", "CONFIGURATIONS", "SETTINGS", "STATISTICS", "TAGS");
+
     public ObjectNode clusterNode(EcsCluster c) {
+        return clusterNode(c, ALL_CLUSTER_INCLUDES);
+    }
+
+    /**
+     * Renders a cluster, holding back the members DescribeClusters only returns when the request
+     * asked for them: "If this field is omitted, this information isn't included."
+     *
+     * <p>The gated members are emitted whenever they are asked for, empty array and all, so a
+     * client can tell an empty answer from a withheld one.
+     */
+    public ObjectNode clusterNode(EcsCluster c, Set<String> include) {
         ObjectNode n = objectMapper.createObjectNode();
         n.put("clusterArn", c.getClusterArn());
         n.put("clusterName", c.getClusterName());
@@ -78,7 +99,7 @@ public class EcsResponseWriter {
         n.put("runningTasksCount", c.getRunningTasksCount());
         n.put("pendingTasksCount", c.getPendingTasksCount());
         n.put("activeServicesCount", c.getActiveServicesCount());
-        if (c.getSettings() != null && !c.getSettings().isEmpty()) {
+        if (include.contains("SETTINGS") && c.getSettings() != null && !c.getSettings().isEmpty()) {
             ArrayNode settings = objectMapper.createArrayNode();
             c.getSettings().forEach(s -> {
                 ObjectNode sn = objectMapper.createObjectNode();
@@ -88,12 +109,36 @@ public class EcsResponseWriter {
             });
             n.set("settings", settings);
         }
+        if (include.contains("STATISTICS")) {
+            ArrayNode statistics = objectMapper.createArrayNode();
+            service.clusterStatistics(c).forEach(kv -> {
+                ObjectNode sn = objectMapper.createObjectNode();
+                sn.put("name", kv.name());
+                sn.put("value", kv.value());
+                statistics.add(sn);
+            });
+            n.set("statistics", statistics);
+        }
+        if (include.contains("ATTACHMENTS")) {
+            // Floci creates no managed scaling policies, so a cluster never has attachments.
+            n.set("attachments", objectMapper.createArrayNode());
+        }
+        if (include.contains("CONFIGURATIONS") && c.getConfiguration() != null) {
+            n.set("configuration", objectMapper.valueToTree(c.getConfiguration()));
+        }
         if (c.getCapacityProviders() != null) {
             ArrayNode cp = objectMapper.createArrayNode();
             c.getCapacityProviders().forEach(cp::add);
             n.set("capacityProviders", cp);
         }
-        if (c.getTags() != null && !c.getTags().isEmpty()) {
+        if (c.getDefaultCapacityProviderStrategy() != null) {
+            n.set("defaultCapacityProviderStrategy",
+                    objectMapper.valueToTree(c.getDefaultCapacityProviderStrategy()));
+        }
+        if (c.getServiceConnectDefaults() != null) {
+            n.set("serviceConnectDefaults", objectMapper.valueToTree(c.getServiceConnectDefaults()));
+        }
+        if (include.contains("TAGS") && c.getTags() != null && !c.getTags().isEmpty()) {
             n.set("tags", tagsNode(c.getTags()));
         }
         return n;
@@ -652,7 +697,38 @@ public class EcsResponseWriter {
         ArrayNode deployments = objectMapper.createArrayNode();
         service.deploymentsFor(s).forEach(d -> deployments.add(deploymentNode(d)));
         n.set("deployments", deployments);
+        // Both are always reported, empty and all: a service under the ECS controller has no task
+        // sets, and one that has not converged yet has no events, and a client has to be able to
+        // tell that from a member the emulator simply never writes.
+        ArrayNode taskSets = objectMapper.createArrayNode();
+        service.taskSetsFor(s).forEach(ts -> taskSets.add(taskSetNode(ts)));
+        n.set("taskSets", taskSets);
+        ArrayNode events = objectMapper.createArrayNode();
+        service.eventsFor(s).forEach(e -> events.add(serviceEventNode(e)));
+        n.set("events", events);
+        // The service points at the deployment and revision it is currently on, which is how a
+        // caller gets from DescribeServices to DescribeServiceDeployments without listing first.
+        ServiceDeployment current = service.currentServiceDeployment(s);
+        if (current != null) {
+            n.put("currentServiceDeployment", current.getServiceDeploymentArn());
+            if (current.getTargetServiceRevisionArn() != null) {
+                ObjectNode revision = objectMapper.createObjectNode();
+                revision.put("arn", current.getTargetServiceRevisionArn());
+                revision.put("requestedTaskCount", s.getDesiredCount());
+                revision.put("runningTaskCount", s.getRunningCount());
+                revision.put("pendingTaskCount", s.getPendingCount());
+                n.set("currentServiceRevisions", objectMapper.createArrayNode().add(revision));
+            }
+        }
         EcsJsonPassthrough.write(n, s.getUnparsed(), objectMapper);
+        return n;
+    }
+
+    private ObjectNode serviceEventNode(ServiceEvent event) {
+        ObjectNode n = objectMapper.createObjectNode();
+        n.put("id", event.id());
+        putInstant(n, "createdAt", event.createdAt());
+        n.put("message", event.message());
         return n;
     }
 
@@ -691,14 +767,28 @@ public class EcsResponseWriter {
         n.put("failedTasks", d.getFailedTasks());
         n.put("rolloutState", d.getRolloutState());
         n.put("rolloutStateReason", d.getRolloutStateReason());
-        if (d.getLaunchType() != null) { n.put("launchType", d.getLaunchType().name()); }
-        if (d.getCreatedAt() != null) { n.put("createdAt", d.getCreatedAt().toEpochMilli() / 1000.0); }
-        if (d.getUpdatedAt() != null) { n.put("updatedAt", d.getUpdatedAt().toEpochMilli() / 1000.0); }
+        if (d.getCapacityProviderStrategy() != null && !d.getCapacityProviderStrategy().isEmpty()) {
+            n.set("capacityProviderStrategy",
+                    capacityProviderStrategyNode(d.getCapacityProviderStrategy()));
+        } else if (d.getLaunchType() != null) {
+            n.put("launchType", d.getLaunchType().name());
+        }
+        if (d.getPlatformVersion() != null) { n.put("platformVersion", d.getPlatformVersion()); }
+        if (d.getPlatformFamily() != null) { n.put("platformFamily", d.getPlatformFamily()); }
+        if (d.getNetworkConfiguration() != null
+                && d.getNetworkConfiguration().getAwsvpcConfiguration() != null) {
+            n.set("networkConfiguration",
+                    networkConfigurationNode(d.getNetworkConfiguration().getAwsvpcConfiguration()));
+        }
+        putInstant(n, "createdAt", d.getCreatedAt());
+        putInstant(n, "updatedAt", d.getUpdatedAt());
         if (d.getServiceConnectConfiguration() != null) {
             n.set("serviceConnectConfiguration", objectMapper.valueToTree(d.getServiceConnectConfiguration()));
         }
         return n;
     }
+
+    // ── Everything else ───────────────────────────────────────────────────────
 
     public ObjectNode failureNode(Failure f) {
         ObjectNode n = objectMapper.createObjectNode();
@@ -709,23 +799,71 @@ public class EcsResponseWriter {
     }
 
     public ObjectNode containerInstanceNode(ContainerInstance ci) {
+        return containerInstanceNode(ci, true, true);
+    }
+
+    /**
+     * @param includeTags DescribeContainerInstances returns tags only for {@code include: ["TAGS"]}
+     * @param includeHealth and the health status only for
+     *                      {@code include: ["CONTAINER_INSTANCE_HEALTH"]}: "If this field is
+     *                      omitted, tags and container instance health status aren't included in
+     *                      the response."
+     */
+    public ObjectNode containerInstanceNode(ContainerInstance ci, boolean includeTags,
+                                             boolean includeHealth) {
         ObjectNode n = objectMapper.createObjectNode();
         n.put("containerInstanceArn", ci.getContainerInstanceArn());
         n.put("ec2InstanceId", ci.getEc2InstanceId());
         n.put("status", ci.getStatus());
+        if (ci.getStatusReason() != null) { n.put("statusReason", ci.getStatusReason()); }
         n.put("runningTasksCount", ci.getRunningTasksCount());
         n.put("pendingTasksCount", ci.getPendingTasksCount());
-        n.put("agentVersion", ci.getAgentVersion());
         n.put("agentConnected", ci.isAgentConnected());
+        if (ci.getAgentUpdateStatus() != null) { n.put("agentUpdateStatus", ci.getAgentUpdateStatus()); }
+        if (ci.getCapacityProviderName() != null) {
+            n.put("capacityProviderName", ci.getCapacityProviderName());
+        }
+        n.put("version", ci.getVersion());
+        putInstant(n, "registeredAt", ci.getRegisteredAt());
+        if (ci.getVersionInfo() != null) {
+            n.set("versionInfo", objectMapper.valueToTree(ci.getVersionInfo()));
+        }
+        if (ci.getRegisteredResources() != null) {
+            n.set("registeredResources", objectMapper.valueToTree(ci.getRegisteredResources()));
+        }
+        if (ci.getRemainingResources() != null) {
+            n.set("remainingResources", objectMapper.valueToTree(ci.getRemainingResources()));
+        }
         if (ci.getAttributes() != null && !ci.getAttributes().isEmpty()) {
             ArrayNode attrs = objectMapper.createArrayNode();
             ci.getAttributes().forEach(a -> attrs.add(attributeNode(a)));
             n.set("attributes", attrs);
         }
-        if (ci.getTags() != null && !ci.getTags().isEmpty()) {
+        if (includeHealth) {
+            n.set("healthStatus", containerInstanceHealthNode(ci));
+        }
+        if (includeTags && ci.getTags() != null && !ci.getTags().isEmpty()) {
             n.set("tags", tagsNode(ci.getTags()));
         }
         return n;
+    }
+
+    /**
+     * The instance's health. Floci runs no agent health checks of its own, so the one check it can
+     * answer honestly is {@code AGENT_CONNECTIVITY}, taken from the registration state the
+     * instance already tracks, and the overall status follows it.
+     */
+    private ObjectNode containerInstanceHealthNode(ContainerInstance ci) {
+        String status = ci.isAgentConnected() ? "OK" : "IMPAIRED";
+        ObjectNode health = objectMapper.createObjectNode();
+        health.put("overallStatus", status);
+        ObjectNode connectivity = objectMapper.createObjectNode();
+        connectivity.put("type", "AGENT_CONNECTIVITY");
+        connectivity.put("status", status);
+        putInstant(connectivity, "lastUpdated", ci.getRegisteredAt());
+        putInstant(connectivity, "lastStatusChange", ci.getRegisteredAt());
+        health.set("details", objectMapper.createArrayNode().add(connectivity));
+        return health;
     }
 
     /** @param includeTags DescribeCapacityProviders returns tags only for {@code include: ["TAGS"]}. */
@@ -752,6 +890,11 @@ public class EcsResponseWriter {
     }
 
     public ObjectNode taskSetNode(TaskSet ts) {
+        return taskSetNode(ts, true);
+    }
+
+    /** @param includeTags DescribeTaskSets returns tags only for {@code include: ["TAGS"]}. */
+    public ObjectNode taskSetNode(TaskSet ts, boolean includeTags) {
         ObjectNode n = objectMapper.createObjectNode();
         n.put("id", ts.getId());
         n.put("taskSetArn", ts.getTaskSetArn());
@@ -763,29 +906,79 @@ public class EcsResponseWriter {
         n.put("pendingCount", ts.getPendingCount());
         n.put("runningCount", ts.getRunningCount());
         n.put("stabilityStatus", ts.getStabilityStatus());
+        putInstant(n, "stabilityStatusAt", ts.getStabilityStatusAt());
         if (ts.getLaunchType() != null) { n.put("launchType", ts.getLaunchType().name()); }
+        if (ts.getCapacityProviderStrategy() != null && !ts.getCapacityProviderStrategy().isEmpty()) {
+            n.set("capacityProviderStrategy",
+                    capacityProviderStrategyNode(ts.getCapacityProviderStrategy()));
+        }
+        if (ts.getPlatformVersion() != null) { n.put("platformVersion", ts.getPlatformVersion()); }
+        if (ts.getPlatformFamily() != null) { n.put("platformFamily", ts.getPlatformFamily()); }
         if (ts.getExternalId() != null) { n.put("externalId", ts.getExternalId()); }
+        if (ts.getStartedBy() != null) { n.put("startedBy", ts.getStartedBy()); }
+        if (ts.getNetworkConfiguration() != null
+                && ts.getNetworkConfiguration().getAwsvpcConfiguration() != null) {
+            n.set("networkConfiguration",
+                    networkConfigurationNode(ts.getNetworkConfiguration().getAwsvpcConfiguration()));
+        }
+        if (ts.getLoadBalancers() != null && !ts.getLoadBalancers().isEmpty()) {
+            ArrayNode lbs = objectMapper.createArrayNode();
+            ts.getLoadBalancers().forEach(lb -> lbs.add(loadBalancerNode(lb)));
+            n.set("loadBalancers", lbs);
+        }
+        if (ts.getServiceRegistries() != null && !ts.getServiceRegistries().isEmpty()) {
+            n.set("serviceRegistries", objectMapper.valueToTree(ts.getServiceRegistries()));
+        }
         ObjectNode scale = objectMapper.createObjectNode();
         scale.put("value", ts.getScaleValue());
         scale.put("unit", ts.getScaleUnit());
         n.set("scale", scale);
-        if (ts.getCreatedAt() != null) { n.put("createdAt", ts.getCreatedAt().toEpochMilli() / 1000.0); }
-        if (ts.getUpdatedAt() != null) { n.put("updatedAt", ts.getUpdatedAt().toEpochMilli() / 1000.0); }
-        if (ts.getTags() != null && !ts.getTags().isEmpty()) {
+        putInstant(n, "createdAt", ts.getCreatedAt());
+        putInstant(n, "updatedAt", ts.getUpdatedAt());
+        if (includeTags && ts.getTags() != null && !ts.getTags().isEmpty()) {
             n.set("tags", tagsNode(ts.getTags()));
         }
         return n;
     }
 
+    /**
+     * A service deployment. AWS's {@code ServiceDeployment} shape carries no
+     * {@code taskDefinition}: the deployment points at the revision it targets, and the revision
+     * names the task definition, so that is the only route reported here.
+     */
     public ObjectNode serviceDeploymentNode(ServiceDeployment d) {
         ObjectNode n = objectMapper.createObjectNode();
         n.put("serviceDeploymentArn", d.getServiceDeploymentArn());
         n.put("serviceArn", d.getServiceArn());
         n.put("clusterArn", d.getClusterArn());
-        n.put("taskDefinition", d.getTaskDefinition());
         n.put("status", d.getStatus());
-        if (d.getCreatedAt() != null) { n.put("createdAt", d.getCreatedAt().toEpochMilli() / 1000.0); }
-        if (d.getUpdatedAt() != null) { n.put("updatedAt", d.getUpdatedAt().toEpochMilli() / 1000.0); }
+        putInstant(n, "createdAt", d.getCreatedAt());
+        putInstant(n, "startedAt", d.getStartedAt());
+        putInstant(n, "finishedAt", d.getFinishedAt());
+        putInstant(n, "updatedAt", d.getUpdatedAt());
+        if (d.getTargetServiceRevisionArn() != null) {
+            n.set("targetServiceRevision",
+                    serviceRevisionSummaryNode(d.getTargetServiceRevisionArn(), d.getServiceArn()));
+        }
+        ArrayNode sources = objectMapper.createArrayNode();
+        if (d.getSourceServiceRevisionArns() != null) {
+            d.getSourceServiceRevisionArns()
+                    .forEach(arn -> sources.add(serviceRevisionSummaryNode(arn, d.getServiceArn())));
+        }
+        n.set("sourceServiceRevisions", sources);
+        return n;
+    }
+
+    /** The counts a revision summary reports track the service the revision belongs to. */
+    private ObjectNode serviceRevisionSummaryNode(String revisionArn, String serviceArn) {
+        ObjectNode n = objectMapper.createObjectNode();
+        n.put("arn", revisionArn);
+        EcsServiceModel svc = service.serviceByArn(serviceArn);
+        if (svc != null) {
+            n.put("requestedTaskCount", svc.getDesiredCount());
+            n.put("runningTaskCount", svc.getRunningCount());
+            n.put("pendingTaskCount", svc.getPendingCount());
+        }
         return n;
     }
 
@@ -795,8 +988,45 @@ public class EcsResponseWriter {
         n.put("serviceArn", r.getServiceArn());
         n.put("clusterArn", r.getClusterArn());
         n.put("taskDefinition", r.getTaskDefinition());
-        if (r.getLaunchType() != null) { n.put("launchType", r.getLaunchType().name()); }
-        if (r.getCreatedAt() != null) { n.put("createdAt", r.getCreatedAt().toEpochMilli() / 1000.0); }
+        if (r.getCapacityProviderStrategy() != null && !r.getCapacityProviderStrategy().isEmpty()) {
+            n.set("capacityProviderStrategy",
+                    capacityProviderStrategyNode(r.getCapacityProviderStrategy()));
+        } else if (r.getLaunchType() != null) {
+            n.put("launchType", r.getLaunchType().name());
+        }
+        if (r.getPlatformVersion() != null) { n.put("platformVersion", r.getPlatformVersion()); }
+        if (r.getPlatformFamily() != null) { n.put("platformFamily", r.getPlatformFamily()); }
+        if (r.getLoadBalancers() != null && !r.getLoadBalancers().isEmpty()) {
+            ArrayNode lbs = objectMapper.createArrayNode();
+            r.getLoadBalancers().forEach(lb -> lbs.add(loadBalancerNode(lb)));
+            n.set("loadBalancers", lbs);
+        }
+        if (r.getServiceRegistries() != null && !r.getServiceRegistries().isEmpty()) {
+            n.set("serviceRegistries", objectMapper.valueToTree(r.getServiceRegistries()));
+        }
+        if (r.getNetworkConfiguration() != null
+                && r.getNetworkConfiguration().getAwsvpcConfiguration() != null) {
+            n.set("networkConfiguration",
+                    networkConfigurationNode(r.getNetworkConfiguration().getAwsvpcConfiguration()));
+        }
+        if (r.getServiceConnectConfiguration() != null) {
+            n.set("serviceConnectConfiguration",
+                    objectMapper.valueToTree(r.getServiceConnectConfiguration()));
+        }
+        if (r.getContainerImages() != null && !r.getContainerImages().isEmpty()) {
+            ArrayNode images = objectMapper.createArrayNode();
+            for (ContainerImage image : r.getContainerImages()) {
+                ObjectNode imageNode = objectMapper.createObjectNode();
+                imageNode.put("containerName", image.containerName());
+                imageNode.put("image", image.image());
+                if (image.imageDigest() != null) { imageNode.put("imageDigest", image.imageDigest()); }
+                images.add(imageNode);
+            }
+            n.set("containerImages", images);
+        }
+        // Floci runs no GuardDuty runtime monitoring, which is what this reports.
+        n.put("guardDutyEnabled", false);
+        putInstant(n, "createdAt", r.getCreatedAt());
         return n;
     }
 
@@ -817,10 +1047,12 @@ public class EcsResponseWriter {
         return n;
     }
 
-    public ObjectNode settingNode(String name, String value) {
+    public ObjectNode settingNode(EcsService.AccountSetting setting) {
         ObjectNode n = objectMapper.createObjectNode();
-        n.put("name", name);
-        n.put("value", value);
+        n.put("name", setting.name());
+        n.put("value", setting.value());
+        if (setting.principalArn() != null) { n.put("principalArn", setting.principalArn()); }
+        if (setting.type() != null) { n.put("type", setting.type()); }
         return n;
     }
 

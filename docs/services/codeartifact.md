@@ -5,9 +5,11 @@
 **Endpoint:** `http://localhost:4566`
 
 Floci supports the CodeArtifact control plane: domains, repositories, resource policies, tags,
-and public upstream (external) connections. Package publish/fetch is implemented for the
-`generic` format only, matching AWS's own restriction that `PublishPackageVersion` accepts only
-`generic`; the other formats (npm, PyPI, Maven, NuGet, etc.) have no real package-manager-protocol
+and public upstream (external) connections. Package publish/fetch through the CodeArtifact API
+itself is implemented for the `generic` format only, matching AWS's own restriction that
+`PublishPackageVersion` accepts only `generic`. The `maven` format is served through its own real
+package-manager-protocol proxy (`mvn`/Gradle publish and resolve both work against the URL
+`GetRepositoryEndpoint` returns); the remaining formats (npm, PyPI, NuGet, etc.) have no real
 proxy behind them yet.
 
 ## Supported Actions
@@ -16,9 +18,10 @@ proxy behind them yet.
 | Action | Description |
 | --- | --- |
 | `CreateDomain` | Creates a domain (max 10 per account per Region), optionally with a KMS encryption key and initial tags. |
-| `DeleteDomain` | Deletes a domain; fails with `ConflictException` while it still contains repositories. |
+| `DeleteDomain` | Deletes a domain; fails with `ConflictException` while it still contains repositories, and with `ResourceNotFoundException` for a missing domain (as AWS does, although the API reference does not list it). |
 | `DescribeDomain` | Returns a domain's full description, including its repository count. |
 | `ListDomains` | Lists domain summaries for the account and Region, paginated. |
+| `GetAuthorizationToken` | Issues a bearer token scoped to a domain, valid for 0 (12 hours) or 900-43200 seconds, required by the `maven` repository endpoint. |
 | `PutDomainPermissionsPolicy` | Attaches or replaces a domain's resource policy, versioned by `policyRevision`. |
 | `GetDomainPermissionsPolicy` | Returns a domain's current resource policy and revision. |
 | `DeleteDomainPermissionsPolicy` | Removes a domain's resource policy, optionally checked against `policyRevision`. |
@@ -65,6 +68,30 @@ the bytes Floci actually received, not echoed from the request. Floci enforces A
 quotas for this action: a 5 GB max asset file size and a 350-asset cap per package version, both
 returning `ServiceQuotaExceededException`.
 
+## The Maven repository endpoint
+
+`GetRepositoryEndpoint` for `format=maven` returns `http://localhost:4566/codeartifact/maven/<domain>/<repository>/`.
+Real Maven clients (`mvn deploy`, `mvn dependency:get`, Gradle) can publish to and resolve from
+that URL directly, the same way they would against real AWS CodeArtifact; it speaks the raw Maven
+repository layout (GET/PUT/HEAD over a group/artifact/version path), not the CodeArtifact JSON API.
+Every request needs a token from `GetAuthorizationToken` scoped to the domain being accessed,
+either as `Authorization: Bearer <token>` or as HTTP Basic with the token as the password (the
+username is ignored). Basic is what a real `settings.xml`, configured the way
+[AWS documents for `mvn`](https://docs.aws.amazon.com/codeartifact/latest/ug/maven-mvn.html)
+(`<server><username>aws</username><password>${env.CODEARTIFACT_AUTH_TOKEN}</password></server>`),
+actually sends: Maven's HTTP wagon authenticates with Basic, not a custom header. A missing,
+invalid, expired, or wrong-domain token gets a 401 challenging `Basic`.
+
+It is backed by a shared [Reposilite](https://reposilite.com) container that Floci starts lazily
+on first use and reuses for every CodeArtifact repository; a CodeArtifact repository maps to its
+own Reposilite repository, provisioned automatically the first time it is published to or fetched
+from, and identified internally by a fresh id generated at `CreateRepository` time rather than a
+name derived from the domain/repository, so a repository deleted and recreated under the same name
+never inherits the previous one's artifacts. Two config knobs,
+`FLOCI_SERVICES_CODEARTIFACT_MAVEN_IMAGE` and `FLOCI_SERVICES_CODEARTIFACT_MAVEN_URL`, pin the
+image version or point at an already-running instance and skip container management, matching the
+pattern used elsewhere in Floci for sidecars.
+
 ## AWS-compatible failures
 
 Domain and repository names, tags, pagination, duplicate names, missing upstreams, policy-revision
@@ -99,11 +126,35 @@ state.
   `DisposePackageVersions`, and `UpdatePackageVersionsStatus` don't exist yet; the only way to
   move a version from `Unfinished` to `Published` today is a follow-up `PublishPackageVersion`
   call that omits the `unfinished` flag.
-- **The 5 GB asset size quota is nominal.** `PublishPackageVersion` receives the request body as
-  a single byte array before Floci ever checks its length, so a request already large enough to
-  exhaust available heap fails before the quota check runs. The `ServiceQuotaExceededException`
-  behavior is correct for anything that does fit in memory; it is not itself a streaming size
-  limit.
+- **The 5 GB asset size quota is nominal.** `PublishPackageVersion` and the Maven repository
+  endpoint both receive the request body as a single byte array before Floci ever checks its
+  length, so a request already large enough to exhaust available heap fails before the quota check
+  runs. The rejection (`ServiceQuotaExceededException` from `PublishPackageVersion`, HTTP 413 from
+  the Maven endpoint) is correct for anything that does fit in memory; it is not itself a streaming
+  size limit.
+- **Deleting a CodeArtifact repository does not remove its Maven artifacts.** The backing
+  Reposilite repository and everything published to it are left behind (though never reused: see
+  above); only the CodeArtifact-side metadata is deleted. This wastes storage inside the sidecar
+  container over a long-running Floci process but is otherwise inert, since a deleted repository's
+  endpoint already returns 404 through the proxy regardless of what Reposilite still holds.
+- **Maven artifacts do not survive a Floci restart, even under persistent storage.** The Reposilite
+  sidecar container has no volume attached and is removed on shutdown along with everything
+  published to it. CodeArtifact repository/domain metadata (including the stored
+  `mavenRepositoryId`) survives a restart the same way any other Floci state does under persistent
+  storage mode; the artifacts themselves do not, so the first Maven request after a restart
+  re-provisions an empty Reposilite repository and returns 404 for anything published before the
+  restart.
+- **`GetAuthorizationToken` tokens are not revocable and are not tied to any IAM identity.** Real
+  CodeArtifact tokens are scoped to the calling principal's permissions; Floci's are scoped only to
+  the domain named in the request; anyone who obtains one keeps the same domain-scoped access for
+  its full lifetime.
+- **The Maven repository endpoint does not resolve through upstream repositories or external
+  connections.** On real CodeArtifact, a repository with another repository configured as an
+  upstream (`UpdateRepository`'s `upstreams`) or with an `AssociateExternalConnection` to a public
+  repository (`public:maven-central`, etc.) serves packages from those sources too, not just its
+  own. Floci's Maven proxy only ever looks up the repository's own backing storage: a package that
+  exists solely in an upstream, or only through an external connection, returns 404 through a
+  repository that has it configured as one.
 
 See the [CodeArtifact API Reference](https://docs.aws.amazon.com/codeartifact/latest/APIReference/Welcome.html).
 
@@ -112,3 +163,6 @@ See the [CodeArtifact API Reference](https://docs.aws.amazon.com/codeartifact/la
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_CODEARTIFACT_ENABLED` | `true` | Enable or disable CodeArtifact |
+| `FLOCI_SERVICES_CODEARTIFACT_MAVEN_IMAGE` | `dzikoysk/reposilite:3.6.3` | Reposilite image used to serve the `maven` format |
+| `FLOCI_SERVICES_CODEARTIFACT_MAVEN_URL` | unset | When set, use this URL and skip Reposilite container management |
+| `FLOCI_SERVICES_CODEARTIFACT_MAVEN_TOKEN` | unset | `name:secret` access token for a pre-configured `MAVEN_URL` |

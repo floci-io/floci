@@ -1363,8 +1363,10 @@ public class CodeDeployService {
                 createTaskSet.setService(serviceName);
                 createTaskSet.setTaskDefinition(appSpec.taskDefinition);
                 createTaskSet.setScaleValue(100.0);
-                createTaskSet.setScaleUnit("PERCENT");
+                // ECS reports the deployment id as the task set's externalId, and CODE_DEPLOY as
+                // its startedBy, which is how a client tells a CodeDeploy set from an external one.
                 createTaskSet.setExternalId(deploymentId);
+                createTaskSet.setStartedBy("CODE_DEPLOY");
                 greenTaskSet = ecsService.createTaskSet(createTaskSet, region);
                 appendTaskSetInfo(ecsTargetMap, greenTaskSet, greenTgArn, 0.0);
                 finishLifecycleEvent(installEvent, "Succeeded");

@@ -40,6 +40,7 @@ import io.github.hectorvent.floci.services.ses.SesCvetController;
 import io.github.hectorvent.floci.services.ses.SesDedicatedIpController;
 import io.github.hectorvent.floci.services.ses.SesIdentityController;
 import io.github.hectorvent.floci.services.ses.SesImportJobController;
+import io.github.hectorvent.floci.services.ses.SesInsightsController;
 import io.github.hectorvent.floci.services.ses.SesSendController;
 import io.github.hectorvent.floci.services.ses.SesSuppressionController;
 import io.github.hectorvent.floci.services.ses.SesTagController;
@@ -300,9 +301,10 @@ public class ResolvedServiceCatalog {
                         Set.of(SesAccountController.class, SesConfigurationSetController.class,
                                 SesContactController.class, SesCvetController.class,
                                 SesDedicatedIpController.class, SesIdentityController.class,
-                                SesSendController.class, SesSuppressionController.class,
-                                SesTagController.class, SesTemplateController.class,
-                                SesImportJobController.class, SesTenantController.class)),
+                                SesInsightsController.class, SesSendController.class,
+                                SesSuppressionController.class, SesTagController.class,
+                                SesTemplateController.class, SesImportJobController.class,
+                                SesTenantController.class)),
                 descriptor("es", "opensearch", config.services().opensearch().enabled(), true,
                         "opensearch", storageMode(config.storage().services().opensearch().mode(), config.storage().mode()),
                         config.storage().services().opensearch().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
@@ -733,7 +735,11 @@ public class ResolvedServiceCatalog {
                         "marketplace", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON, ServiceProtocol.JSON, ServiceProtocol.CBOR),
                         Set.of("AWSMPCommerceService_v20200301.", "AWSMPEntitlementService.", "AWSMPMeteringService."), Set.of("aws-marketplace"), Set.of("AWS Marketplace Entitlement Service"),
-                        Set.of(MarketplaceCatalogController.class, MarketplaceDeploymentController.class, MarketplaceReportingController.class, MarketplaceDiscoveryController.class))
+                        Set.of(MarketplaceCatalogController.class, MarketplaceDeploymentController.class, MarketplaceReportingController.class, MarketplaceDiscoveryController.class)),
+                descriptor("dms", "dms", config.services().dms().enabled(), true,
+                        "dms", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("AmazonDMSv20160101."), Set.of("dms"), Set.of(), Set.of())
         ));
     }
 

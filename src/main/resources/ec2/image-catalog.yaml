@@ -31,6 +31,19 @@ images:
     architecture: x86_64
     creationDate: "2023-03-15T00:00:00.000Z"
 
+  - imageId: ami-amazonlinux2023-arm64
+    publicParameterNames:
+      - /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+      - /aws/service/ami-amazon-linux-latest/al2023-ami-minimal-kernel-default-arm64
+      - /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-arm64
+    dockerImage: public.ecr.aws/amazonlinux/amazonlinux:2023
+    name: al2023-ami-2023.0.20230315.0-kernel-6.1-arm64
+    description: Amazon Linux 2023 AMI
+    ownerId: "137112412989"
+    imageOwnerAlias: amazon
+    architecture: arm64
+    creationDate: "2023-03-15T00:00:00.000Z"
+
   - imageId: ami-0abcdef1234567892
     aliases:
       - ami-ubuntu2004

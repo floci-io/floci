@@ -127,6 +127,60 @@ class CloudWatchMetricsServiceTest {
     // ──────────────────────────── GetMetricStatistics ────────────────────────────
 
     @Test
+    void getMetricStatisticsFiltersByUnit() {
+        MetricDatum count = datum("Requests", 10);
+        count.setUnit("Count");
+        MetricDatum bytes = datum("Requests", 20);
+        bytes.setUnit("Bytes");
+        service.putMetricData(NAMESPACE, List.of(count, bytes), REGION);
+
+        Instant start = Instant.now().minusSeconds(60);
+        Instant end = Instant.now().plusSeconds(60);
+
+        List<CloudWatchMetricsService.Datapoint> matching = service.getMetricStatistics(
+                NAMESPACE, "Requests", null, start, end, 60, List.of("Sum"), "Count", REGION);
+        assertEquals(1, matching.size());
+        assertEquals(10.0, matching.getFirst().sum());
+        assertEquals("Count", matching.getFirst().unit());
+
+        List<CloudWatchMetricsService.Datapoint> otherUnit = service.getMetricStatistics(
+                NAMESPACE, "Requests", null, start, end, 60, List.of("Sum"), "Bytes", REGION);
+        assertEquals(1, otherUnit.size());
+        assertEquals(20.0, otherUnit.getFirst().sum());
+        assertEquals("Bytes", otherUnit.getFirst().unit());
+
+        List<CloudWatchMetricsService.Datapoint> noMatch = service.getMetricStatistics(
+                NAMESPACE, "Requests", null, start, end, 60, List.of("Sum"), "Percent", REGION);
+        assertTrue(noMatch.isEmpty());
+    }
+
+    @Test
+    void getMetricStatisticsTreatsNullOrNoneOrBlankUnitAsNoFilter() {
+        MetricDatum count = datum("Requests", 10);
+        count.setUnit("Count");
+        MetricDatum bytes = datum("Requests", 20);
+        bytes.setUnit("Bytes");
+        service.putMetricData(NAMESPACE, List.of(count, bytes), REGION);
+
+        Instant start = Instant.now().minusSeconds(60);
+        Instant end = Instant.now().plusSeconds(60);
+
+        List<CloudWatchMetricsService.Datapoint> allNull = service.getMetricStatistics(
+                NAMESPACE, "Requests", null, start, end, 60, List.of("Sum"), null, REGION);
+        assertEquals(1, allNull.size());
+        assertEquals(30.0, allNull.getFirst().sum());
+
+        List<CloudWatchMetricsService.Datapoint> allNone = service.getMetricStatistics(
+                NAMESPACE, "Requests", null, start, end, 60, List.of("Sum"), "None", REGION);
+        assertEquals(1, allNone.size());
+        assertEquals(30.0, allNone.getFirst().sum());
+
+        List<CloudWatchMetricsService.Datapoint> allBlank = service.getMetricStatistics(
+                NAMESPACE, "Requests", null, start, end, 60, List.of("Sum"), "  ", REGION);
+        assertEquals(1, allBlank.size());
+    }
+
+    @Test
     void getMetricStatisticsBucketsByPeriod() {
         long now = Instant.now().getEpochSecond();
         long bucket1 = (now / 60) * 60;

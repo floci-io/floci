@@ -74,6 +74,20 @@ public class Cluster {
     @JsonIgnore
     private int hostPort;
 
+    @JsonIgnore
+    private String podCidr;
+
+    /**
+     * Internal flag indicating whether the Kubernetes version was explicitly requested by
+     * the caller (true) or defaulted (false). Persisted to storage so that clusters explicitly
+     * pinned to the default version (e.g. 1.29) resolve to their pinned image across restarts
+     * rather than falling back to the unversioned default image. Omitted from AWS API responses
+     * by toClusterResponse in EksController.
+     */
+    @JsonProperty("explicitVersion")
+    @JsonInclude(JsonInclude.Include.NON_DEFAULT)
+    private boolean explicitVersion;
+
     /**
      * Resolved Docker container/volume name for this cluster's k3s resources. In-memory only
      * (never part of the AWS response shape): assigned when the container is started, or
@@ -148,4 +162,38 @@ public class Cluster {
 
     public String getDockerName() { return dockerName; }
     public void setDockerName(String dockerName) { this.dockerName = dockerName; }
+
+    public String getPodCidr() { return podCidr; }
+    public void setPodCidr(String podCidr) { this.podCidr = podCidr; }
+
+    public boolean isExplicitVersion() { return explicitVersion; }
+    public void setExplicitVersion(boolean explicitVersion) { this.explicitVersion = explicitVersion; }
+
+    public Cluster copy() {
+        Cluster c = new Cluster();
+        c.name = this.name;
+        c.arn = this.arn;
+        c.createdAt = this.createdAt;
+        c.version = this.version;
+        c.endpoint = this.endpoint;
+        c.roleArn = this.roleArn;
+        c.resourcesVpcConfig = this.resourcesVpcConfig;
+        c.kubernetesNetworkConfig = this.kubernetesNetworkConfig;
+        c.logging = this.logging;
+        c.encryptionConfig = this.encryptionConfig;
+        c.status = this.status;
+        c.certificateAuthority = this.certificateAuthority;
+        c.identity = this.identity;
+        c.platformVersion = this.platformVersion;
+        c.tags = this.tags;
+        c.containerId = this.containerId;
+        c.accountId = this.accountId;
+        c.internalEndpoint = this.internalEndpoint;
+        c.hostPort = this.hostPort;
+        c.podCidr = this.podCidr;
+        c.explicitVersion = this.explicitVersion;
+        c.dockerName = this.dockerName;
+        c.accessConfig = this.accessConfig;
+        return c;
+    }
 }

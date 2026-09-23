@@ -15,7 +15,9 @@ import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
 import io.github.hectorvent.floci.services.ecs.model.CreateClusterRequest;
 import io.github.hectorvent.floci.services.ecs.model.CreateServiceRequest;
 import io.github.hectorvent.floci.services.ecs.model.CreateTaskSetRequest;
+import io.github.hectorvent.floci.services.ecs.model.RegisterContainerInstanceRequest;
 import io.github.hectorvent.floci.services.ecs.model.EnvironmentFile;
+import io.github.hectorvent.floci.services.ecs.model.Failure;
 import io.github.hectorvent.floci.services.ecs.model.EphemeralStorage;
 import io.github.hectorvent.floci.services.ecs.model.FirelensConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.HealthCheck;
@@ -109,6 +111,7 @@ public class EcsJsonHandler {
             case "ListTasks" -> handleListTasks(request, region);
             case "UpdateTaskProtection" -> handleUpdateTaskProtection(request, region);
             case "GetTaskProtection" -> handleGetTaskProtection(request, region);
+            case "ExecuteCommand" -> handleExecuteCommand(request, region);
 
             case "CreateService" -> handleCreateService(request, region);
             case "UpdateService" -> handleUpdateService(request, region);
@@ -171,6 +174,8 @@ public class EcsJsonHandler {
         request.setClusterName(req.has("clusterName") ? req.path("clusterName").asText() : null);
         request.setTags(parseTagMap(req.path("tags")));
         request.setSettings(parseClusterSettings(req.path("settings")));
+        request.setConfiguration(parseRawObject(req.path("configuration")));
+        request.setServiceConnectDefaults(parseRawObject(req.path("serviceConnectDefaults")));
         if (req.has("capacityProviders")) {
             request.setCapacityProviders(jsonArrayToList(req.path("capacityProviders")));
         }
@@ -185,22 +190,50 @@ public class EcsJsonHandler {
     }
 
     private Response handleDescribeClusters(JsonNode req, String region) {
-        List<String> ids = jsonArrayToList(req.path("clusters"));
-        List<EcsCluster> found = service.describeClusters(ids, region);
+        List<String> clusterIds = jsonArrayToList(req.path("clusters"));
+        Set<String> include = parseClusterIncludes(req.path("include"));
+        EcsService.DescribeClustersResult found = service.describeClustersDetailed(clusterIds, region);
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
-        found.forEach(c -> arr.add(writer.clusterNode(c)));
+        found.clusters().forEach(c -> arr.add(writer.clusterNode(c, include)));
         resp.set("clusters", arr);
-        resp.set("failures", objectMapper.createArrayNode());
+        ArrayNode failures = objectMapper.createArrayNode();
+        found.failures().forEach(f -> failures.add(writer.failureNode(f)));
+        resp.set("failures", failures);
         return Response.ok(resp).build();
     }
 
+    /** Rejects an unknown include the way ECS does, rather than silently returning less. */
+    private Set<String> parseClusterIncludes(JsonNode node) {
+        List<String> requested = jsonArrayToList(node);
+        validateIncludes(requested, EcsResponseWriter.ALL_CLUSTER_INCLUDES);
+        return Set.copyOf(requested);
+    }
+
+    /** The two fields DescribeContainerInstances withholds unless the request asks for them. */
+    private static final Set<String> CONTAINER_INSTANCE_INCLUDES =
+            Set.of("TAGS", "CONTAINER_INSTANCE_HEALTH");
+
+    private static void validateIncludes(List<String> requested, Set<String> allowed) {
+        for (String value : requested) {
+            if (!allowed.contains(value)) {
+                throw new AwsException("InvalidParameterException",
+                        "Invalid include value: " + value, 400);
+            }
+        }
+    }
+
     private Response handleListClusters(JsonNode req, String region) {
-        List<String> arns = service.listClusters(region);
+        Integer maxResults = req.hasNonNull("maxResults") ? req.path("maxResults").asInt() : null;
+        String nextToken = req.hasNonNull("nextToken") ? req.path("nextToken").asText() : null;
+        EcsService.ListPage page = service.listClusters(maxResults, nextToken, region);
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
-        arns.forEach(arr::add);
+        page.arns().forEach(arr::add);
         resp.set("clusterArns", arr);
+        if (page.nextToken() != null) {
+            resp.put("nextToken", page.nextToken());
+        }
         return Response.ok(resp).build();
     }
 
@@ -215,7 +248,9 @@ public class EcsJsonHandler {
     private Response handleUpdateCluster(JsonNode req, String region) {
         String clusterId = req.path("cluster").asText();
         List<ClusterSetting> settings = parseClusterSettings(req.path("settings"));
-        EcsCluster cluster = service.updateCluster(clusterId, settings, region);
+        EcsCluster cluster = service.updateCluster(clusterId, settings,
+                parseRawObject(req.path("configuration")),
+                parseRawObject(req.path("serviceConnectDefaults")), region);
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("cluster", writer.clusterNode(cluster));
         return Response.ok(resp).build();
@@ -292,22 +327,40 @@ public class EcsJsonHandler {
 
     private Response handleListTaskDefinitions(JsonNode req, String region) {
         String familyPrefix = req.has("familyPrefix") ? req.path("familyPrefix").asText() : null;
-        String status = req.has("status") ? req.path("status").asText() : null;
-        List<String> arns = service.listTaskDefinitions(familyPrefix, status);
+        String status = parseChoice(req, "status", TASK_DEFINITION_STATUSES);
+        String sort = parseChoice(req, "sort", SORT_ORDERS);
+        Integer maxResults = req.hasNonNull("maxResults") ? req.path("maxResults").asInt() : null;
+        String nextToken = req.hasNonNull("nextToken") ? req.path("nextToken").asText() : null;
+
+        EcsService.ListPage page = service.listTaskDefinitions(familyPrefix, status, sort,
+                maxResults, nextToken);
+
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
-        arns.forEach(arr::add);
+        page.arns().forEach(arr::add);
         resp.set("taskDefinitionArns", arr);
+        if (page.nextToken() != null) {
+            resp.put("nextToken", page.nextToken());
+        }
         return Response.ok(resp).build();
     }
 
     private Response handleListTaskDefinitionFamilies(JsonNode req, String region) {
         String familyPrefix = req.has("familyPrefix") ? req.path("familyPrefix").asText() : null;
-        List<String> families = service.listTaskDefinitionFamilies(familyPrefix);
+        String status = parseChoice(req, "status", FAMILY_STATUSES);
+        Integer maxResults = req.hasNonNull("maxResults") ? req.path("maxResults").asInt() : null;
+        String nextToken = req.hasNonNull("nextToken") ? req.path("nextToken").asText() : null;
+
+        EcsService.ListPage page = service.listTaskDefinitionFamilies(familyPrefix, status,
+                maxResults, nextToken);
+
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
-        families.forEach(arr::add);
+        page.arns().forEach(arr::add);
         resp.set("families", arr);
+        if (page.nextToken() != null) {
+            resp.put("nextToken", page.nextToken());
+        }
         return Response.ok(resp).build();
     }
 
@@ -409,16 +462,25 @@ public class EcsJsonHandler {
     private Response handleListTasks(JsonNode req, String region) {
         ListTasksRequest request = new ListTasksRequest();
         request.setCluster(req.has("cluster") ? req.path("cluster").asText() : null);
+        request.setContainerInstance(req.hasNonNull("containerInstance")
+                ? req.path("containerInstance").asText() : null);
+        request.setDesiredStatus(parseChoice(req, "desiredStatus", DESIRED_STATUSES));
         request.setFamily(req.has("family") ? req.path("family").asText() : null);
-        request.setDesiredStatus(req.has("desiredStatus") ? req.path("desiredStatus").asText() : null);
+        request.setLaunchType(parseEnum(req, "launchType", LaunchType.class));
         request.setServiceName(req.has("serviceName") ? req.path("serviceName").asText() : null);
+        request.setStartedBy(req.hasNonNull("startedBy") ? req.path("startedBy").asText() : null);
+        request.setMaxResults(req.hasNonNull("maxResults") ? req.path("maxResults").asInt() : null);
+        request.setNextToken(req.hasNonNull("nextToken") ? req.path("nextToken").asText() : null);
 
-        List<String> arns = service.listTasks(request, region);
+        EcsService.ListPage result = service.listTasks(request, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
-        arns.forEach(arr::add);
+        result.arns().forEach(arr::add);
         resp.set("taskArns", arr);
+        if (result.nextToken() != null) {
+            resp.put("nextToken", result.nextToken());
+        }
         return Response.ok(resp).build();
     }
 
@@ -450,6 +512,31 @@ public class EcsJsonHandler {
         result.forEach(pt -> arr.add(writer.protectedTaskNode(pt)));
         resp.set("protectedTasks", arr);
         resp.set("failures", objectMapper.createArrayNode());
+        return Response.ok(resp).build();
+    }
+
+    private Response handleExecuteCommand(JsonNode req, String region) {
+        String cluster = req.has("cluster") ? req.path("cluster").asText() : null;
+        String task = req.path("task").asText();
+        String container = req.hasNonNull("container") ? req.path("container").asText() : null;
+        String command = req.path("command").asText(null);
+        boolean interactive = req.path("interactive").asBoolean(false);
+
+        EcsService.ExecuteCommandResult result =
+                service.executeCommand(cluster, task, container, command, interactive, region);
+
+        ObjectNode resp = objectMapper.createObjectNode();
+        resp.put("clusterArn", result.task().getClusterArn());
+        resp.put("taskArn", result.task().getTaskArn());
+        resp.put("containerName", result.container().getName());
+        if (result.container().getContainerArn() != null) {
+            resp.put("containerArn", result.container().getContainerArn());
+        }
+        resp.put("interactive", interactive);
+        ObjectNode session = resp.putObject("session");
+        session.put("sessionId", result.session().sessionId());
+        session.put("streamUrl", service.execStreamUrl(result.session()));
+        session.put("tokenValue", result.session().tokenValue());
         return Response.ok(resp).build();
     }
 
@@ -635,12 +722,21 @@ public class EcsJsonHandler {
 
     private Response handleListServices(JsonNode req, String region) {
         String cluster = req.has("cluster") ? req.path("cluster").asText() : null;
-        List<String> arns = service.listServices(cluster, region);
+        LaunchType launchType = parseEnum(req, "launchType", LaunchType.class);
+        String schedulingStrategy = parseChoice(req, "schedulingStrategy", SCHEDULING_STRATEGIES);
+        Integer maxResults = req.hasNonNull("maxResults") ? req.path("maxResults").asInt() : null;
+        String nextToken = req.hasNonNull("nextToken") ? req.path("nextToken").asText() : null;
+
+        EcsService.ListPage page = service.listServices(cluster, launchType, schedulingStrategy,
+                maxResults, nextToken, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
-        arns.forEach(arr::add);
+        page.arns().forEach(arr::add);
         resp.set("serviceArns", arr);
+        if (page.nextToken() != null) {
+            resp.put("nextToken", page.nextToken());
+        }
         return Response.ok(resp).build();
     }
 
@@ -682,40 +778,49 @@ public class EcsJsonHandler {
     // ── Account Settings ──────────────────────────────────────────────────────
 
     private Response handlePutAccountSetting(JsonNode req, String region) {
-        String name = req.path("name").asText();
-        String value = req.path("value").asText();
-        var entry = service.putAccountSetting(name, value);
+        EcsService.AccountSetting setting = service.putAccountSetting(
+                req.path("name").asText(), req.path("value").asText(), principalArn(req));
         ObjectNode resp = objectMapper.createObjectNode();
-        resp.set("setting", writer.settingNode(entry.getKey(), entry.getValue()));
+        resp.set("setting", writer.settingNode(setting));
         return Response.ok(resp).build();
     }
 
     private Response handlePutAccountSettingDefault(JsonNode req, String region) {
-        String name = req.path("name").asText();
-        String value = req.path("value").asText();
-        var entry = service.putAccountSettingDefault(name, value);
+        EcsService.AccountSetting setting = service.putAccountSettingDefault(
+                req.path("name").asText(), req.path("value").asText());
         ObjectNode resp = objectMapper.createObjectNode();
-        resp.set("setting", writer.settingNode(entry.getKey(), entry.getValue()));
+        resp.set("setting", writer.settingNode(setting));
         return Response.ok(resp).build();
     }
 
     private Response handleDeleteAccountSetting(JsonNode req, String region) {
-        String name = req.path("name").asText();
-        var entry = service.deleteAccountSetting(name);
+        EcsService.AccountSetting setting =
+                service.deleteAccountSetting(req.path("name").asText(), principalArn(req));
         ObjectNode resp = objectMapper.createObjectNode();
-        resp.set("setting", writer.settingNode(entry.getKey(), entry.getValue()));
+        resp.set("setting", writer.settingNode(setting));
         return Response.ok(resp).build();
     }
 
     private Response handleListAccountSettings(JsonNode req, String region) {
-        String filterName = req.has("name") ? req.path("name").asText() : null;
-        String filterValue = req.has("value") ? req.path("value").asText() : null;
-        var settings = service.listAccountSettings(filterName, filterValue);
+        EcsService.AccountSettingPage page = service.listAccountSettings(
+                req.hasNonNull("name") ? req.path("name").asText() : null,
+                req.hasNonNull("value") ? req.path("value").asText() : null,
+                principalArn(req),
+                req.path("effectiveSettings").asBoolean(false),
+                req.hasNonNull("maxResults") ? req.path("maxResults").asInt() : null,
+                req.hasNonNull("nextToken") ? req.path("nextToken").asText() : null);
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
-        settings.forEach(e -> arr.add(writer.settingNode(e.getKey(), e.getValue())));
+        page.settings().forEach(s -> arr.add(writer.settingNode(s)));
         resp.set("settings", arr);
+        if (page.nextToken() != null) {
+            resp.put("nextToken", page.nextToken());
+        }
         return Response.ok(resp).build();
+    }
+
+    private static String principalArn(JsonNode req) {
+        return req.hasNonNull("principalArn") ? req.path("principalArn").asText() : null;
     }
 
     // ── Attributes ────────────────────────────────────────────────────────────
@@ -744,25 +849,44 @@ public class EcsJsonHandler {
 
     private Response handleListAttributes(JsonNode req, String region) {
         String cluster = req.has("cluster") ? req.path("cluster").asText() : null;
-        String targetType = req.has("targetType") ? req.path("targetType").asText() : null;
-        String attributeName = req.has("attributeName") ? req.path("attributeName").asText() : null;
-        String attributeValue = req.has("attributeValue") ? req.path("attributeValue").asText() : null;
-        List<Attribute> result = service.listAttributes(cluster, targetType, attributeName, attributeValue, region);
+        String targetType = req.hasNonNull("targetType") ? req.path("targetType").asText() : null;
+        String attributeName = req.hasNonNull("attributeName") ? req.path("attributeName").asText() : null;
+        String attributeValue = req.hasNonNull("attributeValue") ? req.path("attributeValue").asText() : null;
+        Integer maxResults = req.hasNonNull("maxResults") ? req.path("maxResults").asInt() : null;
+        String nextToken = req.hasNonNull("nextToken") ? req.path("nextToken").asText() : null;
+
+        EcsService.ListAttributesPage page = service.listAttributes(cluster, targetType,
+                attributeName, attributeValue, maxResults, nextToken, region);
+
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
-        result.forEach(a -> arr.add(writer.attributeNode(a)));
+        page.attributes().forEach(a -> arr.add(writer.attributeNode(a)));
         resp.set("attributes", arr);
+        if (page.nextToken() != null) {
+            resp.put("nextToken", page.nextToken());
+        }
         return Response.ok(resp).build();
     }
 
     // ── Container Instances ───────────────────────────────────────────────────
 
     private Response handleRegisterContainerInstance(JsonNode req, String region) {
-        String cluster = req.has("cluster") ? req.path("cluster").asText() : null;
-        String instanceIdentityDocument = req.has("instanceIdentityDocument")
-                ? req.path("instanceIdentityDocument").asText() : null;
-        List<Attribute> attrs = parseAttributes(req.path("attributes"));
-        ContainerInstance instance = service.registerContainerInstance(cluster, instanceIdentityDocument, attrs, region);
+        RegisterContainerInstanceRequest request = new RegisterContainerInstanceRequest();
+        request.setCluster(req.has("cluster") ? req.path("cluster").asText() : null);
+        request.setContainerInstanceArn(req.hasNonNull("containerInstanceArn")
+                ? req.path("containerInstanceArn").asText() : null);
+        request.setInstanceIdentityDocument(req.hasNonNull("instanceIdentityDocument")
+                ? req.path("instanceIdentityDocument").asText() : null);
+        request.setAttributes(parseAttributes(req.path("attributes")));
+        if (req.has("totalResources")) {
+            request.setTotalResources(parseRawObjectList(req.path("totalResources")));
+        }
+        request.setVersionInfo(parseRawObject(req.path("versionInfo")));
+        if (req.has("platformDevices")) {
+            request.setPlatformDevices(parseRawObjectList(req.path("platformDevices")));
+        }
+        request.setTags(parseTagMap(req.path("tags")));
+        ContainerInstance instance = service.registerContainerInstance(request, region);
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("containerInstance", writer.containerInstanceNode(instance));
         return Response.ok(resp).build();
@@ -781,23 +905,37 @@ public class EcsJsonHandler {
     private Response handleDescribeContainerInstances(JsonNode req, String region) {
         String cluster = req.has("cluster") ? req.path("cluster").asText() : null;
         List<String> instanceRefs = jsonArrayToList(req.path("containerInstances"));
-        List<ContainerInstance> found = service.describeContainerInstances(cluster, instanceRefs, region);
+        List<String> include = jsonArrayToList(req.path("include"));
+        validateIncludes(include, CONTAINER_INSTANCE_INCLUDES);
+        boolean includeTags = include.contains("TAGS");
+        boolean includeHealth = include.contains("CONTAINER_INSTANCE_HEALTH");
+        EcsService.DescribeContainerInstancesResult found =
+                service.describeContainerInstancesDetailed(cluster, instanceRefs, region);
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
-        found.forEach(ci -> arr.add(writer.containerInstanceNode(ci)));
+        found.instances().forEach(ci ->
+                arr.add(writer.containerInstanceNode(ci, includeTags, includeHealth)));
         resp.set("containerInstances", arr);
-        resp.set("failures", objectMapper.createArrayNode());
+        ArrayNode failures = objectMapper.createArrayNode();
+        found.failures().forEach(f -> failures.add(writer.failureNode(f)));
+        resp.set("failures", failures);
         return Response.ok(resp).build();
     }
 
     private Response handleListContainerInstances(JsonNode req, String region) {
         String cluster = req.has("cluster") ? req.path("cluster").asText() : null;
-        String status = req.has("status") ? req.path("status").asText() : null;
-        List<String> arns = service.listContainerInstances(cluster, status, region);
+        String status = parseChoice(req, "status", CONTAINER_INSTANCE_STATUSES);
+        Integer maxResults = req.hasNonNull("maxResults") ? req.path("maxResults").asInt() : null;
+        String nextToken = req.hasNonNull("nextToken") ? req.path("nextToken").asText() : null;
+        EcsService.ListPage page =
+                service.listContainerInstances(cluster, status, maxResults, nextToken, region);
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
-        arns.forEach(arr::add);
+        page.arns().forEach(arr::add);
         resp.set("containerInstanceArns", arr);
+        if (page.nextToken() != null) {
+            resp.put("nextToken", page.nextToken());
+        }
         return Response.ok(resp).build();
     }
 
@@ -814,12 +952,15 @@ public class EcsJsonHandler {
         String cluster = req.has("cluster") ? req.path("cluster").asText() : null;
         List<String> instanceRefs = jsonArrayToList(req.path("containerInstances"));
         String status = req.path("status").asText();
-        List<ContainerInstance> updated = service.updateContainerInstancesState(cluster, instanceRefs, status, region);
+        EcsService.UpdateContainerInstancesStateResult updated =
+                service.updateContainerInstancesState(cluster, instanceRefs, status, region);
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
-        updated.forEach(ci -> arr.add(writer.containerInstanceNode(ci)));
+        updated.instances().forEach(ci -> arr.add(writer.containerInstanceNode(ci)));
         resp.set("containerInstances", arr);
-        resp.set("failures", objectMapper.createArrayNode());
+        ArrayNode failures = objectMapper.createArrayNode();
+        updated.failures().forEach(f -> failures.add(writer.failureNode(f)));
+        resp.set("failures", failures);
         return Response.ok(resp).build();
     }
 
@@ -875,9 +1016,21 @@ public class EcsJsonHandler {
         request.setService(req.path("service").asText());
         request.setTaskDefinition(req.path("taskDefinition").asText());
         request.setLaunchType(parseEnum(req, "launchType", LaunchType.class));
-        request.setScaleValue(req.path("scale").path("value").asDouble(100.0));
-        request.setScaleUnit(req.path("scale").path("unit").asText("PERCENT"));
+        request.setCapacityProviderStrategy(
+                parseCapacityProviderStrategy(req.path("capacityProviderStrategy")));
+        request.setPlatformVersion(req.hasNonNull("platformVersion")
+                ? req.path("platformVersion").asText() : null);
+        if (req.hasNonNull("scale")) {
+            request.setScaleValue(req.path("scale").path("value").asDouble(100.0));
+            request.setScaleUnit(req.path("scale").hasNonNull("unit")
+                    ? req.path("scale").path("unit").asText() : null);
+        }
         request.setExternalId(req.has("externalId") ? req.path("externalId").asText() : null);
+        request.setNetworkConfiguration(parseNetworkConfiguration(req.path("networkConfiguration")));
+        request.setLoadBalancers(parseLoadBalancers(req.path("loadBalancers")));
+        request.setServiceRegistries(req.has("serviceRegistries")
+                ? parseRawObjectList(req.path("serviceRegistries")) : null);
+        request.setTags(parseTagMap(req.path("tags")));
 
         TaskSet ts = service.createTaskSet(request, region);
 
@@ -891,7 +1044,8 @@ public class EcsJsonHandler {
         String svc = req.path("service").asText();
         String taskSet = req.path("taskSet").asText();
         double scaleValue = req.path("scale").path("value").asDouble(100.0);
-        String scaleUnit = req.path("scale").path("unit").asText("PERCENT");
+        String scaleUnit = req.path("scale").hasNonNull("unit")
+                ? req.path("scale").path("unit").asText() : null;
 
         TaskSet ts = service.updateTaskSet(cluster, svc, taskSet, scaleValue, scaleUnit, region);
 
@@ -917,13 +1071,18 @@ public class EcsJsonHandler {
         String cluster = req.has("cluster") ? req.path("cluster").asText() : null;
         String svc = req.path("service").asText();
         List<String> taskSetRefs = req.has("taskSets") ? jsonArrayToList(req.path("taskSets")) : null;
+        boolean includeTags = jsonArrayToList(req.path("include")).contains("TAGS");
 
-        List<TaskSet> found = service.describeTaskSets(cluster, svc, taskSetRefs, region);
+        EcsService.DescribeTaskSetsResult found =
+                service.describeTaskSetsDetailed(cluster, svc, taskSetRefs, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
-        found.forEach(ts -> arr.add(writer.taskSetNode(ts)));
+        found.taskSets().forEach(ts -> arr.add(writer.taskSetNode(ts, includeTags)));
         resp.set("taskSets", arr);
+        ArrayNode failures = objectMapper.createArrayNode();
+        found.failures().forEach(f -> failures.add(writer.failureNode(f)));
+        resp.set("failures", failures);
         return Response.ok(resp).build();
     }
 
@@ -948,7 +1107,18 @@ public class EcsJsonHandler {
         ArrayNode arr = objectMapper.createArrayNode();
         found.forEach(d -> arr.add(writer.serviceDeploymentNode(d)));
         resp.set("serviceDeployments", arr);
+        resp.set("failures", missingFailures(arns,
+                found.stream().map(ServiceDeployment::getServiceDeploymentArn).toList()));
         return Response.ok(resp).build();
+    }
+
+    /** The references that resolved to nothing, reported as ECS reports them rather than dropped. */
+    private ArrayNode missingFailures(List<String> requested, List<String> resolved) {
+        ArrayNode failures = objectMapper.createArrayNode();
+        requested.stream()
+                .filter(arn -> !resolved.contains(arn))
+                .forEach(arn -> failures.add(writer.failureNode(Failure.missing(arn))));
+        return failures;
     }
 
     private Response handleListServiceDeployments(JsonNode req, String region) {
@@ -967,7 +1137,11 @@ public class EcsJsonHandler {
             brief.put("clusterArn", d.getClusterArn());
             brief.put("status", d.getStatus());
             if (d.getCreatedAt() != null) { brief.put("createdAt", d.getCreatedAt().toEpochMilli() / 1000.0); }
-            if (d.getUpdatedAt() != null) { brief.put("finishedAt", d.getUpdatedAt().toEpochMilli() / 1000.0); }
+            if (d.getStartedAt() != null) { brief.put("startedAt", d.getStartedAt().toEpochMilli() / 1000.0); }
+            if (d.getFinishedAt() != null) { brief.put("finishedAt", d.getFinishedAt().toEpochMilli() / 1000.0); }
+            if (d.getTargetServiceRevisionArn() != null) {
+                brief.put("targetServiceRevisionArn", d.getTargetServiceRevisionArn());
+            }
             arr.add(brief);
         });
         resp.set("serviceDeployments", arr);
@@ -981,6 +1155,8 @@ public class EcsJsonHandler {
         ArrayNode arr = objectMapper.createArrayNode();
         found.forEach(r -> arr.add(writer.serviceRevisionNode(r)));
         resp.set("serviceRevisions", arr);
+        resp.set("failures", missingFailures(arns,
+                found.stream().map(ServiceRevision::getServiceRevisionArn).toList()));
         return Response.ok(resp).build();
     }
 
@@ -1540,10 +1716,17 @@ public class EcsJsonHandler {
             Set.of("EC2", "FARGATE", "EXTERNAL", "MANAGED_INSTANCES");
     private static final Set<String> PID_MODES = Set.of("host", "task");
     private static final Set<String> IPC_MODES = Set.of("host", "task", "none");
+    private static final Set<String> CONTAINER_INSTANCE_STATUSES =
+            Set.of("ACTIVE", "DRAINING", "REGISTERING", "DEREGISTERING", "REGISTRATION_FAILED");
     private static final Set<String> SCHEDULING_STRATEGIES = Set.of("REPLICA", "DAEMON");
     private static final Set<String> DEPLOYMENT_CONTROLLER_TYPES = Set.of("ECS", "CODE_DEPLOY", "EXTERNAL");
     private static final Set<String> AZ_REBALANCING = Set.of("ENABLED", "DISABLED");
     private static final Set<String> PROPAGATE_TAGS = Set.of("TASK_DEFINITION", "SERVICE", "NONE");
+    private static final Set<String> DESIRED_STATUSES = Set.of("RUNNING", "PENDING", "STOPPED");
+    private static final Set<String> TASK_DEFINITION_STATUSES =
+            Set.of("ACTIVE", "INACTIVE", "DELETE_IN_PROGRESS");
+    private static final Set<String> SORT_ORDERS = Set.of("ASC", "DESC");
+    private static final Set<String> FAMILY_STATUSES = Set.of("ACTIVE", "INACTIVE", "ALL");
     private static final Set<String> DEPENDENCY_CONDITIONS = Set.of(
             ContainerDependency.START, ContainerDependency.COMPLETE,
             ContainerDependency.SUCCESS, ContainerDependency.HEALTHY);

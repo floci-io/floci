@@ -55,7 +55,8 @@ class CognitoAttributeVerificationIntegrationTest {
         JsonNode clientResponse = cognitoJson("CreateUserPoolClient", """
                 {
                   "UserPoolId": "%s",
-                  "ClientName": "attribute-verification-client"
+                  "ClientName": "attribute-verification-client",
+                  "ExplicitAuthFlows": ["ALLOW_USER_PASSWORD_AUTH"]
                 }
                 """.formatted(poolId));
         clientId = clientResponse.path("UserPoolClient").path("ClientId").asText();

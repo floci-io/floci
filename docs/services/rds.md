@@ -18,6 +18,11 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `DeleteDBInstance` | Stop and remove an instance |
 | `ModifyDBInstance` | Update instance settings |
 | `RebootDBInstance` | Restart a database instance |
+| `StopDBInstance` | Stop a standalone instance temporarily: an optional `DBSnapshotIdentifier` first, then its container goes away while the record, endpoint and volume stay |
+| `StartDBInstance` | Start a stopped instance on the volume it kept, same endpoint |
+| `StopDBCluster` | Stop a cluster and its member instances |
+| `StartDBCluster` | Start a stopped cluster and its members |
+| `RebootDBCluster` | Restart a cluster's database and its members' proxies |
 | `CreateDBInstanceReadReplica` | Create a read replica of a PostgreSQL instance, initialised from a copy of the source; see [Read replicas](#read-replicas) |
 | `PromoteReadReplica` | Detach a read replica into a standalone instance and turn automated backups on |
 | `SwitchoverReadReplica` | Refused with `InvalidDBInstanceState`: AWS supports switchover only for Oracle and SQL Server replicas, neither of which is emulated |
@@ -68,7 +73,13 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `DescribeDBProxyTargetGroups` | List a proxy's target groups |
 | `ModifyDBProxyTargetGroup` | Update target-group connection-pool configuration |
 | `DescribeDBProxyTargets` | List a proxy target group's registered targets |
-| `DescribeDBClusterSnapshots` | Return an empty cluster-snapshot list (snapshots are not modeled) |
+| `DescribeDBClusterSnapshots` | List cluster snapshots, filtered by `DBClusterSnapshotIdentifier`, `DBClusterIdentifier` and `SnapshotType` |
+| `CreateDBClusterSnapshot` | Take a manual snapshot of an available cluster, with its data and `Tags` |
+| `DeleteDBClusterSnapshot` | Delete an available cluster snapshot and its data; the response carries `Status` `deleted` |
+| `CopyDBClusterSnapshot` | Copy an available cluster snapshot (by identifier or same-region ARN) to a new manual one with its data; `CopyTags` and `Tags`; the copy reports `SourceDBClusterSnapshotArn` |
+| `RestoreDBClusterFromSnapshot` | Create a cluster from a cluster snapshot's settings and data; `Engine` must match the snapshot's |
+| `DescribeDBClusterSnapshotAttributes` | Return the `restore` attribute of a cluster snapshot |
+| `ModifyDBClusterSnapshotAttribute` | Add or remove `restore` values (account ids or `all`) on a cluster snapshot |
 | `DescribeGlobalClusters` | List the account's global clusters with their primary and secondary members; see [Global clusters](#global-clusters) |
 | `CreateGlobalCluster` | Create an Aurora global database, empty or with an existing Aurora cluster as its primary |
 | `ModifyGlobalCluster` | Rename a global cluster, set deletion protection, or upgrade its engine version (members follow) |
@@ -95,6 +106,20 @@ usual default, a 30-minute window starting where the given one ends); a window g
 checked against the instance's other window. Modifications apply immediately —
 `PendingModifiedValues` is not modeled.
 
+!!! note "Stopping and starting"
+
+    `StopDBInstance` and `StopDBCluster` follow the user guide: the response reports `stopping`
+    (`StopDBCluster` for the cluster and its members), the stored status settles to `stopped`,
+    and `StartDBInstance` / `StartDBCluster` report `starting` and settle to `available`. While
+    stopped, the identifier, endpoint (same port), parameter and option groups and the Docker
+    volume all stay, so the data comes back on start; the container itself is removed and the
+    endpoint refuses connections. `StopDBInstance` refuses a cluster member (use `StopDBCluster`),
+    a read replica or an instance that has one, and anything not `available`, with
+    `InvalidDBInstanceState`; `ModifyDBInstance` on a stopped instance is refused the same way.
+    `DeleteDBInstance` works on a stopped instance. A stopped instance or cluster stays stopped
+    across an emulator restart. Not modeled: the automatic restart after seven days, and the
+    Multi-AZ SQL Server restriction.
+
 !!! note "DB snapshot tagging and lifecycle"
 
     `CreateDBSnapshot` accepts `Tags`, and `TagResource`/`UntagResource`/`ListTagsForResource`
@@ -104,9 +129,11 @@ checked against the instance's other window. Modifications apply immediately —
     identifier or ARN, and modified. Copies retain the source data and can copy source tags or add
     request tags. Snapshots are region-scoped like DB instances and clusters: `DBSnapshotArn` reflects
     the request's signed region, and a snapshot is only visible to `Describe`/`Tag` calls signed
-    for that same region. Aurora cluster snapshots and RDS reserved instances aren't modeled at
-    all (`DescribeDBClusterSnapshots` always returns an empty list, and there's no
-    reserved-instance API), so tagging doesn't apply to either.
+    for that same region. Cluster snapshots follow the same lifecycle: `CreateDBClusterSnapshot`
+    dumps the cluster's database, `RestoreDBClusterFromSnapshot` loads it into a new cluster, and
+    `Copy`, `Delete` and the `restore` attribute behave as they do for instance snapshots, under
+    `arn:aws:rds:<region>:<account>:cluster-snapshot:<name>`. RDS reserved instances aren't
+    modeled (there's no reserved-instance API), so tagging doesn't apply to them.
 
 ## Configuration
 
@@ -117,6 +144,7 @@ checked against the instance's other window. Modifications apply immediately —
 | `FLOCI_SERVICES_RDS_PROXY_BASE_PORT` | `7001` | First host port in the RDS proxy range |
 | `FLOCI_SERVICES_RDS_PROXY_MAX_PORT` | `7099` | Last host port in the RDS proxy range |
 | `FLOCI_SERVICES_RDS_ENDPOINT_HOST` | _(auto-detected)_ | Hostname advertised in RDS endpoints; when set in Docker, Floci advertises each proxy's published host port |
+| `FLOCI_SERVICES_RDS_IAM_TOKEN_ENDPOINT_BINDING` | `true` | Refuse a PostgreSQL IAM auth token generated for another hostname, port or region than the endpoint publishes, as RDS does; set `false` to accept such tokens. MySQL and MariaDB always refuse them |
 | `FLOCI_SERVICES_RDS_DEFAULT_POSTGRES_IMAGE` | `postgres:16-alpine` | Docker image for PostgreSQL instances |
 | `FLOCI_SERVICES_RDS_DEFAULT_MYSQL_IMAGE` | `mysql:8.0` | Docker image for MySQL instances |
 | `FLOCI_SERVICES_RDS_DEFAULT_MARIADB_IMAGE` | `mariadb:11` | Docker image for MariaDB instances |
@@ -426,6 +454,14 @@ FLOCI_STORAGE_HOST_PERSISTENT_PATH=/absolute/host/path/data
 The RDS auth proxy validates the master username and password at the proxy layer. All other database users are passed through directly to the backend engine — create them with standard SQL (`CREATE USER`) and connect as normal.
 
 IAM database authentication is also supported. Set `--enable-iam-database-authentication` at instance creation time and use `aws rds generate-db-auth-token` to obtain a token.
+
+On RDS, a token is only good for the endpoint it was generated for: the hostname, port and region passed to `generate-db-auth-token` are the ones the instance (or cluster, or RDS Proxy) publishes. MySQL and MariaDB endpoints in Floci always refuse a token generated for another endpoint. PostgreSQL endpoints do the same by default; set `FLOCI_SERVICES_RDS_IAM_TOKEN_ENDPOINT_BINDING=false` to accept a token generated for another name, for clients that generate tokens for a container name or DNS alias the endpoint does not publish. Either way, the username must match the `DBUser` in the token exactly. Because clients on the host reach the same proxy over the loopback interface, a token generated for `localhost` or `127.0.0.1` on the published port is accepted as well. Clients on a Docker network connect by Floci's container name, so set `FLOCI_SERVICES_RDS_ENDPOINT_HOST` to that name (see [Docker Compose](#docker-compose)) so it is what the endpoint publishes and tokens are generated for. With [IAM enforcement](iam.md#iam-enforcement-mode) turned on, the token's principal must also be allowed `rds-db:connect` on the database user, scoped the way AWS scopes it:
+
+```
+arn:aws:rds-db:<region>:<account-id>:dbuser:<DbiResourceId>/<db-user-name>
+```
+
+Aurora clusters use the `DbClusterResourceId`, and connections through an RDS Proxy use the proxy's `prx-…` resource id. A token that fails any of these checks is refused with the engine's ordinary authentication failure; the reason is written to Floci's log.
 
 On PostgreSQL, the token names a database role (`DBUser`) and the session runs as that role: `current_user` and `session_user` both report it, objects it creates are owned by it, and a token naming a role the database does not have is refused with `FATAL: role "..." does not exist`. Create the role first with `CREATE ROLE <name> WITH LOGIN` as the master user, and grant it whatever the application needs.
 

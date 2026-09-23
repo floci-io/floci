@@ -1,13 +1,11 @@
 package io.github.hectorvent.floci.services.docdb;
 
+import io.github.hectorvent.floci.testing.DocDbMockProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
-
-import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static io.restassured.http.ContentType.URLENC;
@@ -25,15 +23,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * region it was in fact created under.
  */
 @QuarkusTest
-@TestProfile(DocDbLegacyRecordArnIntegrationTest.NoContainersProfile.class)
+@TestProfile(DocDbMockProfile.class)
 class DocDbLegacyRecordArnIntegrationTest {
-
-    public static class NoContainersProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.docdb.mock", "true");
-        }
-    }
 
     @Inject
     DocDbService service;

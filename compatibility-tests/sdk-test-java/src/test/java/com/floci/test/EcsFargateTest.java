@@ -12,16 +12,22 @@ import software.amazon.awssdk.services.ec2.model.DescribeSubnetsRequest;
 import software.amazon.awssdk.services.ecs.EcsClient;
 import software.amazon.awssdk.services.ecs.model.AwsVpcConfiguration;
 import software.amazon.awssdk.services.ecs.model.CapacityProviderStrategyItem;
+import software.amazon.awssdk.services.ecs.model.Cluster;
+import software.amazon.awssdk.services.ecs.model.ClusterField;
 import software.amazon.awssdk.services.ecs.model.Compatibility;
 import software.amazon.awssdk.services.ecs.model.ContainerDefinition;
 import software.amazon.awssdk.services.ecs.model.CreateClusterRequest;
 import software.amazon.awssdk.services.ecs.model.DeleteTaskDefinitionsRequest;
 import software.amazon.awssdk.services.ecs.model.DeregisterTaskDefinitionRequest;
+import software.amazon.awssdk.services.ecs.model.DescribeClustersRequest;
+import software.amazon.awssdk.services.ecs.model.DescribeClustersResponse;
 import software.amazon.awssdk.services.ecs.model.DescribeTaskDefinitionRequest;
 import software.amazon.awssdk.services.ecs.model.DescribeTasksRequest;
 import software.amazon.awssdk.services.ecs.model.DescribeTasksResponse;
 import software.amazon.awssdk.services.ecs.model.EcsException;
+import software.amazon.awssdk.services.ecs.model.KeyValuePair;
 import software.amazon.awssdk.services.ecs.model.EphemeralStorage;
+import software.amazon.awssdk.services.ecs.model.ExecuteCommandRequest;
 import software.amazon.awssdk.services.ecs.model.LaunchType;
 import software.amazon.awssdk.services.ecs.model.NetworkConfiguration;
 import software.amazon.awssdk.services.ecs.model.NetworkMode;
@@ -207,9 +213,68 @@ class EcsFargateTest {
     }
 
     @Test
+    @Order(5)
+    @DisplayName("ExecuteCommand - refused for a task that was not run with it enabled")
+    void executeCommandRequiresTheTaskToHaveItEnabled() {
+        Task plain = ecs.runTask(RunTaskRequest.builder()
+                .cluster(clusterName)
+                .taskDefinition(family)
+                .launchType(LaunchType.FARGATE)
+                .networkConfiguration(NetworkConfiguration.builder()
+                        .awsvpcConfiguration(AwsVpcConfiguration.builder()
+                                .subnets(subnetId)
+                                .build())
+                        .build())
+                .build()).tasks().get(0);
+
+        try {
+            assertThatThrownBy(() -> ecs.executeCommand(ExecuteCommandRequest.builder()
+                    .cluster(clusterName)
+                    .task(plain.taskArn())
+                    .container("app")
+                    .command("/bin/sh")
+                    .interactive(true)
+                    .build()))
+                    .isInstanceOf(EcsException.class)
+                    .hasMessageContaining("execute command was not enabled");
+        } finally {
+            ecs.stopTask(StopTaskRequest.builder()
+                    .cluster(clusterName).task(plain.taskArn()).build());
+        }
+    }
+
+    @Test
     @Order(6)
-    @DisplayName("DescribeTasks - an unknown reference comes back as MISSING")
+    @DisplayName("DescribeClusters - include gates the optional members and statistics deserialize")
+    void describeClustersHonoursInclude() {
+        Cluster bare = ecs.describeClusters(DescribeClustersRequest.builder()
+                .clusters(clusterName).build()).clusters().get(0);
+        assertThat(bare.statistics()).isEmpty();
+        assertThat(bare.hasStatistics()).isFalse();
+        assertThat(bare.hasTags()).isFalse();
+
+        Cluster full = ecs.describeClusters(DescribeClustersRequest.builder()
+                .clusters(clusterName)
+                .include(ClusterField.STATISTICS, ClusterField.SETTINGS, ClusterField.TAGS,
+                        ClusterField.ATTACHMENTS, ClusterField.CONFIGURATIONS)
+                .build()).clusters().get(0);
+        assertThat(full.hasStatistics()).isTrue();
+        assertThat(full.statistics()).extracting(KeyValuePair::name)
+                .contains("runningFargateTasksCount", "runningEC2TasksCount",
+                        "activeFargateServiceCount", "drainingEC2ServiceCount");
+        assertThat(full.hasAttachments()).isTrue();
+    }
+
+    @Test
+    @Order(7)
+    @DisplayName("DescribeClusters and DescribeTasks - an unknown reference comes back as MISSING")
     void describeReportsMissingRatherThanDroppingTheReference() {
+        DescribeClustersResponse clusters = ecs.describeClusters(DescribeClustersRequest.builder()
+                .clusters(clusterName, "sdk-no-such-cluster").build());
+        assertThat(clusters.clusters()).hasSize(1);
+        assertThat(clusters.failures()).singleElement()
+                .satisfies(failure -> assertThat(failure.reason()).isEqualTo("MISSING"));
+
         DescribeTasksResponse tasks = ecs.describeTasks(DescribeTasksRequest.builder()
                 .cluster(clusterName)
                 .tasks("00000000000000000000000000000000")

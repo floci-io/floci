@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
@@ -7,8 +8,11 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.util.Map;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * Verifies CloudFormation provisions {@code AWS::Events::EventBus} as a real custom EventBridge bus.
@@ -295,6 +299,59 @@ class CloudFormationEventBusIntegrationTest {
         .then()
             .statusCode(400)
             .body(containsString("ResourceNotFoundException"));
+    }
+
+    @Test
+    void getAttRuleNameResolvesToTheRuleName() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String ruleName = "cfn-rulename-" + suffix;
+        String stackName = "rulename-stack-" + suffix;
+        String template = """
+                {
+                  "Resources": {
+                    "Named": {
+                      "Type": "AWS::Events::Rule",
+                      "Properties": {
+                        "Name": "%s",
+                        "EventPattern": { "source": ["com.example.orders"] }
+                      }
+                    },
+                    "Unnamed": {
+                      "Type": "AWS::Events::Rule",
+                      "Properties": {
+                        "EventPattern": { "source": ["com.example.orders"] }
+                      }
+                    }
+                  },
+                  "Outputs": {
+                    "NamedRuleName": { "Value": { "Fn::GetAtt": ["Named", "RuleName"] } },
+                    "UnnamedRuleName": { "Value": { "Fn::GetAtt": ["Unnamed", "RuleName"] } },
+                    "UnnamedRef": { "Value": { "Ref": "Unnamed" } }
+                  }
+                }
+                """.formatted(ruleName);
+
+        createStack(stackName, template);
+        try {
+            assertStackStatus(stackName, "CREATE_COMPLETE");
+            String xml = given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", CFN_AUTH)
+                .formParam("Action", "DescribeStacks")
+                .formParam("StackName", stackName)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract().asString();
+            Map<String, String> outputs = XmlParser.extractPairs(xml, "Outputs", "OutputKey", "OutputValue");
+
+            assertEquals(ruleName, outputs.get("NamedRuleName"));
+            assertEquals(outputs.get("UnnamedRef"), outputs.get("UnnamedRuleName"));
+        } finally {
+            deleteStack(stackName);
+            awaitStackDeleted(stackName);
+        }
     }
 
     private void awaitStackDeleted(String stackName) throws InterruptedException {

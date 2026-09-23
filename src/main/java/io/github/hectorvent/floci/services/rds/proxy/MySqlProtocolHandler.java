@@ -93,33 +93,9 @@ public class MySqlProtocolHandler {
                                   boolean iamEnabled, RdsSigV4Validator sigV4,
                                   RdsProxyTlsCertificates tlsCertificates,
                                   PasswordValidator passwordValidator,
-                                  int handshakeTimeoutMillis) throws IOException {
-        handleAuth(client, backend, backendConnector, masterUsername, masterPassword,
-                iamEnabled, sigV4, tlsCertificates, passwordValidator, handshakeTimeoutMillis,
-                username -> true, null);
-    }
-
-    public static void handleAuth(Socket client, Socket backend,
-                                  PostgresProtocolHandler.BackendConnector backendConnector,
-                                  String masterUsername, String masterPassword,
-                                  boolean iamEnabled, RdsSigV4Validator sigV4,
-                                  RdsProxyTlsCertificates tlsCertificates,
-                                  PasswordValidator passwordValidator,
-                                  int handshakeTimeoutMillis,
-                                  IamUserChecker iamUserChecker) throws IOException {
-        handleAuth(client, backend, backendConnector, masterUsername, masterPassword, iamEnabled,
-                sigV4, tlsCertificates, passwordValidator, handshakeTimeoutMillis, iamUserChecker, null);
-    }
-
-    public static void handleAuth(Socket client, Socket backend,
-                                  PostgresProtocolHandler.BackendConnector backendConnector,
-                                  String masterUsername, String masterPassword,
-                                  boolean iamEnabled, RdsSigV4Validator sigV4,
-                                  RdsProxyTlsCertificates tlsCertificates,
-                                  PasswordValidator passwordValidator,
                                   int handshakeTimeoutMillis,
                                   IamUserChecker iamUserChecker,
-                                  RdsMysqlBinding mysqlBinding) throws IOException {
+                                  RdsProxyBinding binding) throws IOException {
 
         client.setSoTimeout(handshakeTimeoutMillis);
         // The backend accepted the TCP connection but may never answer (or answer only
@@ -225,7 +201,7 @@ public class MySqlProtocolHandler {
                     && isIamToken(clearPassword(parsed.authData())) && !tlsEstablished) {
                 valid = false;
             } else if (iamLogin) {
-                valid = sigV4.validate(clearPassword(parsed.authData()), clientUsername, mysqlBinding);
+                valid = sigV4.validate(clearPassword(parsed.authData()), clientUsername, binding);
                 if (valid) {
                     clientResponseRaw = rewriteHandshakeCredentials(
                             clientResponseRaw, parsed, masterUsername,
@@ -278,7 +254,7 @@ public class MySqlProtocolHandler {
                 authenticateIamUserAfterAuthSwitch(
                         client, clientIn, clientOut, verdict[3] & 0xFF, clientResponseRaw, parsed,
                         backendNonce, backendConnector, masterUsername, masterPassword, sigV4,
-                        handshakeTimeoutMillis, mysqlBinding);
+                        handshakeTimeoutMillis, binding);
                 return;
             }
             clientOut.write(verdict);
@@ -357,7 +333,7 @@ public class MySqlProtocolHandler {
             byte[] clientResponseRaw, ParsedHandshakeResponse parsed, byte[] nonce,
             PostgresProtocolHandler.BackendConnector backendConnector,
             String masterUsername, String masterPassword, RdsSigV4Validator sigV4,
-            int handshakeTimeoutMillis, RdsMysqlBinding mysqlBinding) throws IOException {
+            int handshakeTimeoutMillis, RdsProxyBinding binding) throws IOException {
         if (!(client instanceof SSLSocket ssl) || !ssl.getSession().isValid()) {
             closeQuietly(client);
             return;
@@ -374,7 +350,7 @@ public class MySqlProtocolHandler {
         String token = clearPassword(Arrays.copyOfRange(reply, 4, reply.length));
         boolean valid;
         try {
-            valid = isIamToken(token) && sigV4.validate(token, parsed.username(), mysqlBinding);
+            valid = isIamToken(token) && sigV4.validate(token, parsed.username(), binding);
         } catch (Exception e) {
             LOG.warnv("MySQL IAM auth error: {0}", e.getMessage());
             valid = false;

@@ -3760,16 +3760,21 @@ public class S3Controller {
     /**
      * True when the raw request path carries no bucket prefix because the bucket came from the
      * Host header: the rewritten request URI is then exactly "/" + bucket + rawPath, which is
-     * what {@link S3VirtualHostFilter} produces and what a path-style request never is.
+     * what {@link S3VirtualHostFilter} produces and what a path-style request never is. JAX-RS
+     * collapses consecutive slashes before the filter sees the path, so a leading-slash key
+     * ({@code //file.txt} on the wire) is rewritten to {@code /<bucket>/file.txt}; the collapsed
+     * form is compared as well so that key keeps its slash.
      */
     private static boolean isVirtualHostedRawPath(UriInfo uriInfo, String bucket, String rawPath) {
         if (rawPath.isEmpty() || rawPath.charAt(0) != '/') {
             return false;
         }
         String rewritten = uriInfo.getRequestUri().getRawPath();
-        return rewritten != null
-                && !rewritten.equals(rawPath)
-                && rewritten.equals("/" + bucket + rawPath);
+        if (rewritten == null || rewritten.equals(rawPath)) {
+            return false;
+        }
+        return rewritten.equals("/" + bucket + rawPath)
+                || rewritten.equals("/" + bucket + rawPath.replaceAll("/{2,}", "/"));
     }
 
     private void validateKeyNoTraversal(String key) {

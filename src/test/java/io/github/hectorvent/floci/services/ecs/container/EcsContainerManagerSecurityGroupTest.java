@@ -120,8 +120,10 @@ class EcsContainerManagerSecurityGroupTest {
         verify(builder, never()).withPortBinding(anyInt(), anyInt());
         verify(builder, never()).withDynamicPort(anyInt());
         verify(builder, never()).withExposedPort(anyInt());
+        // Port bindings come off the helper, whose namespace holds them; the workload container
+        // shares that namespace and publishes none, and is inspected only for its launch clock.
         verify(dockerClient).inspectContainerCmd("helper-id");
-        verify(dockerClient, never()).inspectContainerCmd("docker-id");
+        verify(dockerClient, times(1)).inspectContainerCmd("docker-id");
         verify(firewallManager).register(any(), eq("helper-id"), any());
         assertEquals("eni-1", handle.getNetworkInterfaceId());
         assertEquals("us-east-1", handle.getRegion());

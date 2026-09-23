@@ -1071,6 +1071,25 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void describeImagesResolvesArm64AmazonLinux2023ByNamePattern() {
+        Ec2ImageCatalog imageCatalog = new Ec2ImageCatalog();
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                new AmiImageResolver(imageCatalog), imageCatalog, new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        List<Image> images = service.describeImages(
+                "us-east-1", List.of(), List.of("amazon"),
+                Map.of("name", List.of("al2023-ami-2023.*-arm64")));
+
+        assertEquals(1, images.size());
+        Image matched = images.getFirst();
+        assertEquals("ami-amazonlinux2023-arm64", matched.getImageId());
+        assertEquals("arm64", matched.getArchitecture());
+        assertEquals("al2023-ami-2023.0.20230315.0-kernel-6.1-arm64", matched.getName());
+    }
+
+    @Test
     void describeImagesWritesRefreshedTagsBackWhenStorageReturnsDetachedImages() {
         DetachedImageStorage imageStorage = new DetachedImageStorage();
         Ec2ImageCatalog imageCatalog = new Ec2ImageCatalog();

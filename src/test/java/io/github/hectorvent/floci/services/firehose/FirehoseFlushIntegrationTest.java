@@ -52,6 +52,9 @@ class FirehoseFlushIntegrationTest {
     @Inject
     MutableClock clock;
 
+    @Inject
+    FirehoseService firehoseService;
+
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
@@ -113,7 +116,7 @@ class FirehoseFlushIntegrationTest {
      * added afterward is.
      */
     @Test
-    void kinesisSourceCreatedThroughTheApiDoesNotBackfillPreExistingRecords() throws InterruptedException {
+    void kinesisSourceCreatedThroughTheApiDoesNotBackfillPreExistingRecords() {
         String sourceStream = "flush-kinesis-source-stream";
         String deliveryStream = "flush-kinesis-source-delivery";
         String bucket = "flush-kinesis-source-archive";
@@ -146,18 +149,19 @@ class FirehoseFlushIntegrationTest {
             .statusCode(200)
             .body("DeliveryStreamARN", notNullValue());
 
-        // Give the 1s poller a couple of real ticks to run against the pre-loaded stream
-        // before adding a record it is meant to pick up. A backfill bug would buffer
-        // "old" here already; the buffering interval below (60s of the frozen test clock)
-        // is what lets this test tell "polled and buffered" apart from "never polled".
-        Thread.sleep(2500);
+        // Run a couple of poll ticks against the pre-loaded stream before adding a record it is
+        // meant to pick up. A backfill bug would buffer "old" here already; the buffering
+        // interval below (60s of the frozen test clock) is what lets this test tell "polled and
+        // buffered" apart from "never polled".
+        firehoseService.tickSafely();
+        firehoseService.tickSafely();
 
         putKinesisRecord(sourceStream, "new");
 
-        // Let a poll tick actually buffer "new" before the clock moves: bufferSince is
-        // stamped from this same frozen Clock, so advancing first would stamp it already
-        // in the future and the interval trigger below would never fire.
-        Thread.sleep(2500);
+        // Buffer "new" with a poll tick before the clock moves: bufferSince is stamped from this
+        // same frozen Clock, so advancing first would stamp it already in the future and the
+        // interval trigger below would never fire.
+        firehoseService.tickSafely();
 
         // The frozen test-scope Clock only elapses when advanced; the real 1s tick then
         // finds the buffer due, same as intervalTriggerDeliversAfterIntervalInSecondsElapses.

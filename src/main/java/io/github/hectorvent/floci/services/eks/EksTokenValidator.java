@@ -35,7 +35,8 @@ class EksTokenValidator {
     private static final String EMPTY_PAYLOAD_SHA256 =
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
     private static final String REQUIRED_SIGNED_HEADERS = "host;x-k8s-aws-id";
-    private static final int MAX_PRESIGN_EXPIRY_SECONDS = 60;
+    private static final Duration TOKEN_LIFETIME = Duration.ofMinutes(15);
+    private static final int MAX_PRESIGN_EXPIRY_SECONDS = (int) TOKEN_LIFETIME.toSeconds();
     private static final int MAX_TOKEN_LENGTH = 4096;
     private static final Duration MAX_FUTURE_SKEW = Duration.ofMinutes(5);
     private static final DateTimeFormatter DATETIME_FORMAT =
@@ -155,11 +156,11 @@ class EksTokenValidator {
 
     private boolean isCurrent(Instant signedAt, String expiryText) {
         int expirySeconds = Integer.parseInt(expiryText);
-        if (expirySeconds <= 0 || expirySeconds > MAX_PRESIGN_EXPIRY_SECONDS) {
+        if (expirySeconds < 0 || expirySeconds > MAX_PRESIGN_EXPIRY_SECONDS) {
             return false;
         }
         Instant now = clock.instant();
-        return !signedAt.isAfter(now.plus(MAX_FUTURE_SKEW)) && !now.isAfter(signedAt.plusSeconds(expirySeconds));
+        return !signedAt.isAfter(now.plus(MAX_FUTURE_SKEW)) && !now.isAfter(signedAt.plus(TOKEN_LIFETIME));
     }
 
     private String secretKey(String accessKeyId, String sessionToken) {

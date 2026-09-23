@@ -34,8 +34,8 @@ class RedshiftDataApiIntegrationTest {
     void createSharedCluster() {
         Assumptions.assumeTrue(dockerAvailable(), "Docker is required for Redshift Data API integration tests");
         RestAssuredJsonUtils.configureAwsContentTypes();
-        redshift.createCluster(SHARED_CLUSTER_ID, "dc2.large", "admin", "Secret123");
         clusterId = SHARED_CLUSTER_ID;
+        redshift.createCluster(SHARED_CLUSTER_ID, "dc2.large", "admin", "Secret123");
     }
 
     private static boolean dockerAvailable() {

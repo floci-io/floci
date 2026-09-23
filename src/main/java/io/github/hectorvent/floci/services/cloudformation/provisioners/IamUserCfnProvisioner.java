@@ -64,6 +64,7 @@ public class IamUserCfnProvisioner implements CfnResourceProvisioner {
 
         List<String> managedPolicyArns = ctx.resolveStringList(props, "ManagedPolicyArns");
         List<String> groups = ctx.resolveStringList(props, "Groups");
+        Map<String, String> tags = ctx.resolveTags(props, "Tags");
 
         IamUser user;
         boolean createdUser = false;
@@ -103,6 +104,21 @@ public class IamUserCfnProvisioner implements CfnResourceProvisioner {
         Set<String> originalGroups = new HashSet<>(user.getGroupNames());
         Set<String> originalPolicyArns = new HashSet<>(user.getAttachedPolicyArns());
         Map<String, String> originalInlinePolicies = new HashMap<>(user.getInlinePolicies());
+        Map<String, String> originalTags = new HashMap<>(user.getTags());
+
+        Map<String, String> tagUpdates = new HashMap<>();
+        for (Map.Entry<String, String> entry : tags.entrySet()) {
+            if (!originalTags.containsKey(entry.getKey())
+                    || !entry.getValue().equals(originalTags.get(entry.getKey()))) {
+                tagUpdates.put(entry.getKey(), entry.getValue());
+            }
+        }
+        List<String> tagRemovals = new ArrayList<>();
+        for (String key : originalTags.keySet()) {
+            if (!tags.containsKey(key)) {
+                tagRemovals.add(key);
+            }
+        }
 
         LinkedHashSet<String> groupsAddedByThisAttempt = new LinkedHashSet<>();
         LinkedHashSet<String> groupsRemovedByThisAttempt = new LinkedHashSet<>();
@@ -110,6 +126,7 @@ public class IamUserCfnProvisioner implements CfnResourceProvisioner {
         LinkedHashSet<String> detachedByThisAttempt = new LinkedHashSet<>();
         LinkedHashSet<String> inlineWrittenByThisAttempt = new LinkedHashSet<>();
         LinkedHashSet<String> inlineRemovedByThisAttempt = new LinkedHashSet<>();
+        boolean tagMutationStarted = false;
 
         final String pathToRestore = priorPath;
         final String userIdToRestore = priorUserId;
@@ -168,8 +185,34 @@ public class IamUserCfnProvisioner implements CfnResourceProvisioner {
                     groupsRemovedByThisAttempt.add(stale);
                 }
             }
+            if (!tagUpdates.isEmpty() || !tagRemovals.isEmpty()) {
+                tagMutationStarted = true;
+                if (!tagUpdates.isEmpty()) {
+                    iamService.tagUser(resolvedUserName, tagUpdates);
+                }
+                if (!tagRemovals.isEmpty()) {
+                    iamService.untagUser(resolvedUserName, tagRemovals);
+                }
+            }
         } catch (RuntimeException failure) {
             boolean cleanupSucceeded = true;
+
+            if (tagMutationStarted) {
+                List<String> introducedTagKeys = new ArrayList<>(tags.keySet());
+                introducedTagKeys.removeAll(originalTags.keySet());
+                if (!introducedTagKeys.isEmpty()
+                        && !CfnRollback.attemptIamCleanup(failure,
+                        "remove newly applied tags from user " + resolvedUserName,
+                        () -> iamService.untagUser(resolvedUserName, introducedTagKeys))) {
+                    cleanupSucceeded = false;
+                }
+                if (!originalTags.isEmpty()
+                        && !CfnRollback.attemptIamCleanup(failure,
+                        "restore prior tags on user " + resolvedUserName,
+                        () -> iamService.tagUser(resolvedUserName, originalTags))) {
+                    cleanupSucceeded = false;
+                }
+            }
 
             for (String groupName : groupsRemovedByThisAttempt) {
                 if (!CfnRollback.attemptIamCleanup(failure,

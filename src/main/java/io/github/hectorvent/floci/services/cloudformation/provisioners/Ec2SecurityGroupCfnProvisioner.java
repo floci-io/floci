@@ -84,6 +84,8 @@ public class Ec2SecurityGroupCfnProvisioner implements CfnResourceProvisioner {
         // Ref on AWS::EC2::SecurityGroup returns the group id for VPC security groups.
         r.setPhysicalId(sg.getGroupId());
         r.getAttributes().put("GroupId", sg.getGroupId());
+        // Id is the schema's primary identifier and equals the group id, the same value as GroupId.
+        r.getAttributes().put("Id", sg.getGroupId());
         if (sg.getVpcId() != null) {
             r.getAttributes().put("VpcId", sg.getVpcId());
         }

@@ -107,6 +107,69 @@ class CloudFormationIamLeafIntegrationTest {
             .body(containsString("NoSuchEntity"));
     }
 
+    @Test
+    void updateStackRenamingTheInstanceProfileReplacesItAndDeletesTheOldProfile() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String roleName = "rename-role-" + suffix;
+        String firstName = "rename-profile-a-" + suffix;
+        String secondName = "rename-profile-b-" + suffix;
+        String stackName = "cfn-iam-profile-rename-" + suffix;
+
+        String template = """
+                {
+                  "Resources": {
+                    "Role": {
+                      "Type": "AWS::IAM::Role",
+                      "Properties": {
+                        "RoleName": "%s",
+                        "AssumeRolePolicyDocument": {
+                          "Version": "2012-10-17",
+                          "Statement": [{"Effect": "Allow", "Principal": {"Service": "ec2.amazonaws.com"}, "Action": "sts:AssumeRole"}]
+                        }
+                      }
+                    },
+                    "Profile": {
+                      "Type": "AWS::IAM::InstanceProfile",
+                      "Properties": {"InstanceProfileName": "%s", "Roles": [{"Ref": "Role"}]}
+                    }
+                  },
+                  "Outputs": {
+                    "ProfileRef": {"Value": {"Ref": "Profile"}}
+                  }
+                }
+                """;
+
+        String stackId = createStack(stackName, template.formatted(roleName, firstName));
+        awaitStackStatus(stackId, "CREATE_COMPLETE");
+        assertEquals(firstName, outputValue(describeStacks(stackId), "ProfileRef"));
+
+        // InstanceProfileName is createOnly, so renaming it replaces the profile.
+        updateStack(stackName, template.formatted(roleName, secondName));
+        awaitStackStatus(stackId, "UPDATE_COMPLETE");
+
+        // Ref now resolves to the replacement profile, which really exists in IAM.
+        assertEquals(secondName, outputValue(describeStacks(stackId), "ProfileRef"));
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "GetInstanceProfile")
+            .formParam("InstanceProfileName", secondName)
+        .when().post("/").then().statusCode(200)
+            .body(containsString("<InstanceProfileName>" + secondName + "</InstanceProfileName>"));
+
+        // The profile it displaced was cleaned up once the update committed.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "GetInstanceProfile")
+            .formParam("InstanceProfileName", firstName)
+        .when().post("/").then().statusCode(404)
+            .body(containsString("NoSuchEntity"));
+
+        deleteStack(stackName);
+        awaitStackStatus(stackId, "DELETE_COMPLETE");
+    }
+
     private static String createStack(String stackName, String template) {
         return cfnQuery("CreateStack", stackName, template)
                 .then()
@@ -114,6 +177,10 @@ class CloudFormationIamLeafIntegrationTest {
                 .extract()
                 .xmlPath()
                 .getString("CreateStackResponse.CreateStackResult.StackId");
+    }
+
+    private static void updateStack(String stackName, String template) {
+        cfnQuery("UpdateStack", stackName, template).then().statusCode(200);
     }
 
     private static void deleteStack(String stackName) {

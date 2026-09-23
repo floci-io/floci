@@ -172,15 +172,11 @@ final class CognitoAuthFlowHandler {
     }
 
     /**
-     * Enforces the app client's {@code ExplicitAuthFlows}. A client with no explicit list is left
-     * ungated so clients created without one keep working; once a list is set, the flow must be
-     * covered by one of {@code acceptedValues}.
+     * Enforces the app client's {@code ExplicitAuthFlows}: the flow must be covered by one of
+     * {@code acceptedValues}.
      */
     private static void requireFlowEnabled(UserPoolClient client, String authFlow, String... acceptedValues) {
-        List<String> enabled = client.getExplicitAuthFlows();
-        if (enabled == null || enabled.isEmpty()) {
-            return;
-        }
+        List<String> enabled = enabledAuthFlows(client);
         for (String accepted : acceptedValues) {
             if (enabled.contains(accepted)) {
                 return;
@@ -190,12 +186,21 @@ final class CognitoAuthFlowHandler {
     }
 
     /**
+     * A client with no stored {@code ExplicitAuthFlows} gets the AWS default rather than every
+     * flow. Floci never materialises the default into storage, so this covers every such client,
+     * not just one from before enforcement existed.
+     */
+    private static List<String> enabledAuthFlows(UserPoolClient client) {
+        List<String> enabled = client.getExplicitAuthFlows();
+        return enabled == null || enabled.isEmpty() ? CognitoService.DEFAULT_EXPLICIT_AUTH_FLOWS : enabled;
+    }
+
+    /**
      * Refresh has to be listed explicitly via {@code ALLOW_REFRESH_TOKEN_AUTH}, except on clients that
      * only use legacy (non {@code ALLOW_}) values, where refresh was never gated.
      */
     private static void requireRefreshEnabled(UserPoolClient client, String authFlow) {
-        List<String> enabled = client.getExplicitAuthFlows();
-        if (enabled == null || enabled.stream().noneMatch(flow -> flow.startsWith("ALLOW_"))) {
+        if (enabledAuthFlows(client).stream().noneMatch(flow -> flow.startsWith("ALLOW_"))) {
             return;
         }
         requireFlowEnabled(client, authFlow, "ALLOW_REFRESH_TOKEN_AUTH");

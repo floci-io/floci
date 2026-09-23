@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.core.common.docker;
 import io.github.hectorvent.floci.config.ContainerCaBundle;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.CreateContainerCmd;
 import com.github.dockerjava.api.command.CreateContainerResponse;
@@ -21,6 +22,7 @@ import com.github.dockerjava.api.model.Mount;
 import com.github.dockerjava.api.model.MountType;
 import com.github.dockerjava.api.model.Ports;
 import com.github.dockerjava.core.command.WaitContainerResultCallback;
+import io.quarkus.runtime.annotations.RegisterForReflection;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
@@ -60,6 +62,9 @@ public class ContainerLifecycleManager {
             Pattern.compile("join keyctl.*disk quota exceeded", Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
 
     private static final long NANO_CPUS_PER_CPU = 1_000_000_000L;
+
+    /** Host interface a port marked loopback-only publishes on. */
+    private static final String LOOPBACK_HOST_IP = "127.0.0.1";
 
     private final DockerClient dockerClient;
     private final ImageCacheService imageCacheService;
@@ -134,6 +139,20 @@ public class ContainerLifecycleManager {
     }
 
     private String create(ContainerSpec spec, String resolvedImage, String platform) {
+        String containerId = createWithCaBundle(spec, resolvedImage, platform);
+        if (spec.hasNetworkConfiguration()) {
+            try {
+                attachNetworkBeforeStart(containerId, spec);
+            } catch (RuntimeException e) {
+                removeIfExists(containerId);
+                throw new IllegalStateException(
+                        "Failed to attach pre-start network configuration for container " + containerId, e);
+            }
+        }
+        return containerId;
+    }
+
+    private String createWithCaBundle(ContainerSpec spec, String resolvedImage, String platform) {
         LOG.debugv("Creating container from spec: image={0}, name={1}", spec.image(), spec.name());
 
         // Built once: a dynamic port binding allocates its host port here.
@@ -195,6 +214,44 @@ public class ContainerLifecycleManager {
     }
 
     /**
+     * Applies endpoint IPAM while the container is still in CREATED state. docker-java does not
+     * expose Docker's {@code NetworkingConfig} on create, but it does expose the equivalent
+     * network-connect endpoint, so the container is reconnected before it starts.
+     */
+    private void attachNetworkBeforeStart(String containerId, ContainerSpec spec) {
+        if (!spec.hasPortBindings()) {
+            dockerClient.disconnectFromNetworkCmd()
+                    .withContainerId(containerId)
+                    .withNetworkId(spec.networkMode())
+                    .exec();
+        }
+        ContainerNetwork endpoint = new ContainerNetwork().withIpamConfig(new LinkLocalIpam(spec.linkLocalIps()));
+        dockerClient.connectToNetworkCmd()
+                .withContainerId(containerId)
+                .withNetworkId(spec.networkMode())
+                .withContainerNetwork(endpoint)
+                .exec();
+    }
+
+    /**
+     * Docker Engine accepts LinkLocalIPs, but docker-java omits the model property. Registered for
+     * reflection because Jackson finds the added getter reflectively in a native image.
+     */
+    @RegisterForReflection
+    private static final class LinkLocalIpam extends ContainerNetwork.Ipam {
+        private final List<String> linkLocalIps;
+
+        private LinkLocalIpam(List<String> linkLocalIps) {
+            this.linkLocalIps = List.copyOf(linkLocalIps);
+        }
+
+        @JsonProperty("LinkLocalIPs")
+        public List<String> getLinkLocalIps() {
+            return linkLocalIps;
+        }
+    }
+
+    /**
      * Copies the CA bundle into the created, not yet started, container so runtimes that read
      * {@code SSL_CERT_FILE} and friends at init find it. A copy rather than a bind mount because
      * when Floci itself runs in Docker its persistent path is not a host path the daemon can mount.
@@ -237,7 +294,8 @@ public class ContainerLifecycleManager {
         startContainer(containerId);
         LOG.infov("Started container {0}", containerId);
 
-        if (spec.networkMode() != null && !spec.networkMode().isBlank() && spec.hasPortBindings()) {
+        if (spec.networkMode() != null && !spec.networkMode().isBlank()
+                && spec.hasPortBindings() && !spec.hasNetworkConfiguration()) {
             try {
                 dockerClient.connectToNetworkCmd()
                         .withContainerId(containerId)
@@ -944,10 +1002,7 @@ public class ContainerLifecycleManager {
                     hostPort = portAllocator.allocateAny();
                 }
 
-                Ports.Binding binding = spec.loopbackPortBindings().contains(containerPort)
-                        ? Ports.Binding.bindIpAndPort("127.0.0.1", hostPort)
-                        : Ports.Binding.bindPort(hostPort);
-                ports.bind(ExposedPort.tcp(containerPort), binding);
+                ports.bind(ExposedPort.tcp(containerPort), bindingFor(spec, containerPort, hostPort));
                 LOG.debugv("Port binding: {0} -> {1}", String.valueOf(containerPort), String.valueOf(hostPort));
             }
             hostConfig.withPortBindings(ports);
@@ -1001,6 +1056,27 @@ public class ContainerLifecycleManager {
         }
 
         return hostConfig;
+    }
+
+    /**
+     * The host interface a published port binds to.
+     *
+     * <p>An explicit address from {@code portBindingHostIps} wins, so a caller that reads the
+     * address from configuration keeps control of it. {@code loopbackPortBindings} is the fixed
+     * form of the same decision, for a port that is an implementation detail and must never leave
+     * the host. A port in neither binds every interface, which is Docker's own default and what
+     * every caller that does not ask has always got.
+     */
+    private static Ports.Binding bindingFor(ContainerSpec spec, int containerPort, int hostPort) {
+        String hostIp = spec.portBindingHostIps() == null
+                ? null
+                : spec.portBindingHostIps().get(containerPort);
+        if (hostIp != null && !hostIp.isBlank()) {
+            return Ports.Binding.bindIpAndPort(hostIp, hostPort);
+        }
+        return spec.loopbackPortBindings().contains(containerPort)
+                ? Ports.Binding.bindIpAndPort(LOOPBACK_HOST_IP, hostPort)
+                : Ports.Binding.bindPort(hostPort);
     }
 
     /**

@@ -1,14 +1,12 @@
 package io.github.hectorvent.floci.services.rds;
 
+import io.github.hectorvent.floci.testing.RdsMockProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-
-import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static io.restassured.http.ContentType.URLENC;
@@ -25,15 +23,8 @@ import static org.hamcrest.Matchers.not;
  * <p>Each member's documented default and valid values come from the RDS model.
  */
 @QuarkusTest
-@TestProfile(RdsInstanceMonitoringFieldsIntegrationTest.NoContainersProfile.class)
+@TestProfile(RdsMockProfile.class)
 class RdsInstanceMonitoringFieldsIntegrationTest {
-
-    public static class NoContainersProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.rds.mock", "true");
-        }
-    }
 
     private static final String ID = "monitoring-fields-db";
     private static final String ROLE = "arn:aws:iam::000000000000:role/rds-monitoring-role";

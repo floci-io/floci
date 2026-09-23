@@ -606,13 +606,39 @@ public class SmtpRelay {
      * or unparseable.
      */
     public static RawMessageHeaders parseRawHeaders(String rawMessage) {
+        return parseRawMessage(rawMessage).headers();
+    }
+
+    /**
+     * The decoded bytes of a raw message, the parsed message ({@code null} when the parser cannot
+     * read it) and the headers read off it, from one parse that the send path shares between
+     * header extraction and the content scan.
+     */
+    public record ParsedRawMessage(byte[] bytes, Message message, RawMessageHeaders headers) {}
+
+    public static ParsedRawMessage parseRawMessage(String rawMessage) {
         if (rawMessage == null || rawMessage.isBlank()) {
-            return RawMessageHeaders.empty();
+            return new ParsedRawMessage(new byte[0], null, RawMessageHeaders.empty());
         }
+        byte[] mimeBytes = tryBase64Decode(rawMessage);
+        Message message = parseMime(mimeBytes);
+        return new ParsedRawMessage(mimeBytes, message,
+                message == null ? RawMessageHeaders.empty() : headersOf(message));
+    }
+
+    /** Parses MIME bytes, or returns {@code null} for anything the parser cannot read. */
+    static Message parseMime(byte[] mimeBytes) {
         try {
-            byte[] mimeBytes = tryBase64Decode(rawMessage);
-            var builder = new DefaultMessageBuilder();
-            var message = builder.parseMessage(new ByteArrayInputStream(mimeBytes));
+            return new DefaultMessageBuilder().parseMessage(new ByteArrayInputStream(mimeBytes));
+        } catch (Exception | StackOverflowError ignored) {
+            // The caller treats an unparseable message as such; there is nothing to diagnose here,
+            // and mime4j nests a reader per forwarded message, so a hostile depth overflows too.
+            return null;
+        }
+    }
+
+    private static RawMessageHeaders headersOf(Message message) {
+        try {
             String subject = message.getSubject() != null ? message.getSubject() : "";
             List<String> from = message.getFrom() != null
                     ? toMailboxAddresses(message.getFrom()) : List.of();
@@ -630,7 +656,8 @@ public class SmtpRelay {
                     returnPath == null ? "" : returnPath,
                     configurationSet == null ? "" : configurationSet,
                     messageTags);
-        } catch (Exception e) {
+        } catch (Exception ignored) {
+            // A message whose addresses cannot be read is treated like one without headers.
             return RawMessageHeaders.empty();
         }
     }

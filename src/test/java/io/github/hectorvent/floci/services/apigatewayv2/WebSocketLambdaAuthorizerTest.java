@@ -511,19 +511,15 @@ class WebSocketLambdaAuthorizerTest {
 
     @Test
     @Order(999)
-    void cleanup() {
+    void cleanup() throws Exception {
         if (connectRouteId != null) {
             given().when().delete("/v2/apis/" + wsApiId + "/routes/" + connectRouteId);
         }
         if (wsApiId != null) {
             given().when().delete("/v2/apis/" + wsApiId);
         }
-        given().when().delete("/2015-03-31/functions/" + allowAuthFnName);
-        given().when().delete("/2015-03-31/functions/" + denyAuthFnName);
-        given().when().delete("/2015-03-31/functions/" + errorAuthFnName);
-        given().when().delete("/2015-03-31/functions/" + contextAuthFnName);
-        given().when().delete("/2015-03-31/functions/" + echoAuthFnName);
-        given().when().delete("/2015-03-31/functions/" + connectFnName);
+        WebSocketTestSupport.deleteFunctions(allowAuthFnName, denyAuthFnName, errorAuthFnName,
+                contextAuthFnName, echoAuthFnName, connectFnName);
     }
 
     // ──────────────────────────── Helpers ────────────────────────────

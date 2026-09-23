@@ -112,6 +112,32 @@ class CloudWatchLogsHandlerTest {
         assertFalse(nextEntity.has("nextToken"));
     }
 
+    // ──────────────────────────── creationTime (issue #4084) ────────────────────────────
+
+    @Test
+    void describeLogGroupsReturnsCreationTimeNotCreatedTime() {
+        ObjectNode request = MAPPER.createObjectNode().put("logGroupNamePrefix", GROUP);
+
+        JsonNode group = ((JsonNode) handler.handle("DescribeLogGroups", request, REGION).getEntity())
+                .path("logGroups").get(0);
+
+        assertTrue(group.path("creationTime").isNumber());
+        assertTrue(group.path("creationTime").asLong() > 0);
+        assertFalse(group.has("createdTime"));
+    }
+
+    @Test
+    void describeLogStreamsReturnsCreationTimeNotCreatedTime() {
+        ObjectNode request = MAPPER.createObjectNode().put("logGroupName", GROUP);
+
+        JsonNode stream = ((JsonNode) handler.handle("DescribeLogStreams", request, REGION).getEntity())
+                .path("logStreams").get(0);
+
+        assertTrue(stream.path("creationTime").isNumber());
+        assertTrue(stream.path("creationTime").asLong() > 0);
+        assertFalse(stream.has("createdTime"));
+    }
+
     // ──────────────────────────── GetDataProtectionPolicy ────────────────────────────
 
     @Test

@@ -92,7 +92,7 @@ aws lambda invoke --function-name my-function out.json
 
 ## Hot-Reload via Bind Mount
 
-For the tightest inner-loop development cycle, Floci supports a **bind-mount hot-reload** mode. Instead of packaging code into a ZIP and uploading it to S3, you point Floci directly at a directory on your host machine. The directory is bind-mounted into `/var/task` inside the container, so every invocation runs the files as they currently exist on disk, with no upload or redeploy.
+For the tightest inner-loop development cycle, Floci supports a **bind-mount hot-reload** mode. Instead of packaging code into a ZIP and uploading it to S3, you point Floci directly at a directory on your host machine. The directory is bind-mounted read-only into `/var/task` inside the container, as `/var/task` is read-only in AWS Lambda, so every invocation runs the files as they currently exist on disk, with no upload or redeploy.
 
 This is enabled by using the magic bucket name `hot-reload` when creating a function:
 
@@ -126,7 +126,7 @@ FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ENABLED=true
 FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ALLOWED_PATHS=/home/user/projects,/tmp
 ```
 
-An `S3Key` is accepted when it is one of the listed directories or inside one. `.` and `..` segments are resolved first, so `/home/user/projects/../secrets` and a sibling such as `/home/user/projects-old` are rejected. Symbolic links on the Docker host are not resolved by Floci. A path containing `:` is rejected. Without an allow-list any absolute host path is accepted, and Floci logs a warning at startup when hot-reload is enabled that way.
+An `S3Key` is accepted when it is one of the listed directories or inside one. `.` and `..` segments are resolved first, so `/home/user/projects/../secrets` and a sibling such as `/home/user/projects-old` are rejected. Symbolic links on the Docker host are not resolved by Floci. A path containing `:` is rejected. Without an allow-list any absolute host path is accepted except the host root, `/var`, `/proc`, and anything under `/run` or `/var/run`, where the Docker socket lives or can be reached. Floci logs a warning at startup when hot-reload is enabled without an allow-list.
 
 **Docker Compose setup**: enable the feature and share the Docker socket:
 

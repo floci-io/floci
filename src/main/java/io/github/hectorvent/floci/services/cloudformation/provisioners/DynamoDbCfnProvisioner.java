@@ -25,7 +25,10 @@ import java.util.Set;
  * global-table custom resource {@code Custom::DynamoDBReplica}.
  *
  * <p>Extracted from {@code CloudFormationResourceProvisioner}. A global table is provisioned as a
- * plain table: its {@code Replicas} property is not applied. The replica custom resource is the
+ * plain table and then its {@code Replicas} property is reconciled against the tracked replica
+ * regions: declared regions are added and dropped ones removed, so an UpdateStack that changes the
+ * Replicas list converges. The deployment region is served by the table itself and is filtered out
+ * rather than tracked as a replica. The replica custom resource is the
  * one the CDK legacy global table ({@code dynamodb.Table.replicationRegions}) emits per replica
  * region. Its provider Lambda only calls UpdateTable with a ReplicaUpdates Create, so that call is
  * applied directly against the DynamoDB service rather than through the async CDK Provider
@@ -222,6 +225,7 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
         // rejects. DescribeTable reports the same value, so Fn::GetAtt and the API agree.
         if (GLOBAL_TABLE.equals(r.getResourceType())) {
             r.getAttributes().put("TableId", table.getTableId());
+            reconcileGlobalTableReplicas(tableName, props, ctx);
         }
         // Only a live stream has an ARN worth handing to Fn::GetAtt. Publishing one unconditionally
         // resolved to nothing on a streamless table; publishing the retained ARN of a stream that
@@ -233,6 +237,54 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
         } else {
             r.getAttributes().remove("StreamArn");
         }
+    }
+
+    /**
+     * Reconciles a global table's tracked replica regions to its declared {@code Replicas} property.
+     * Serves create and update: declared regions absent from the table are added and tracked regions
+     * no longer declared are removed, so an UpdateStack that edits the Replicas list converges rather
+     * than only ever growing. The deployment region is served by the table itself and the service
+     * rejects a replica there (as the UpdateTable ReplicaUpdates API does), so it is filtered out of
+     * the reconcile. The table is still marked a global table homed in that region, so DescribeTable
+     * lists the deployment region as an ACTIVE replica alongside the others, as AWS does.
+     */
+    private void reconcileGlobalTableReplicas(String tableName, JsonNode props, ProvisionContext ctx) {
+        CloudFormationTemplateEngine engine = ctx.engine();
+        String localRegion = ctx.region();
+        List<String> declared = new ArrayList<>();
+        JsonNode replicas = props != null ? engine.resolveNode(props.get("Replicas")) : null;
+        if (replicas != null && replicas.isArray()) {
+            for (JsonNode replica : replicas) {
+                String replicaRegion = engine.resolve(replica.path("Region"));
+                if (replicaRegion != null && !replicaRegion.isBlank()
+                        && !replicaRegion.equals(localRegion) && !declared.contains(replicaRegion)) {
+                    declared.add(replicaRegion);
+                }
+            }
+        }
+
+        TableDefinition table = dynamoDbService.describeTable(tableName, localRegion);
+        // This resource is a global table, so mark it homed in the deployment region even when it
+        // declares no other replica: DescribeTable then lists the home region as an ACTIVE replica,
+        // the single-region global table AWS reports (and CDK TableV2 emits by default).
+        dynamoDbService.ensureGlobalTable(tableName, localRegion);
+        List<String> existing = table.getReplicaRegions();
+        List<String> toAdd = new ArrayList<>();
+        for (String replicaRegion : declared) {
+            if (!existing.contains(replicaRegion)) {
+                toAdd.add(replicaRegion);
+            }
+        }
+        List<String> toRemove = new ArrayList<>();
+        for (String replicaRegion : existing) {
+            if (!declared.contains(replicaRegion)) {
+                toRemove.add(replicaRegion);
+            }
+        }
+        if (toAdd.isEmpty() && toRemove.isEmpty()) {
+            return;
+        }
+        dynamoDbService.applyReplicaUpdates(tableName, toAdd, toRemove, localRegion);
     }
 
     private void provisionReplica(StackResource r, JsonNode props, ProvisionContext ctx) {

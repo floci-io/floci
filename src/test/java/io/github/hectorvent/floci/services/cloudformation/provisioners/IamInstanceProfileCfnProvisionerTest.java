@@ -16,6 +16,7 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -30,8 +31,10 @@ import static org.mockito.Mockito.when;
 
 /**
  * {@code AWS::IAM::InstanceProfile} in isolation: Ref is the name, Fn::GetAtt Arn is the arn, Path
- * and Roles are applied, a role swap reconciles in place, a missing Roles or a createOnly change
- * (name, path) is rejected, and delete detaches roles before removing the profile.
+ * and Roles are applied, a role swap reconciles in place, a createOnly change (name, or path on an
+ * auto-named profile, or a dropped name) replaces the profile and marks the old one for cleanup, a
+ * path change that keeps an explicit name collides with EntityAlreadyExists, a missing Roles is
+ * rejected, and delete detaches roles before removing the profile.
  */
 class IamInstanceProfileCfnProvisionerTest {
 
@@ -51,7 +54,8 @@ class IamInstanceProfileCfnProvisionerTest {
                 """), ctx(null));
 
         assertEquals("web", r.getPhysicalId());
-        assertEquals(Set.of("Arn"), r.getAttributes().keySet());
+        // Arn is the published attribute; the __Floci record is internal and filtered before publishing.
+        assertEquals(Set.of("Arn", "__FlociIamInstanceProfileExplicitName"), r.getAttributes().keySet());
         assertEquals("arn:aws:iam::000000000000:instance-profile/web", r.getAttributes().get("Arn"));
         verify(iam).addRoleToInstanceProfile("web", "app-role");
     }
@@ -108,10 +112,12 @@ class IamInstanceProfileCfnProvisionerTest {
     }
 
     @Test
-    void changingThePathOnUpdateIsRejected() throws Exception {
-        when(iam.createInstanceProfile(eq("web"), anyString()))
-                .thenThrow(new AwsException("EntityAlreadyExists", "exists", 409));
+    void changingThePathOnANamedProfileCollidesWithEntityAlreadyExists() throws Exception {
+        // A Path change needs replacement, but the replacement keeps the explicit name, so
+        // CreateInstanceProfile collides and IAM answers EntityAlreadyExists, as CloudFormation does.
         when(iam.getInstanceProfile("web")).thenReturn(profile("web", "/"));
+        when(iam.createInstanceProfile("web", "/team/"))
+                .thenThrow(new AwsException("EntityAlreadyExists", "exists", 409));
 
         StackResource r = resource();
         r.setPhysicalId("web");
@@ -119,20 +125,121 @@ class IamInstanceProfileCfnProvisionerTest {
                 () -> provisioner.provision(r, props("""
                         {"InstanceProfileName": "web", "Path": "/team/", "Roles": ["app-role"]}
                         """), ctx("web")));
-        assertEquals("ValidationError", failure.getErrorCode());
-        assertTrue(failure.getMessage().contains("Path"), failure.getMessage());
+        assertEquals("EntityAlreadyExists", failure.getErrorCode());
     }
 
     @Test
-    void changingTheNameOnUpdateIsRejected() throws Exception {
+    void droppingTheExplicitNameReplacesWithAGeneratedName() throws Exception {
+        // Created under an explicit name ("web"), which the create records; removing
+        // InstanceProfileName afterwards is a createOnly change that replaces it.
+        when(iam.getInstanceProfile("web")).thenReturn(profile("web", "/"));
+        when(iam.createInstanceProfile(anyString(), eq("/")))
+                .thenAnswer(inv -> profile(inv.getArgument(0), "/"));
+        StackResource r = resource();
+        provisioner.provision(r, props("{\"InstanceProfileName\": \"web\", \"Roles\": [\"app-role\"]}"), ctx(null));
+        assertEquals("web", r.getPhysicalId());
+        assertEquals("true", r.getAttributes().get("__FlociIamInstanceProfileExplicitName"));
+
+        provisioner.provision(r, props("{\"Roles\": [\"app-role\"]}"), ctx("web"));
+
+        assertTrue(r.getPhysicalId().matches("my-stack-Profile-[0-9a-f]{12}"), r.getPhysicalId());
+        assertEquals("false", r.getAttributes().get("__FlociIamInstanceProfileExplicitName"));
+        assertTrue(provisioner.hasReplacementUpdate(r));
+        assertEquals("web", provisioner.updateCleanupPhysicalId(r));
+    }
+
+    /**
+     * The generated-name shape is not a reliable "was it explicit" signal: past 128 characters the
+     * {@code <stack>-<logicalId>-} prefix is truncated and only the suffix survives, so an
+     * auto-named profile in a long-named stack must still read as auto-named on a no-op update, or
+     * every UpdateStack would replace it.
+     */
+    @Test
+    void anAutoNamedProfileInALongNamedStackIsNotReplacedOnANoOpUpdate() throws Exception {
+        String stackName = "a".repeat(120);
+        when(iam.createInstanceProfile(anyString(), eq("/")))
+                .thenAnswer(inv -> profile(inv.getArgument(0), "/"));
+        StackResource r = resource();
+        provisioner.provision(r, props("{\"Roles\": [\"app-role\"]}"), ctx(stackName, null));
+        String generated = r.getPhysicalId();
+        assertEquals(128, generated.length());
+        assertTrue(generated.matches("a{115}-[0-9a-f]{12}"), generated);
+        when(iam.getInstanceProfile(generated)).thenReturn(profile(generated, "/"));
+
+        provisioner.provision(r, props("{\"Roles\": [\"app-role\"]}"), ctx(stackName, generated));
+
+        assertEquals(generated, r.getPhysicalId());
+        assertTrue(!provisioner.hasReplacementUpdate(r), "a no-op update must not replace the profile");
+        verify(iam, never()).deleteInstanceProfile(anyString());
+    }
+
+    /** A prior profile with no create-time record (state from before the record) is kept, not churned. */
+    @Test
+    void anUnrecordedPriorProfileIsNotReplacedWhenTheTemplateNamesNone() throws Exception {
+        when(iam.getInstanceProfile("web")).thenReturn(profile("web", "/"));
+        when(iam.createInstanceProfile("web", "/")).thenReturn(profile("web", "/"));
+        StackResource r = resource();
+        r.setPhysicalId("web");
+
+        provisioner.provision(r, props("{\"Roles\": [\"app-role\"]}"), ctx("web"));
+
+        assertEquals("web", r.getPhysicalId());
+        assertTrue(!provisioner.hasReplacementUpdate(r));
+        verify(iam, never()).deleteInstanceProfile(anyString());
+    }
+
+    @Test
+    void changingTheNameOnUpdateReplacesTheProfileAndMarksTheOldForCleanup() throws Exception {
+        when(iam.getInstanceProfile("old")).thenReturn(profile("old", "/"));
+        when(iam.createInstanceProfile("new", "/")).thenReturn(profile("new", "/"));
+
         StackResource r = resource();
         r.setPhysicalId("old");
+        r.getAttributes().put("Arn", "arn:aws:iam::000000000000:instance-profile/old");
+        provisioner.provision(r, props("""
+                {"InstanceProfileName": "new", "Roles": ["app-role"]}
+                """), ctx("old"));
 
-        AwsException failure = assertThrows(AwsException.class,
-                () -> provisioner.provision(r, props("""
-                        {"InstanceProfileName": "new", "Roles": ["app-role"]}
-                        """), ctx("old")));
-        assertEquals("ValidationError", failure.getErrorCode());
+        assertEquals("new", r.getPhysicalId());
+        assertEquals("arn:aws:iam::000000000000:instance-profile/new", r.getAttributes().get("Arn"));
+        verify(iam).createInstanceProfile("new", "/");
+        verify(iam).addRoleToInstanceProfile("new", "app-role");
+        assertTrue(provisioner.hasReplacementUpdate(r));
+        assertEquals("old", provisioner.updateCleanupPhysicalId(r));
+    }
+
+    @Test
+    void changingThePathOnAnAutoNamedProfileReplacesWithAFreshName() throws Exception {
+        String priorName = "my-stack-Profile-0123456789ab";
+        when(iam.getInstanceProfile(priorName)).thenReturn(profile(priorName, "/"));
+        when(iam.createInstanceProfile(anyString(), eq("/team/")))
+                .thenAnswer(inv -> profile(inv.getArgument(0), "/team/"));
+
+        StackResource r = resource();
+        r.setPhysicalId(priorName);
+        provisioner.provision(r, props("{\"Path\": \"/team/\", \"Roles\": [\"app-role\"]}"), ctx(priorName));
+
+        assertTrue(r.getPhysicalId().matches("my-stack-Profile-[0-9a-f]{12}"), r.getPhysicalId());
+        assertNotEquals(priorName, r.getPhysicalId());
+        verify(iam).createInstanceProfile(r.getPhysicalId(), "/team/");
+        assertTrue(provisioner.hasReplacementUpdate(r));
+        assertEquals(priorName, provisioner.updateCleanupPhysicalId(r));
+    }
+
+    @Test
+    void completingAReplacingUpdateDeletesTheDisplacedProfile() throws Exception {
+        when(iam.getInstanceProfile("old")).thenReturn(profile("old", "/"));
+        when(iam.createInstanceProfile("new", "/")).thenReturn(profile("new", "/"));
+        StackResource r = resource();
+        r.setPhysicalId("old");
+        provisioner.provision(r, props("""
+                {"InstanceProfileName": "new", "Roles": ["app-role"]}
+                """), ctx("old"));
+
+        UpdateCleanupResult result = provisioner.completeUpdate(r);
+
+        assertTrue(result.applicable() && result.complete());
+        verify(iam).deleteInstanceProfile("old");
     }
 
     @Test
@@ -180,6 +287,10 @@ class IamInstanceProfileCfnProvisionerTest {
     }
 
     private ProvisionContext ctx(String priorPhysicalId) {
+        return ctx("my-stack", priorPhysicalId);
+    }
+
+    private ProvisionContext ctx(String stackName, String priorPhysicalId) {
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
         when(engine.resolve(any())).thenAnswer(inv -> {
             JsonNode node = inv.getArgument(0);
@@ -193,7 +304,7 @@ class IamInstanceProfileCfnProvisionerTest {
             }
             return out;
         });
-        return new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack", priorPhysicalId);
+        return new ProvisionContext(engine, "us-east-1", "000000000000", stackName, priorPhysicalId);
     }
 
     private JsonNode props(String json) throws Exception {

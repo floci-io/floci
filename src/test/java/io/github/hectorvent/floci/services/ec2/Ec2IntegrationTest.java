@@ -506,6 +506,31 @@ class Ec2IntegrationTest {
     }
 
     @Test
+    @Order(9)
+    void describeImagesWithAl2023Arm64Filters() {
+        given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Owner.1", "amazon")
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", "al2023-ami-2023.*-arm64")
+            .formParam("Filter.2.Name", "architecture")
+            .formParam("Filter.2.Value.1", "arm64")
+            .formParam("Filter.3.Name", "state")
+            .formParam("Filter.3.Value.1", "available")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(1))
+            .body("DescribeImagesResponse.imagesSet.item.imageId", equalTo("ami-amazonlinux2023-arm64"))
+            .body("DescribeImagesResponse.imagesSet.item.architecture", equalTo("arm64"))
+            .body("DescribeImagesResponse.imagesSet.item.name",
+                    equalTo("al2023-ami-2023.0.20230315.0-kernel-6.1-arm64"));
+    }
+
+    @Test
     // Runs after the DescribeNetworkInterfaces pagination tests at @Order(92), like the
     // metadata test below. Terminating the source instance is not enough on its own:
     // TerminateInstances flips the state to shutting-down synchronously and only reaches

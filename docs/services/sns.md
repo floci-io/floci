@@ -80,13 +80,14 @@ aws sqs receive-message \
 
 ## SNS → SQS Fan-Out
 
-Floci supports real SNS → SQS fan-out. When you publish to a topic, all SQS-subscribed queues receive the message immediately.
+Floci supports real SNS → SQS fan-out. When you publish to a topic, every SQS-subscribed queue receives the message.
 
 Supported subscription protocols:
-- `sqs` — delivers to a Floci SQS queue
-- `lambda` — invokes a Floci Lambda function
-- `http` / `https` — posts to an HTTP endpoint
-- `application` — fans out to a mobile push platform endpoint (see [Mobile push](#mobile-push-mock))
+- `sqs`: delivers to a Floci SQS queue
+- `lambda`: invokes a Floci Lambda function
+- `firehose`: puts records to a Floci Firehose delivery stream
+- `http` / `https`: posts to an HTTP endpoint
+- `application`: fans out to a mobile push platform endpoint (see [Mobile push](#mobile-push-mock))
 
 ## Message size
 
@@ -110,8 +111,7 @@ A topic above `262144` is restricted: at most 100 subscriptions, every one of th
 `firehose` or `lambda`. Floci enforces the protocol rule on `Subscribe` and `SetTopicAttributes`
 alike, and the subscription count on `SetTopicAttributes` only — matching AWS, which lets an
 already-raised topic drift past 100 and catches it the next time the attribute is set. Pending
-confirmations count towards both. (`firehose` subscriptions are accepted for validation but not
-delivered to, as before.)
+confirmations count towards both.
 
 | Action | Condition | Error code | HTTP |
 |---|---|---|---|

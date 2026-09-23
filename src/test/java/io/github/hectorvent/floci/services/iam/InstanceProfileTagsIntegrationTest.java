@@ -7,6 +7,8 @@ import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.not;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Verifies TagInstanceProfile and UntagInstanceProfile wire compatibility:
@@ -196,5 +198,125 @@ class InstanceProfileTagsIntegrationTest {
         .when().post("/")
         .then().statusCode(400)
             .body(containsString("ValidationError"));
+    }
+
+    @Test
+    void listInstanceProfileTagsReturnsTagsPreviouslySet() {
+        String profile = "list-test-" + UUID.randomUUID().toString().substring(0, 8);
+        createProfile(profile);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "TagInstanceProfile")
+            .formParam("InstanceProfileName", profile)
+            .formParam("Tags.member.1.Key", "team")
+            .formParam("Tags.member.1.Value", "platform")
+            .header("Authorization", auth(ACCOUNT, "iam"))
+        .when().post("/")
+        .then().statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ListInstanceProfileTags")
+            .formParam("InstanceProfileName", profile)
+            .header("Authorization", auth(ACCOUNT, "iam"))
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<Key>team</Key>"))
+            .body(containsString("<Value>platform</Value>"));
+    }
+
+    /** AWS documents ListInstanceProfileTags as returning results sorted by tag key. */
+    @Test
+    void listInstanceProfileTagsAreSortedByKey() {
+        String profile = "list-sort-" + UUID.randomUUID().toString().substring(0, 8);
+        createProfile(profile);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "TagInstanceProfile")
+            .formParam("InstanceProfileName", profile)
+            .formParam("Tags.member.1.Key", "zebra")
+            .formParam("Tags.member.1.Value", "1")
+            .formParam("Tags.member.2.Key", "alpha")
+            .formParam("Tags.member.2.Value", "2")
+            .header("Authorization", auth(ACCOUNT, "iam"))
+        .when().post("/")
+        .then().statusCode(200);
+
+        String body = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ListInstanceProfileTags")
+            .formParam("InstanceProfileName", profile)
+            .header("Authorization", auth(ACCOUNT, "iam"))
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().asString();
+
+        assertTrue(body.indexOf("<Key>alpha</Key>") < body.indexOf("<Key>zebra</Key>"),
+                "expected alpha before zebra in: " + body);
+    }
+
+    @Test
+    void listInstanceProfileTagsOnUntaggedProfileReturnsEmptyList() {
+        String profile = "list-empty-" + UUID.randomUUID().toString().substring(0, 8);
+        createProfile(profile);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ListInstanceProfileTags")
+            .formParam("InstanceProfileName", profile)
+            .header("Authorization", auth(ACCOUNT, "iam"))
+        .when().post("/")
+        .then().statusCode(200)
+            .body(not(containsString("<Key>")));
+    }
+
+    @Test
+    void listInstanceProfileTagsRoutedViaActionFallbackWhenAuthHeaderAbsent() {
+        // Exercises AwsQueryController.inferServiceFromAction -> IAM_ACTIONS dispatch
+        // when no Authorization header is present (no SigV4 credential scope to resolve).
+        // The whole scenario stays unauthenticated so the create and the later calls
+        // land in the same account context.
+        String profile = "list-fallback-" + UUID.randomUUID().toString().substring(0, 8);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateInstanceProfile")
+            .formParam("InstanceProfileName", profile)
+        .when().post("/")
+        .then().statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "TagInstanceProfile")
+            .formParam("InstanceProfileName", profile)
+            .formParam("Tags.member.1.Key", "team")
+            .formParam("Tags.member.1.Value", "platform")
+        .when().post("/")
+        .then().statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ListInstanceProfileTags")
+            .formParam("InstanceProfileName", profile)
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("ListInstanceProfileTagsResponse"))
+            .body(containsString("<Key>team</Key>"));
+    }
+
+    @Test
+    void listInstanceProfileTagsOnNonexistentProfileReturnsNoSuchEntity() {
+        String profile = "list-no-such-" + UUID.randomUUID().toString().substring(0, 8);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ListInstanceProfileTags")
+            .formParam("InstanceProfileName", profile)
+            .header("Authorization", auth(ACCOUNT, "iam"))
+        .when().post("/")
+        .then().statusCode(404)
+            .body(containsString("NoSuchEntity"));
     }
 }

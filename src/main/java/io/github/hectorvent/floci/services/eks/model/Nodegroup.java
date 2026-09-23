@@ -14,8 +14,9 @@ import java.util.Map;
 /**
  * EKS managed node group. Doubles as the {@code CreateNodegroup} request body (the input
  * members are a subset) and the wire response. Recursive sub-structures
- * (remoteAccess, taints, launchTemplate, updateConfig, nodeRepairConfig, resources, health)
- * round-trip as generic JSON so we don't over-model what the management plane just echoes.
+ * (remoteAccess, taints, launchTemplate, updateConfig, nodeRepairConfig, warmPoolConfig,
+ * resources, health) round-trip as generic JSON so we don't over-model what the management
+ * plane just echoes.
  */
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -92,6 +93,9 @@ public class Nodegroup {
 
     @JsonProperty("launchTemplate")
     private Object launchTemplate;
+
+    @JsonProperty("warmPoolConfig")
+    private Object warmPoolConfig;
 
     @JsonProperty("tags")
     private Map<String, String> tags;
@@ -173,6 +177,9 @@ public class Nodegroup {
 
     public Object getLaunchTemplate() { return launchTemplate; }
     public void setLaunchTemplate(Object launchTemplate) { this.launchTemplate = launchTemplate; }
+
+    public Object getWarmPoolConfig() { return warmPoolConfig; }
+    public void setWarmPoolConfig(Object warmPoolConfig) { this.warmPoolConfig = warmPoolConfig; }
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags; }

@@ -12,6 +12,7 @@ import software.amazon.awssdk.services.codeartifact.model.Tag;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.Instant;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -82,6 +83,32 @@ class CodeArtifactTest {
                     assertThat(e.resourceId()).isEqualTo(DOMAIN);
                     assertThat(e.resourceTypeAsString()).isEqualTo("domain");
                 });
+    }
+
+    @Test
+    @Order(12)
+    @DisplayName("GetAuthorizationToken - returns a bearer token and a future expiration")
+    void getAuthorizationTokenReturnsATokenAndExpiration() {
+        GetAuthorizationTokenResponse resp = codeArtifact.getAuthorizationToken(r -> r.domain(DOMAIN));
+
+        assertThat(resp.authorizationToken()).isNotBlank();
+        assertThat(resp.expiration()).isAfter(Instant.now());
+    }
+
+    @Test
+    @Order(13)
+    @DisplayName("GetAuthorizationToken - fails against a domain that does not exist")
+    void getAuthorizationTokenMissingDomainFails() {
+        assertThatThrownBy(() -> codeArtifact.getAuthorizationToken(r -> r.domain("does-not-exist-domain")))
+                .isInstanceOf(ResourceNotFoundException.class);
+    }
+
+    @Test
+    @Order(14)
+    @DisplayName("GetAuthorizationToken - rejects a duration outside 0 or 900-43200")
+    void getAuthorizationTokenRejectsAnInvalidDuration() {
+        assertThatThrownBy(() -> codeArtifact.getAuthorizationToken(r -> r.domain(DOMAIN).durationSeconds(60L)))
+                .isInstanceOf(ValidationException.class);
     }
 
     @Test

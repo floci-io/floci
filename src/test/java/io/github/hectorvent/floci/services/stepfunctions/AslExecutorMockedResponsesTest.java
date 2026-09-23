@@ -28,8 +28,10 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 @QuarkusTest
 class AslExecutorMockedResponsesTest {
@@ -48,6 +50,8 @@ class AslExecutorMockedResponsesTest {
     @BeforeEach
     void setUp() {
         lambdaExecutor = mock(LambdaExecutorService.class);
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().stepfunctions().maxWaitSeconds()).thenReturn(30);
 
         executor = new AslExecutor(
                 lambdaExecutor,
@@ -65,7 +69,7 @@ class AslExecutorMockedResponsesTest {
                 mock(io.github.hectorvent.floci.services.scheduler.SchedulerController.class),
                 objectMapper,
                 new JsonataEvaluator(objectMapper),
-                mock(Instance.class), mock(EmulatorConfig.class), vertx, null);
+                mock(Instance.class), config, vertx, null);
     }
 
     @Test

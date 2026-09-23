@@ -206,7 +206,7 @@ public class ScheduleDispatcher implements Resettable {
 
         // Record the fire before delivering so a failing occurrence never holds back the next one.
         recordFire(schedule, now);
-        String requestBody = invoker.materializeRequest(schedule.getTarget(), regionOf(schedule));
+        String requestBody = invoker.materializeRequest(schedule, nextFire);
         attempt(schedule, new Occurrence(schedule.getArn(), nextFire),
                 Delivery.first(kind, schedule, requestBody), now);
     }
@@ -241,7 +241,7 @@ public class ScheduleDispatcher implements Resettable {
 
     private void attempt(Schedule schedule, Occurrence occurrence, Delivery delivery, Instant now) {
         try {
-            invoker.invoke(schedule.getTarget(), regionOf(schedule));
+            invoker.invoke(schedule, occurrence.scheduledAt());
         } catch (Exception e) {
             LOG.warnv("Schedule {0} invocation failed: {1}", schedule.getArn(), e.getMessage());
             Delivery failed = delivery.failedWith(e, now);
@@ -365,7 +365,7 @@ public class ScheduleDispatcher implements Resettable {
     }
 
     private static String regionOf(Schedule schedule) {
-        return AwsArnUtils.regionOrDefault(schedule.getArn(), "us-east-1");
+        return ScheduleInvoker.regionOf(schedule);
     }
 
     private record Occurrence(String scheduleArn, Instant scheduledAt) {

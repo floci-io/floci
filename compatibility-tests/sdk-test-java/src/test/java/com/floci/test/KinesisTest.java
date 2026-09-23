@@ -15,7 +15,12 @@ import software.amazon.awssdk.services.kinesis.KinesisClient;
 import software.amazon.awssdk.services.kinesis.model.CreateStreamRequest;
 import software.amazon.awssdk.services.kinesis.model.DeleteStreamRequest;
 import software.amazon.awssdk.services.kinesis.model.DescribeStreamSummaryRequest;
+import software.amazon.awssdk.services.kinesis.model.ListShardsRequest;
+import software.amazon.awssdk.services.kinesis.model.ListShardsResponse;
 
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -81,6 +86,46 @@ class KinesisTest {
             assertDoesNotThrow(() -> kinesis.deleteStream(DeleteStreamRequest.builder()
                     .streamName(streamName)
                     .build()));
+        }
+    }
+
+    @Test
+    @DisplayName("ListShards paginates through an opaque NextToken")
+    void listShardsPaginatesThroughEveryPage() {
+        KinesisClient client = TestFixtures.kinesisClient();
+        String streamName = TestFixtures.uniqueName("sdk-v2-kinesis-pagination");
+
+        try {
+            assertDoesNotThrow(() -> client.createStream(CreateStreamRequest.builder()
+                    .streamName(streamName)
+                    .shardCount(3)
+                    .build()));
+
+            List<String> seen = new ArrayList<>();
+            String nextToken = null;
+            int pages = 0;
+            do {
+                ListShardsRequest.Builder request = ListShardsRequest.builder().maxResults(1);
+                if (nextToken == null) {
+                    // AWS documents NextToken as the only stream identifier once paging has started.
+                    request.streamName(streamName);
+                } else {
+                    request.nextToken(nextToken);
+                }
+                ListShardsResponse page = assertDoesNotThrow(() -> client.listShards(request.build()));
+                page.shards().forEach(shard -> seen.add(shard.shardId()));
+                nextToken = page.nextToken();
+                pages++;
+            } while (nextToken != null && pages < 10);
+
+            assertThat(seen).hasSize(3);
+            assertThat(new HashSet<>(seen)).hasSize(3);
+            assertThat(nextToken).isNull();
+        } finally {
+            assertDoesNotThrow(() -> client.deleteStream(DeleteStreamRequest.builder()
+                    .streamName(streamName)
+                    .build()));
+            client.close();
         }
     }
 }

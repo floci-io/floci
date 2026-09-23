@@ -4,6 +4,7 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 @RegisterForReflection
@@ -21,8 +22,16 @@ public class TaskSet {
     private double scaleValue;
     private String scaleUnit;
     private String stabilityStatus;
+    private Instant stabilityStatusAt;
     private LaunchType launchType;
+    private List<CapacityProviderStrategyItem> capacityProviderStrategy;
+    private String platformVersion;
+    private String platformFamily;
     private String externalId;
+    private String startedBy;
+    private NetworkConfiguration networkConfiguration;
+    private List<EcsLoadBalancer> loadBalancers;
+    private List<Map<String, Object>> serviceRegistries;
     private Instant createdAt;
     private Instant updatedAt;
     private Map<String, String> tags = new HashMap<>();
@@ -63,11 +72,41 @@ public class TaskSet {
     public String getStabilityStatus() { return stabilityStatus; }
     public void setStabilityStatus(String stabilityStatus) { this.stabilityStatus = stabilityStatus; }
 
+    public Instant getStabilityStatusAt() { return stabilityStatusAt; }
+    public void setStabilityStatusAt(Instant stabilityStatusAt) { this.stabilityStatusAt = stabilityStatusAt; }
+
     public LaunchType getLaunchType() { return launchType; }
     public void setLaunchType(LaunchType launchType) { this.launchType = launchType; }
 
+    public List<CapacityProviderStrategyItem> getCapacityProviderStrategy() { return capacityProviderStrategy; }
+    public void setCapacityProviderStrategy(List<CapacityProviderStrategyItem> strategy) {
+        this.capacityProviderStrategy = strategy;
+    }
+
+    public String getPlatformVersion() { return platformVersion; }
+    public void setPlatformVersion(String platformVersion) { this.platformVersion = platformVersion; }
+
+    public String getPlatformFamily() { return platformFamily; }
+    public void setPlatformFamily(String platformFamily) { this.platformFamily = platformFamily; }
+
     public String getExternalId() { return externalId; }
     public void setExternalId(String externalId) { this.externalId = externalId; }
+
+    public String getStartedBy() { return startedBy; }
+    public void setStartedBy(String startedBy) { this.startedBy = startedBy; }
+
+    public NetworkConfiguration getNetworkConfiguration() { return networkConfiguration; }
+    public void setNetworkConfiguration(NetworkConfiguration networkConfiguration) {
+        this.networkConfiguration = networkConfiguration;
+    }
+
+    public List<EcsLoadBalancer> getLoadBalancers() { return loadBalancers; }
+    public void setLoadBalancers(List<EcsLoadBalancer> loadBalancers) { this.loadBalancers = loadBalancers; }
+
+    public List<Map<String, Object>> getServiceRegistries() { return serviceRegistries; }
+    public void setServiceRegistries(List<Map<String, Object>> serviceRegistries) {
+        this.serviceRegistries = serviceRegistries;
+    }
 
     public Instant getCreatedAt() { return createdAt; }
     public void setCreatedAt(Instant createdAt) { this.createdAt = createdAt; }

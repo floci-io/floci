@@ -79,13 +79,22 @@ public class ContainerLogStreamer {
      */
     public Closeable attachFromNow(String containerId, String logGroup, String logStream,
                                    String region, String logPrefix) {
-        return attachForAccount(null, containerId, logGroup, logStream, region, logPrefix, Instant.now());
+        return attachFromNowForAccount(null, containerId, logGroup, logStream, region, logPrefix);
     }
 
     public Closeable attachForAccount(
             String accountId, String containerId, String logGroup, String logStream,
             String region, String logPrefix) {
         return attachForAccount(accountId, containerId, logGroup, logStream, region, logPrefix, null);
+    }
+
+    /**
+     * Like {@link #attachForAccount}, but only forwards lines the container emits from now on.
+     */
+    public Closeable attachFromNowForAccount(
+            String accountId, String containerId, String logGroup, String logStream,
+            String region, String logPrefix) {
+        return attachForAccount(accountId, containerId, logGroup, logStream, region, logPrefix, Instant.now());
     }
 
     /** {@code since} of null follows the container's complete log history. */
