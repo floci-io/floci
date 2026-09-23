@@ -307,6 +307,7 @@ floci:
       enabled: true
     ecr:
       enabled: true
+      tls-uri: false
     ui:
       enabled: true
     bedrock:

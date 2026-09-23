@@ -178,6 +178,43 @@ class EksClusterManagerTest {
     }
 
     @Test
+    void registriesYamlTlsAliasesPreserveLoopbackMirrorsAndInternalHttpEndpoint() {
+        String endpoint = "http://host.docker.internal:4577";
+        String yaml = EksClusterManager.buildRegistriesYaml(
+                "111122223333", AwsRegions.ALL, 4577, endpoint, true);
+
+        for (String region : AwsRegions.ALL) {
+            assertTrue(yaml.contains("\"111122223333.dkr.ecr." + region + ".localhost:4577\":"));
+            assertTrue(yaml.contains("\"111122223333.dkr.ecr." + region + ".localhost.floci.io:4577\":"));
+        }
+        assertTrue(yaml.contains("\"localhost:4577\":"));
+        assertTrue(yaml.contains("\"localhost.floci.io:4577\":"));
+        assertFalse(yaml.contains("*"), "mirrors must not intercept unrelated registries");
+        assertFalse(yaml.contains("amazonaws.com"));
+        assertFalse(yaml.contains("docker.io"));
+        assertFalse(yaml.contains("ghcr.io"));
+        assertFalse(yaml.contains("https://"), "internal pulls still use the HTTP data plane");
+        long endpoints = yaml.lines().filter(line -> line.contains("- \"" + endpoint + "\"")).count();
+        assertEquals(2L * (AwsRegions.ALL.size() + 1), endpoints);
+    }
+
+    @Test
+    void registriesYamlKeepsTheExistingOutputWhenTlsUrisAreDisabled() {
+        String yaml = EksClusterManager.buildRegistriesYaml(
+                "111122223333", List.of("eu-central-1"), 4566, "http://floci:4566", false);
+
+        assertEquals("""
+                mirrors:
+                  "111122223333.dkr.ecr.eu-central-1.localhost:4566":
+                    endpoint:
+                      - "http://floci:4566"
+                  "localhost:4566":
+                    endpoint:
+                      - "http://floci:4566"
+                """, yaml);
+    }
+
+    @Test
     void serverArgsOmitCniFlagsByDefault() {
         List<String> args = EksClusterManager.buildServerArgs(false);
 
@@ -574,6 +611,7 @@ class EksClusterManagerTest {
         private DockerClient dockerClient;
         private CopyArchiveToContainerCmd copyCmd;
         private EcrRegistryManager registryManager;
+        private EmulatorConfig config;
         private EmulatorConfig.EksServiceConfig eks;
         private EmulatorConfig.EcrServiceConfig ecr;
         private EksClusterManager manager;
@@ -588,7 +626,7 @@ class EksClusterManagerTest {
 
             registryManager = Mockito.mock(EcrRegistryManager.class);
 
-            EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
+            config = Mockito.mock(EmulatorConfig.class);
             eks = Mockito.mock(EmulatorConfig.EksServiceConfig.class);
             ecr = Mockito.mock(EmulatorConfig.EcrServiceConfig.class);
             when(config.services()).thenReturn(Mockito.mock(EmulatorConfig.ServicesConfig.class));
@@ -611,11 +649,45 @@ class EksClusterManagerTest {
         }
 
         @Test
-        void injectsTheMirrorIntoTheContainer() {
+        void injectsTheMirrorIntoTheContainer() throws Exception {
             manager.injectEcrRegistryMirror("container-1", "demo");
 
             verify(registryManager).ensureStarted();
             verify(copyCmd).withRemotePath("/etc");
+            verify(copyCmd).exec();
+            verify(config, never()).tls();
+            String yaml = Files.readString(tempDir.resolve("registries/demo/registries.yaml"));
+            assertFalse(yaml.contains("localhost.floci.io"));
+        }
+
+        @Test
+        void injectsTlsAliasesWhenTlsAndTlsUrisAreEnabled() throws Exception {
+            EmulatorConfig.TlsConfig tls = Mockito.mock(EmulatorConfig.TlsConfig.class);
+            when(config.tls()).thenReturn(tls);
+            when(tls.enabled()).thenReturn(true);
+            when(ecr.tlsUri()).thenReturn(true);
+
+            manager.injectEcrRegistryMirror("container-1", "demo");
+
+            String yaml = Files.readString(tempDir.resolve("registries/demo/registries.yaml"));
+            assertTrue(yaml.contains("\"000000000000.dkr.ecr.us-east-1.localhost.floci.io:4566\":"));
+            assertTrue(yaml.contains("\"localhost.floci.io:4566\":"));
+            assertTrue(yaml.contains("- \"http://floci:4566\""));
+            assertFalse(yaml.contains("https://"));
+            verify(copyCmd).exec();
+        }
+
+        @Test
+        void omitsTlsAliasesWhenTlsIsDisabled() throws Exception {
+            EmulatorConfig.TlsConfig tls = Mockito.mock(EmulatorConfig.TlsConfig.class);
+            when(config.tls()).thenReturn(tls);
+            when(ecr.tlsUri()).thenReturn(true);
+
+            manager.injectEcrRegistryMirror("container-1", "demo");
+
+            String yaml = Files.readString(tempDir.resolve("registries/demo/registries.yaml"));
+            assertFalse(yaml.contains("localhost.floci.io"));
+            assertTrue(yaml.contains("\"localhost:4566\":"));
             verify(copyCmd).exec();
         }
 

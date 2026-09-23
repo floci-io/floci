@@ -563,6 +563,7 @@ floci:
       tls-enabled: false
       keep-running-on-shutdown: true
       uri-style: hostname
+      tls-uri: false
       prefer-local-images: true
     ui:
       enabled: true

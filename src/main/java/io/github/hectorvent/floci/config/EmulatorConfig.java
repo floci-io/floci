@@ -2451,6 +2451,10 @@ public interface EmulatorConfig {
         @WithDefault("hostname")
         String uriStyle();
 
+        /** Advertise TLS registry hostnames when Floci's global TLS listener is enabled. */
+        @WithDefault("false")
+        boolean tlsUri();
+
         /**
          * When true, an AWS-shaped ECR image URI that names an image already present on the Docker
          * daemon is used as-is instead of being rewritten to Floci's loopback registry.

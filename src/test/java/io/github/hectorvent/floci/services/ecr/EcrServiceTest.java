@@ -229,6 +229,40 @@ class EcrServiceTest {
     }
 
     @Test
+    void describeRepositoriesRefreshesStoredUrisForTheCurrentConfiguration() {
+        String namedRepository = REPO + "-named";
+        String listedRepository = REPO + "-listed";
+        service.createRepository(namedRepository, null, null, null, null, null, null, REGION);
+        service.createRepository(listedRepository, null, null, null, null, null, null, REGION);
+        when(registryManager.getRepositoryUri(anyString(), anyString(), anyString()))
+                .thenAnswer(invocation -> invocation.getArgument(0) + ".dkr.ecr." + invocation.getArgument(1)
+                        + ".localhost.floci.io:4566/" + invocation.getArgument(2));
+
+        Repository named = service.describeRepositories(List.of(namedRepository), null, REGION).getFirst();
+        assertEquals(ACCOUNT + ".dkr.ecr." + REGION + ".localhost.floci.io:4566/" + namedRepository,
+                named.getRepositoryUri());
+        List<Repository> listed = service.describeRepositories(null, null, REGION);
+        assertEquals(2, listed.size());
+        assertTrue(listed.stream().allMatch(repository -> repository.getRepositoryUri()
+                .equals(ACCOUNT + ".dkr.ecr." + REGION + ".localhost.floci.io:4566/"
+                        + repository.getRepositoryName())));
+    }
+
+    @Test
+    void deleteRepositoryRefreshesItsResponseWithoutRecreatingMetadata() {
+        service.createRepository(REPO, null, null, null, null, null, null, REGION);
+        String tlsUri = ACCOUNT + ".dkr.ecr." + REGION + ".localhost.floci.io:4566/" + REPO;
+        when(registryManager.getRepositoryUri(ACCOUNT, REGION, REPO)).thenReturn(tlsUri);
+        when(registryManager.tryEnsureStarted()).thenReturn(false);
+
+        Repository deleted = service.deleteRepository(REPO, null, false, REGION);
+
+        assertEquals(tlsUri, deleted.getRepositoryUri());
+        assertThrows(AwsException.class, () -> service.describeRepositories(List.of(REPO), null, REGION));
+        assertTrue(service.describeRepositories(null, null, REGION).isEmpty());
+    }
+
+    @Test
     void describeRepositories_emptyList_returnsAllInRegion() {
         service.createRepository("a/one", null, null, null, null, null, null, REGION);
         service.createRepository("a/two", null, null, null, null, null, null, REGION);

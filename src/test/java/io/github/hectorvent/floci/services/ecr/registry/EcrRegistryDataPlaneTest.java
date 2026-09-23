@@ -138,6 +138,29 @@ class EcrRegistryDataPlaneTest {
     }
 
     @Test
+    void tlsMirrorNamespacePreservesTheAccountAndRegion() {
+        EcrRegistryDataPlane.RegistryRequest request = EcrRegistryDataPlane.requestFor(
+                "floci:4566", "/v2/team/app/manifests/v1",
+                "ns=123456789012.dkr.ecr.eu-west-1.localhost.floci.io%3A4566", "hostname").orElseThrow();
+
+        assertEquals("123456789012", request.accountId());
+        assertEquals("eu-west-1", request.region());
+        assertEquals("/v2/123456789012/eu-west-1/team/app/manifests/v1", request.backendUri());
+    }
+
+    @Test
+    void tlsPathStyleMirrorPreservesTheRepositoryNamespace() {
+        EcrRegistryDataPlane.RegistryRequest request = EcrRegistryDataPlane.requestFor(
+                "floci:4566", "/v2/123456789012/eu-west-1/team/app/manifests/v1",
+                "ns=localhost.floci.io%3A4566", "path").orElseThrow();
+
+        assertEquals("123456789012", request.accountId());
+        assertEquals("eu-west-1", request.region());
+        assertEquals("team/app", request.repositoryName());
+        assertEquals("/v2/123456789012/eu-west-1/team/app/manifests/v1", request.backendUri());
+    }
+
+    @Test
     void registryPingDoesNotAcquireARepositoryNamespace() {
         var hostnameRequest = EcrRegistryDataPlane.requestFor(
                 "000000000000.dkr.ecr.us-east-1.localhost:4566", "/v2/", null, "hostname").orElseThrow();

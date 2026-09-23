@@ -1349,7 +1349,8 @@ public class EksClusterManager {
      * Generates and injects {@code /etc/rancher/k3s/registries.yaml} into the (created,
      * not-yet-started) k3s container so its containerd can pull images pushed to the Floci ECR
      * registry. Mirrors every repository hostname the emulator can mint: the default account across
-     * the full region catalog and the path-style {@code localhost:<port>} form, to Floci's
+     * the full region catalog and the path-style {@code localhost:<port>} form, including
+     * {@code localhost.floci.io} aliases when TLS registry URIs are enabled, to Floci's
      * in-network data plane. Public registries are never matched. A failure disables the
      * mirror for this cluster but does not abort its startup, matching the webhook contract.
      */
@@ -1369,7 +1370,8 @@ public class EksClusterManager {
             regions.add(config.defaultRegion());
         }
         String endpoint = "http://" + dockerHostResolver.resolve() + ":" + config.port();
-        String content = buildRegistriesYaml(config.defaultAccountId(), regions, config.port(), endpoint);
+        boolean tlsUri = config.services().ecr().tlsUri() && config.tls().enabled();
+        String content = buildRegistriesYaml(config.defaultAccountId(), regions, config.port(), endpoint, tlsUri);
         writeLocalCopy(Paths.get(config.services().eks().dataPath(), "registries", clusterName,
                 "registries.yaml"), content, clusterName);
         try {
@@ -1508,16 +1510,28 @@ public class EksClusterManager {
     /**
      * Builds the k3s registries.yaml content. One mirror entry per hostname-style repository URI
      * ({@code <account>.dkr.ecr.<region>.localhost:<port>}) plus one for the path-style form
-     * ({@code localhost:<port>}), all pointing at Floci's in-network data plane. k3s supports
+     * ({@code localhost:<port>}), all pointing at Floci's in-network data plane. The TLS URI
+     * mode adds the corresponding {@code localhost.floci.io} aliases. k3s supports
      * no partial wildcards and a {@code "*"} catch-all would also intercept public registries,
      * so the hostnames are enumerated explicitly.
      */
     static String buildRegistriesYaml(String accountId, List<String> regions, int dataPlanePort, String endpoint) {
+        return buildRegistriesYaml(accountId, regions, dataPlanePort, endpoint, false);
+    }
+
+    static String buildRegistriesYaml(String accountId, List<String> regions, int dataPlanePort,
+                                     String endpoint, boolean tlsUri) {
         StringBuilder yaml = new StringBuilder("mirrors:\n");
         for (String region : regions) {
             appendMirror(yaml, accountId + ".dkr.ecr." + region + ".localhost:" + dataPlanePort, endpoint);
+            if (tlsUri) {
+                appendMirror(yaml, accountId + ".dkr.ecr." + region + ".localhost.floci.io:" + dataPlanePort, endpoint);
+            }
         }
         appendMirror(yaml, "localhost:" + dataPlanePort, endpoint);
+        if (tlsUri) {
+            appendMirror(yaml, "localhost.floci.io:" + dataPlanePort, endpoint);
+        }
         return yaml.toString();
     }
 

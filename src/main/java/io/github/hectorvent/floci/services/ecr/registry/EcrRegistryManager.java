@@ -124,7 +124,7 @@ public class EcrRegistryManager {
         String region = m.group(2);
         String repoAndTag = m.group(3);
         ensureStarted();
-        String rewritten = getRepositoryUri(account, region, repoAndTag);
+        String rewritten = repositoryUri(account, region, repoAndTag, "localhost");
         LOG.infov("Rewriting ECR image URI {0} -> {1}", image, rewritten);
         return rewritten;
     }
@@ -144,16 +144,31 @@ public class EcrRegistryManager {
 
     /** Returns the docker-pullable repository URI for the given account/region/name. */
     public String getRepositoryUri(String accountId, String region, String repoName) {
+        return repositoryUri(accountId, region, repoName, tlsUriEnabled() ? "localhost.floci.io" : "localhost");
+    }
+
+    private String repositoryUri(String accountId, String region, String repoName, String domain) {
         int port = config.port();
         String style = config.services().ecr().uriStyle();
         if ("path".equalsIgnoreCase(style)) {
-            return "localhost:" + port + "/" + accountId + "/" + region + "/" + repoName;
+            return domain + ":" + port + "/" + accountId + "/" + region + "/" + repoName;
         }
-        return accountId + ".dkr.ecr." + region + ".localhost:" + port + "/" + repoName;
+        return accountId + ".dkr.ecr." + region + "." + domain + ":" + port + "/" + repoName;
+    }
+
+    private boolean tlsUriEnabled() {
+        return config.services().ecr().tlsUri() && config.tls().enabled();
     }
 
     /** Returns the proxy endpoint a docker daemon should log into for any ECR repo. */
     public String getProxyEndpoint() {
+        if (tlsUriEnabled()) {
+            String host = "path".equalsIgnoreCase(config.services().ecr().uriStyle())
+                    ? "localhost.floci.io"
+                    : regionResolver.getAccountId() + ".dkr.ecr."
+                            + regionResolver.getRegion() + ".localhost.floci.io";
+            return "https://" + host + ":" + config.port();
+        }
         String scheme = config.services().ecr().tlsEnabled() ? "https" : "http";
         return scheme + "://" + regionResolver.getAccountId() + ".dkr.ecr."
                 + regionResolver.getDefaultRegion() + ".localhost:" + config.port();

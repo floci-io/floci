@@ -269,6 +269,7 @@ public class EcrService implements ResourceProvider {
             registryManager.pruneStorage();
         }
         LOG.infov("Deleted ECR repository {0}/{1}/{2}", region, account, repositoryName);
+        repo.setRepositoryUri(registryManager.getRepositoryUri(account, region, repositoryName));
         return repo;
     }
 

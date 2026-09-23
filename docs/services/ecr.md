@@ -31,6 +31,7 @@
 
 - **Real OCI registry backing.** A single shared `registry:2` container per Floci instance stores all repositories. Floci proxies Docker Distribution traffic to it and starts it lazily on the first ECR API call. The container is reused across Floci restarts (`keep-running-on-shutdown: true` by default), so pushed image bytes survive restarts.
 - **TLS registry data plane.** Real AWS ECR is HTTPS-only. When TLS is enabled (`FLOCI_TLS_ENABLED=true`), Floci serves the registry data plane over TLS at `<account>.dkr.ecr.<region>.localhost.floci.io:<port>/<repo>`. The server certificate automatically includes regional wildcards `*.dkr.ecr.<region>.localhost.floci.io` for every advertised AWS region as Subject Alternative Names (SANs). Container runtimes and tools (Docker, containerd, nerdctl, podman) connect over HTTPS after trusting Floci's root CA certificate (`GET /_floci/ca.pem` or system trust store). The plain HTTP loopback path (`<account>.dkr.ecr.<region>.localhost:<port>`) remains fully supported without changes.
+- **Advertise TLS addresses.** Set `FLOCI_SERVICES_ECR_TLS_URI=true` together with `FLOCI_TLS_ENABLED=true` to return the TLS hostname in `repositoryUri` and an HTTPS `proxyEndpoint` from `GetAuthorizationToken`. This opt-in defaults to `false`. With `uri-style: path`, the URI becomes `localhost.floci.io:<port>/<account>/<region>/<repo>` and the login endpoint is `https://localhost.floci.io:<port>`. Existing repository records acquire the current URI when described or returned by deletion. If global TLS is disabled, the option has no effect. Clients must trust the Floci CA, or the configured certificate must cover the advertised names.
 - **Storage cleanup.** `DeleteRepository --force` removes repository manifests, including untagged manifests. When it deletes the final repository, or when a non-retained runtime stops, Floci removes the named registry volume only in `memory` mode or when `prune-volumes-on-delete: true`.
 - **Loopback URI scheme.** Repository URIs follow `<account>.dkr.ecr.<region>.localhost:<flociPort>/<repoName>`. RFC 6761 reserves `*.localhost` to resolve to the loopback address, and the docker daemon auto-trusts loopback as an insecure registry, so `docker push` and `docker pull` work without daemon configuration. A `path` URI style fallback (`localhost:<flociPort>/<account>/<region>/<repo>`) is available via `floci.services.ecr.uri-style: path` for environments where `*.localhost` resolution misbehaves.
 - **Image tag mutability.** `IMMUTABLE` repositories allow the first manifest write for a tag and reject every replacement, including a replacement with the same manifest. The proxy forwards blob uploads and digest-addressed manifests unchanged.
@@ -54,6 +55,7 @@
 | `FLOCI_SERVICES_ECR_DATA_PATH` | `./data/ecr` | Bind-mount root for the registry data directory |
 | `FLOCI_SERVICES_ECR_KEEP_RUNNING_ON_SHUTDOWN` | `true` | Leave the registry container running so the next Floci start adopts it |
 | `FLOCI_SERVICES_ECR_URI_STYLE` | `hostname` | `hostname` = `*.dkr.ecr.<region>.localhost`; `path` = `localhost:<port>/<account>/<region>/<repo>` |
+| `FLOCI_SERVICES_ECR_TLS_URI` | `false` | Report `localhost.floci.io` registry addresses and an HTTPS login endpoint when global `FLOCI_TLS_ENABLED` is also `true` |
 | `FLOCI_SERVICES_ECR_PREFER_LOCAL_IMAGES` | `true` | Use an AWS-shaped ECR image URI as-is when the Docker daemon already has that image, instead of rewriting it to the loopback registry |
 | `FLOCI_SERVICES_ECR_TLS_ENABLED` | `false` | Reserved for future ACM-backed TLS |
 
@@ -132,7 +134,7 @@ aws ecr delete-repository  --repository-name floci-it/app --force \
 
 ### Push and Pull over TLS
 
-When TLS is enabled (`FLOCI_TLS_ENABLED=true`), trust Floci's root CA and authenticate against the TLS registry data plane:
+Start Floci with `FLOCI_TLS_ENABLED=true` and `FLOCI_SERVICES_ECR_TLS_URI=true`, then trust Floci's root CA and use the repository address returned by the API:
 
 ```bash
 # 1. Download and trust Floci's root CA
@@ -140,25 +142,43 @@ curl -s http://localhost:4566/_floci/ca.pem -o floci-root-ca.pem
 export AWS_CA_BUNDLE=$PWD/floci-root-ca.pem
 export AWS_ENDPOINT=https://localhost:4566
 
-# 2. Authenticate Docker against the TLS endpoint
+# 2. Read the advertised repository and registry addresses
+REPOSITORY_URI=$(aws ecr create-repository --repository-name floci-it/tls-app \
+  --endpoint-url "$AWS_ENDPOINT" --query repository.repositoryUri --output text)
+REGISTRY_HOST=${REPOSITORY_URI%%/*}
+
+# 3. Trust the CA in Linux Docker Engine (separate from AWS_CA_BUNDLE)
+sudo mkdir -p "/etc/docker/certs.d/$REGISTRY_HOST"
+sudo cp floci-root-ca.pem "/etc/docker/certs.d/$REGISTRY_HOST/ca.crt"
+
+# 4. Authenticate Docker against the TLS endpoint
 aws ecr get-login-password --endpoint-url $AWS_ENDPOINT \
   | docker login --username AWS --password-stdin \
-        000000000000.dkr.ecr.us-east-1.localhost.floci.io:4566
+        "$REGISTRY_HOST"
 
-# 3. Tag and push an image over TLS
+# 5. Tag and push an image over TLS
 docker pull alpine:3.19
-docker tag  alpine:3.19 \
-            000000000000.dkr.ecr.us-east-1.localhost.floci.io:4566/floci-it/app:v1
-docker push 000000000000.dkr.ecr.us-east-1.localhost.floci.io:4566/floci-it/app:v1
+docker tag alpine:3.19 "$REPOSITORY_URI:v1"
+docker push "$REPOSITORY_URI:v1"
 
-# 4. Pull over TLS
-docker pull 000000000000.dkr.ecr.us-east-1.localhost.floci.io:4566/floci-it/app:v1
+# 6. Pull over TLS
+docker pull "$REPOSITORY_URI:v1"
 ```
+
+For Docker Desktop, replace step 3 with installation of the Floci CA in the host trust store
+and restart Docker Desktop, following [Docker's CA certificate instructions](https://docs.docker.com/engine/network/ca-certs/).
+`AWS_CA_BUNDLE` affects the AWS CLI; it does not configure Docker's certificate trust.
 
 !!! note "Pulling from other containers (EKS, same-network consumers)"
     The `localhost`-based repository URI only works from the host. [Floci EKS](eks.md#pulling-images-from-floci-ecr)
     configures a containerd mirror to reach Floci's data plane, so Helm charts can reference the
     pushed URI as-is.
+
+    When TLS URI advertising is enabled, newly configured EKS registry mirrors accept both
+    the loopback and TLS names and forward them to the same internal HTTP endpoint. Recreate
+    existing clusters to pick up changed registry mirror settings. Automatic rewrites of
+    AWS-shaped Lambda/ECS image references continue using loopback URIs; an explicitly supplied
+    TLS image reference is used as supplied.
 
 ## SDK Example (Java)
 
@@ -218,7 +238,7 @@ The following ECR features are **not** implemented. Stored values for policies a
 
 **`Function.TimedOut` when invoking image-backed Lambdas on native Linux Docker.** Lambda containers reach Floci's Runtime API server via the docker bridge gateway. On Ubuntu / Pop!_OS / Debian with UFW enabled, the default `INPUT DROP` policy blocks this path. See [Quick Start → Lambda on native Linux Docker](../getting-started/quick-start.md#lambda-on-native-linux-docker-ufw) for the one-line `ufw allow in on docker0` fix.
 
-**`docker login` fails with TLS errors.** Floci's emulated registry serves plain HTTP. Docker auto-trusts loopback addresses (`127.0.0.1`, `*.localhost`) as insecure registries, so this should not normally happen. If your URIs end up pointing somewhere non-loopback (e.g. you set `FLOCI_HOSTNAME=floci` for Docker Compose), add the hostname to the daemon's `insecure-registries` array in `/etc/docker/daemon.json`.
+**`docker login` fails with TLS errors.** When TLS URI advertising is enabled, Docker must trust the Floci CA independently of the AWS CLI, and the server certificate must cover the returned registry hostname. Follow the trust steps above; setting only `AWS_CA_BUNDLE` is insufficient. Default loopback URIs remain usable over HTTP without additional Docker trust configuration.
 
 **Disk not reclaimed after deleting images.** `BatchDeleteImage` removes manifests but blobs remain on disk until garbage collection runs. Trigger it with `curl -X POST http://localhost:4566/_floci/ecr/gc`. The endpoint runs `registry garbage-collect` inside the backing container and returns the reclaimed blob list. The operation is serialized — ECR API calls block for its duration (typically a few seconds).
 
