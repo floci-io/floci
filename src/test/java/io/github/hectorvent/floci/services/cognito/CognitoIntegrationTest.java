@@ -81,7 +81,9 @@ class CognitoIntegrationTest {
         JsonNode clientResponse = cognitoJson("CreateUserPoolClient", """
                 {
                   "UserPoolId": "%s",
-                  "ClientName": "jwt-client"
+                  "ClientName": "jwt-client",
+                  "ExplicitAuthFlows": ["ALLOW_USER_PASSWORD_AUTH", "ALLOW_ADMIN_USER_PASSWORD_AUTH",
+                                        "ALLOW_REFRESH_TOKEN_AUTH"]
                 }
                 """.formatted(poolId));
         clientId = clientResponse.path("UserPoolClient").path("ClientId").asText();
@@ -1999,7 +2001,8 @@ class CognitoIntegrationTest {
         JsonNode clientResponse = cognitoJson("CreateUserPoolClient", """
                 {
                   "UserPoolId": "%s",
-                  "ClientName": "del-client"
+                  "ClientName": "del-client",
+                  "ExplicitAuthFlows": ["ALLOW_USER_PASSWORD_AUTH"]
                 }
                 """.formatted(delPoolId));
         String delClientId = clientResponse.path("UserPoolClient").path("ClientId").asText();
@@ -2680,7 +2683,7 @@ class CognitoIntegrationTest {
                 { "PoolName": "UserAuthWirePool" }
                 """).path("UserPool").path("Id").asText();
         String userAuthClientId = cognitoJson("CreateUserPoolClient", """
-                { "UserPoolId": "%s", "ClientName": "user-auth-client" }
+                { "UserPoolId": "%s", "ClientName": "user-auth-client", "ExplicitAuthFlows": ["ALLOW_USER_AUTH"] }
                 """.formatted(userAuthPoolId)).path("UserPoolClient").path("ClientId").asText();
         cognitoAction("AdminCreateUser", """
                 { "UserPoolId": "%s", "Username": "dana",
@@ -2714,7 +2717,7 @@ class CognitoIntegrationTest {
                 { "PoolName": "UserAuthWirePasswordPool" }
                 """).path("UserPool").path("Id").asText();
         String userAuthClientId = cognitoJson("CreateUserPoolClient", """
-                { "UserPoolId": "%s", "ClientName": "user-auth-client" }
+                { "UserPoolId": "%s", "ClientName": "user-auth-client", "ExplicitAuthFlows": ["ALLOW_USER_AUTH"] }
                 """.formatted(userAuthPoolId)).path("UserPoolClient").path("ClientId").asText();
         cognitoAction("AdminCreateUser", """
                 { "UserPoolId": "%s", "Username": "erin",
@@ -2758,7 +2761,7 @@ class CognitoIntegrationTest {
                 { "PoolName": "UserAuthWireSelectChallengePool" }
                 """).path("UserPool").path("Id").asText();
         String userAuthClientId = cognitoJson("CreateUserPoolClient", """
-                { "UserPoolId": "%s", "ClientName": "user-auth-client" }
+                { "UserPoolId": "%s", "ClientName": "user-auth-client", "ExplicitAuthFlows": ["ALLOW_USER_AUTH"] }
                 """.formatted(userAuthPoolId)).path("UserPoolClient").path("ClientId").asText();
         cognitoAction("AdminCreateUser", """
                 { "UserPoolId": "%s", "Username": "gale",
@@ -2802,7 +2805,7 @@ class CognitoIntegrationTest {
                 { "PoolName": "UserAuthLiteTierPool", "UserPoolTier": "LITE" }
                 """).path("UserPool").path("Id").asText();
         String liteTierClientId = cognitoJson("CreateUserPoolClient", """
-                { "UserPoolId": "%s", "ClientName": "user-auth-client" }
+                { "UserPoolId": "%s", "ClientName": "user-auth-client", "ExplicitAuthFlows": ["ALLOW_USER_AUTH"] }
                 """.formatted(liteTierPoolId)).path("UserPoolClient").path("ClientId").asText();
         cognitoAction("AdminCreateUser", """
                 { "UserPoolId": "%s", "Username": "finn",
@@ -2836,7 +2839,7 @@ class CognitoIntegrationTest {
                 { "PoolName": "UserAuthWireNoSessionPool" }
                 """).path("UserPool").path("Id").asText();
         String userAuthClientId = cognitoJson("CreateUserPoolClient", """
-                { "UserPoolId": "%s", "ClientName": "user-auth-client" }
+                { "UserPoolId": "%s", "ClientName": "user-auth-client", "ExplicitAuthFlows": ["ALLOW_USER_AUTH"] }
                 """.formatted(userAuthPoolId)).path("UserPoolClient").path("ClientId").asText();
         cognitoAction("AdminCreateUser", """
                 { "UserPoolId": "%s", "Username": "gale",
@@ -2859,6 +2862,57 @@ class CognitoIntegrationTest {
                 .then()
                 .statusCode(400)
                 .body("__type", equalTo("NotAuthorizedException"));
+    }
+
+    @Test
+    @Order(110)
+    void clientWithoutExplicitAuthFlowsGetsTheAwsDefaultOverTheWire() throws Exception {
+        String defaultPoolId = cognitoJson("CreateUserPool", """
+                { "PoolName": "DefaultFlowsPool" }
+                """).path("UserPool").path("Id").asText();
+        JsonNode created = cognitoJson("CreateUserPoolClient", """
+                { "UserPoolId": "%s", "ClientName": "default-flows-client" }
+                """.formatted(defaultPoolId)).path("UserPoolClient");
+        String defaultClientId = created.path("ClientId").asText();
+
+        // As on AWS, the stored and described value is empty; only the auth-time gate applies the default.
+        assertEquals(List.of(), textValues(created.path("ExplicitAuthFlows")));
+        JsonNode described = cognitoJson("DescribeUserPoolClient", """
+                { "UserPoolId": "%s", "ClientId": "%s" }
+                """.formatted(defaultPoolId, defaultClientId)).path("UserPoolClient");
+        assertEquals(List.of(), textValues(described.path("ExplicitAuthFlows")));
+
+        cognitoAction("AdminCreateUser", """
+                { "UserPoolId": "%s", "Username": "flora",
+                  "UserAttributes": [{ "Name": "email", "Value": "flora@example.com" }] }
+                """.formatted(defaultPoolId)).then().statusCode(200);
+        cognitoAction("AdminSetUserPassword", """
+                { "UserPoolId": "%s", "Username": "flora", "Password": "Perm1234!", "Permanent": true }
+                """.formatted(defaultPoolId)).then().statusCode(200);
+
+        cognitoAction("InitiateAuth", """
+                { "ClientId": "%s", "AuthFlow": "USER_PASSWORD_AUTH",
+                  "AuthParameters": { "USERNAME": "flora", "PASSWORD": "Perm1234!" } }
+                """.formatted(defaultClientId))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterException"))
+                .body("message", equalTo("USER_PASSWORD_AUTH flow not enabled for this client"));
+        cognitoAction("AdminInitiateAuth", """
+                { "UserPoolId": "%s", "ClientId": "%s", "AuthFlow": "ADMIN_USER_PASSWORD_AUTH",
+                  "AuthParameters": { "USERNAME": "flora", "PASSWORD": "Perm1234!" } }
+                """.formatted(defaultPoolId, defaultClientId))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterException"));
+    }
+
+    private static List<String> textValues(JsonNode array) {
+        List<String> values = new ArrayList<>();
+        for (JsonNode value : array) {
+            values.add(value.asText());
+        }
+        return values;
     }
 
     private static JsonNode decodeJwtPayload(String token) throws Exception {

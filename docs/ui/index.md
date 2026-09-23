@@ -30,6 +30,18 @@ Console container logs are streamed into CloudWatch Logs under the log group `/f
 Port `4500` is bound on the host by Docker, not by Floci, so it needs **no** `ports:` entry in your
 `docker-compose.yml`. See [Ports Reference](../configuration/ports.md).
 
+Docker publishes it on every interface, the same as a bare `"4500:4500"` mapping. If you
+deliberately keep Floci itself on loopback, with a `"127.0.0.1:4566:4566"` mapping rather than
+`"4566:4566"`, set the console to match:
+
+```yaml
+environment:
+  FLOCI_SERVICES_UI_BIND_ADDRESS: "127.0.0.1"
+```
+
+The console is unauthenticated and can drive every emulated service, so without this it would be
+reachable from the network that the API mapping was narrowed to keep it off.
+
 ## Configuration
 
 All keys live under `floci.services.ui.*`, so `FLOCI_SERVICES_UI_*` as environment variables.
@@ -40,6 +52,7 @@ All keys live under `floci.services.ui.*`, so `FLOCI_SERVICES_UI_*` as environme
 | `FLOCI_SERVICES_UI_IMAGE` | `floci/floci-ui:latest` | Console image to run |
 | `FLOCI_SERVICES_UI_CONTAINER_NAME` | `floci-ui` | Name of the sidecar container |
 | `FLOCI_SERVICES_UI_PORT` | `4500` | Host port the console is published on |
+| `FLOCI_SERVICES_UI_BIND_ADDRESS` | _(none)_ | Host interface that port is published on (see [Ports](#ports)) |
 | `FLOCI_SERVICES_UI_KEEP_RUNNING_ON_SHUTDOWN` | `false` | Leave the sidecar running when Floci stops |
 | `FLOCI_SERVICES_UI_DOCKER_NETWORK` | _(none)_ | Docker network for the sidecar (overrides `FLOCI_SERVICES_DOCKER_NETWORK`) |
 | `FLOCI_SERVICES_UI_ENDPOINT` | _(derived)_ | Floci endpoint handed to the console, instead of deriving it from the Docker host and TLS settings |

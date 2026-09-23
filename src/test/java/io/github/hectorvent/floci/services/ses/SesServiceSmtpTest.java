@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.ses;
 
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
 import io.github.hectorvent.floci.services.ses.model.SentEmail;
@@ -14,6 +15,7 @@ import org.mockito.ArgumentCaptor;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
@@ -109,6 +111,35 @@ class SesServiceSmtpTest {
 
         assertEquals("bounces@example.com", capturedRelay().returnPath());
         assertEquals("bounces@example.com", storedEmail(messageId).getReturnPath());
+    }
+
+    @Test
+    void sendRawEmail_rejectedMessage_keepsNoReturnPathFromItsHeaders() {
+        // The scan trips on the subject; the Return-Path header, read off the same message, must
+        // not survive on the record either, so the request's return path is used.
+        String raw = "From: from@example.com\r\nTo: to@example.com\r\nReturn-Path: <bounces@evil.example>\r\n"
+                + "Subject: " + SesContentScan.signature() + "\r\n\r\nbody\r\n";
+
+        String messageId = service.sendRawEmail("from@example.com", List.of("to@example.com"), raw,
+                "bounces@example.com", null, List.of(), null, "us-east-1");
+
+        assertEquals("bounces@example.com", storedEmail(messageId).getReturnPath());
+        assertEquals("Bad content", storedEmail(messageId).getRejectReason());
+        verify(smtpRelay, never()).relayRaw(any());
+    }
+
+    @Test
+    void sendRawEmail_unreadableMessage_isRefusedNotStoredNotRelayed() {
+        // Nested past what mime4j can parse: the content cannot be scanned, so the send is refused
+        // rather than recorded and relayed unseen.
+        String raw = "Content-Type: message/rfc822\r\n\r\n".repeat(100_000) + "Subject: deep\r\n\r\nx\r\n";
+
+        AwsException e = assertThrows(AwsException.class, () -> service.sendRawEmail("from@example.com",
+                List.of("to@example.com"), raw, null, null, List.of(), null, "us-east-1"));
+
+        assertEquals(400, e.getHttpStatus());
+        assertTrue(sentEmails.listAll().isEmpty());
+        verify(smtpRelay, never()).relayRaw(any());
     }
 
     @Test

@@ -25,6 +25,12 @@ class SsmServicePublicAmiParameterTest {
     private static final String REGION = "eu-west-1";
     private static final String AL2023_DEFAULT =
             "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64";
+    private static final String AL2023_ARM64_DEFAULT =
+            "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64";
+    private static final String AL2023_ARM64_MINIMAL =
+            "/aws/service/ami-amazon-linux-latest/al2023-ami-minimal-kernel-default-arm64";
+    private static final String AL2023_ARM64_KERNEL_6_1 =
+            "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-arm64";
     private static final String AMZN2_DEFAULT =
             "/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2";
 
@@ -50,6 +56,25 @@ class SsmServicePublicAmiParameterTest {
     }
 
     @Test
+    void resolvesTheDocumentedAl2023Arm64DefaultFromTheImageCatalog() {
+        Parameter param = ssmService.getParameter(AL2023_ARM64_DEFAULT, REGION);
+
+        assertEquals("ami-amazonlinux2023-arm64", param.getValue());
+        assertEquals("String", param.getType());
+        assertEquals(1, param.getVersion());
+        assertEquals("arn:aws:ssm:eu-west-1::parameter" + AL2023_ARM64_DEFAULT, param.getArn());
+        assertEquals(Instant.parse("2023-03-15T00:00:00.000Z"), param.getLastModifiedDate());
+    }
+
+    @Test
+    void resolvesAllDocumentedAl2023Arm64VariantsFromTheImageCatalog() {
+        for (String paramName : List.of(AL2023_ARM64_DEFAULT, AL2023_ARM64_MINIMAL, AL2023_ARM64_KERNEL_6_1)) {
+            Parameter param = ssmService.getParameter(paramName, REGION);
+            assertEquals("ami-amazonlinux2023-arm64", param.getValue(), paramName);
+        }
+    }
+
+    @Test
     void resolvesTheDocumentedAmzn2DefaultFromTheImageCatalog() {
         assertEquals("ami-0abcdef1234567890", ssmService.getParameter(AMZN2_DEFAULT, REGION).getValue());
     }
@@ -71,6 +96,7 @@ class SsmServicePublicAmiParameterTest {
 
         List<String> names = params.stream().map(Parameter::getName).toList();
         assertTrue(names.contains(AL2023_DEFAULT), names.toString());
+        assertTrue(names.contains(AL2023_ARM64_DEFAULT), names.toString());
         assertTrue(names.contains(AMZN2_DEFAULT), names.toString());
         assertTrue(ssmService.getParametersByPath("/aws/service", false, REGION).isEmpty());
         assertEquals(names.size(), ssmService.getParametersByPath("/aws/service", true, REGION).size());

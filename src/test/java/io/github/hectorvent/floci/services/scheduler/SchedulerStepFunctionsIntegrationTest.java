@@ -163,6 +163,59 @@ class SchedulerStepFunctionsIntegrationTest {
         assertEquals(0, listExecutions(targetStateMachineArn).size());
     }
 
+    @Test
+    void sdkTaskStructuredInputReachesDueStateMachineTarget() {
+        String targetStateMachineArn = createPassStateMachine();
+        String scheduleName = uniqueName("sfn-sdk-input");
+        String expectedInput = "{\"scheduleId\":\"schedule-123\",\"nested\":{\"quote\":\"a\\\"b\"}}";
+        Instant fireAt = Instant.now().plus(1, ChronoUnit.DAYS).truncatedTo(ChronoUnit.SECONDS);
+        String creatorStateMachineArn = createStateMachine(uniqueName("schedule-creator"), """
+                {
+                  "QueryLanguage": "JSONata",
+                  "StartAt": "Create",
+                  "States": {
+                    "Create": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::aws-sdk:scheduler:createSchedule",
+                      "Arguments": {
+                        "Name": "SCHEDULE_NAME",
+                        "ScheduleExpression": "SCHEDULE_EXPRESSION",
+                        "FlexibleTimeWindow": {"Mode": "OFF"},
+                        "Target": {
+                          "Arn": "TARGET_ARN",
+                          "RoleArn": "ROLE",
+                          "Input": {
+                            "scheduleId": "schedule-123",
+                            "nested": {"quote": "a\\\"b"}
+                          }
+                        }
+                      },
+                      "End": true
+                    }
+                  }
+                }
+                """
+                .replace("SCHEDULE_NAME", scheduleName)
+                .replace("SCHEDULE_EXPRESSION", "at(" + SCHEDULE_TIME.format(fireAt) + ")")
+                .replace("TARGET_ARN", targetStateMachineArn)
+                .replace("ROLE", ROLE_ARN));
+
+        Response creation = waitForTerminalExecution(startExecution(creatorStateMachineArn));
+        assertEquals("SUCCEEDED", creation.jsonPath().getString("status"));
+        scheduleNames.add(scheduleName);
+        Schedule schedule = schedulerService.getSchedule(scheduleName, null, REGION);
+        assertEquals(expectedInput, schedule.getTarget().getInput());
+
+        dispatcherFor(scheduleName).tick(fireAt);
+
+        List<Map<String, Object>> executions = listExecutions(targetStateMachineArn);
+        assertEquals(1, executions.size());
+        Response targetExecution = waitForTerminalExecution((String) executions.get(0).get("executionArn"));
+        assertEquals("SUCCEEDED", targetExecution.jsonPath().getString("status"));
+        assertEquals(expectedInput, targetExecution.jsonPath().getString("input"));
+        assertEquals(expectedInput, targetExecution.jsonPath().getString("output"));
+    }
+
     private String createPassStateMachine() {
         String name = uniqueName("scheduled-workflow");
         String definition = "{\"StartAt\":\"Pass\",\"States\":{\"Pass\":{\"Type\":\"Pass\",\"End\":true}}}";

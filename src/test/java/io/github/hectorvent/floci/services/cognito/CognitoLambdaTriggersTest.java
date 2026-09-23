@@ -55,6 +55,9 @@ import static org.mockito.Mockito.when;
  * triggerSource, and that their responses are correctly applied to the auth flow.
  */
 class CognitoLambdaTriggersTest {
+    private static final List<String> AUTH_FLOWS = List.of("ALLOW_USER_PASSWORD_AUTH",
+            "ALLOW_ADMIN_USER_PASSWORD_AUTH", "ALLOW_CUSTOM_AUTH", "ALLOW_USER_SRP_AUTH", "ALLOW_REFRESH_TOKEN_AUTH");
+
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
@@ -97,7 +100,9 @@ class CognitoLambdaTriggersTest {
     }
 
     private UserPoolClient createClient(UserPool pool) {
-        return service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+        return service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of(),
+                null, List.of(), null, AUTH_FLOWS, null, null, List.of(), null, List.of(), null,
+                null, null, List.of(), null, null);
     }
 
     private void seedUser(UserPool pool, String username, String password) {

@@ -46,7 +46,22 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Base64;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HexFormat;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Matcher;
@@ -2003,7 +2018,12 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     public Map<String, String> getObjectTagging(String bucketName, String key) {
-        S3Object obj = getStoredObject(bucketName, key, null);
+        return getObjectTagging(bucketName, key, null);
+    }
+
+    /** Tags of one version, or of the current version when {@code versionId} is null or "null". */
+    public Map<String, String> getObjectTagging(String bucketName, String key, String versionId) {
+        S3Object obj = getStoredObject(bucketName, key, "null".equals(versionId) ? null : versionId);
         return obj.getTags() != null ? obj.getTags() : Map.of();
     }
 
@@ -3307,8 +3327,9 @@ public class S3Service implements Resettable, ResourceProvider {
                         ? memoryMultipartStore.get(uploadId).get(num)
                         : Files.readAllBytes(dataRoot.resolve(".multipart").resolve(uploadId).resolve(String.valueOf(num)));
                 combined.write(partData);
-                // For composite ETag: hash each part's MD5
-                md.update(computeETagBytes(partData));
+                // A part ETag is the MD5 of that part, so the composite hashes it without rehashing the data
+                String partETag = stripSurroundingQuotes(upload.getParts().get(num).getETag());
+                md.update(HexFormat.of().parseHex(partETag));
             }
 
             byte[] allData = combined.toByteArray();

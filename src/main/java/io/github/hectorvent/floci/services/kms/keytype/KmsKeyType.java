@@ -31,4 +31,14 @@ public interface KmsKeyType {
     default byte[] generateMac(KmsKey key, byte[] message, String algorithm) throws GeneralSecurityException {
         throw new IllegalStateException(key.getKeySpec() + " does not generate MACs");
     }
+
+    /**
+     * Validates and stores imported key material for the specified KMS key.
+     *
+     * @param key target KMS key
+     * @param material key material after transport wrapping has been removed
+     */
+    default void importKeyMaterial(KmsKey key, byte[] material) {
+        throw new IllegalStateException(key.getKeySpec() + " does not import key material");
+    }
 }

@@ -11,8 +11,11 @@ import org.junit.jupiter.params.provider.CsvSource;
 import javax.crypto.Cipher;
 import javax.crypto.spec.OAEPParameterSpec;
 import javax.crypto.spec.PSource;
+import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyFactory;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
 import java.security.PublicKey;
 import java.security.spec.MGF1ParameterSpec;
 import java.security.spec.X509EncodedKeySpec;
@@ -39,6 +42,87 @@ class KmsIntegrationTest {
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
+    @Test
+    void replicateKeyReturnsMultiRegionMetadataThroughJsonHandler() {
+        String keyId = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("""
+                    {
+                        "Description": "multi-region-primary",
+                        "MultiRegion": true
+                    }
+                    """)
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .body("KeyMetadata.MultiRegion", equalTo(true))
+                .body("KeyMetadata.KeyId", matchesPattern("mrk-[0-9a-f]{32}"))
+                .body("KeyMetadata.MultiRegionConfiguration.MultiRegionKeyType", equalTo("PRIMARY"))
+                .extract().path("KeyMetadata.KeyId");
+
+        String replicaKeyArn = given()
+                .header("X-Amz-Target", "TrentService.ReplicateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("""
+                    {
+                        "KeyId": "%s",
+                        "ReplicaRegion": "us-west-2",
+                        "Description": "multi-region-replica",
+                        "Tags": [{"TagKey":"environment","TagValue":"test"}]
+                    }
+                    """.formatted(keyId))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .body("ReplicaKeyMetadata.KeyId", equalTo(keyId))
+                .body("ReplicaKeyMetadata.MultiRegion", equalTo(true))
+                .body("ReplicaKeyMetadata.MultiRegionConfiguration.MultiRegionKeyType", equalTo("REPLICA"))
+                .body("ReplicaKeyMetadata.MultiRegionConfiguration.PrimaryKey.Region", equalTo("us-east-1"))
+                .body("ReplicaKeyMetadata.MultiRegionConfiguration.ReplicaKeys[0].Region", equalTo("us-west-2"))
+                .body("ReplicaPolicy", notNullValue())
+                .body("ReplicaTags[0].TagKey", equalTo("environment"))
+                .body("ReplicaTags[0].TagValue", equalTo("test"))
+                .extract().path("ReplicaKeyMetadata.Arn");
+
+        String plaintext = Base64.getEncoder().encodeToString(
+                "multi-region payload".getBytes(StandardCharsets.UTF_8));
+        String ciphertext = given()
+                .header("X-Amz-Target", "TrentService.Encrypt")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("""
+                    {
+                        "KeyId": "%s",
+                        "Plaintext": "%s"
+                    }
+                    """.formatted(keyId, plaintext))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .extract().path("CiphertextBlob");
+
+        given()
+                .header("Authorization",
+                        "AWS4-HMAC-SHA256 Credential=AKID/20260922/us-west-2/kms/aws4_request")
+                .header("X-Amz-Target", "TrentService.Decrypt")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("""
+                    {
+                        "KeyId": "%s",
+                        "CiphertextBlob": "%s"
+                    }
+                    """.formatted(keyId, ciphertext))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .body("Plaintext", equalTo(plaintext))
+                .body("KeyId", equalTo(replicaKeyArn));
     }
 
     @Test
@@ -2925,15 +3009,59 @@ class KmsIntegrationTest {
     }
 
     @Test
-    void importIsRejectedForAnAsymmetricKeySpec() {
-        given()
+    void rsaImportRoundTripDerivesThePublicKey() throws Exception {
+        KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
+        generator.initialize(2048);
+        KeyPair importedKeyPair = generator.generateKeyPair();
+
+        String keyId = given()
                 .header("X-Amz-Target", "TrentService.CreateKey")
                 .contentType(KMS_CONTENT_TYPE)
-                .body("{\"Origin\":\"EXTERNAL\",\"KeyUsage\":\"ENCRYPT_DECRYPT\",\"KeySpec\":\"RSA_2048\"}")
+                .body("{\"Origin\":\"EXTERNAL\",\"KeyUsage\":\"SIGN_VERIFY\",\"KeySpec\":\"RSA_2048\"}")
                 .when().post("/")
                 .then()
-                .statusCode(400)
-                .body("__type", equalTo("UnsupportedOperationException"));
+                .statusCode(200)
+                .body("KeyMetadata.KeyState", equalTo("PendingImport"))
+                .extract().path("KeyMetadata.KeyId");
+
+        var parameters = given()
+                .header("X-Amz-Target", "TrentService.GetParametersForImport")
+                .contentType(KMS_CONTENT_TYPE)
+                .body(("{\"KeyId\":\"%s\",\"WrappingAlgorithm\":\"RSA_AES_KEY_WRAP_SHA_256\","
+                        + "\"WrappingKeySpec\":\"RSA_2048\"}").formatted(keyId))
+                .when().post("/")
+                .then()
+                .statusCode(200)
+                .extract().jsonPath();
+
+        String wrapped = Base64.getEncoder().encodeToString(wrapWithRsaAesSha256(
+                parameters.getString("PublicKey"), importedKeyPair.getPrivate().getEncoded()));
+        given()
+                .header("X-Amz-Target", "TrentService.ImportKeyMaterial")
+                .contentType(KMS_CONTENT_TYPE)
+                .body(("{\"KeyId\":\"%s\",\"ImportToken\":\"%s\",\"EncryptedKeyMaterial\":\"%s\","
+                        + "\"ExpirationModel\":\"KEY_MATERIAL_DOES_NOT_EXPIRE\"}")
+                        .formatted(keyId, parameters.getString("ImportToken"), wrapped))
+                .when().post("/")
+                .then()
+                .statusCode(200)
+                .body("KeyMaterialId", matchesPattern("[a-f0-9]{64}"));
+
+        String publicKey = given()
+                .header("X-Amz-Target", "TrentService.GetPublicKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"%s\"}".formatted(keyId))
+                .when().post("/")
+                .then()
+                .statusCode(200)
+                .body("KeySpec", equalTo("RSA_2048"))
+                .body("KeyUsage", equalTo("SIGN_VERIFY"))
+                .extract().path("PublicKey");
+
+        assertEquals(Base64.getEncoder().encodeToString(importedKeyPair.getPublic().getEncoded()), publicKey);
+        describeKey(keyId)
+                .body("KeyMetadata.KeyState", equalTo("Enabled"))
+                .body("KeyMetadata.Enabled", equalTo(true));
     }
 
     @Test
@@ -3006,5 +3134,18 @@ class KmsIntegrationTest {
         cipher.init(Cipher.ENCRYPT_MODE, wrappingKey, new OAEPParameterSpec("SHA-256", "MGF1",
                 new MGF1ParameterSpec("SHA-256"), PSource.PSpecified.DEFAULT));
         return cipher.doFinal(material);
+    }
+
+    private static byte[] wrapWithRsaAesSha256(String publicKeyEncoded, byte[] material) throws Exception {
+        byte[] aesKeyBytes = new byte[32];
+        Arrays.fill(aesKeyBytes, (byte) 23);
+        Cipher aesKwp = Cipher.getInstance("AES/KWP/NoPadding");
+        aesKwp.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(aesKeyBytes, "AES"));
+        byte[] wrappedMaterial = aesKwp.doFinal(material);
+        byte[] wrappedAesKey = wrapWithRsaOaepSha256(publicKeyEncoded, aesKeyBytes);
+
+        byte[] payload = Arrays.copyOf(wrappedAesKey, wrappedAesKey.length + wrappedMaterial.length);
+        System.arraycopy(wrappedMaterial, 0, payload, wrappedAesKey.length, wrappedMaterial.length);
+        return payload;
     }
 }

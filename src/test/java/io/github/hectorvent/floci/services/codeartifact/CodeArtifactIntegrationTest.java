@@ -58,7 +58,12 @@ class CodeArtifactIntegrationTest {
 
         given().header("Authorization", AUTH)
                 .delete("/v1/domain?domain=lifecycle-domain")
-                .then().statusCode(200);
+                .then().statusCode(200).body("domain.name", equalTo("lifecycle-domain"));
+
+        // AWS returns ResourceNotFoundException here although the API reference does not list it on DeleteDomain.
+        given().header("Authorization", AUTH)
+                .delete("/v1/domain?domain=lifecycle-domain")
+                .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
     }
 
     @Test
@@ -209,6 +214,27 @@ class CodeArtifactIntegrationTest {
 
         given().header("Authorization", AUTH)
                 .get("/v1/repository/endpoint?repository=r&format=npm")
+                .then().statusCode(400).body("__type", equalTo("ValidationException"));
+    }
+
+    @Test
+    void getAuthorizationTokenReturnsATokenAndExpiration() {
+        given().contentType("application/json").header("Authorization", AUTH).body("{}")
+                .post("/v1/domain?domain=token-domain")
+                .then().statusCode(200);
+
+        given().header("Authorization", AUTH)
+                .post("/v1/authorization-token?domain=token-domain")
+                .then().statusCode(200)
+                .body("authorizationToken", notNullValue())
+                .body("expiration", notNullValue());
+
+        given().header("Authorization", AUTH)
+                .post("/v1/authorization-token?domain=does-not-exist")
+                .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+
+        given().header("Authorization", AUTH)
+                .post("/v1/authorization-token?domain=token-domain&duration=899")
                 .then().statusCode(400).body("__type", equalTo("ValidationException"));
     }
 

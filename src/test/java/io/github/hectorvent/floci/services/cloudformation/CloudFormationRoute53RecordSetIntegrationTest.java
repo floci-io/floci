@@ -27,6 +27,8 @@ class CloudFormationRoute53RecordSetIntegrationTest {
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/cloudformation/aws4_request";
     private static final String SSM_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/ssm/aws4_request";
+    private static final String ROUTE53_AUTH =
+            "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/route53/aws4_request";
     private static final Duration STACK_DELETE_TIMEOUT = Duration.ofSeconds(30);
     private static final Duration STACK_DELETE_POLL_INTERVAL = Duration.ofMillis(50);
 
@@ -60,19 +62,38 @@ class CloudFormationRoute53RecordSetIntegrationTest {
                     "RefParam": {
                       "Type": "AWS::SSM::Parameter",
                       "Properties": {"Name": "/r53-recordset/%s/ref", "Type": "String", "Value": {"Ref": "Www"}}
+                    },
+                    "ZoneParam": {
+                      "Type": "AWS::SSM::Parameter",
+                      "Properties": {"Name": "/r53-recordset/%s/zone", "Type": "String", "Value": {"Ref": "Zone"}}
                     }
                   }
                 }
-                """.formatted(suffix, recordName, suffix);
+                """.formatted(suffix, recordName, suffix, suffix);
 
         createStack(stackName, template);
         assertStackStatus(stackName, "CREATE_COMPLETE");
         try {
             assertEquals(recordName, parameterValue("/r53-recordset/" + suffix + "/ref"));
+
+            // A stack status proves nothing on its own: read the record back from the zone to
+            // confirm the provisioner wrote it (not stubbed) rather than leaving the zone empty.
+            String zoneId = parameterValue("/r53-recordset/" + suffix + "/zone");
+            String records = listResourceRecordSets(zoneId);
+            assertTrue(records.contains(recordName), "record not written to zone: " + records);
+            assertTrue(records.contains("10.0.0.1"), "record value not written to zone: " + records);
         } finally {
             deleteStack(stackName);
             awaitStackGone(stackName);
         }
+    }
+
+    private String listResourceRecordSets(String zoneId) {
+        return given()
+            .header("Authorization", ROUTE53_AUTH)
+        .when().get("/2013-04-01/hostedzone/" + zoneId + "/rrset")
+        .then().statusCode(200)
+            .extract().asString();
     }
 
     private void createStack(String stackName, String template) {

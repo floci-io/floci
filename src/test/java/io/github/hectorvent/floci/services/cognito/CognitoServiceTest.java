@@ -178,8 +178,7 @@ class CognitoServiceTest {
     @Test
     void adminInitiateAuthNoSrpFlowRequiresTheCorrectPassword() {
         UserPool pool = createPoolAndUser();
-        UserPoolClient client = service.createUserPoolClient(
-                pool.getId(), "client", false, false, List.of(), List.of());
+        UserPoolClient client = openClient(service, pool.getId(), "client", false);
 
         AwsException exception = assertThrows(AwsException.class, () ->
                 service.adminInitiateAuth(pool.getId(), client.getClientId(), "ADMIN_NO_SRP_AUTH",
@@ -309,6 +308,63 @@ class CognitoServiceTest {
         Map<String, Object> admin = service.adminInitiateAuth(pool.getId(), client.getClientId(), "USER_AUTH",
                 params);
         assertEquals("SELECT_CHALLENGE", admin.get("ChallengeName"));
+    }
+
+    @Test
+    void clientWithoutExplicitAuthFlowsIsStoredAndDescribedAsEmptyLikeAws() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(), "client", false, false, List.of(), List.of());
+
+        assertEquals(List.of(), client.getExplicitAuthFlows());
+        assertEquals(List.of(), service.describeUserPoolClient(client.getClientId()).getExplicitAuthFlows());
+    }
+
+    @Test
+    void clientWithoutExplicitAuthFlowsRejectsPasswordFlowsAndAllowsTheDefaultOnes() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(), "client", false, false, List.of(), List.of());
+        Map<String, String> passwordParams = Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!");
+
+        assertEquals("USER_PASSWORD_AUTH flow not enabled for this client", assertThrows(AwsException.class, () ->
+                service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH", passwordParams)).getMessage());
+        assertEquals("ADMIN_USER_PASSWORD_AUTH flow not enabled for this client", assertThrows(AwsException.class,
+                () -> service.adminInitiateAuth(pool.getId(), client.getClientId(), "ADMIN_USER_PASSWORD_AUTH",
+                        passwordParams)).getMessage());
+
+        assertEquals("USERNAME and SRP_A are required", assertThrows(AwsException.class, () ->
+                service.initiateAuth(client.getClientId(), "USER_SRP_AUTH", Map.of("USERNAME", "alice")))
+                .getMessage());
+        assertEquals("REFRESH_TOKEN is required", assertThrows(AwsException.class, () ->
+                service.initiateAuth(client.getClientId(), "REFRESH_TOKEN_AUTH", Map.of())).getMessage());
+        assertEquals("USER_AUTH flow not enabled for this client", assertThrows(AwsException.class, () ->
+                service.initiateAuth(client.getClientId(), "USER_AUTH", Map.of("USERNAME", "alice"))).getMessage());
+    }
+
+    @Test
+    void clientStoredWithAnEmptyListIsTreatedAsTheDefault() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(), "client", false, false, List.of(), List.of());
+        service.describeUserPoolClient(client.getClientId()).setExplicitAuthFlows(List.of());
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
+                        Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!")));
+
+        assertEquals("USER_PASSWORD_AUTH flow not enabled for this client", exception.getMessage());
+    }
+
+    private static final List<String> ALL_AUTH_FLOWS = List.of("ALLOW_USER_PASSWORD_AUTH",
+            "ALLOW_ADMIN_USER_PASSWORD_AUTH", "ALLOW_USER_AUTH", "ALLOW_USER_SRP_AUTH", "ALLOW_CUSTOM_AUTH",
+            "ALLOW_REFRESH_TOKEN_AUTH");
+
+    private static UserPoolClient openClient(CognitoService service, String poolId, String clientName,
+                                             boolean generateSecret) {
+        return service.createUserPoolClient(poolId, clientName, generateSecret, false, List.of(), List.of(),
+                null, List.of(), null, ALL_AUTH_FLOWS, null, null, List.of(), null, List.of(), null,
+                null, null, List.of(), null, null);
     }
 
     private UserPoolClient clientWithFlows(UserPool pool, String... explicitAuthFlows) {
@@ -1548,7 +1604,7 @@ class CognitoServiceTest {
     @SuppressWarnings("unchecked")
     void jwtContainsGroupsClaim() {
         UserPool pool = createPoolAndUser();
-        UserPoolClient client = service.createUserPoolClient(pool.getId(), "test-client", false, false, List.of(), List.of());
+        UserPoolClient client = openClient(service, pool.getId(), "test-client", false);
         String clientId = client.getClientId();
 
         service.createGroup(pool.getId(), "admins", "Admin group", 1, null);
@@ -1574,7 +1630,7 @@ class CognitoServiceTest {
     @SuppressWarnings("unchecked")
     void jwtEscapesSpecialCharsInGroupName() {
         UserPool pool = createPoolAndUser();
-        UserPoolClient client = service.createUserPoolClient(pool.getId(), "test-client", false, false, List.of(), List.of());
+        UserPoolClient client = openClient(service, pool.getId(), "test-client", false);
 
         String specialGroup = "group\"with\\special\nchars";
         service.createGroup(pool.getId(), specialGroup, null, null, null);
@@ -1703,8 +1759,7 @@ class CognitoServiceTest {
 
         UserPool pool = serviceWithVerification.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
         pool.setAutoVerifiedAttributes(List.of("email"));
-        UserPoolClient client = serviceWithVerification.createUserPoolClient(pool.getId(), "test-client",
-                false, false, List.of(), List.of());
+        UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "test-client", false);
 
         AwsException ex = assertThrows(AwsException.class, () ->
                 serviceWithVerification.signUp(client.getClientId(), "carol", "Pass1234!", Map.of()));
@@ -1744,8 +1799,7 @@ class CognitoServiceTest {
 
         UserPool pool = serviceWithVerification.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
         pool.setAutoVerifiedAttributes(List.of("email"));
-        UserPoolClient client = serviceWithVerification.createUserPoolClient(pool.getId(), "test-client",
-                false, false, List.of(), List.of());
+        UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "test-client", false);
 
         AwsException ex = assertThrows(AwsException.class, () ->
                 serviceWithVerification.signUp(client.getClientId(), "carol", "Pass1234!",
@@ -1813,8 +1867,7 @@ class CognitoServiceTest {
     void updateUserAttributesRejectsSelfManagedVerificationStatusWithoutPartialPersistence(
             String verificationStatusAttribute) {
         UserPool pool = createPoolAndUser();
-        UserPoolClient client = service.createUserPoolClient(
-                pool.getId(), "verification-status-client", false, false, List.of(), List.of());
+        UserPoolClient client = openClient(service, pool.getId(), "verification-status-client", false);
         Map<String, Object> authResult = service.initiateAuth(
                 client.getClientId(), "USER_PASSWORD_AUTH",
                 Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"));
@@ -1869,8 +1922,7 @@ class CognitoServiceTest {
                 "UserAttributeUpdateSettings", Map.of(
                         "AttributesRequireVerificationBeforeUpdate", List.of("email"))),
                 "us-east-1");
-        UserPoolClient client = serviceWithVerification.createUserPoolClient(
-                pool.getId(), "pending-email-expiry-client", false, false, List.of(), List.of());
+        UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "pending-email-expiry-client", false);
         serviceWithVerification.adminCreateUser(pool.getId(), "alice", Map.of(
                 "email", "old@example.com",
                 "email_verified", "true"), "TempPass1!");
@@ -1933,8 +1985,7 @@ class CognitoServiceTest {
                 "UserAttributeUpdateSettings", Map.of(
                         "AttributesRequireVerificationBeforeUpdate", List.of("email"))),
                 "us-east-1");
-        UserPoolClient client = serviceWithVerification.createUserPoolClient(
-                pool.getId(), "pending-email-delivery-client", false, false, List.of(), List.of());
+        UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "pending-email-delivery-client", false);
         serviceWithVerification.adminCreateUser(pool.getId(), "alice", Map.of(
                 "email", "old@example.com",
                 "email_verified", "true"), "TempPass1!");
@@ -2044,8 +2095,7 @@ class CognitoServiceTest {
                 "UserAttributeUpdateSettings", Map.of(
                         "AttributesRequireVerificationBeforeUpdate", List.of("email", "phone_number"))),
                 "us-east-1");
-        UserPoolClient client = serviceWithVerification.createUserPoolClient(
-                pool.getId(), "admin-pending-contact-client", false, false, List.of(), List.of());
+        UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "admin-pending-contact-client", false);
         serviceWithVerification.adminCreateUser(pool.getId(), "alice", Map.of(
                 "email", "old@example.com",
                 "email_verified", "true",
@@ -2072,8 +2122,7 @@ class CognitoServiceTest {
     @SuppressWarnings("unchecked")
     void jwtSubMatchesStoredSubAttribute() {
         UserPool pool = createPoolAndUser();
-        UserPoolClient client = service.createUserPoolClient(pool.getId(), "test-client",
-                false, false, List.of(), List.of());
+        UserPoolClient client = openClient(service, pool.getId(), "test-client", false);
 
         String storedSub = service.adminGetUser(pool.getId(), "alice")
                 .getAttributes().get("sub");
@@ -2096,8 +2145,7 @@ class CognitoServiceTest {
     @SuppressWarnings("unchecked")
     void jwtSubIsConsistentAcrossMultipleLogins() {
         UserPool pool = createPoolAndUser();
-        UserPoolClient client = service.createUserPoolClient(pool.getId(), "test-client",
-                false, false, List.of(), List.of());
+        UserPoolClient client = openClient(service, pool.getId(), "test-client", false);
 
         Function<String, String> extractSub = token -> {
             String payload = new String(Base64.getUrlDecoder().decode(token.split("\\.")[1]), StandardCharsets.UTF_8);
@@ -2140,7 +2188,7 @@ class CognitoServiceTest {
     void initiateAuthRejectsAnyPasswordWhenNoHashSet() {
         UserPool pool = service.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
         service.adminCreateUser(pool.getId(), "bob", Map.of("email", "bob@example.com"), null);
-        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
 
         AwsException ex = assertThrows(AwsException.class, () ->
                 service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
@@ -2154,7 +2202,7 @@ class CognitoServiceTest {
         UserPool pool = service.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
         service.adminCreateUser(pool.getId(), "bob", Map.of("email", "bob@example.com"), null);
         service.adminSetUserPassword(pool.getId(), "bob", "Perm1!", true);
-        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
 
         Map<String, Object> result = service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
                 Map.of("USERNAME", "bob", "PASSWORD", "Perm1!"));
@@ -2168,7 +2216,7 @@ class CognitoServiceTest {
     @Test
     void adminSetUserPasswordPermanentFalseChangesPassword() {
         UserPool pool = createPoolAndUser(); // alice has permanent "Perm1234!"
-        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
 
         service.adminSetUserPassword(pool.getId(), "alice", "NewTemp1!", false);
 
@@ -2281,7 +2329,7 @@ class CognitoServiceTest {
     @SuppressWarnings("unchecked")
     void initiateAuthWithUserAuthNoPreferredChallengeReturnsSelectChallenge() {
         UserPool pool = createPoolAndUser();
-        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
 
         Map<String, Object> result = service.initiateAuth(client.getClientId(), "USER_AUTH",
                 Map.of("USERNAME", "alice"));
@@ -2333,7 +2381,7 @@ class CognitoServiceTest {
     @Test
     void initiateAuthWithUserAuthPreferredChallengePasswordThenRespondCompletesAuth() {
         UserPool pool = createPoolAndUser();
-        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
 
         Map<String, Object> initResult = service.initiateAuth(client.getClientId(), "USER_AUTH",
                 Map.of("USERNAME", "alice", "PREFERRED_CHALLENGE", "PASSWORD"));
@@ -2351,7 +2399,7 @@ class CognitoServiceTest {
     @Test
     void initiateAuthWithUserAuthPreferredChallengePasswordSrpThenRespondReturnsPasswordVerifier() {
         UserPool pool = createPoolAndUser();
-        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
 
         Map<String, Object> initResult = service.initiateAuth(client.getClientId(), "USER_AUTH",
                 Map.of("USERNAME", "alice", "PREFERRED_CHALLENGE", "PASSWORD_SRP"));
@@ -2369,7 +2417,7 @@ class CognitoServiceTest {
     @SuppressWarnings("unchecked")
     void selectChallengeWithPasswordAnswerAndPasswordCompletesInOneRoundTrip() {
         UserPool pool = createPoolAndUser();
-        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
 
         Map<String, Object> initResult = service.initiateAuth(client.getClientId(), "USER_AUTH",
                 Map.of("USERNAME", "alice"));
@@ -2388,7 +2436,7 @@ class CognitoServiceTest {
         // RespondToAuthChallengeResponse is AuthenticationResult, ChallengeName,
         // ChallengeParameters and Session only.
         UserPool pool = createPoolAndUser();
-        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
 
         Map<String, Object> initResult = service.initiateAuth(client.getClientId(), "USER_AUTH",
                 Map.of("USERNAME", "alice"));
@@ -2407,7 +2455,7 @@ class CognitoServiceTest {
     @Test
     void adminSelectChallengeResponseDoesNotCarryAvailableChallenges() {
         UserPool pool = createPoolAndUser();
-        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
 
         Map<String, Object> initResult = service.adminInitiateAuth(pool.getId(), client.getClientId(), "USER_AUTH",
                 Map.of("USERNAME", "alice"));
@@ -2426,7 +2474,7 @@ class CognitoServiceTest {
     @Test
     void selectChallengeWithPasswordSrpAnswerAndSrpAReturnsPasswordVerifier() {
         UserPool pool = createPoolAndUser();
-        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
 
         Map<String, Object> initResult = service.initiateAuth(client.getClientId(), "USER_AUTH",
                 Map.of("USERNAME", "alice"));
@@ -2482,7 +2530,7 @@ class CognitoServiceTest {
         // that would let a caller answer PASSWORD without ever going through SELECT_CHALLENGE's
         // requireSignInEligible/availableUserAuthChallenges checks.
         UserPool pool = createPoolAndUser();
-        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
 
         Map<String, Object> initResult = service.initiateAuth(client.getClientId(), "USER_AUTH",
                 Map.of("USERNAME", "alice"));
@@ -2498,7 +2546,7 @@ class CognitoServiceTest {
     @Test
     void respondToAuthChallengeRejectsASessionAlreadyConsumed() {
         UserPool pool = createPoolAndUser();
-        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
 
         Map<String, Object> initResult = service.initiateAuth(client.getClientId(), "USER_AUTH",
                 Map.of("USERNAME", "alice", "PREFERRED_CHALLENGE", "PASSWORD"));
@@ -2517,9 +2565,8 @@ class CognitoServiceTest {
     @Test
     void respondToAuthChallengeRejectsASessionRedeemedAgainstADifferentClient() {
         UserPool pool = createPoolAndUser();
-        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
-        UserPoolClient otherClient = service.createUserPoolClient(pool.getId(), "other", false, false,
-                List.of(), List.of());
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
+        UserPoolClient otherClient = openClient(service, pool.getId(), "other", false);
 
         Map<String, Object> initResult = service.initiateAuth(client.getClientId(), "USER_AUTH",
                 Map.of("USERNAME", "alice", "PREFERRED_CHALLENGE", "PASSWORD"));
@@ -2534,7 +2581,7 @@ class CognitoServiceTest {
     @Test
     void adminInitiateAuthWithUserAuthPreferredChallengePasswordWorks() {
         UserPool pool = createPoolAndUser();
-        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
 
         Map<String, Object> initResult = service.adminInitiateAuth(pool.getId(), client.getClientId(), "USER_AUTH",
                 Map.of("USERNAME", "alice", "PREFERRED_CHALLENGE", "PASSWORD"));
@@ -2573,8 +2620,7 @@ class CognitoServiceTest {
         );
 
         UserPool pool = serviceWithVerification.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
-        UserPoolClient client = serviceWithVerification.createUserPoolClient(pool.getId(), "c",
-                false, false, List.of(), List.of());
+        UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "c", false);
         serviceWithVerification.adminCreateUser(pool.getId(), "alice",
                 Map.of("email", "alice@example.com", "email_verified", "true"), "TempPass1!");
         serviceWithVerification.adminSetUserPassword(pool.getId(), "alice", "Perm1234!", true);
@@ -2629,8 +2675,7 @@ class CognitoServiceTest {
         );
 
         UserPool pool = serviceWithVerification.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
-        UserPoolClient client = serviceWithVerification.createUserPoolClient(pool.getId(), "c",
-                false, false, List.of(), List.of());
+        UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "c", false);
         serviceWithVerification.adminCreateUser(pool.getId(), "alice",
                 Map.of("phone_number", "+15551234567", "phone_number_verified", "true"), "TempPass1!");
         serviceWithVerification.adminSetUserPassword(pool.getId(), "alice", "Perm1234!", true);
@@ -2687,8 +2732,7 @@ class CognitoServiceTest {
         );
 
         UserPool pool = serviceWithVerification.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
-        UserPoolClient client = serviceWithVerification.createUserPoolClient(pool.getId(), "c",
-                false, false, List.of(), List.of());
+        UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "c", false);
         serviceWithVerification.adminCreateUser(pool.getId(), "alice",
                 Map.of("email", "alice@example.com", "email_verified", "true"), "TempPass1!");
         serviceWithVerification.adminSetUserPassword(pool.getId(), "alice", "Perm1234!", true);
@@ -2706,8 +2750,7 @@ class CognitoServiceTest {
     @Test
     void initiateAuthWithUserAuthRejectsMissingSecretHashWhenClientHasSecret() {
         UserPool pool = createPoolAndUser();
-        UserPoolClient client = service.createUserPoolClient(
-                pool.getId(), "c", true, false, List.of(), List.of());
+        UserPoolClient client = openClient(service, pool.getId(), "c", true);
 
         AwsException ex = assertThrows(AwsException.class, () -> service.initiateAuth(
                 client.getClientId(), "USER_AUTH", Map.of("USERNAME", "alice")));
@@ -2741,8 +2784,7 @@ class CognitoServiceTest {
         );
 
         UserPool pool = serviceWithVerification.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
-        UserPoolClient client = serviceWithVerification.createUserPoolClient(pool.getId(), "c",
-                false, false, List.of(), List.of());
+        UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "c", false);
         serviceWithVerification.adminCreateUser(pool.getId(), "alice",
                 Map.of("email", "alice@example.com", "email_verified", "true"), "TempPass1!");
         serviceWithVerification.adminSetUserPassword(pool.getId(), "alice", "Perm1234!", true);
@@ -2783,8 +2825,7 @@ class CognitoServiceTest {
         );
 
         UserPool pool = serviceWithVerification.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
-        UserPoolClient client = serviceWithVerification.createUserPoolClient(pool.getId(), "c",
-                false, false, List.of(), List.of());
+        UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "c", false);
         serviceWithVerification.adminCreateUser(pool.getId(), "alice",
                 Map.of("email", "alice@example.com", "email_verified", "true"), "TempPass1!");
         serviceWithVerification.adminSetUserPassword(pool.getId(), "alice", "Perm1234!", true);
@@ -2806,7 +2847,7 @@ class CognitoServiceTest {
     @SuppressWarnings("unchecked")
     void accessTokenContainsClientId() {
         UserPool pool = createPoolAndUser();
-        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
 
         Map<String, Object> authResult = service.initiateAuth(
                 client.getClientId(), "USER_PASSWORD_AUTH",
@@ -2824,7 +2865,7 @@ class CognitoServiceTest {
     @SuppressWarnings("unchecked")
     void idTokenDoesNotContainClientId() {
         UserPool pool = createPoolAndUser();
-        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
 
         Map<String, Object> authResult = service.initiateAuth(
                 client.getClientId(), "USER_PASSWORD_AUTH",
@@ -3099,7 +3140,7 @@ class CognitoServiceTest {
     @SuppressWarnings("unchecked")
     void refreshTokenIsStructuredAndDecodable() {
         UserPool pool = createPoolAndUser();
-        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
 
         Map<String, Object> authResult = service.initiateAuth(
                 client.getClientId(), "USER_PASSWORD_AUTH",
@@ -3123,7 +3164,7 @@ class CognitoServiceTest {
     @SuppressWarnings("unchecked")
     void getTokensFromRefreshTokenReturnsNewAccessAndIdTokens() {
         UserPool pool = createPoolAndUser();
-        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
 
         Map<String, Object> authResult = service.initiateAuth(
                 client.getClientId(), "USER_PASSWORD_AUTH",
@@ -3190,7 +3231,7 @@ class CognitoServiceTest {
     @Test
     void refreshTokenAuthFlowReturnsNewTokens() {
         UserPool pool = createPoolAndUser();
-        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
 
         @SuppressWarnings("unchecked")
         Map<String, Object> firstAuth = (Map<String, Object>) service.initiateAuth(
@@ -3257,8 +3298,8 @@ class CognitoServiceTest {
         // thing that can reject it against poolA's client is the embedded pool-id check.
         UserPool poolA = createPoolAndUser();
         UserPool poolB = createPoolAndUser();
-        UserPoolClient clientA = service.createUserPoolClient(poolA.getId(), "ca", false, false, List.of(), List.of());
-        UserPoolClient clientB = service.createUserPoolClient(poolB.getId(), "cb", false, false, List.of(), List.of());
+        UserPoolClient clientA = openClient(service, poolA.getId(), "ca", false);
+        UserPoolClient clientB = openClient(service, poolB.getId(), "cb", false);
 
         Map<String, Object> authB = (Map<String, Object>) service.initiateAuth(
                 clientB.getClientId(), "USER_PASSWORD_AUTH",
@@ -3296,7 +3337,7 @@ class CognitoServiceTest {
         UserPool pool = createPoolAndUser();
         service.adminCreateUser(pool.getId(), "mallory", Map.of("email", "mallory@example.com"), "TempPass1!");
         service.adminSetUserPassword(pool.getId(), "mallory", "Perm1234!", true);
-        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
 
         Map<String, Object> authResult = service.initiateAuth(
                 client.getClientId(), "USER_PASSWORD_AUTH",
@@ -3318,7 +3359,7 @@ class CognitoServiceTest {
     void getTokensFromRefreshTokenRejectsSwappedPoolId() {
         UserPool poolA = createPoolAndUser();
         UserPool poolB = service.createUserPool(Map.of("PoolName", "OtherPool"), "us-east-1");
-        UserPoolClient client = service.createUserPoolClient(poolA.getId(), "c", false, false, List.of(), List.of());
+        UserPoolClient client = openClient(service, poolA.getId(), "c", false);
 
         Map<String, Object> authResult = service.initiateAuth(
                 client.getClientId(), "USER_PASSWORD_AUTH",
@@ -3413,8 +3454,7 @@ class CognitoServiceTest {
     @Test
     void disabledUserCannotAuthenticate() {
         UserPool pool = createPoolAndUser();
-        UserPoolClient client = service.createUserPoolClient(
-                pool.getId(), "c", false, false, List.of(), List.of());
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
 
         service.adminDisableUser(pool.getId(), "alice");
 
@@ -3428,8 +3468,7 @@ class CognitoServiceTest {
     @SuppressWarnings("unchecked")
     void reEnabledUserCanAuthenticate() {
         UserPool pool = createPoolAndUser();
-        UserPoolClient client = service.createUserPoolClient(
-                pool.getId(), "c", false, false, List.of(), List.of());
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
 
         service.adminDisableUser(pool.getId(), "alice");
         service.adminEnableUser(pool.getId(), "alice");
@@ -3506,8 +3545,7 @@ class CognitoServiceTest {
         UserPool pool = service.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
         service.adminCreateUser(pool.getId(), "carol",
                 Map.of("email", "carol@example.com", "given_name", "Carol"), "TempPass1!");
-        UserPoolClient client = service.createUserPoolClient(
-                pool.getId(), "c", false, false, List.of(), List.of());
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
 
         Map<String, Object> result = service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
                 Map.of("USERNAME", "carol", "PASSWORD", "TempPass1!"));
@@ -3527,8 +3565,7 @@ class CognitoServiceTest {
     void newPasswordRequiredAppliesUserAttributeUpdates() {
         UserPool pool = service.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
         service.adminCreateUser(pool.getId(), "carol", Map.of("email", "carol@example.com"), "TempPass1!");
-        UserPoolClient client = service.createUserPoolClient(
-                pool.getId(), "c", false, false, List.of(), List.of());
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
 
         Map<String, Object> challengeResp = service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
                 Map.of("USERNAME", "carol", "PASSWORD", "TempPass1!"));
@@ -3557,8 +3594,7 @@ class CognitoServiceTest {
     @Test
     void initiateAuthRejectsMissingSecretHashWhenClientHasSecret() {
         UserPool pool = createPoolAndUser();
-        UserPoolClient client = service.createUserPoolClient(
-                pool.getId(), "c", true, false, List.of(), List.of());
+        UserPoolClient client = openClient(service, pool.getId(), "c", true);
 
         AwsException ex = assertThrows(AwsException.class, () ->
                 service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
@@ -3570,8 +3606,7 @@ class CognitoServiceTest {
     @Test
     void initiateAuthRejectsWrongSecretHash() {
         UserPool pool = createPoolAndUser();
-        UserPoolClient client = service.createUserPoolClient(
-                pool.getId(), "c", true, false, List.of(), List.of());
+        UserPoolClient client = openClient(service, pool.getId(), "c", true);
 
         AwsException ex = assertThrows(AwsException.class, () ->
                 service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
@@ -3585,8 +3620,7 @@ class CognitoServiceTest {
     @SuppressWarnings("unchecked")
     void initiateAuthAcceptsCorrectSecretHash() throws Exception {
         UserPool pool = createPoolAndUser();
-        UserPoolClient client = service.createUserPoolClient(
-                pool.getId(), "c", true, false, List.of(), List.of());
+        UserPoolClient client = openClient(service, pool.getId(), "c", true);
 
         javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA256");
         mac.init(new javax.crypto.spec.SecretKeySpec(
@@ -3612,8 +3646,7 @@ class CognitoServiceTest {
     void adminRespondToAuthChallengeNewPasswordRequired() {
         UserPool pool = service.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
         service.adminCreateUser(pool.getId(), "bob", Map.of("email", "bob@example.com"), "TempPass1!");
-        UserPoolClient client = service.createUserPoolClient(
-                pool.getId(), "c", false, false, List.of(), List.of());
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
 
         Map<String, Object> challengeResp = service.adminInitiateAuth(
                 pool.getId(), client.getClientId(), "ADMIN_USER_PASSWORD_AUTH",
@@ -3654,8 +3687,7 @@ class CognitoServiceTest {
     void adminRespondToAuthChallengeWithUserAttributes() {
         UserPool pool = service.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
         service.adminCreateUser(pool.getId(), "carol", Map.of("email", "carol@example.com"), "TempPass1!");
-        UserPoolClient client = service.createUserPoolClient(
-                pool.getId(), "c", false, false, List.of(), List.of());
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
 
         Map<String, Object> challengeResp = service.adminInitiateAuth(
                 pool.getId(), client.getClientId(), "ADMIN_USER_PASSWORD_AUTH",

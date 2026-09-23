@@ -222,6 +222,9 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         }
         r.setPhysicalId(group.getDbSubnetGroupName());
         r.getAttributes().put("DBSubnetGroupName", group.getDbSubnetGroupName());
+        if (group.getDbSubnetGroupArn() != null) {
+            r.getAttributes().put("DBSubnetGroupArn", group.getDbSubnetGroupArn());
+        }
     }
 
     private void provisionDbParameterGroup(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
@@ -254,6 +257,9 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         }
         r.setPhysicalId(group.getDbParameterGroupName());
         r.getAttributes().put("DBParameterGroupName", group.getDbParameterGroupName());
+        if (group.getDbParameterGroupArn() != null) {
+            r.getAttributes().put("DBParameterGroupArn", group.getDbParameterGroupArn());
+        }
     }
 
     private void provisionDbClusterParameterGroup(StackResource r, JsonNode props,

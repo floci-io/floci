@@ -236,7 +236,6 @@ class WebSocketConnectionLifecycleTest {
         WebSocket ws = connectWebSocket(wsApiId, "test");
         assertNotNull(ws, "WebSocket connection should succeed when no $connect route is defined");
         ws.sendClose(WebSocket.NORMAL_CLOSURE, "done").join();
-        Thread.sleep(500);
     }
 
     // ──────────────────────────── Test 2: Connect with $connect route Lambda allow ────────────────────────────
@@ -259,7 +258,6 @@ class WebSocketConnectionLifecycleTest {
         WebSocket ws = connectWebSocket(wsApiId, "test");
         assertNotNull(ws, "WebSocket connection should succeed when $connect Lambda returns 200");
         ws.sendClose(WebSocket.NORMAL_CLOSURE, "done").join();
-        Thread.sleep(500);
     }
 
     // ──────────────────────────── Test 3: Connect with $connect route Lambda deny ────────────────────────────
@@ -331,8 +329,6 @@ class WebSocketConnectionLifecycleTest {
         WebSocket ws = connectWebSocket(wsApiId, "test");
         assertNotNull(ws);
         ws.sendClose(WebSocket.NORMAL_CLOSURE, "done").join();
-        // Give time for the $disconnect handler to execute
-        Thread.sleep(2000);
     }
 
     // ──────────────────────────── Test 6: Disconnect cleans up connection ────────────────────────────
@@ -344,14 +340,11 @@ class WebSocketConnectionLifecycleTest {
         WebSocket ws = connectWebSocket(wsApiId, "test");
         assertNotNull(ws);
         ws.sendClose(WebSocket.NORMAL_CLOSURE, "done").join();
-        // Give time for cleanup
-        Thread.sleep(2000);
 
         // Attempting to reconnect should work (proving old connection was cleaned up)
         WebSocket ws2 = connectWebSocket(wsApiId, "test");
         assertNotNull(ws2);
         ws2.sendClose(WebSocket.NORMAL_CLOSURE, "done").join();
-        Thread.sleep(500);
     }
 
     // ──────────────────────────── Test 7: Disconnect error does not propagate to client ────────────────────────────
@@ -376,8 +369,6 @@ class WebSocketConnectionLifecycleTest {
 
         // The close should complete normally
         ws.sendClose(WebSocket.NORMAL_CLOSURE, "done").join();
-        // Give time for the $disconnect handler to execute (and fail)
-        Thread.sleep(2000);
         // If we got here without exception, the error was not propagated
     }
 
@@ -441,14 +432,13 @@ class WebSocketConnectionLifecycleTest {
         for (WebSocket ws : connections) {
             ws.sendClose(WebSocket.NORMAL_CLOSURE, "done").join();
         }
-        Thread.sleep(1000);
     }
 
     // ──────────────────────────── Cleanup ────────────────────────────
 
     @Test
     @Order(999)
-    void cleanup() {
+    void cleanup() throws Exception {
         // Delete routes if they still exist
         if (connectRouteId != null) {
             given().when().delete("/v2/apis/" + wsApiId + "/routes/" + connectRouteId)
@@ -468,10 +458,8 @@ class WebSocketConnectionLifecycleTest {
         }
 
         // Delete Lambda functions
-        given().when().delete("/2015-03-31/functions/" + allowFunctionName);
-        given().when().delete("/2015-03-31/functions/" + denyFunctionName);
-        given().when().delete("/2015-03-31/functions/" + errorFunctionName);
-        given().when().delete("/2015-03-31/functions/" + disconnectFunctionName);
+        WebSocketTestSupport.deleteFunctions(allowFunctionName, denyFunctionName, errorFunctionName,
+                disconnectFunctionName);
     }
 
     // ──────────────────────────── Helpers ────────────────────────────

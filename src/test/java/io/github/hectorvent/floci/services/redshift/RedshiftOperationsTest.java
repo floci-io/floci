@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerH
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerManager;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.xml.XmlPath;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -11,11 +12,21 @@ import org.junit.jupiter.api.TestMethodOrder;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
@@ -27,6 +38,11 @@ public class RedshiftOperationsTest {
 
     private static final String AUTH_HEADER =
             "AWS4-HMAC-SHA256 Credential=test/20260822/us-east-1/redshift/aws4_request";
+
+    private static final String GRANT_NAMES_PATH = "DescribeSnapshotCopyGrantsResponse"
+            + ".DescribeSnapshotCopyGrantsResult.SnapshotCopyGrants.SnapshotCopyGrant.SnapshotCopyGrantName";
+    private static final String MARKER_PATH =
+            "DescribeSnapshotCopyGrantsResponse.DescribeSnapshotCopyGrantsResult.Marker";
 
     @InjectMock
     RedshiftContainerManager containerManager;
@@ -357,6 +373,268 @@ public class RedshiftOperationsTest {
     }
 
     @Test
+    @Order(5)
+    void snapshotCopyGrantLifecycle() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "CreateSnapshotCopyGrant")
+            .formParam("SnapshotCopyGrantName", "copy-grant-1")
+            .formParam("KmsKeyId", "key-abc")
+            .formParam("Tags.Tag.1.Key", "env")
+            .formParam("Tags.Tag.1.Value", "test")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body(containsString("<SnapshotCopyGrantName>copy-grant-1</SnapshotCopyGrantName>"))
+            .body(containsString("<KmsKeyId>key-abc</KmsKeyId>"))
+            .body(containsString("<Key>env</Key>"));
+
+        // A grant created without KmsKeyId gets the account's AWS-managed Redshift key.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "CreateSnapshotCopyGrant")
+            .formParam("SnapshotCopyGrantName", "copy-grant-2")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<KmsKeyId>arn:aws:kms:us-east-1:"))
+            .body(containsString(":alias/aws/redshift</KmsKeyId>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "CreateSnapshotCopyGrant")
+            .formParam("SnapshotCopyGrantName", "copy-grant-1")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("SnapshotCopyGrantAlreadyExistsFault"));
+
+        // Name filter selects one grant, and omitting it returns both.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DescribeSnapshotCopyGrants")
+            .formParam("SnapshotCopyGrantName", "copy-grant-1")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<SnapshotCopyGrantName>copy-grant-1</SnapshotCopyGrantName>"))
+            .body(not(containsString("<SnapshotCopyGrantName>copy-grant-2</SnapshotCopyGrantName>")));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DescribeSnapshotCopyGrants")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<SnapshotCopyGrantName>copy-grant-1</SnapshotCopyGrantName>"))
+            .body(containsString("<SnapshotCopyGrantName>copy-grant-2</SnapshotCopyGrantName>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DeleteSnapshotCopyGrant")
+            .formParam("SnapshotCopyGrantName", "copy-grant-1")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DescribeSnapshotCopyGrants")
+            .formParam("SnapshotCopyGrantName", "copy-grant-1")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("SnapshotCopyGrantNotFoundFault"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DeleteSnapshotCopyGrant")
+            .formParam("SnapshotCopyGrantName", "copy-grant-1")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("SnapshotCopyGrantNotFoundFault"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DeleteSnapshotCopyGrant")
+            .formParam("SnapshotCopyGrantName", "copy-grant-2")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(6)
+    void snapshotCopyGrantPagination() {
+        // AWS constrains MaxRecords to 20-100, so a two-page walk needs more than 20 grants.
+        int total = 21;
+        for (int i = 1; i <= total; i++) {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", AUTH_HEADER)
+                .formParam("Action", "CreateSnapshotCopyGrant")
+                .formParam("SnapshotCopyGrantName", String.format("pg-grant-%02d", i))
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+        }
+
+        String firstPage = given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DescribeSnapshotCopyGrants")
+            .formParam("MaxRecords", "20")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+
+        List<String> firstNames = new XmlPath(firstPage).getList(GRANT_NAMES_PATH);
+        String marker = new XmlPath(firstPage).getString(MARKER_PATH);
+        assertEquals(20, firstNames.size());
+        assertEquals("pg-grant-01", firstNames.get(0));
+        assertEquals("pg-grant-20", firstNames.get(19));
+        assertNotNull(marker);
+        assertFalse(marker.isBlank(), "a non-final page must carry a Marker");
+
+        String secondPage = given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DescribeSnapshotCopyGrants")
+            .formParam("MaxRecords", "20")
+            .formParam("Marker", marker)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+
+        List<String> secondNames = new XmlPath(secondPage).getList(GRANT_NAMES_PATH);
+        assertEquals(List.of("pg-grant-21"), secondNames);
+        // Asserted on the raw body: an absent GPath node can read back as "" rather than null.
+        assertFalse(secondPage.contains("<Marker>"), "the final page must not carry a Marker");
+
+        // Out-of-range MaxRecords is rejected rather than silently clamped.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DescribeSnapshotCopyGrants")
+            .formParam("MaxRecords", "19")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidParameterValue"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DescribeSnapshotCopyGrants")
+            .formParam("MaxRecords", "101")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidParameterValue"));
+
+        for (int i = 1; i <= total; i++) {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", AUTH_HEADER)
+                .formParam("Action", "DeleteSnapshotCopyGrant")
+                .formParam("SnapshotCopyGrantName", String.format("pg-grant-%02d", i))
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+        }
+    }
+
+    @Test
+    @Order(7)
+    void snapshotCopyGrantNameContract() {
+        String tooLong = "g123456789012345678901234567890123456789012345678901234567890123";
+        for (String invalid : List.of("1grant", "Grant", "grant--copy", "grant-", tooLong)) {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", AUTH_HEADER)
+                .formParam("Action", "CreateSnapshotCopyGrant")
+                .formParam("SnapshotCopyGrantName", invalid)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body(containsString("InvalidParameterValue"));
+
+            // A rejected name must leave nothing behind, read back through Describe.
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", AUTH_HEADER)
+                .formParam("Action", "DescribeSnapshotCopyGrants")
+                .formParam("SnapshotCopyGrantName", invalid)
+            .when()
+                .post("/")
+            .then()
+                .body(not(containsString("<SnapshotCopyGrantName>" + invalid + "</SnapshotCopyGrantName>")));
+        }
+
+        String maxLength = "g12345678901234567890123456789012345678901234567890123456789012";
+        assertEquals(63, maxLength.length());
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "CreateSnapshotCopyGrant")
+            .formParam("SnapshotCopyGrantName", maxLength)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DescribeSnapshotCopyGrants")
+            .formParam("SnapshotCopyGrantName", maxLength)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<SnapshotCopyGrantName>" + maxLength + "</SnapshotCopyGrantName>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DeleteSnapshotCopyGrant")
+            .formParam("SnapshotCopyGrantName", maxLength)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
     @Order(3)
     void testTagLifecycle() {
         when(containerManager.start(any(), eq("cluster-tags"), any(), any()))
@@ -418,6 +696,79 @@ public class RedshiftOperationsTest {
             .header("Authorization", AUTH_HEADER)
             .formParam("Action", "DeleteCluster")
             .formParam("ClusterIdentifier", "cluster-tags")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    /**
+     * CreateSnapshotCopyGrant checks the name is free and then writes. Both steps run under the
+     * service lock, so of two concurrent creates of one name exactly one wins and the other sees
+     * SnapshotCopyGrantAlreadyExistsFault -- the loser must not overwrite the winner's grant.
+     */
+    @Test
+    @Order(8)
+    void concurrentCreatesOfOneGrantNameLeaveExactlyOneGrant() throws Exception {
+        int threads = 2;
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch done = new CountDownLatch(threads);
+        AtomicInteger created = new AtomicInteger();
+        AtomicInteger rejected = new AtomicInteger();
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+
+        try {
+            for (int i = 0; i < threads; i++) {
+                pool.execute(() -> {
+                    try {
+                        release.await();
+                        int status = given()
+                            .contentType("application/x-www-form-urlencoded")
+                            .header("Authorization", AUTH_HEADER)
+                            .formParam("Action", "CreateSnapshotCopyGrant")
+                            .formParam("SnapshotCopyGrantName", "race-grant")
+                        .when()
+                            .post("/")
+                        .then()
+                            .extract().statusCode();
+                        if (status == 200) {
+                            created.incrementAndGet();
+                        } else if (status == 400) {
+                            rejected.incrementAndGet();
+                        }
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                    } finally {
+                        done.countDown();
+                    }
+                });
+            }
+            release.countDown();
+            assertTrue(done.await(30, TimeUnit.SECONDS), "concurrent creates did not finish");
+        } finally {
+            pool.shutdownNow();
+        }
+
+        assertEquals(1, created.get(), "exactly one create should succeed");
+        assertEquals(1, rejected.get(), "the losing create should be rejected, not silently accepted");
+
+        String names = given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DescribeSnapshotCopyGrants")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().body().asString();
+        assertEquals(1, names.split("<SnapshotCopyGrantName>race-grant</SnapshotCopyGrantName>", -1).length - 1,
+                "the grant should be stored once");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DeleteSnapshotCopyGrant")
+            .formParam("SnapshotCopyGrantName", "race-grant")
         .when()
             .post("/")
         .then()

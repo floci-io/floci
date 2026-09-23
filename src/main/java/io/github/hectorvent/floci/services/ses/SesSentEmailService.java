@@ -10,6 +10,7 @@ import org.jboss.logging.Logger;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * Sent-email records (the {@code emailStore}), extracted from {@link SesService} as part of the
@@ -37,6 +38,17 @@ public class SesSentEmailService {
 
     public void record(String region, String messageId, SentEmail email) {
         emailStore.put(emailKey(region, messageId), email);
+    }
+
+    /**
+     * One stored message, for {@code GetMessageInsights}. Empty when the region has no record under
+     * that id; the caller owns the AWS-shaped error.
+     */
+    public Optional<SentEmail> find(String region, String messageId) {
+        if (messageId == null || messageId.isBlank()) {
+            return Optional.empty();
+        }
+        return emailStore.get(emailKey(region, messageId));
     }
 
     public long countInRegion(String region) {

@@ -1,18 +1,13 @@
 package io.github.hectorvent.floci.services.kms;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.kms.model.KmsKeySpec;
 import org.jboss.logging.Logger;
 
-import javax.crypto.Cipher;
-import javax.crypto.spec.OAEPParameterSpec;
-import javax.crypto.spec.PSource;
-import java.security.KeyFactory;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.NoSuchAlgorithmException;
 import java.security.PrivateKey;
-import java.security.spec.MGF1ParameterSpec;
-import java.security.spec.PKCS8EncodedKeySpec;
 import java.util.Base64;
 
 /**
@@ -31,6 +26,9 @@ final class KmsKeyImport {
     private static final String RSAES_PKCS1_V1_5 = "RSAES_PKCS1_V1_5";
     private static final String RSAES_OAEP_SHA_1 = "RSAES_OAEP_SHA_1";
     private static final String RSAES_OAEP_SHA_256 = "RSAES_OAEP_SHA_256";
+    private static final String RSA_AES_KEY_WRAP_SHA_1 = "RSA_AES_KEY_WRAP_SHA_1";
+    private static final String RSA_AES_KEY_WRAP_SHA_256 = "RSA_AES_KEY_WRAP_SHA_256";
+    private static final String SM2PKE = "SM2PKE";
 
     private KmsKeyImport() {
     }
@@ -73,19 +71,41 @@ final class KmsKeyImport {
      * refuse.
      *
      * <p>RSAES_PKCS1_V1_5 stays in the modelled enum but AWS KMS stopped honouring it on
-     * October 10, 2023. The RSA_AES variants exist for material longer than an RSA modulus can
-     * hold; every spec that can be imported here carries at most 64 bytes.
+     * October 10, 2023.
      */
-    static void validateWrappingAlgorithm(String wrappingAlgorithm) {
-        switch (wrappingAlgorithm == null ? "" : wrappingAlgorithm) {
-            case RSAES_OAEP_SHA_1, RSAES_OAEP_SHA_256 -> { }
+    static void validateWrappingAlgorithm(KmsKeySpec keySpec, String wrappingAlgorithm) {
+        String algorithm = wrappingAlgorithm == null ? "" : wrappingAlgorithm;
+        validateWrappingAlgorithmValue(algorithm, wrappingAlgorithm);
+
+        switch (keySpec.getKeyType()) {
+            case HMAC, SYMMETRIC -> {
+                if (!RSAES_OAEP_SHA_1.equals(algorithm) && !RSAES_OAEP_SHA_256.equals(algorithm)) {
+                    throw new AwsException("UnsupportedOperationException",
+                            "WrappingAlgorithm " + wrappingAlgorithm + " is not supported for " + keySpec + " key. "
+                                    + "Supported values are: RSAES_OAEP_SHA_1 and RSAES_OAEP_SHA_256.", 400);
+                }
+            }
+            case RSA -> {
+                if (!RSA_AES_KEY_WRAP_SHA_1.equals(algorithm) && !RSA_AES_KEY_WRAP_SHA_256.equals(algorithm)) {
+                    throw new AwsException("UnsupportedOperationException",
+                            "WrappingAlgorithm " + wrappingAlgorithm + " is not supported for " + keySpec + " key. "
+                                    + "Supported values are: RSA_AES_KEY_WRAP_SHA_1 and RSA_AES_KEY_WRAP_SHA_256.", 400);
+                }
+            }
+            default -> throw new AwsException("UnsupportedOperationException",
+                    "Importing key material for key spec " + keySpec + " is not supported.", 400);
+        }
+    }
+
+    private static void validateWrappingAlgorithmValue(String algorithm, String wrappingAlgorithm) {
+        switch (algorithm) {
+            case RSAES_OAEP_SHA_1, RSAES_OAEP_SHA_256, RSA_AES_KEY_WRAP_SHA_1, RSA_AES_KEY_WRAP_SHA_256 -> { }
+            case SM2PKE -> throw new AwsException("UnsupportedOperationException",
+                    "WrappingAlgorithm SM2PKE is not supported.", 400);
             case RSAES_PKCS1_V1_5 -> throw new AwsException("UnsupportedOperationException",
                     "AWS KMS stopped supporting the RSAES_PKCS1_V1_5 wrapping algorithm on October 10, 2023. "
-                            + "Use RSAES_OAEP_SHA_256 or RSAES_OAEP_SHA_1.", 400);
-            case "RSA_AES_KEY_WRAP_SHA_1", "RSA_AES_KEY_WRAP_SHA_256", "SM2PKE" ->
-                    throw new AwsException("UnsupportedOperationException",
-                            "WrappingAlgorithm " + wrappingAlgorithm + " is not supported. Supported values are "
-                                    + "RSAES_OAEP_SHA_256 and RSAES_OAEP_SHA_1.", 400);
+                            + "Use RSA_AES_KEY_WRAP_SHA_1, RSA_AES_KEY_WRAP_SHA_256, "
+                            + "RSAES_OAEP_SHA_1 or RSAES_OAEP_SHA_256.", 400);
             default -> throw new AwsException("ValidationException",
                     "1 validation error detected: Value '" + wrappingAlgorithm + "' at 'wrappingAlgorithm' failed "
                             + "to satisfy constraint: Member must satisfy enum value set: "
@@ -103,13 +123,18 @@ final class KmsKeyImport {
      */
     static byte[] unwrap(String wrappingPrivateKeyEncoded, String wrappingAlgorithm, byte[] encryptedKeyMaterial) {
         try {
-            PrivateKey wrappingKey = KeyFactory.getInstance("RSA").generatePrivate(
-                    new PKCS8EncodedKeySpec(Base64.getDecoder().decode(wrappingPrivateKeyEncoded)));
-            String digest = RSAES_OAEP_SHA_1.equals(wrappingAlgorithm) ? "SHA-1" : "SHA-256";
-            Cipher cipher = Cipher.getInstance("RSA/ECB/OAEPPadding");
-            cipher.init(Cipher.DECRYPT_MODE, wrappingKey, new OAEPParameterSpec(digest, "MGF1",
-                    new MGF1ParameterSpec(digest), PSource.PSpecified.DEFAULT));
-            return cipher.doFinal(encryptedKeyMaterial);
+            PrivateKey wrappingKey = CipherUtils.generateRsaPrivateKey(Base64.getDecoder().decode(wrappingPrivateKeyEncoded));
+
+            return switch (wrappingAlgorithm) {
+                case RSA_AES_KEY_WRAP_SHA_1 -> CipherUtils.unwrapRsaAes(wrappingKey, "SHA-1", encryptedKeyMaterial);
+                case RSA_AES_KEY_WRAP_SHA_256 -> CipherUtils.unwrapRsaAes(wrappingKey, "SHA-256", encryptedKeyMaterial);
+                case RSAES_OAEP_SHA_1 -> CipherUtils.decryptRsaOaep(wrappingKey, "SHA-1", encryptedKeyMaterial);
+                case RSAES_OAEP_SHA_256 -> CipherUtils.decryptRsaOaep(wrappingKey, "SHA-256", encryptedKeyMaterial);
+                default -> throw new AwsException("UnsupportedOperationException",
+                        "WrappingAlgorithm " + wrappingAlgorithm + " is not supported. Supported values are "
+                                + "RSA_AES_KEY_WRAP_SHA_1, RSA_AES_KEY_WRAP_SHA_256, RSAES_OAEP_SHA_1 and RSAES_OAEP_SHA_256.", 400);
+
+            };
         } catch (Exception e) {
             LOG.debugv(e, "Unwrapping imported key material failed for wrapping algorithm {0}", wrappingAlgorithm);
             throw new AwsException("InvalidCiphertextException", null, 400);

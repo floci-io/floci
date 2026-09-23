@@ -721,4 +721,94 @@ class IamPolicyEvaluatorTest {
                 "arn:aws:s3:::bucket/k",
                 null));
     }
+
+    @Test
+    void contextKeysReferencedInCollectsKeysAcrossStatementsAndDocumentsInEncounterOrder() {
+        String policyWithTwoKeys = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Action":"s3:GetObject","Resource":"*",
+               "Condition":{"StringEquals":{"aws:PrincipalArn":"arn:aws:iam::111111111111:user/alice"}}},
+              {"Effect":"Allow","Action":"dynamodb:GetItem","Resource":"*",
+               "Condition":{"ForAllValues:StringLike":{"dynamodb:LeadingKeys":["USER_alice*"]}}}
+            ]}""";
+        String policyWithOverlappingKey = """
+            {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:PutObject","Resource":"*",
+               "Condition":{"StringEquals":{"aws:PrincipalArn":"arn:aws:iam::111111111111:user/alice",
+                                             "s3:VersionId":"abc"}}}]}""";
+
+        List<String> keys = evaluator.contextKeysReferencedIn(List.of(policyWithTwoKeys, policyWithOverlappingKey));
+
+        // Not sorted and not de-duplicated: AWS's own documented example for
+        // GetContextKeysForPrincipalPolicy repeats a key referenced by more than one statement.
+        assertEquals(List.of("aws:PrincipalArn", "dynamodb:LeadingKeys", "aws:PrincipalArn", "s3:VersionId"), keys);
+    }
+
+    @Test
+    void contextKeysReferencedInIncludesPolicyVariablesFromResourcePatterns() {
+        // AWS's own primary example for this method: a policy variable inside a Resource ARN
+        // is reported as a referenced context key, just like a Condition operator's key.
+        String policyWithResourceVariable = """
+            {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"dynamodb:GetItem",
+               "Resource":"arn:aws:dynamodb:us-east-2:123456789012:table/${aws:username}",
+               "Condition":{"DateGreaterThan":{"aws:CurrentTime":"2015-08-16T12:00:00Z"}}}]}""";
+
+        List<String> keys = evaluator.contextKeysReferencedIn(List.of(policyWithResourceVariable));
+
+        assertEquals(List.of("aws:CurrentTime", "aws:username"), keys);
+    }
+
+    @Test
+    void contextKeysReferencedInIncludesPolicyVariablesFromConditionValues() {
+        // AWS's own documented example: a policy variable used as a Condition VALUE (not just
+        // the operator's key) is itself a referenced context key, since its value must also be
+        // supplied for correct simulation.
+        String policyWithConditionValueVariable = """
+            {"Version":"2012-10-17","Statement":[{"Effect":"Deny","Action":"s3:GetObject","Resource":"*",
+               "Condition":{"StringNotEquals":{"s3:ExistingObjectTag/Team":"${aws:PrincipalTag/Team}"}}}]}""";
+
+        List<String> keys = evaluator.contextKeysReferencedIn(List.of(policyWithConditionValueVariable));
+
+        assertEquals(List.of("s3:ExistingObjectTag/Team", "aws:PrincipalTag/Team"), keys);
+    }
+
+    @Test
+    void contextKeysReferencedInStripsADefaultValueAndKeepsOnlyTheKeyName() {
+        String policyWithDefaultValue = """
+            {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject",
+               "Resource":"arn:aws:s3:::bucket-${aws:PrincipalTag/team, '{{company-wide}}'}/*"}]}""";
+
+        List<String> keys = evaluator.contextKeysReferencedIn(List.of(policyWithDefaultValue));
+
+        assertEquals(List.of("aws:PrincipalTag/team"), keys);
+    }
+
+    @Test
+    void contextKeysReferencedInExcludesTheSpecialCharacterEscapeVariables() {
+        // ${*}, ${?} and ${$} are literal-character substitutions, not context-key references.
+        String policyWithEscapes = """
+            {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject",
+               "Resource":"arn:aws:s3:::bucket/${*}/${?}/${$}/${aws:username}"}]}""";
+
+        List<String> keys = evaluator.contextKeysReferencedIn(List.of(policyWithEscapes));
+
+        assertEquals(List.of("aws:username"), keys);
+    }
+
+    @Test
+    void contextKeysReferencedInReturnsEmptyForStatementsWithoutConditionsOrEmptyInput() {
+        assertEquals(List.of(), evaluator.contextKeysReferencedIn(List.of(ALLOW_S3_ONLY)));
+        assertEquals(List.of(), evaluator.contextKeysReferencedIn(List.of()));
+        assertEquals(List.of(), evaluator.contextKeysReferencedIn(null));
+    }
+
+    @Test
+    void contextKeysReferencedInSkipsAMalformedDocumentRatherThanThrowing() {
+        String validWithKey = """
+            {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*",
+               "Condition":{"StringEquals":{"aws:PrincipalArn":"arn:aws:iam::111111111111:user/alice"}}}]}""";
+
+        List<String> keys = evaluator.contextKeysReferencedIn(List.of(MALFORMED, validWithKey));
+
+        assertEquals(List.of("aws:PrincipalArn"), keys);
+    }
 }

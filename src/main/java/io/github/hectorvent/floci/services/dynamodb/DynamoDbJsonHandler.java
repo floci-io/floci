@@ -1671,22 +1671,7 @@ public class DynamoDbJsonHandler {
     }
 
     private Response handleTransactWriteItems(JsonNode request, String region) {
-        JsonNode transactItemsNode = request.path("TransactItems");
-        if (transactItemsNode.isMissingNode() || transactItemsNode.isNull() || !transactItemsNode.isArray()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value null at 'transactItems' failed to satisfy constraint: "
-                    + "Member must have length greater than or equal to 1", 400);
-        }
-        if (transactItemsNode.isEmpty()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '[]' at 'transactItems' failed to satisfy constraint: "
-                    + "Member must have length greater than or equal to 1", 400);
-        }
-        if (transactItemsNode.size() > 100) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + transactItemsNode + "' at 'transactItems' failed to satisfy constraint: "
-                    + "Member must have length less than or equal to 100", 400);
-        }
+        JsonNode transactItemsNode = requireValidTransactRequest(request);
 
         for (JsonNode txItem : transactItemsNode) {
             for (JsonNode op : txItem) {
@@ -1755,11 +1740,56 @@ public class DynamoDbJsonHandler {
                 : null;
 
         try {
-            dynamoDbService.transactWriteItems(transactItems, region, clientRequestToken, request);
-            return Response.ok(objectMapper.createObjectNode()).build();
+            DynamoDbService.TransactWriteResult result =
+                    dynamoDbService.transactWriteItems(transactItems, region, clientRequestToken, request);
+            ObjectNode response = objectMapper.createObjectNode();
+            addTransactWriteConsumedCapacity(response, request, result);
+            return Response.ok(response).build();
         } catch (TransactionCanceledException e) {
             return transactWriteCanceled(e);
         }
+    }
+
+    private static JsonNode requireValidTransactRequest(JsonNode request) {
+        JsonNode transactItems = request.path("TransactItems");
+        List<String> validationErrors = new ArrayList<>();
+        if (transactItems.isMissingNode() || transactItems.isNull() || !transactItems.isArray()) {
+            validationErrors.add("Value null at 'transactItems' failed to satisfy constraint: "
+                    + "Member must have length greater than or equal to 1");
+        } else if (transactItems.isEmpty()) {
+            validationErrors.add("Value '[]' at 'transactItems' failed to satisfy constraint: "
+                    + "Member must have length greater than or equal to 1");
+        } else if (transactItems.size() > 100) {
+            validationErrors.add("Value '" + transactItems + "' at 'transactItems' failed to satisfy constraint: "
+                    + "Member must have length less than or equal to 100");
+        }
+        addReturnConsumedCapacityError(request, validationErrors);
+        throwValidationErrors(validationErrors);
+        return transactItems;
+    }
+
+    private static void addReturnConsumedCapacityError(JsonNode request, List<String> validationErrors) {
+        String returnCC = request.has("ReturnConsumedCapacity") ? request.get("ReturnConsumedCapacity").asText() : null;
+        if (returnCC != null && !VALID_RETURN_CONSUMED_CAPACITY.contains(returnCC)) {
+            validationErrors.add("Value '" + returnCC + "' at 'returnConsumedCapacity' failed to satisfy constraint: "
+                    + "Member must satisfy enum value set: [INDEXES, TOTAL, NONE]");
+        }
+    }
+
+    private static void requireValidReturnConsumedCapacity(JsonNode request) {
+        List<String> validationErrors = new ArrayList<>();
+        addReturnConsumedCapacityError(request, validationErrors);
+        throwValidationErrors(validationErrors);
+    }
+
+    private static void throwValidationErrors(List<String> validationErrors) {
+        if (validationErrors.isEmpty()) {
+            return;
+        }
+        int n = validationErrors.size();
+        throw new AwsException("ValidationException",
+                n + " validation error" + (n > 1 ? "s" : "") + " detected: "
+                + String.join("; ", validationErrors), 400);
     }
 
     private Response transactWriteCanceled(TransactionCanceledException e) {
@@ -1782,22 +1812,7 @@ public class DynamoDbJsonHandler {
     }
 
     private Response handleTransactGetItems(JsonNode request, String region) {
-        JsonNode transactItemsNode = request.path("TransactItems");
-        if (transactItemsNode.isMissingNode() || transactItemsNode.isNull() || !transactItemsNode.isArray()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value null at 'transactItems' failed to satisfy constraint: "
-                    + "Member must have length greater than or equal to 1", 400);
-        }
-        if (transactItemsNode.isEmpty()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '[]' at 'transactItems' failed to satisfy constraint: "
-                    + "Member must have length greater than or equal to 1", 400);
-        }
-        if (transactItemsNode.size() > 100) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + transactItemsNode + "' at 'transactItems' failed to satisfy constraint: "
-                    + "Member must have length less than or equal to 100", 400);
-        }
+        JsonNode transactItemsNode = requireValidTransactRequest(request);
 
         for (JsonNode txItem : transactItemsNode) {
             DynamoDbExpressionSize.checkRead(txItem.path("Get").path("ProjectionExpression").textValue(),
@@ -1841,9 +1856,9 @@ public class DynamoDbJsonHandler {
         List<JsonNode> transactItems = new ArrayList<>();
         transactItemsNode.forEach(transactItems::add);
 
-        List<JsonNode> results;
+        DynamoDbService.TransactGetResult result;
         try {
-            results = dynamoDbService.transactGetItems(transactItems, region);
+            result = dynamoDbService.transactGetItems(transactItems, region);
         } catch (TransactionCanceledException e) {
             ObjectNode body = objectMapper.createObjectNode();
             body.put("__type", "TransactionCanceledException");
@@ -1865,7 +1880,7 @@ public class DynamoDbJsonHandler {
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode responsesArray = objectMapper.createArrayNode();
-        for (JsonNode item : results) {
+        for (JsonNode item : result.items()) {
             ObjectNode entry = objectMapper.createObjectNode();
             if (item != null) {
                 entry.set("Item", item);
@@ -1873,6 +1888,7 @@ public class DynamoDbJsonHandler {
             responsesArray.add(entry);
         }
         response.set("Responses", responsesArray);
+        addPerTableConsumedCapacity(response, request, result.capacity(), "ReadCapacityUnits");
         return Response.ok(response).build();
     }
 
@@ -2263,7 +2279,7 @@ public class DynamoDbJsonHandler {
      * Half a read unit per 4KB read, doubled for a strongly consistent read, with the
      * half-unit minimum DynamoDB charges even when nothing is found.
      */
-    private static double readCapacityUnits(long bytes, boolean consistentRead) {
+    static double readCapacityUnits(long bytes, boolean consistentRead) {
         var units = Math.max(1, (bytes + 4095) / 4096) * 0.5;
         return consistentRead ? units * 2 : units;
     }
@@ -2285,32 +2301,59 @@ public class DynamoDbJsonHandler {
                 writeCapacityNode(tableName, cost, "INDEXES".equals(returnCC)));
     }
 
+    private void addTransactWriteConsumedCapacity(ObjectNode response, JsonNode request,
+                                                  DynamoDbService.TransactWriteResult result) {
+        addPerTableConsumedCapacity(response, request, result.capacity(),
+                result.replayed() ? "ReadCapacityUnits" : "WriteCapacityUnits");
+    }
+
+    private void addPerTableConsumedCapacity(ObjectNode response, JsonNode request,
+                                             Map<String, DynamoDbWriteCapacity.Cost> capacityByTable,
+                                             String unitsField) {
+        String returnCC = request.path("ReturnConsumedCapacity").asText("NONE");
+        if ("NONE".equals(returnCC) || capacityByTable.isEmpty()) {
+            return;
+        }
+        ArrayNode entries = objectMapper.createArrayNode();
+        capacityByTable.forEach((tableName, cost) ->
+                entries.add(writeCapacityNode(tableName, cost, "INDEXES".equals(returnCC), unitsField)));
+        response.set("ConsumedCapacity", entries);
+    }
+
     private ObjectNode writeCapacityNode(String tableName, DynamoDbWriteCapacity.Cost cost,
                                           boolean withBreakdown) {
-        var cc = objectMapper.createObjectNode();
+        return writeCapacityNode(tableName, cost, withBreakdown, null);
+    }
+
+    private ObjectNode writeCapacityNode(String tableName, DynamoDbWriteCapacity.Cost cost,
+                                          boolean withBreakdown, String unitsField) {
+        ObjectNode cc = objectMapper.createObjectNode();
         cc.put("TableName", DynamoDbTableNames.resolve(tableName));
-        cc.put("CapacityUnits", cost.total());
+        cc.setAll(capacityUnitsNode(cost.total(), unitsField));
         if (withBreakdown) {
-            var tableCap = objectMapper.createObjectNode();
-            tableCap.put("CapacityUnits", cost.table());
-            cc.set("Table", tableCap);
+            cc.set("Table", capacityUnitsNode(cost.table(), unitsField));
             if (!cost.gsi().isEmpty()) {
-                cc.set("GlobalSecondaryIndexes", capacityUnitsMap(cost.gsi()));
+                cc.set("GlobalSecondaryIndexes", capacityUnitsMap(cost.gsi(), unitsField));
             }
             if (!cost.lsi().isEmpty()) {
-                cc.set("LocalSecondaryIndexes", capacityUnitsMap(cost.lsi()));
+                cc.set("LocalSecondaryIndexes", capacityUnitsMap(cost.lsi(), unitsField));
             }
         }
         return cc;
     }
 
-    private ObjectNode capacityUnitsMap(Map<String, Double> unitsByIndex) {
-        var node = objectMapper.createObjectNode();
-        unitsByIndex.forEach((indexName, units) -> {
-            var cap = objectMapper.createObjectNode();
-            cap.put("CapacityUnits", units);
-            node.set(indexName, cap);
-        });
+    private ObjectNode capacityUnitsMap(Map<String, Double> unitsByIndex, String unitsField) {
+        ObjectNode node = objectMapper.createObjectNode();
+        unitsByIndex.forEach((indexName, units) -> node.set(indexName, capacityUnitsNode(units, unitsField)));
+        return node;
+    }
+
+    private ObjectNode capacityUnitsNode(double units, String unitsField) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("CapacityUnits", units);
+        if (unitsField != null) {
+            node.put(unitsField, units);
+        }
         return node;
     }
 
@@ -2411,11 +2454,18 @@ public class DynamoDbJsonHandler {
 
         // Global-table replicas. In a single-process emulator every region is served by this same
         // table, so a replica is metadata; AWS reports each as an ACTIVE Replica and marks the table
-        // a 2019.11.21 global table.
+        // a 2019.11.21 global table. A global table also lists its own home region as a replica, so it
+        // is appended (once) after the tracked ones; a plain table (no replicas, no home) has neither.
         List<String> replicaRegions = table.getReplicaRegions();
-        if (replicaRegions != null && !replicaRegions.isEmpty()) {
+        String homeRegion = table.getGlobalTableHomeRegion();
+        LinkedHashSet<String> regions = new LinkedHashSet<>(
+                replicaRegions != null ? replicaRegions : List.of());
+        if (homeRegion != null && !homeRegion.isBlank()) {
+            regions.add(homeRegion);
+        }
+        if (!regions.isEmpty()) {
             ArrayNode replicas = objectMapper.createArrayNode();
-            for (String replicaRegion : replicaRegions) {
+            for (String replicaRegion : regions) {
                 ObjectNode replica = objectMapper.createObjectNode();
                 replica.put("RegionName", replicaRegion);
                 replica.put("ReplicaStatus", "ACTIVE");
@@ -2670,6 +2720,7 @@ public class DynamoDbJsonHandler {
     }
 
     private Response handleExecuteStatement(JsonNode request, String region) {
+        requireValidReturnConsumedCapacity(request);
         String statement = request.path("Statement").asText();
         List<JsonNode> parameters = toPartiQLParams(request.path("Parameters"));
         DynamoDbPartiQLParser.Stmt stmt = DynamoDbPartiQLParser.parse(statement, parameters);
@@ -2678,8 +2729,14 @@ public class DynamoDbJsonHandler {
                 .nextToken(request.has("NextToken") ? request.get("NextToken").asText() : null)
                 .consistentRead(request.path("ConsistentRead").asBoolean(false))
                 .tokenBinding(partiQLHandler.tokenBinding(statement, parameters));
-        JsonNode result = partiQLHandler.execute(stmt, ctx, region);
-        return Response.ok(result).build();
+        DynamoDbPartiQLHandler.Result result = partiQLHandler.execute(stmt, ctx, region);
+        ObjectNode response = result.body();
+        String returnCC = request.path("ReturnConsumedCapacity").asText("NONE");
+        if (!"NONE".equals(returnCC)) {
+            response.set("ConsumedCapacity",
+                    writeCapacityNode(stmt.table(), result.capacity(), "INDEXES".equals(returnCC)));
+        }
+        return Response.ok(response).build();
     }
 
     private Response handleExecuteTransaction(JsonNode request, String region) {
@@ -2687,6 +2744,9 @@ public class DynamoDbJsonHandler {
         if (stmts.isMissingNode() || !stmts.isArray() || stmts.isEmpty()) {
             throw new AwsException("ValidationException", "TransactStatements must not be empty", 400);
         }
+        List<String> validationErrors = new ArrayList<>();
+        addReturnConsumedCapacityError(request, validationErrors);
+        throwValidationErrors(validationErrors);
         try {
             List<DynamoDbPartiQLParser.Stmt> statements = new ArrayList<>();
             for (int i = 0; i < stmts.size(); i++) {
@@ -2703,7 +2763,7 @@ public class DynamoDbJsonHandler {
             if (reads == statements.size()) {
                 return executeTransactionReads(statements.stream()
                         .map(DynamoDbPartiQLParser.Stmt.Select.class::cast)
-                        .toList(), region);
+                        .toList(), request, region);
             }
             List<DynamoDbPartiQLHandler.TransactMember> members = new ArrayList<>();
             for (int i = 0; i < statements.size(); i++) {
@@ -2711,10 +2771,11 @@ public class DynamoDbJsonHandler {
                 members.add(inTransactStatement(i, () -> partiQLHandler.toTransactItem(stmt, region)));
             }
             List<JsonNode> transactItems = cancelOnMemberReasons(members);
-            dynamoDbService.transactWriteItems(transactItems, region,
+            DynamoDbService.TransactWriteResult result = dynamoDbService.transactWriteItems(transactItems, region,
                     request.path("ClientRequestToken").asText(null), request);
             ObjectNode resp = objectMapper.createObjectNode();
             resp.set("Responses", objectMapper.createArrayNode());
+            addTransactWriteConsumedCapacity(resp, request, result);
             return Response.ok(resp).build();
         } catch (TransactionCanceledException e) {
             ObjectNode body = objectMapper.createObjectNode();
@@ -2736,7 +2797,8 @@ public class DynamoDbJsonHandler {
         }
     }
 
-    private Response executeTransactionReads(List<DynamoDbPartiQLParser.Stmt.Select> selects, String region) {
+    private Response executeTransactionReads(List<DynamoDbPartiQLParser.Stmt.Select> selects, JsonNode request,
+                                             String region) {
         List<DynamoDbPartiQLHandler.TransactMember> members = new ArrayList<>();
         for (int i = 0; i < selects.size(); i++) {
             DynamoDbPartiQLParser.Stmt.Select select = selects.get(i);
@@ -2744,8 +2806,9 @@ public class DynamoDbJsonHandler {
         }
         List<JsonNode> getItems = cancelOnMemberReasons(members);
 
-        List<JsonNode> results = dynamoDbService.transactGetItems(getItems, region);
+        DynamoDbService.TransactGetResult result = dynamoDbService.transactGetItems(getItems, region);
         requireOneReadPerItem(getItems, region);
+        List<JsonNode> results = result.items();
         ArrayNode responses = objectMapper.createArrayNode();
         for (int i = 0; i < results.size(); i++) {
             JsonNode item = partiQLHandler.projectSelected(selects.get(i), results.get(i));
@@ -2757,6 +2820,7 @@ public class DynamoDbJsonHandler {
         }
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("Responses", responses);
+        addPerTableConsumedCapacity(resp, request, result.capacity(), "ReadCapacityUnits");
         return Response.ok(resp).build();
     }
 
@@ -2802,20 +2866,24 @@ public class DynamoDbJsonHandler {
     }
 
     private Response handleBatchExecuteStatement(JsonNode request, String region) {
+        requireValidReturnConsumedCapacity(request);
         JsonNode stmts = request.path("Statements");
         if (stmts.isMissingNode() || !stmts.isArray() || stmts.isEmpty()) {
             throw new AwsException("ValidationException", "Statements must not be empty", 400);
         }
         ArrayNode responses = objectMapper.createArrayNode();
+        Map<String, DynamoDbWriteCapacity.Cost> capacity = new LinkedHashMap<>();
         for (JsonNode s : stmts) {
-            responses.add(batchMemberResponse(s, region));
+            responses.add(batchMemberResponse(s, region, capacity));
         }
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("Responses", responses);
+        addPerTableConsumedCapacity(resp, request, capacity, null);
         return Response.ok(resp).build();
     }
 
-    private ObjectNode batchMemberResponse(JsonNode statement, String region) {
+    private ObjectNode batchMemberResponse(JsonNode statement, String region,
+                                           Map<String, DynamoDbWriteCapacity.Cost> capacity) {
         ObjectNode slot = objectMapper.createObjectNode();
         String tableName = null;
         try {
@@ -2824,13 +2892,14 @@ public class DynamoDbJsonHandler {
             if (stmt instanceof DynamoDbPartiQLParser.Stmt.Select select) {
                 requireBatchSelectReadsByKey(select, region);
             }
-            JsonNode result = partiQLHandler.execute(stmt, PartiQLExecuteContext.builder()
+            DynamoDbPartiQLHandler.Result result = partiQLHandler.execute(stmt, PartiQLExecuteContext.builder()
                     .consistentRead(statement.path("ConsistentRead").asBoolean(false)), region);
-            JsonNode firstItem = result.path("Items").path(0);
+            JsonNode firstItem = result.body().path("Items").path(0);
             if (!firstItem.isMissingNode()) {
                 slot.set("Item", firstItem);
             }
             slot.put("TableName", tableName);
+            capacity.merge(tableName, result.capacity(), DynamoDbWriteCapacity.Cost::plus);
         } catch (AwsException e) {
             ObjectNode err = objectMapper.createObjectNode();
             err.put("Code", batchMemberErrorCode(e.getErrorCode()));

@@ -37,10 +37,23 @@ window are skipped. The dispatcher ticks every
 `floci.services.scheduler.tick-interval-seconds` (default `10`).
 
 Supported target types: SQS, Lambda, SNS, ECS `RunTask`, EventBridge
-`PutEvents`, and unqualified Step Functions state machine ARNs. A Step Functions
-target starts an asynchronous execution with the schedule target's `Input`, or
-`{}` when `Input` is absent. Scheduler delivery succeeds when `StartExecution`
-is accepted; a later workflow failure does not trigger Scheduler retries.
+`PutEvents`, and unqualified Step Functions state machine ARNs. Templated
+targets receive the schedule target's `Input`. When `Input` is absent, Floci
+delivers the default notification AWS sends: an EventBridge-style event with
+`detail-type` `Scheduled Event`, `source` `aws.scheduler`, the schedule's
+account, region, and ARN (in `resources`), the occurrence time, and `detail`
+set to the string `"{}"`. The event `id` is stable per occurrence, so retries
+and the dead-letter body carry the same event. A Step Functions target starts
+an asynchronous execution with that payload as its input. Scheduler delivery
+succeeds when `StartExecution` is accepted; a later workflow failure does not
+trigger Scheduler retries.
+
+`CreateSchedule` and `UpdateSchedule` reject a non-JSON `Input` for Lambda,
+Step Functions, and EventBridge targets with a `ValidationException`, as AWS
+does. A blank `Input`, or one with text after the JSON value such as
+`{} garbage`, is rejected the same way. SQS and SNS targets accept any text,
+and the `Input` of a universal (`aws-sdk`) target is only checked when the
+schedule is invoked.
 
 ### Retries and dead-letter queues
 
@@ -62,8 +75,13 @@ queue with the message attributes
 `IS_PAYLOAD_TRUNCATED`, `RETRY_ATTEMPTS`, `SCHEDULED_TIME`, `SCHEDULE_ARN`, and
 `TARGET_ARN`. FIFO queues and non-SQS ARNs are logged and skipped. An `at`
 schedule with `ActionAfterCompletion=DELETE` is deleted once its occurrence is
-delivered or exhausted. For an SQS target, the body contains `MessageBody` and
-`QueueUrl`. Non-JSON target input is encoded as a JSON string field.
+delivered or exhausted. The body uses the request fields of the target
+service's API: SQS `MessageBody` and `QueueUrl` (plus `MessageGroupId` for FIFO
+queues), Lambda `FunctionName`, `InvocationType`, and `Payload`, SNS `TopicArn`
+and `Message`, Step Functions `stateMachineArn` and `input`, EventBridge
+`Entries`, and ECS `cluster`, `taskDefinition`, and `count` with the configured
+launch type, group, and network configuration. Non-JSON input of a universal
+target is encoded as a JSON string field.
 
 ## Configuration
 

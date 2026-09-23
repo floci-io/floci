@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ecs.container;
 
 import java.io.Closeable;
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -28,6 +29,11 @@ public class EcsTaskHandle {
     private final String region;
     /** Per-container {@code stopTimeout}, so teardown waits as long as the task definition asked. */
     private final Map<String, Integer> stopTimeouts;
+    /**
+     * When each container finished, read during teardown. Docker forgets a container once it is
+     * removed, so the time has to be kept here for the caller that stamps the task's containers.
+     */
+    private final Map<String, Instant> finishedAt = new LinkedHashMap<>();
 
     public EcsTaskHandle(String taskArn, Map<String, String> containerIds,
                          Map<String, Closeable> logStreamsByContainerId) {
@@ -65,6 +71,18 @@ public class EcsTaskHandle {
     public int stopTimeoutFor(String containerName) {
         Integer configured = stopTimeouts.get(containerName);
         return configured != null ? configured : DEFAULT_STOP_TIMEOUT_SECONDS;
+    }
+
+    /** Notes when a container finished. A null is ignored, so a failed read leaves no entry. */
+    public void recordFinishedAt(String containerName, Instant instant) {
+        if (instant != null) {
+            finishedAt.put(containerName, instant);
+        }
+    }
+
+    /** When each container finished, for the containers teardown could read a time for. */
+    public Map<String, Instant> getFinishedAt() {
+        return finishedAt;
     }
 
     /** Removes and returns the log stream that no longer needs task-level ownership. */

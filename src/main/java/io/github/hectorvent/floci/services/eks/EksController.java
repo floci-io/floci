@@ -1,8 +1,10 @@
 package io.github.hectorvent.floci.services.eks;
 
 import io.github.hectorvent.floci.core.common.Pagination;
+import io.github.hectorvent.floci.services.eks.model.Addon;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
 import io.github.hectorvent.floci.services.eks.model.CreateAccessEntryRequest;
+import io.github.hectorvent.floci.services.eks.model.CreateAddonRequest;
 import io.github.hectorvent.floci.services.eks.model.CreateClusterRequest;
 import io.github.hectorvent.floci.services.eks.model.CreateFargateProfileRequest;
 import io.github.hectorvent.floci.services.eks.model.CreateNodeGroupRequest;
@@ -10,6 +12,8 @@ import io.github.hectorvent.floci.services.eks.model.CreatePodIdentityAssociatio
 import io.github.hectorvent.floci.services.eks.model.FargateProfile;
 import io.github.hectorvent.floci.services.eks.model.Nodegroup;
 import io.github.hectorvent.floci.services.eks.model.PodIdentityAssociation;
+import io.github.hectorvent.floci.services.eks.model.Update;
+import io.github.hectorvent.floci.services.eks.model.UpdateAddonRequest;
 import io.github.hectorvent.floci.services.eks.model.UpdatePodIdentityAssociationRequest;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
@@ -41,20 +45,23 @@ public class EksController {
     private final EksService eksService;
     private final EksAccessEntryService accessEntries;
     private final EksPodIdentityAssociationService podIdentityAssociations;
+    private final EksAddonService addons;
 
     @Inject
     public EksController(EksService eksService, EksAccessEntryService accessEntries,
-                         EksPodIdentityAssociationService podIdentityAssociations) {
+                         EksPodIdentityAssociationService podIdentityAssociations,
+                         EksAddonService addons) {
         this.eksService = eksService;
         this.accessEntries = accessEntries;
         this.podIdentityAssociations = podIdentityAssociations;
+        this.addons = addons;
     }
 
     @POST
     @Path("/clusters")
     public Response createCluster(CreateClusterRequest request) {
         Cluster cluster = eksService.createCluster(request);
-        return Response.ok(Map.of("cluster", cluster)).build();
+        return Response.ok(Map.of("cluster", toClusterResponse(cluster))).build();
     }
 
     @GET
@@ -68,14 +75,29 @@ public class EksController {
     @Path("/clusters/{name}")
     public Response describeCluster(@PathParam("name") String name) {
         Cluster cluster = eksService.describeCluster(name);
-        return Response.ok(Map.of("cluster", cluster)).build();
+        return Response.ok(Map.of("cluster", toClusterResponse(cluster))).build();
     }
 
     @DELETE
     @Path("/clusters/{name}")
     public Response deleteCluster(@PathParam("name") String name) {
         Cluster cluster = eksService.deleteCluster(name);
-        return Response.ok(Map.of("cluster", cluster)).build();
+        return Response.ok(Map.of("cluster", toClusterResponse(cluster))).build();
+    }
+
+    /**
+     * Sanitizes the cluster model before emitting it as an AWS API response.
+     * explicitVersion is internal Floci metadata used for container image resolution
+     * across restarts and must not be included on the wire. Clearing it on a copy
+     * causes Jackson to omit the property due to @JsonInclude(NON_DEFAULT).
+     */
+    private Cluster toClusterResponse(Cluster cluster) {
+        if (cluster == null || !cluster.isExplicitVersion()) {
+            return cluster;
+        }
+        Cluster response = cluster.copy();
+        response.setExplicitVersion(false);
+        return response;
     }
 
     // Keep these concrete EKS resource paths declared explicitly so they outrank
@@ -175,11 +197,88 @@ public class EksController {
         return Response.ok(Map.of()).build();
     }
 
+    @POST
+    @Path("/clusters/{name}/addons")
+    public Response createAddon(@PathParam("name") String name, CreateAddonRequest request) {
+        Cluster cluster = eksService.describeCluster(name);
+        Addon addon = addons.create(cluster, request);
+        return Response.ok(Map.of("addon", addon)).build();
+    }
+
     @GET
     @Path("/clusters/{name}/addons")
-    public Response listAddons(@PathParam("name") String name) {
-        eksService.describeCluster(name);
-        return Response.ok(Map.of("addons", List.of())).build();
+    public Response listAddons(@PathParam("name") String name,
+                               @QueryParam("maxResults") String maxResults,
+                               @QueryParam("nextToken") String nextToken) {
+        Cluster cluster = eksService.describeCluster(name);
+        EksAddonService.AddonNamesPage page = addons.list(cluster,
+                Pagination.parseMaxResults(maxResults, "InvalidParameterException"), nextToken);
+        return Response.ok(page.nextToken() == null
+                ? Map.of("addons", page.addons())
+                : Map.of("addons", page.addons(), "nextToken", page.nextToken())).build();
+    }
+
+    @GET
+    @Path("/clusters/{name}/addons/{addonName}")
+    public Response describeAddon(@PathParam("name") String name,
+                                  @PathParam("addonName") String addonName) {
+        Cluster cluster = eksService.describeCluster(name);
+        Addon addon = addons.describe(cluster, addonName);
+        return Response.ok(Map.of("addon", addon)).build();
+    }
+
+    @POST
+    @Path("/clusters/{name}/addons/{addonName}/update")
+    public Response updateAddon(@PathParam("name") String name,
+                                @PathParam("addonName") String addonName,
+                                UpdateAddonRequest request) {
+        Cluster cluster = eksService.describeCluster(name);
+        Update update = addons.update(cluster, addonName, request);
+        return Response.ok(Map.of("update", update)).build();
+    }
+
+    @GET
+    @Path("/clusters/{name}/updates/{updateId}")
+    public Response describeUpdate(@PathParam("name") String name,
+                                   @PathParam("updateId") String updateId,
+                                   @QueryParam("addonName") String addonName,
+                                   @QueryParam("nodegroupName") String nodegroupName) {
+        Cluster cluster = eksService.describeCluster(name);
+        Update update = addons.describeUpdate(cluster, updateId, addonName);
+        return Response.ok(Map.of("update", update)).build();
+    }
+
+    @DELETE
+    @Path("/clusters/{name}/addons/{addonName}")
+    public Response deleteAddon(@PathParam("name") String name,
+                                @PathParam("addonName") String addonName,
+                                @QueryParam("preserve") Boolean preserve) {
+        Cluster cluster = eksService.describeCluster(name);
+        Addon addon = addons.delete(cluster, addonName, Boolean.TRUE.equals(preserve));
+        return Response.ok(Map.of("addon", addon)).build();
+    }
+
+    @GET
+    @Path("/addons/supported-versions")
+    public Response describeAddonVersions(@QueryParam("addonName") String addonName,
+                                          @QueryParam("kubernetesVersion") String kubernetesVersion,
+                                          @QueryParam("maxResults") String maxResults,
+                                          @QueryParam("nextToken") String nextToken,
+                                          @QueryParam("publishers") List<String> publishers,
+                                          @QueryParam("types") List<String> types,
+                                          @QueryParam("owners") List<String> owners) {
+        EksAddonService.AddonVersionsPage page = addons.describeAddonVersions(
+                addonName,
+                kubernetesVersion,
+                Pagination.parseMaxResults(maxResults, "InvalidParameterException"),
+                nextToken,
+                publishers,
+                types,
+                owners
+        );
+        return Response.ok(page.nextToken() == null
+                ? Map.of("addons", page.addons())
+                : Map.of("addons", page.addons(), "nextToken", page.nextToken())).build();
     }
 
     @GET

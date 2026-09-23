@@ -37,7 +37,7 @@ public class KmsJsonHandler {
     }
 
     private static final Set<String> KEY_ID_OPERATIONS = Set.of(
-            "GetPublicKey", "DescribeKey", "CreateGrant", "ListGrants", "RevokeGrant", "Encrypt", "GenerateDataKey",
+            "GetPublicKey", "DescribeKey", "ReplicateKey", "CreateGrant", "ListGrants", "RevokeGrant", "Encrypt", "GenerateDataKey",
             "GenerateDataKeyWithoutPlaintext", "Sign", "Verify", "GenerateMac", "VerifyMac", "ScheduleKeyDeletion",
             "CancelKeyDeletion", "TagResource", "UntagResource", "ListResourceTags", "GetKeyPolicy", "PutKeyPolicy",
             "ListKeyPolicies", "UpdateKeyDescription", "GetKeyRotationStatus", "EnableKeyRotation",
@@ -45,7 +45,7 @@ public class KmsJsonHandler {
             "ImportKeyMaterial", "DeleteImportedKeyMaterial");
 
     private static final Set<String> KEY_ONLY_OPERATIONS = Set.of(
-            "CreateGrant", "ListGrants", "RevokeGrant", "ScheduleKeyDeletion", "CancelKeyDeletion", "TagResource",
+            "ReplicateKey", "CreateGrant", "ListGrants", "RevokeGrant", "ScheduleKeyDeletion", "CancelKeyDeletion", "TagResource",
             "UntagResource", "ListResourceTags", "GetKeyPolicy", "PutKeyPolicy", "ListKeyPolicies",
             "UpdateKeyDescription", "GetKeyRotationStatus", "EnableKeyRotation", "DisableKeyRotation", "EnableKey",
             "DisableKey", "RotateKeyOnDemand", "GetParametersForImport", "ImportKeyMaterial",
@@ -68,6 +68,7 @@ public class KmsJsonHandler {
             case "GenerateRandom" -> handleGenerateRandom(request, region);
             case "GetPublicKey" -> handleGetPublicKey(request, region);
             case "DescribeKey" -> handleDescribeKey(request, region);
+            case "ReplicateKey" -> handleReplicateKey(request, region);
             case "ListKeys" -> handleListKeys(request, region);
             case "CreateGrant" -> handleCreateGrant(request, region);
             case "ListGrants" -> handleListGrants(request, region);
@@ -122,9 +123,28 @@ public class KmsJsonHandler {
         request.path("Tags").forEach(t -> tags.put(t.path("TagKey").asText(), t.path("TagValue").asText()));
         rejectUnknownReservedTags(tags,"TagException");
         String origin = request.path("Origin").asText(null);
-        KmsKey key = service.createKey(description, keyUsage, keySpec, policy, tags, origin, region);
+        boolean multiRegion = request.path("MultiRegion").asBoolean(false);
+        KmsKey key = service.createKey(description, keyUsage, keySpec, policy, tags, origin, multiRegion, region);
         ObjectNode response = objectMapper.createObjectNode();
         response.set("KeyMetadata", addKeyMetadata(key));
+        return Response.ok(response).build();
+    }
+
+    private Response handleReplicateKey(JsonNode request, String region) {
+        String description = request.path("Description").asText(null);
+        String policy = request.path("Policy").isMissingNode() ? null : request.path("Policy").asText(null);
+        String replicaRegion = requiredText(request, "ReplicaRegion");
+        Map<String, String> tags = new HashMap<>();
+        request.path("Tags").forEach(t -> tags.put(t.path("TagKey").asText(), t.path("TagValue").asText()));
+        rejectUnknownReservedTags(tags, "TagException");
+
+        KmsKey replica = service.replicateKey(request.path("KeyId").asText(), description, policy,
+                tags, replicaRegion, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("ReplicaKeyMetadata", addKeyMetadata(replica));
+        response.put("ReplicaPolicy", replica.getPolicy());
+        ArrayNode replicaTags = response.putArray("ReplicaTags");
+        addTags(replicaTags, replica);
         return Response.ok(response).build();
     }
 
@@ -754,11 +774,58 @@ public class KmsJsonHandler {
         keyMetadata.put("KeyManager", "CUSTOMER");
         keyMetadata.put("CustomerMasterKeySpec", k.getKeySpec().name());
         keyMetadata.put("KeySpec", k.getKeySpec().name());
+        keyMetadata.put("MultiRegion", k.isMultiRegion());
+        if (k.isMultiRegion()) {
+            keyMetadata.set("MultiRegionConfiguration", addMultiRegionConfiguration(k));
+        }
         addAlgorithms(k, keyMetadata);
         if (k.getDeletionDate() > 0) {
             keyMetadata.put("DeletionDate", k.getDeletionDate());
         }
         return keyMetadata;
+    }
+
+    private ObjectNode addMultiRegionConfiguration(KmsKey key) {
+        ObjectNode configuration = objectMapper.createObjectNode();
+        configuration.put("MultiRegionKeyType", key.getMultiRegionKeyType());
+
+        String primaryRegion = key.getMultiRegionPrimaryRegion();
+        KmsKey primary = service.listKeys(primaryRegion).stream()
+                .filter(candidate -> candidate.isMultiRegion())
+                .filter(candidate -> key.getKeyId().equals(candidate.getKeyId()))
+                .filter(candidate -> "PRIMARY".equals(candidate.getMultiRegionKeyType()))
+                .findFirst()
+                .orElseGet(() -> {
+                    KmsKey fallback = new KmsKey();
+                    fallback.setArn(regionResolver.buildArn("kms", primaryRegion, "key/" + key.getKeyId()));
+                    return fallback;
+                });
+        ObjectNode primaryKey = configuration.putObject("PrimaryKey");
+        primaryKey.put("Arn", primary.getArn());
+        primaryKey.put("Region", primaryRegion);
+
+        ArrayNode replicas = configuration.putArray("ReplicaKeys");
+        for (KmsKey candidate : service.listAllMultiRegionKeys(key.getKeyId())) {
+            if (!"PRIMARY".equals(candidate.getMultiRegionKeyType())) {
+                ObjectNode replica = replicas.addObject();
+                replica.put("Arn", candidate.getArn());
+                replica.put("Region", regionFromArn(candidate.getArn()));
+            }
+        }
+        return configuration;
+    }
+
+    private static String regionFromArn(String arn) {
+        String[] parts = arn.split(":", 6);
+        return parts.length > 3 ? parts[3] : "";
+    }
+
+    private static void addTags(ArrayNode array, KmsKey key) {
+        key.getTags().forEach((keyName, value) -> {
+            ObjectNode tag = array.addObject();
+            tag.put("TagKey", keyName);
+            tag.put("TagValue", value);
+        });
     }
 
     private ObjectNode errorResponse(String code, String message) {

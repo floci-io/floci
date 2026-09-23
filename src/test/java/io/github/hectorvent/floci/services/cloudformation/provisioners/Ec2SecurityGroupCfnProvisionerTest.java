@@ -47,7 +47,7 @@ class Ec2SecurityGroupCfnProvisionerTest {
     private final ObjectMapper mapper = new ObjectMapper();
 
     @Test
-    void createPublishesGroupIdAndVpcIdOnly() throws Exception {
+    void createPublishesGroupIdIdAndVpcId() throws Exception {
         when(ec2.createSecurityGroup("us-east-1", "web", "web tier", "vpc-1"))
                 .thenReturn(group("sg-1", "web", "web tier", "vpc-1"));
         StackResource r = resource("WebSg");
@@ -57,8 +57,9 @@ class Ec2SecurityGroupCfnProvisionerTest {
                 """), ctx(null));
 
         assertEquals("sg-1", r.getPhysicalId());
-        assertEquals(Set.of("GroupId", "VpcId"), r.getAttributes().keySet());
+        assertEquals(Set.of("GroupId", "Id", "VpcId"), r.getAttributes().keySet());
         assertEquals("sg-1", r.getAttributes().get("GroupId"));
+        assertEquals("sg-1", r.getAttributes().get("Id"));
         assertEquals("vpc-1", r.getAttributes().get("VpcId"));
     }
 

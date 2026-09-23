@@ -140,4 +140,49 @@ class CloudWatchTest {
         assertThat(dp.maximum()).isEqualTo(40.0);
         assertThat(dp.average()).isEqualTo(30.0); // sum / sampleCount
     }
+
+    @Test
+    @DisplayName("GetMetricStatistics honors the Unit filter")
+    void testGetMetricStatisticsUnitFilter() {
+        String namespace = "JavaTestUnitFilter";
+        Instant now = Instant.now();
+
+        cloudWatchClient.putMetricData(request -> request
+                .namespace(namespace)
+                .metricData(
+                        datum -> datum
+                                .metricName("UnitMetric")
+                                .value(10.0)
+                                .unit(StandardUnit.COUNT),
+                        datum -> datum
+                                .metricName("UnitMetric")
+                                .value(20.0)
+                                .unit(StandardUnit.BYTES)
+                )
+        );
+
+        GetMetricStatisticsResponse matching = cloudWatchClient.getMetricStatistics(request -> request
+                .namespace(namespace)
+                .metricName("UnitMetric")
+                .startTime(now.minus(1, ChronoUnit.HOURS))
+                .endTime(now.plus(1, ChronoUnit.MINUTES))
+                .period(3600)
+                .statistics(Statistic.SUM)
+                .unit(StandardUnit.COUNT)
+        );
+        assertThat(matching.datapoints()).hasSize(1);
+        assertThat(matching.datapoints().get(0).sum()).isEqualTo(10.0);
+        assertThat(matching.datapoints().get(0).unit()).isEqualTo(StandardUnit.COUNT);
+
+        GetMetricStatisticsResponse noMatch = cloudWatchClient.getMetricStatistics(request -> request
+                .namespace(namespace)
+                .metricName("UnitMetric")
+                .startTime(now.minus(1, ChronoUnit.HOURS))
+                .endTime(now.plus(1, ChronoUnit.MINUTES))
+                .period(3600)
+                .statistics(Statistic.SUM)
+                .unit(StandardUnit.MILLISECONDS)
+        );
+        assertThat(noMatch.datapoints()).isEmpty();
+    }
 }

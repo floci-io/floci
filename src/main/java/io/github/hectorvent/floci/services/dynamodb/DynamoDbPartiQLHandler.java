@@ -29,7 +29,9 @@ class DynamoDbPartiQLHandler {
         this.mapper = mapper;
     }
 
-    JsonNode execute(Stmt stmt, PartiQLExecuteContext ctx, String region) {
+    record Result(ObjectNode body, DynamoDbWriteCapacity.Cost capacity) {}
+
+    Result execute(Stmt stmt, PartiQLExecuteContext ctx, String region) {
         return switch (stmt) {
             case Stmt.Select s -> executeSelect(s, ctx, region);
             case Stmt.Insert s -> executeInsert(s, region);
@@ -42,7 +44,7 @@ class DynamoDbPartiQLHandler {
 
     // --- SELECT ---
 
-    private JsonNode executeSelect(Stmt.Select stmt, PartiQLExecuteContext ctx, String region) {
+    private Result executeSelect(Stmt.Select stmt, PartiQLExecuteContext ctx, String region) {
         TableDefinition table = service.describeTable(stmt.table(), region);
         // ExecuteStatement omits the index name from the missing-index message,
         // unlike Query/Scan (characterised on real AWS, eu-west-1, 2026-09-02).
@@ -118,7 +120,40 @@ class DynamoDbPartiQLHandler {
         if (lastEvaluatedKey != null) {
             resp.put("NextToken", encodeNextToken(lastEvaluatedKey, ctx.tokenBinding()));
         }
-        return resp;
+        return new Result(resp, readCapacity(stmt, table, accessPath, page, ctx.consistentRead()));
+    }
+
+    private static DynamoDbWriteCapacity.Cost readCapacity(Stmt.Select stmt, TableDefinition table,
+                                                           DynamoDbAccessPath accessPath, Page page,
+                                                           boolean consistentRead) {
+        double units = DynamoDbJsonHandler.readCapacityUnits(page.scannedBytes(), consistentRead);
+        if (!accessPath.isIndex()) {
+            return new DynamoDbWriteCapacity.Cost(units, Map.of(), Map.of());
+        }
+        double tableUnits = 0;
+        if (fetchesFromTable(stmt, table, accessPath)) {
+            for (JsonNode item : page.scannedItems()) {
+                tableUnits += DynamoDbJsonHandler.readCapacityUnits(
+                        DynamoDbItemSize.calculateItemSize(item), consistentRead);
+            }
+        }
+        Map<String, Double> indexUnits = Map.of(accessPath.indexName(), units);
+        return accessPath.isGlobalSecondaryIndex()
+                ? new DynamoDbWriteCapacity.Cost(tableUnits, indexUnits, Map.of())
+                : new DynamoDbWriteCapacity.Cost(tableUnits, Map.of(), indexUnits);
+    }
+
+    // An LSI read that selects an attribute the index does not project fetches every row it
+    // walks from the base table, and each fetch is charged on its own.
+    private static boolean fetchesFromTable(Stmt.Select stmt, TableDefinition table,
+                                            DynamoDbAccessPath accessPath) {
+        if (accessPath.isGlobalSecondaryIndex() || "ALL".equals(accessPath.projectionType())) {
+            return false;
+        }
+        Set<String> projected = accessPath.projectedAttributeNames(table);
+        return stmt.columns().stream()
+                .map(Path::root)
+                .anyMatch(column -> !projected.contains(column));
     }
 
     private record Routing(Cond.Eq pkEq, Cond skCond, List<Cond> filterConds, PVal partition) {}
@@ -146,7 +181,8 @@ class DynamoDbPartiQLHandler {
         return new Routing(pkEq, skCond, filterConds, null);
     }
 
-    private record Page(List<JsonNode> items, JsonNode lastEvaluatedKey) {}
+    private record Page(List<JsonNode> items, JsonNode lastEvaluatedKey, long scannedBytes,
+                        List<JsonNode> scannedItems) {}
 
     private Page readPage(Stmt.Select stmt, TableDefinition table, DynamoDbAccessPath accessPath,
                           Routing routing, Supplier<JsonNode> startKey, Integer limit, String region) {
@@ -177,14 +213,17 @@ class DynamoDbPartiQLHandler {
                     ean.isEmpty() ? null : ean.toNode(mapper),
                     eav.isEmpty() ? null : eav.toNode(mapper),
                     null, limit, exclusiveStartKey, accessPath.indexName(), region);
-            return new Page(result.items(), result.lastEvaluatedKey());
+            return new Page(result.items(), result.lastEvaluatedKey(), result.scannedBytes(), result.scannedItems());
         }
         if (accessPath.kind() == DynamoDbAccessPath.Kind.TABLE && skName == null
                 && skCond == null && filterConds.isEmpty()) {
             ObjectNode key = mapper.createObjectNode();
             key.set(pkName, toTypedNode(pkEq.val()));
             JsonNode item = service.getItem(stmt.table(), key, region);
-            return new Page(item != null ? List.of(item) : Collections.emptyList(), null);
+            if (item == null) {
+                return new Page(Collections.emptyList(), null, 0, List.of());
+            }
+            return new Page(List.of(item), null, DynamoDbItemSize.calculateItemSize(item), List.of(item));
         }
         ExprAttrBuilder eav = new ExprAttrBuilder();
         ExprAttrNameBuilder ean = new ExprAttrNameBuilder();
@@ -196,7 +235,7 @@ class DynamoDbPartiQLHandler {
                 stmt.table(), null, eav.toNode(mapper), kce, fe,
                 limit, null, accessPath.indexName(), exclusiveStartKey,
                 ean.isEmpty() ? null : ean.toNode(mapper), region);
-        return new Page(result.items(), result.lastEvaluatedKey());
+        return new Page(result.items(), result.lastEvaluatedKey(), result.scannedBytes(), result.scannedItems());
     }
 
     private Page readPartition(Stmt.Select stmt, TableDefinition table, DynamoDbAccessPath accessPath,
@@ -216,18 +255,22 @@ class DynamoDbPartiQLHandler {
         List<JsonNode> matching = result.items().stream()
                 .filter(item -> ExpressionEvaluator.evaluate(filter, item, names, values))
                 .toList();
-        return new Page(matching, result.lastEvaluatedKey());
+        return new Page(matching, result.lastEvaluatedKey(), result.scannedBytes(), result.items());
     }
 
     private Page readOrdered(Stmt.Select stmt, TableDefinition table, DynamoDbAccessPath accessPath,
                              Routing routing, JsonNode after, Integer limit, String region) {
         requireOrderByShape(stmt, accessPath);
         List<JsonNode> rows = new ArrayList<>();
+        long scannedBytes = 0;
+        List<JsonNode> scannedItems = new ArrayList<>();
         JsonNode lastKey = null;
         do {
             JsonNode from = lastKey;
             Page page = readPage(stmt, table, accessPath, routing, () -> from, null, region);
             rows.addAll(page.items());
+            scannedBytes += page.scannedBytes();
+            scannedItems.addAll(page.scannedItems());
             lastKey = page.lastEvaluatedKey();
         } while (lastKey != null);
 
@@ -241,7 +284,7 @@ class DynamoDbPartiQLHandler {
         }
         int end = limit == null ? rows.size() : Math.min(rows.size(), start + limit);
         JsonNode resumeAfter = start < end && end < rows.size() ? orderingKey(rows.get(end - 1), accessPath, table) : null;
-        return new Page(new ArrayList<>(rows.subList(start, end)), resumeAfter);
+        return new Page(new ArrayList<>(rows.subList(start, end)), resumeAfter, scannedBytes, scannedItems);
     }
 
     private static void requireOrderByShape(Stmt.Select stmt, DynamoDbAccessPath accessPath) {
@@ -473,24 +516,26 @@ class DynamoDbPartiQLHandler {
 
     // --- INSERT ---
 
-    private JsonNode executeInsert(Stmt.Insert stmt, String region) {
+    private Result executeInsert(Stmt.Insert stmt, String region) {
         TableDefinition table = service.describeTable(stmt.table(), region);
         String pkName = table.getPartitionKeyName();
 
         ObjectNode item = mapper.createObjectNode();
         stmt.item().forEach((k, v) -> item.set(k, toTypedNode(v)));
 
+        JsonNode previousItem;
         try {
-            service.putItem(stmt.table(), item, "attribute_not_exists(" + pkName + ")", null, null, region, "NONE");
+            previousItem = service.putItem(stmt.table(), item, "attribute_not_exists(" + pkName + ")",
+                    null, null, region, "NONE");
         } catch (ConditionalCheckFailedException e) {
             throw new AwsException("DuplicateItemException", "Duplicate primary key exists in table", 400);
         }
-        return itemsResponse(null);
+        return new Result(itemsResponse(null), writeCapacity(table, previousItem, item));
     }
 
     // --- UPDATE ---
 
-    private JsonNode executeUpdate(Stmt.Update stmt, String region) {
+    private Result executeUpdate(Stmt.Update stmt, String region) {
         requireNoIndexQualifier(stmt.index());
         TableDefinition table = service.describeTable(stmt.table(), region);
         requireOneValuePerKey(table, stmt.where());
@@ -506,7 +551,14 @@ class DynamoDbPartiQLHandler {
                 ean.isEmpty() ? null : ean.toNode(mapper),
                 eav.isEmpty() ? null : eav.toNode(mapper), returnValues, ce, region, "NONE",
                 UpdateSizeRule.FINISHED_ITEM);
-        return itemsResponse(returnedAttributes(stmt.returning(), result));
+        return new Result(itemsResponse(returnedAttributes(stmt.returning(), result)),
+                writeCapacity(table, result.oldItem(), result.newItem()));
+    }
+
+    private static DynamoDbWriteCapacity.Cost writeCapacity(TableDefinition table, JsonNode oldItem,
+                                                            JsonNode newItem) {
+        return DynamoDbWriteCapacity.forWrite(table, oldItem,
+                newItem != null ? DynamoDbNumberUtils.normalizeNumbersInItem(newItem) : null);
     }
 
     private static void requireNoIndexQualifier(String index) {
@@ -538,7 +590,7 @@ class DynamoDbPartiQLHandler {
 
     // --- DELETE ---
 
-    private JsonNode executeDelete(Stmt.Delete stmt, String region) {
+    private Result executeDelete(Stmt.Delete stmt, String region) {
         requireNoIndexQualifier(stmt.index());
         TableDefinition table = service.describeTable(stmt.table(), region);
         requireOneValuePerKey(table, stmt.where());
@@ -551,7 +603,8 @@ class DynamoDbPartiQLHandler {
         JsonNode oldItem = service.deleteItem(stmt.table(), key, ce,
                 ean.isEmpty() ? null : ean.toNode(mapper),
                 eav.isEmpty() ? null : eav.toNode(mapper), region, "NONE");
-        return itemsResponse(stmt.returning() == Returning.ALL_OLD ? oldItem : null);
+        return new Result(itemsResponse(stmt.returning() == Returning.ALL_OLD ? oldItem : null),
+                writeCapacity(table, oldItem, null));
     }
 
     // --- Transaction item builder ---

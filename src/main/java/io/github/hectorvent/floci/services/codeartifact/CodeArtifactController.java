@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.common.JsonErrorResponseUtils;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.services.codeartifact.CodeArtifactService.AuthorizationToken;
 import io.github.hectorvent.floci.services.codeartifact.CodeArtifactService.DomainView;
 import io.github.hectorvent.floci.services.codeartifact.CodeArtifactService.PackageVersionAssetResult;
 import io.github.hectorvent.floci.services.codeartifact.CodeArtifactService.PublishPackageVersionResult;
@@ -99,6 +100,32 @@ public class CodeArtifactController {
             response.put("nextToken", page.nextToken());
         }
         return ok(response);
+    }
+
+    @POST
+    @Path("/v1/authorization-token")
+    @Consumes(MediaType.WILDCARD)
+    public Response getAuthorizationToken(@Context HttpHeaders headers, @QueryParam("domain") String domain,
+                                           @QueryParam("domain-owner") String domainOwner,
+                                           @QueryParam("duration") String durationSeconds) {
+        String region = regionResolver.resolveRegion(headers);
+        AuthorizationToken token = service.getAuthorizationToken(region, domain, domainOwner,
+                parseDuration(durationSeconds));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("authorizationToken", token.token());
+        response.put("expiration", token.expirationEpochSeconds());
+        return ok(response);
+    }
+
+    private static Long parseDuration(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return Long.parseLong(value);
+        } catch (NumberFormatException e) {
+            throw new AwsException("ValidationException", "duration must be an integer.", 400);
+        }
     }
 
     @PUT

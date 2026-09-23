@@ -51,6 +51,15 @@ public class PersistentStorage<K, V> implements StorageBackend<K, V> {
     }
 
     @Override
+    public void putAll(Map<K, V> entries) {
+        if (entries.isEmpty()) {
+            return;
+        }
+        store.putAll(entries);
+        persistToDisk();
+    }
+
+    @Override
     public Optional<V> get(K key) {
         return Optional.ofNullable(store.get(key));
     }

@@ -2,6 +2,8 @@ package io.github.hectorvent.floci.services.s3;
 
 import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
+import io.vertx.ext.web.RoutingContext;
 import jakarta.annotation.Priority;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Priorities;
@@ -31,7 +33,7 @@ import java.util.Optional;
  * <p>The presigned placements are already verified elsewhere ({@link PreSignedUrlFilter} for the
  * query string, {@link S3PostPolicySigner} for a browser POST). This filter closes the remaining
  * placement, the one every AWS SDK uses for ordinary calls: the canonical request is rebuilt from
- * the request as it arrived (raw path, canonical query string, the headers named in
+ * the request as it arrived (the wire path, canonical query string, the headers named in
  * {@code SignedHeaders}, and the {@code x-amz-content-sha256} value the client signed), the
  * signature is derived with the key's secret, and the two are compared in constant time. When the
  * declared content hash is a real digest rather than an {@code UNSIGNED-PAYLOAD} or
@@ -75,14 +77,17 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
 
     private final S3Service s3Service;
     private final IamService iamService;
+    private final CurrentVertxRequest currentVertxRequest;
 
     @Context
     ResourceInfo resourceInfo;
 
     @Inject
-    public S3HeaderSignatureFilter(S3Service s3Service, IamService iamService) {
+    public S3HeaderSignatureFilter(S3Service s3Service, IamService iamService,
+                                   CurrentVertxRequest currentVertxRequest) {
         this.s3Service = s3Service;
         this.iamService = iamService;
+        this.currentVertxRequest = currentVertxRequest;
     }
 
     @Override
@@ -196,7 +201,7 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
         }
 
         String canonicalRequest = ctx.getMethod() + "\n"
-                + requestUri.getRawPath() + "\n"
+                + signedPath(currentVertxRequest, requestUri) + "\n"
                 + PreSignedUrlFilter.buildCanonicalQueryString(ctx.getUriInfo().getQueryParameters()) + "\n"
                 + canonicalHeaders + "\n"
                 + signedHeaders + "\n"
@@ -210,6 +215,25 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
         return MessageDigest.isEqual(
                 expected.getBytes(StandardCharsets.UTF_8),
                 signature.getBytes(StandardCharsets.UTF_8));
+    }
+
+    /**
+     * The path the client signed: the request line exactly as it arrived, before JAX-RS collapsed
+     * consecutive slashes in {@code UriInfo}. S3 never normalizes the canonical URI, so a key with
+     * a leading slash ({@code /email.txt}) is sent, and signed, as {@code /bucket//email.txt}
+     * (or {@code //email.txt} virtual-hosted). Verifying against the normalized path would reject
+     * every such request and, conversely, let a signature over {@code /bucket/email.txt} pass for
+     * the other object. Falls back to {@code requestUri} when no Vert.x request is current.
+     */
+    static String signedPath(CurrentVertxRequest currentVertxRequest, URI requestUri) {
+        RoutingContext routingContext = currentVertxRequest != null ? currentVertxRequest.getCurrent() : null;
+        if (routingContext != null && routingContext.request() != null) {
+            String path = routingContext.request().path();
+            if (path != null && !path.isEmpty()) {
+                return path;
+            }
+        }
+        return requestUri.getRawPath();
     }
 
     /**

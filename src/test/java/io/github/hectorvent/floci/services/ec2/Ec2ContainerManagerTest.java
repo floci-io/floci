@@ -28,6 +28,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
+import io.github.hectorvent.floci.core.common.docker.UserDataPipeline;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
@@ -572,7 +573,7 @@ class Ec2ContainerManagerTest {
         int concurrentLaunches = 12;
         AtomicInteger active = new AtomicInteger(0);
         AtomicInteger peakActive = new AtomicInteger(0);
-        Ec2ContainerManager.userDataDecompressionTestHook = () -> {
+        UserDataPipeline.userDataDecompressionTestHook = () -> {
             int now = active.incrementAndGet();
             peakActive.accumulateAndGet(now, Math::max);
             try {
@@ -600,7 +601,7 @@ class Ec2ContainerManagerTest {
             }
         } finally {
             pool.shutdownNow();
-            Ec2ContainerManager.userDataDecompressionTestHook = null;
+            UserDataPipeline.userDataDecompressionTestHook = null;
         }
 
         assertEquals(concurrentLaunches, results.size());

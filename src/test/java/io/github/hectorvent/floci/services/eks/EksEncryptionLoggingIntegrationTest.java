@@ -9,7 +9,9 @@ import org.junit.jupiter.api.TestMethodOrder;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasKey;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
 
 @QuarkusTest
@@ -181,5 +183,36 @@ class EksEncryptionLoggingIntegrationTest {
                 .when().post("/clusters")
                 .then().statusCode(400)
                 .body("message", equalTo("Invalid k8s resource and provider for encryption"));
+    }
+
+    @Test
+    @Order(10)
+    void describeClusterDoesNotCarryExplicitVersion() {
+        String clusterName = "it-explicit-version-wire-test";
+        String payload = "{"
+                + "\"name\":\"" + clusterName + "\","
+                + "\"roleArn\":\"arn:aws:iam::000000000000:role/eks-role\","
+                + "\"version\":\"1.29\""
+                + "}";
+
+        given().contentType(JSON)
+                .body(payload)
+                .when().post("/clusters")
+                .then().statusCode(200)
+                .body("cluster.name", equalTo(clusterName))
+                .body("cluster.version", equalTo("1.29"))
+                .body("cluster", not(hasKey("explicitVersion")));
+
+        given().contentType(JSON)
+                .when().get("/clusters/" + clusterName)
+                .then().statusCode(200)
+                .body("cluster.name", equalTo(clusterName))
+                .body("cluster.version", equalTo("1.29"))
+                .body("cluster", not(hasKey("explicitVersion")));
+
+        given().contentType(JSON)
+                .when().delete("/clusters/" + clusterName)
+                .then().statusCode(200)
+                .body("cluster", not(hasKey("explicitVersion")));
     }
 }

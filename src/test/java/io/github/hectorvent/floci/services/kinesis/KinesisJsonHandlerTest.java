@@ -52,7 +52,7 @@ class KinesisJsonHandlerTest {
                 new InMemoryStorage<>(),
                 new RegionResolver(REGION, ACCOUNT)
         );
-        handler = new KinesisJsonHandler(service, MAPPER);
+        handler = new KinesisJsonHandler(service, MAPPER, 300_000);
     }
 
     private void createStream(String name) {
@@ -1582,6 +1582,97 @@ class KinesisJsonHandlerTest {
         assertThat(handler.handle("RemoveTagsFromStream", missingKeys, REGION).getStatus(), is(200));
 
         assertEquals(Map.of("Foo", "Bar"), service.listTagsForStream("test-stream", REGION));
+    }
+
+    @Test
+    void listShardsResumesFromTokenAloneWithoutTheStreamName() {
+        createStream("test-stream", 3);
+
+        ObjectNode first = MAPPER.createObjectNode();
+        first.put("StreamName", "test-stream");
+        first.put("MaxResults", 1);
+        ObjectNode firstPage = responseEntity(handler.handle("ListShards", first, REGION));
+        String token = firstPage.get("NextToken").asText();
+        String firstShardId = firstPage.get("Shards").get(0).get("ShardId").asText();
+
+        ObjectNode second = MAPPER.createObjectNode();
+        second.put("NextToken", token);
+        ObjectNode secondPage = responseEntity(handler.handle("ListShards", second, REGION));
+
+        assertEquals(2, secondPage.get("Shards").size(), "the token alone resumes after the first shard");
+        for (JsonNode shard : secondPage.get("Shards")) {
+            assertFalse(shard.get("ShardId").asText().equals(firstShardId));
+        }
+    }
+
+    @Test
+    void listShardsRejectsStreamNameTogetherWithNextToken() {
+        createStream("test-stream", 3);
+
+        ObjectNode first = MAPPER.createObjectNode();
+        first.put("StreamName", "test-stream");
+        first.put("MaxResults", 1);
+        String token = responseEntity(handler.handle("ListShards", first, REGION)).get("NextToken").asText();
+
+        ObjectNode both = MAPPER.createObjectNode();
+        both.put("StreamName", "test-stream");
+        both.put("NextToken", token);
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("ListShards", both, REGION));
+        assertEquals("InvalidArgumentException", ex.getErrorCode());
+    }
+
+    @Test
+    void listShardsAcceptsAStreamArnThatNamesTheTokenStream() {
+        createStream("test-stream", 3);
+
+        ObjectNode first = MAPPER.createObjectNode();
+        first.put("StreamName", "test-stream");
+        first.put("MaxResults", 1);
+        String token = responseEntity(handler.handle("ListShards", first, REGION)).get("NextToken").asText();
+
+        ObjectNode second = MAPPER.createObjectNode();
+        second.put("NextToken", token);
+        second.put("StreamARN", STREAM_ARN);
+        ObjectNode secondPage = responseEntity(handler.handle("ListShards", second, REGION));
+
+        assertEquals(2, secondPage.get("Shards").size());
+    }
+
+    @Test
+    void listShardsRejectsAStreamArnFromAnotherStream() {
+        createStream("test-stream", 3);
+
+        ObjectNode first = MAPPER.createObjectNode();
+        first.put("StreamName", "test-stream");
+        first.put("MaxResults", 1);
+        String token = responseEntity(handler.handle("ListShards", first, REGION)).get("NextToken").asText();
+
+        ObjectNode second = MAPPER.createObjectNode();
+        second.put("NextToken", token);
+        second.put("StreamARN", "arn:aws:kinesis:us-east-1:123456789012:stream/other-stream");
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("ListShards", second, REGION));
+        assertEquals("InvalidArgumentException", ex.getErrorCode());
+    }
+
+    @Test
+    void listShardsRejectsAnExpiredNextToken() {
+        KinesisJsonHandler zeroTtlHandler = new KinesisJsonHandler(service, MAPPER, 0);
+        createStream("test-stream", 3);
+
+        ObjectNode first = MAPPER.createObjectNode();
+        first.put("StreamName", "test-stream");
+        first.put("MaxResults", 1);
+        ObjectNode firstPage = (ObjectNode) zeroTtlHandler.handle("ListShards", first, REGION).getEntity();
+        String token = firstPage.get("NextToken").asText();
+
+        ObjectNode second = MAPPER.createObjectNode();
+        second.put("NextToken", token);
+        AwsException ex = assertThrows(AwsException.class,
+                () -> zeroTtlHandler.handle("ListShards", second, REGION));
+        assertEquals("ExpiredNextTokenException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
     }
 
     /** Every non-string tag value shape — number, boolean, null, object, array — plus a map mixing a valid and an invalid value. */

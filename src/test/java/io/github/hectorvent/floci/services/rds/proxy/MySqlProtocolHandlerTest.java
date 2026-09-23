@@ -95,7 +95,8 @@ class MySqlProtocolHandlerTest {
                         MySqlProtocolHandler.handleAuth(
                                 proxyClient, backend, NO_RECONNECT, "admin", "secret",
                                 false, testSigV4Validator(), testTlsCertificates(),
-                                (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000);
+                                (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000,
+                                username -> true, testBinding());
                     } catch (IOException e) {
                         throw new RuntimeException(e);
                     }
@@ -157,7 +158,8 @@ class MySqlProtocolHandlerTest {
                         MySqlProtocolHandler.handleAuth(
                                 proxyClient, backend, NO_RECONNECT, "admin", "secret",
                                 false, testSigV4Validator(), testTlsCertificates(),
-                                (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000);
+                                (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000,
+                                username -> true, testBinding());
                     } catch (IOException e) {
                         throw new RuntimeException(e);
                     }
@@ -213,7 +215,8 @@ class MySqlProtocolHandlerTest {
                         MySqlProtocolHandler.handleAuth(
                                 proxyClient, backend, NO_RECONNECT, "admin", "secret",
                                 false, testSigV4Validator(), tlsCertificates,
-                                (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000);
+                                (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000,
+                                username -> true, testBinding());
                     } catch (IOException e) {
                         throw new RuntimeException(e);
                     }
@@ -311,7 +314,8 @@ class MySqlProtocolHandlerTest {
                         MySqlProtocolHandler.handleAuth(
                                 proxyClient, backend, NO_RECONNECT, "admin", "secret",
                                 false, testSigV4Validator(), tlsCertificates,
-                                (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000);
+                                (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000,
+                                username -> true, testBinding());
                     } catch (IOException e) {
                         throw new RuntimeException(e);
                     }
@@ -372,7 +376,8 @@ class MySqlProtocolHandlerTest {
                         MySqlProtocolHandler.handleAuth(
                                 proxyClient, backend, NO_RECONNECT, "admin", "secret",
                                 false, testSigV4Validator(), testTlsCertificates(),
-                                (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 200);
+                                (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 200,
+                                username -> true, testBinding());
                     } catch (IOException e) {
                         authFailure.set(e);
                     }
@@ -675,7 +680,8 @@ class MySqlProtocolHandlerTest {
                 MySqlProtocolHandler.handleAuth(
                         proxyClient, backend, connector, "admin", "secret",
                         iamEnabled, testSigV4Validator(), tlsCertificates,
-                        (user, pass) -> PasswordValidator.AuthResult.PASSTHROUGH, 5000);
+                        (user, pass) -> PasswordValidator.AuthResult.PASSTHROUGH, 5000,
+                        username -> true, testBinding());
             } catch (IOException e) {
                 throw new UncheckedIOException(e);
             }
@@ -699,6 +705,12 @@ class MySqlProtocolHandlerTest {
 
     private static RdsSigV4Validator testSigV4Validator() {
         return new RdsSigV4Validator(IamServiceTestHelper.iamServiceWithAccessKey("AKIATEST", "secret"));
+    }
+
+    /** What the proxy publishes for the endpoint {@link #rdsToken} generates tokens for. */
+    private static RdsProxyBinding testBinding() {
+        return new RdsProxyBinding("mydb.abc123.us-east-1.rds.amazonaws.com", 3306, "us-east-1",
+                "123456789012", "db-ABCDEFGHIJKL01234", true);
     }
 
     private static SSLSocket trustedClientSocket(Socket socket) throws Exception {

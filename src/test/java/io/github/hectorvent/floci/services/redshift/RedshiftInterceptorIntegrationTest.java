@@ -59,17 +59,19 @@ class RedshiftInterceptorIntegrationTest {
     IamService iamService;
 
     private Cluster sharedCluster;
+    private String sharedClusterId;
 
     @BeforeAll
     void createSharedCluster() {
         Assumptions.assumeTrue(isDockerAvailable(), "Docker daemon must be available for Redshift interceptor integration tests");
+        sharedClusterId = SHARED_CLUSTER_ID;
         sharedCluster = service.createCluster(SHARED_CLUSTER_ID, "dc2.large", "admin", "Secret123");
     }
 
     @AfterAll
     void deleteSharedCluster() {
-        if (sharedCluster != null) {
-            service.deleteCluster(SHARED_CLUSTER_ID);
+        if (sharedClusterId != null) {
+            service.deleteCluster(sharedClusterId);
         }
     }
 

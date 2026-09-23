@@ -1,6 +1,9 @@
 package io.github.hectorvent.floci.services.sagemaker;
 
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.async.ResultCallback;
+import com.github.dockerjava.api.model.Event;
+import com.github.dockerjava.api.model.EventType;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
@@ -10,18 +13,22 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Callable;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 class SageMakerDockerIntegrationTest {
@@ -142,22 +149,57 @@ class SageMakerDockerIntegrationTest {
         post("SageMaker.CreateEndpointConfig", """
                 {"EndpointConfigName":"%s","ProductionVariants":[{"VariantName":"AllTraffic","ModelName":"%s","InitialInstanceCount":1,"InstanceType":"ml.t2.medium","InitialVariantWeight":1.0}]}
                 """.formatted(cfg, model)).then().statusCode(200);
-        post("SageMaker.CreateEndpoint", "{\"EndpointName\":\"%s\",\"EndpointConfigName\":\"%s\"}".formatted(endpoint, cfg))
-                .then().statusCode(200);
-        post("SageMaker.DeleteEndpoint", "{\"EndpointName\":\"%s\"}".formatted(endpoint)).then().statusCode(200);
-        // Let the superseded start worker finish (it should discard its result, not persist it).
-        // Discarding it tears down the container it brought up, so the container appearing and
-        // then disappearing marks the point where the worker has decided.
-        String containerName = "floci-sagemaker-endpoint-" + endpoint;
-        AtomicBoolean containerSeen = new AtomicBoolean();
-        await("the superseded start to discard its container").atMost(Duration.ofSeconds(30))
-                .pollInterval(Duration.ofMillis(100)).until(() -> {
-                    boolean running = !dockerClient.listContainersCmd()
-                            .withNameFilter(List.of(containerName)).exec().isEmpty();
-                    containerSeen.compareAndSet(false, running);
-                    return containerSeen.get() && !running;
-                });
+        // A superseded start tears down the container it brought up, so that container being
+        // destroyed marks the point where the worker has decided. Watching Docker's event stream
+        // rather than polling for the container means a container that is created and discarded
+        // between two polls is still seen: events are queued and replayed from the watch's start.
+        try (ContainerDestroyWatch discarded =
+                new ContainerDestroyWatch(dockerClient, "floci-sagemaker-endpoint-" + endpoint)) {
+            post("SageMaker.CreateEndpoint", "{\"EndpointName\":\"%s\",\"EndpointConfigName\":\"%s\"}".formatted(endpoint, cfg))
+                    .then().statusCode(200);
+            post("SageMaker.DeleteEndpoint", "{\"EndpointName\":\"%s\"}".formatted(endpoint)).then().statusCode(200);
+            // Let the superseded start worker finish (it should discard its result, not persist it).
+            assertTrue(discarded.await(Duration.ofSeconds(30)),
+                    "the superseded start should have discarded the container it brought up");
+        }
         post("SageMaker.DescribeEndpoint", "{\"EndpointName\":\"%s\"}".formatted(endpoint)).then().statusCode(400);
+    }
+
+    /**
+     * Watches Docker's event stream for the destruction of a container whose name contains the
+     * given fragment. The stream is opened before the container exists and replays from that
+     * moment, so unlike polling for the container this cannot miss one that came and went inside
+     * a single poll interval.
+     */
+    private static final class ContainerDestroyWatch implements AutoCloseable {
+        private final CountDownLatch destroyed = new CountDownLatch(1);
+        private final ResultCallback.Adapter<Event> events;
+
+        ContainerDestroyWatch(DockerClient dockerClient, String nameFragment) {
+            events = dockerClient.eventsCmd()
+                    .withEventTypeFilter(EventType.CONTAINER)
+                    .withEventFilter("destroy")
+                    .withSince(String.valueOf(Instant.now().getEpochSecond()))
+                    .exec(new ResultCallback.Adapter<Event>() {
+                        @Override
+                        public void onNext(Event event) {
+                            String name = event.getActor() == null
+                                    ? null : event.getActor().getAttributes().get("name");
+                            if (name != null && name.contains(nameFragment)) {
+                                destroyed.countDown();
+                            }
+                        }
+                    });
+        }
+
+        boolean await(Duration timeout) throws InterruptedException {
+            return destroyed.await(timeout.toMillis(), TimeUnit.MILLISECONDS);
+        }
+
+        @Override
+        public void close() throws IOException {
+            events.close();
+        }
     }
 
     private void awaitContainerRunning(String nameFragment) {

@@ -102,10 +102,12 @@ public class AwsQueryController {
             "TagUser", "UntagUser", "ListUserTags",
             "TagRole", "UntagRole", "ListRoleTags",
             "TagPolicy", "UntagPolicy", "ListPolicyTags",
+            "TagInstanceProfile", "UntagInstanceProfile", "ListInstanceProfileTags",
             "CreateLoginProfile", "GetLoginProfile", "DeleteLoginProfile", "UpdateLoginProfile",
             "GenerateCredentialReport", "GetCredentialReport",
             "GetAccountSummary", "GetAccountAuthorizationDetails",
-            "SimulatePrincipalPolicy"
+            "SimulatePrincipalPolicy", "SimulateCustomPolicy",
+            "GetContextKeysForCustomPolicy", "GetContextKeysForPrincipalPolicy"
     );
 
     private static final Set<String> AUTOSCALING_ACTIONS = Set.of(
@@ -608,6 +610,7 @@ public class AwsQueryController {
             "CreateClusterParameterGroup", "DescribeClusterParameterGroups", "DescribeClusterParameters", "DeleteClusterParameterGroup",
             "ModifyClusterParameterGroup",
             "CreateClusterSubnetGroup", "DescribeClusterSubnetGroups", "ModifyClusterSubnetGroup", "DeleteClusterSubnetGroup",
+            "CreateSnapshotCopyGrant", "DescribeSnapshotCopyGrants", "DeleteSnapshotCopyGrant",
             "CreateTags", "DeleteTags", "DescribeTags",
             "GetClusterCredentials", "GetClusterCredentialsWithIAM"
     );

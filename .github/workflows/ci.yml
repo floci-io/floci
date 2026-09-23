@@ -58,19 +58,16 @@ jobs:
           restore-keys: |
             maven-${{ runner.os }}-
 
-      - name: Prefetch this shard's Docker images (background)
-        run: .github/ci/prefetch-images.sh shard.txt || true
-
-      - name: Compile
-        run: ./mvnw test-compile -B
-
+      # Derived from test sources, not target/test-classes, so shard.txt exists
+      # before Compile and the image prefetch below overlaps the compile instead
+      # of starting moments before the tests that need the images. Every test is
+      # a top-level class in src/test/java, so the file name is the class name.
       - name: Compute shard include list
         run: |
-          cd target/test-classes
-          find . \( -name '*Test.class' -o -name 'Test*.class' \
-                    -o -name '*Tests.class' -o -name '*TestCase.class' \) \
-                  ! -name '*$*' \
-            | sed 's|^\./||; s|\.class$||' | LC_ALL=C sort \
+          cd src/test/java
+          find . \( -name '*Test.java' -o -name 'Test*.java' \
+                    -o -name '*Tests.java' -o -name '*TestCase.java' \) \
+            | sed 's|^\./||; s|\.java$||' | LC_ALL=C sort \
             > "$GITHUB_WORKSPACE/all-classes.txt"
           cd "$GITHUB_WORKSPACE"
           .github/ci/partition.sh all-classes.txt "$SHARD_TOTAL" "${{ matrix.shard }}" > shard.txt
@@ -78,7 +75,12 @@ jobs:
           # and run the ENTIRE suite into this shard's timeout.
           test -s shard.txt
           echo "shard ${{ matrix.shard }}/$SHARD_TOTAL: $(wc -l < shard.txt) classes"
-          .github/ci/prefetch-images.sh shard.txt || true
+
+      - name: Prefetch this shard's Docker images (background)
+        run: .github/ci/prefetch-images.sh shard.txt || true
+
+      - name: Compile
+        run: ./mvnw test-compile -B
 
       - name: Run tests
         run: >

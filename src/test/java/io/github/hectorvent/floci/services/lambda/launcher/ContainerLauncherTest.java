@@ -23,6 +23,7 @@ import com.github.dockerjava.api.command.ExecCreateCmdResponse;
 import com.github.dockerjava.api.command.ExecStartCmd;
 import com.github.dockerjava.api.command.CopyArchiveFromContainerCmd;
 import com.github.dockerjava.api.exception.NotFoundException;
+import com.github.dockerjava.api.model.AccessMode;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.StreamType;
 import com.github.dockerjava.api.model.Mount;
@@ -221,6 +222,25 @@ class ContainerLauncherTest {
                 .filter(m -> m.getType() == MountType.VOLUME && "/var/task".equals(m.getTarget()))
                 .findFirst()
                 .orElse(null);
+    }
+
+    @Test
+    void launchFunction_hotReloadMountsTheHostDirectoryReadOnlyAtVarTask() {
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("hot-reload-fn");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setHotReloadHostPath("/home/ci/code");
+
+        launcher.launch(fn);
+
+        ContainerSpec spec = captureRealContainerSpec();
+        assertEquals(1, spec.binds().stream()
+                .filter(b -> "/home/ci/code".equals(b.getPath()) && "/var/task".equals(b.getVolume().getPath()))
+                .count());
+        assertEquals(AccessMode.ro, spec.binds().stream()
+                .filter(b -> "/var/task".equals(b.getVolume().getPath()))
+                .findFirst().orElseThrow().getAccessMode());
     }
 
     @Test

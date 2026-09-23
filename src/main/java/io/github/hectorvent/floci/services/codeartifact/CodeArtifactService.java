@@ -30,8 +30,10 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -74,16 +76,25 @@ public class CodeArtifactService implements Resettable {
     // containing '\r'/'\n' would be echoed back verbatim in the X-AssetName response header.
     private static final Pattern ASSET_NAME = Pattern.compile("\\P{C}+");
     private static final List<String> ASSET_HASH_ALGORITHMS = List.of("MD5", "SHA-1", "SHA-256", "SHA-512");
-    private static final long MAX_ASSET_FILE_SIZE_BYTES = 5L * 1024 * 1024 * 1024;
+    // Package-private: reused by CodeArtifactMavenController so the Maven proxy enforces the same
+    // documented 5 GB AWS quota rather than duplicating the constant.
+    static final long MAX_ASSET_FILE_SIZE_BYTES = 5L * 1024 * 1024 * 1024;
     private static final int MAX_ASSETS_PER_PACKAGE_VERSION = 350;
     private static final int MAX_DOMAINS_PER_ACCOUNT = 10;
     private static final int MAX_REPOSITORIES_PER_DOMAIN = 1000;
     private static final String ASSET_STORAGE_DIR = "codeartifact-assets";
+    private static final long MIN_TOKEN_DURATION_SECONDS = 900;
+    private static final long MAX_TOKEN_DURATION_SECONDS = 43200;
+    private static final long DEFAULT_TOKEN_DURATION_SECONDS = 43200;
+    private static final int TOKEN_RANDOM_BYTES = 32;
 
     public record DomainView(CodeArtifactDomain domain, int repositoryCount) {}
     public record ResourcePolicy(String resourceArn, String revision, String document) {}
     public record PublishPackageVersionResult(CodeArtifactPackageVersion packageVersion, PackageAsset asset) {}
     public record PackageVersionAssetResult(PackageAsset asset, String packageVersionRevision) {}
+    public record AuthorizationToken(String token, long expirationEpochSeconds) {}
+    public record AuthorizationTokenScope(String owner, String region) {}
+    private record AuthorizationTokenRecord(String owner, String region, String domain, Instant expiration) {}
 
     private final AccountAwareStorageBackend<CodeArtifactDomain> domains;
     private final AccountAwareStorageBackend<CodeArtifactRepository> repositories;
@@ -96,6 +107,9 @@ public class CodeArtifactService implements Resettable {
     private final boolean inMemory;
     private final Path assetRoot;
     private final ConcurrentHashMap<String, byte[]> memoryAssetStore = new ConcurrentHashMap<>();
+    // Bearer tokens are ephemeral security material, not durable emulator state: kept in memory
+    // only, the same way IamService keeps STS session credentials, regardless of storage mode.
+    private final ConcurrentHashMap<String, AuthorizationTokenRecord> authorizationTokens = new ConcurrentHashMap<>();
 
     @Inject
     public CodeArtifactService(StorageFactory storageFactory, RegionResolver regionResolver, EmulatorConfig config,
@@ -162,6 +176,10 @@ public class CodeArtifactService implements Resettable {
         return new DomainView(d, 0);
     }
 
+    /**
+     * A missing domain fails with {@code ResourceNotFoundException} (404), which is what AWS
+     * returns even though the API reference leaves it out of DeleteDomain's error list.
+     */
     public synchronized DomainView deleteDomain(String region, String domain, String domainOwner) {
         String owner = effectiveOwner(domainOwner);
         String key = domainKey(region, domain);
@@ -262,6 +280,11 @@ public class CodeArtifactService implements Resettable {
         r.setUpstreams(upstreams != null ? new ArrayList<>(upstreams) : new ArrayList<>());
         r.setCreatedTime(Instant.now().getEpochSecond());
         r.setTags(validateTags(tags, Map.of(), repository, "repository"));
+        // A bare UUID, not a domain/repository-derived name: Reposilite rejects any repository id
+        // over 64 characters, and CodeArtifact domain (max 50) and repository (max 100) names can
+        // easily exceed that combined. The id is purely internal and never surfaced by the public
+        // API, so readability doesn't matter here, only fitting the limit and staying unique.
+        r.setMavenRepositoryId(newRevision());
         repositories.putForAccount(owner, key, r);
         return r;
     }
@@ -281,6 +304,24 @@ public class CodeArtifactService implements Resettable {
         requireNonBlank(domain, "domain");
         String owner = effectiveOwner(domainOwner);
         return requireRepository(owner, repositoryKey(region, domain, repository), repository);
+    }
+
+    /**
+     * {@code mavenRepositoryId} is assigned at {@link #createRepository}, but a repository
+     * persisted before that field existed has none; backfills it lazily on first Maven-format use
+     * rather than leaving every caller of {@link CodeArtifactRepository#getMavenRepositoryId()} to
+     * handle a null it can otherwise never see.
+     */
+    public synchronized String ensureMavenRepositoryId(String region, String domain, String domainOwner,
+                                                         String repository) {
+        String owner = effectiveOwner(domainOwner);
+        String key = repositoryKey(region, domain, repository);
+        CodeArtifactRepository r = requireRepository(owner, key, repository);
+        if (r.getMavenRepositoryId() == null) {
+            r.setMavenRepositoryId(newRevision());
+            repositories.putForAccount(owner, key, r);
+        }
+        return r.getMavenRepositoryId();
     }
 
     public synchronized CodeArtifactRepository updateRepository(String region, String domain, String domainOwner,
@@ -567,6 +608,61 @@ public class CodeArtifactService implements Resettable {
         return new PackageVersionAssetResult(asset, pv.getRevision());
     }
 
+    // ------------------------------------------------------------ authorization
+
+    public AuthorizationToken getAuthorizationToken(String region, String domain, String domainOwner,
+                                                      Long durationSeconds) {
+        String owner = effectiveOwner(domainOwner);
+        requireDomain(owner, domainKey(region, domain), domain);
+        long duration = validateTokenDuration(durationSeconds);
+        Instant expiration = Instant.now().plusSeconds(duration);
+        String token = generateAuthorizationToken();
+        authorizationTokens.put(token, new AuthorizationTokenRecord(owner, region, domain, expiration));
+        return new AuthorizationToken(token, expiration.getEpochSecond());
+    }
+
+    /**
+     * Resolves a live token issued for exactly this domain, returning the account and Region it
+     * was issued under. A Maven request carries no SigV4 header, so there is nothing else to
+     * derive the caller's Region or account from: the token itself is both the credential and, on
+     * this path, the only source of that scope, the same way a real CodeArtifact authorization
+     * token is.
+     */
+    public Optional<AuthorizationTokenScope> resolveAuthorizationToken(String token, String domain) {
+        if (token == null) {
+            return Optional.empty();
+        }
+        AuthorizationTokenRecord record = authorizationTokens.get(token);
+        if (record == null) {
+            return Optional.empty();
+        }
+        if (Instant.now().isAfter(record.expiration())) {
+            authorizationTokens.remove(token);
+            return Optional.empty();
+        }
+        if (!record.domain().equals(domain)) {
+            return Optional.empty();
+        }
+        return Optional.of(new AuthorizationTokenScope(record.owner(), record.region()));
+    }
+
+    private static long validateTokenDuration(Long durationSeconds) {
+        if (durationSeconds == null || durationSeconds == 0) {
+            return DEFAULT_TOKEN_DURATION_SECONDS;
+        }
+        if (durationSeconds < MIN_TOKEN_DURATION_SECONDS || durationSeconds > MAX_TOKEN_DURATION_SECONDS) {
+            throw validation("durationSeconds must be 0, or between " + MIN_TOKEN_DURATION_SECONDS + " and "
+                    + MAX_TOKEN_DURATION_SECONDS + ".");
+        }
+        return durationSeconds;
+    }
+
+    private static String generateAuthorizationToken() {
+        byte[] bytes = new byte[TOKEN_RANDOM_BYTES];
+        new SecureRandom().nextBytes(bytes);
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
+    }
+
     // -------------------------------------------------------------------- tags
 
     public synchronized void tagResource(String resourceArn, Map<String, String> newTags) {
@@ -617,6 +713,7 @@ public class CodeArtifactService implements Resettable {
         domains.clear();
         repositories.clear();
         packageVersions.clear();
+        authorizationTokens.clear();
         if (inMemory) {
             memoryAssetStore.clear();
         } else {
@@ -687,6 +784,8 @@ public class CodeArtifactService implements Resettable {
         }
     }
 
+    // Used by DeleteDomain too: AWS returns ResourceNotFoundException for a missing domain there,
+    // although the API reference does not declare it on that operation.
     private CodeArtifactDomain requireDomain(String owner, String key, String domainName) {
         if (domainName == null || domainName.isBlank()) {
             throw validation("domain is required.");

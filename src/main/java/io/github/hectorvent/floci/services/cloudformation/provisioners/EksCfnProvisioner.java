@@ -82,9 +82,12 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
         request.setSubnets(ctx.resolveStringList(props, "Subnets"));
 
         Nodegroup nodegroup = eksService.createNodeGroup(clusterName, request);
-        r.setPhysicalId(nodegroup.getNodegroupName());
-        // ClusterName is stored so delete() can find the cluster, and NodegroupName mirrors the
-        // physical id; Arn is the schema's read-only attribute.
+        // Ref (and the readOnly Id) is the composite the registry primary identifier declares,
+        // clusterName/nodegroupName, matching AWS. The plain names stay as their own attributes:
+        // ClusterName and NodegroupName back delete() and Fn::GetAtt.
+        String id = nodegroup.getClusterName() + "/" + nodegroup.getNodegroupName();
+        r.setPhysicalId(id);
+        r.getAttributes().put("Id", id);
         r.getAttributes().put("ClusterName", nodegroup.getClusterName());
         r.getAttributes().put("NodegroupName", nodegroup.getNodegroupName());
         if (nodegroup.getNodegroupArn() != null) {
@@ -98,12 +101,15 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
             case CLUSTER -> CfnDeletes.safeDelete("EKS cluster", resource.getPhysicalId(),
                     () -> eksService.deleteCluster(resource.getPhysicalId()), "ResourceNotFoundException");
             case NODEGROUP -> {
-                // Deleting a nodegroup needs the cluster name (a create-time attribute) as well as
-                // the nodegroup name (the physical id), which the id-only delete path cannot supply.
+                // Deleting a nodegroup needs the cluster name and the nodegroup name, both stored as
+                // create-time attributes; the physical id is now the composite clusterName/nodegroupName,
+                // so it cannot be passed as the nodegroup name.
                 String clusterName = resource.getAttributes().get("ClusterName");
-                if (clusterName != null && !clusterName.isBlank()) {
+                String nodegroupName = resource.getAttributes().get("NodegroupName");
+                if (clusterName != null && !clusterName.isBlank()
+                        && nodegroupName != null && !nodegroupName.isBlank()) {
                     CfnDeletes.safeDelete("EKS nodegroup", resource.getPhysicalId(),
-                            () -> eksService.deleteNodeGroup(clusterName, resource.getPhysicalId()),
+                            () -> eksService.deleteNodeGroup(clusterName, nodegroupName),
                             "ResourceNotFoundException");
                 }
             }

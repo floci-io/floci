@@ -100,4 +100,14 @@ class ApplicationDefaultsTest {
         assertNotNull(fallback, "allowPrivateJwtTargets should declare a fallback default");
         assertEquals("false", fallback.value());
     }
+
+    @Test
+    void productionConfigBindsRdsIamTokensToTheEndpointByDefault() throws NoSuchMethodException {
+        WithDefault fallback = EmulatorConfig.RdsServiceConfig.class
+                .getMethod("iamTokenEndpointBinding")
+                .getAnnotation(WithDefault.class);
+        assertNotNull(fallback, "iamTokenEndpointBinding should declare a fallback default");
+        assertEquals("true", fallback.value(),
+                "a stock Floci should refuse a PostgreSQL IAM token generated for another endpoint, as RDS does");
+    }
 }

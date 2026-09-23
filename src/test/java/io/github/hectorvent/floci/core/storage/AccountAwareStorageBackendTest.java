@@ -36,6 +36,20 @@ class AccountAwareStorageBackendTest {
     }
 
     @Test
+    void putAllPrefixesEveryEntryWithTheRequestScope() {
+        InMemoryStorage<String, String> raw = new InMemoryStorage<>();
+        AccountAwareStorageBackend<String> storage =
+                new AccountAwareStorageBackend<>(raw, null, "111111111111");
+
+        storage.putAll(Map.of("key1", "value1", "key2", "value2"));
+
+        assertEquals("value1", raw.get("111111111111/key1").orElseThrow());
+        assertEquals("value2", raw.get("111111111111/key2").orElseThrow());
+        assertTrue(raw.get("key1").isEmpty());
+        assertTrue(raw.get("key2").isEmpty());
+    }
+
+    @Test
     void guardedLegacyLookupMigratesMatchingRawValue() {
         InMemoryStorage<String, String> raw = new InMemoryStorage<>();
         raw.put("resource", "owned");

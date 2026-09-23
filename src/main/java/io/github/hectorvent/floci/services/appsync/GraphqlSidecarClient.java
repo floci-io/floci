@@ -102,6 +102,18 @@ public class GraphqlSidecarClient {
     public record DenyField(String typeName, String fieldName, String errorType, String message) {
     }
 
+    /** One coordinate the sidecar should answer by calling back rather than by its own fetcher. */
+    public record ResolveField(String typeName, String fieldName) {
+    }
+
+    /**
+     * Wires the sidecar's resolver callback: {@code fields} are answered by {@code POST url} with
+     * {@code Authorization: Bearer token}, batched per execution level into chunks of at most
+     * {@code maxBatch}. A coordinate that is also in {@code denyFields} never reaches the callback.
+     */
+    public record ResolveSpec(String url, String token, List<ResolveField> fields, int maxBatch) {
+    }
+
     /**
      * {@code operationType} is {@code QUERY}/{@code MUTATION}/{@code SUBSCRIPTION}, or {@code
      * null} when the query didn't parse or named an operation that doesn't exist, in which case
@@ -154,6 +166,13 @@ public class GraphqlSidecarClient {
     public Map<String, Object> execute(String sdl, Map<String, String> scalars, String query,
                                        Map<String, Object> variables, String operationName,
                                        List<DenyField> denyFields) {
+        return execute(sdl, scalars, query, variables, operationName, denyFields, null);
+    }
+
+    /** As above, with {@code resolve} wiring the sidecar's callback for the fields that have resolvers. */
+    public Map<String, Object> execute(String sdl, Map<String, String> scalars, String query,
+                                       Map<String, Object> variables, String operationName,
+                                       List<DenyField> denyFields, ResolveSpec resolve) {
         ObjectNode body = mapper.createObjectNode();
         body.put("sdl", sdl);
         body.set("scalars", mapper.valueToTree(scalars));
@@ -170,6 +189,18 @@ public class GraphqlSidecarClient {
                 node.put("fieldName", deny.fieldName());
                 node.put("errorType", deny.errorType());
                 node.put("message", deny.message());
+            }
+        }
+        if (resolve != null && !resolve.fields().isEmpty()) {
+            ObjectNode resolveNode = body.putObject("resolve");
+            resolveNode.put("url", resolve.url());
+            resolveNode.put("token", resolve.token());
+            resolveNode.put("maxBatch", resolve.maxBatch());
+            ArrayNode fields = resolveNode.putArray("fields");
+            for (ResolveField field : resolve.fields()) {
+                ObjectNode node = fields.addObject();
+                node.put("typeName", field.typeName());
+                node.put("fieldName", field.fieldName());
             }
         }
         JsonNode response = requireSuccess(call("/v1/execute", body, "query execution"), "query execution");

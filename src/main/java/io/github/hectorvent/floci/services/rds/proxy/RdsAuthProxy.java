@@ -27,7 +27,7 @@ public class RdsAuthProxy {
     private final String dbName;
     private final DatabaseEngine engine;
     private final RdsSigV4Validator sigV4;
-    private final RdsMysqlBinding mysqlBinding;
+    private final RdsProxyBinding binding;
     private final MySqlProtocolHandler.IamUserChecker iamUserChecker;
     private final RdsProxyTlsCertificates tlsCertificates;
     private final MasterPasswordCheck passwordValidator;
@@ -56,11 +56,11 @@ public class RdsAuthProxy {
                         RdsSigV4Validator sigV4, RdsProxyTlsCertificates tlsCertificates,
                         MasterPasswordCheck passwordValidator,
                         int handshakeTimeoutMillis, int backendConnectTimeoutMillis,
-                        int maxConnections, RdsMysqlBinding mysqlBinding) {
+                        int maxConnections, RdsProxyBinding binding) {
         this(instanceId, backendHost, backendPort, engine, iamEnabled, masterUsername, masterPassword,
                 dbName, sigV4, tlsCertificates, passwordValidator, handshakeTimeoutMillis,
-                backendConnectTimeoutMillis, maxConnections, mysqlBinding,
-                username -> mysqlBinding != null);
+                backendConnectTimeoutMillis, maxConnections, binding,
+                username -> binding != null);
     }
 
     public RdsAuthProxy(String instanceId, String backendHost, int backendPort,
@@ -69,7 +69,7 @@ public class RdsAuthProxy {
                         RdsSigV4Validator sigV4, RdsProxyTlsCertificates tlsCertificates,
                         MasterPasswordCheck passwordValidator,
                         int handshakeTimeoutMillis, int backendConnectTimeoutMillis,
-                        int maxConnections, RdsMysqlBinding mysqlBinding,
+                        int maxConnections, RdsProxyBinding binding,
                         MySqlProtocolHandler.IamUserChecker iamUserChecker) {
         this.instanceId = instanceId;
         this.backendHost = backendHost;
@@ -80,7 +80,7 @@ public class RdsAuthProxy {
         this.masterPassword = masterPassword;
         this.dbName = dbName;
         this.sigV4 = sigV4;
-        this.mysqlBinding = mysqlBinding;
+        this.binding = binding;
         this.iamUserChecker = iamUserChecker;
         this.tlsCertificates = tlsCertificates;
         this.passwordValidator = passwordValidator;
@@ -177,7 +177,7 @@ public class RdsAuthProxy {
                 case POSTGRES -> {
                     session = PostgresProtocolHandler.authenticate(
                                     client, connector, masterUsername, masterPassword, dbName,
-                                    iamEnabled, sigV4, tlsCertificates, authAdapter,
+                                    iamEnabled, sigV4, binding, tlsCertificates, authAdapter,
                                     handshakeTimeoutMillis);
                     if (session != null) {
                         PostgresProtocolHandler.bridge(session);
@@ -189,7 +189,7 @@ public class RdsAuthProxy {
                             client, backend, connector, masterUsername, masterPassword,
                             iamEnabled, sigV4, tlsCertificates, authAdapter,
                             handshakeTimeoutMillis,
-                            iamUserChecker, mysqlBinding);
+                            iamUserChecker, binding);
                 }
                 case SQLSERVER -> {
                     backend = connector.connect();

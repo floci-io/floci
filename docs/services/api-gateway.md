@@ -139,7 +139,10 @@ Templates can create domains and mappings with `AWS::ApiGateway::DomainName` and
 
 A method (v1) or route (v2) whose `authorizationType` is `AWS_IAM` requires a SigV4-signed caller.
 Before the integration runs, the signature is verified against the request as it arrived (method,
-path, query string, the headers named in `SignedHeaders`, and the SHA-256 of the body). Both
+path, query string, the headers named in `SignedHeaders`, and the SHA-256 of the body). A request
+that reaches the API through a [custom domain](#custom-domain-names) or an `execute-api` virtual
+host is verified against the path the caller signed, not the `/execute-api/...` form Floci
+rewrites it to internally. Both
 placements AWS accepts are honoured: an `Authorization` header and a presigned query string
 (`X-Amz-Algorithm=AWS4-HMAC-SHA256`). The credential must be scoped to the `execute-api` service.
 

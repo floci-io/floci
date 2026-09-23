@@ -171,6 +171,10 @@ class CognitoFeaturesTest {
         assertThat(client.refreshTokenRotation())
                 .as("refreshTokenRotation must be null when not set")
                 .isNull();
+        assertThat(client.explicitAuthFlows())
+                .as("ExplicitAuthFlows must be empty when not set, matching AWS; the default"
+                        + " (refresh, SRP and custom auth) is enforced at auth time, not stored")
+                .isEmpty();
     }
 
     // ── Issue #229 — InitiateAuth rejects when no password hash is set ────────

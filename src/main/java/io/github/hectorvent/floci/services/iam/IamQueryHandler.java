@@ -25,6 +25,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 import java.util.stream.Stream;
 
 /**
@@ -122,6 +123,7 @@ public class IamQueryHandler {
             case "UntagRole" -> handleUntagRole(params);
             case "TagInstanceProfile" -> handleTagInstanceProfile(params);
             case "UntagInstanceProfile" -> handleUntagInstanceProfile(params);
+            case "ListInstanceProfileTags" -> handleListInstanceProfileTags(params);
             case "ListRoleTags" -> handleListRoleTags(params);
 
             // Managed Policies
@@ -203,6 +205,9 @@ public class IamQueryHandler {
 
             // Policy Simulation
             case "SimulatePrincipalPolicy" -> handleSimulatePrincipalPolicy(params);
+            case "SimulateCustomPolicy" -> handleSimulateCustomPolicy(params);
+            case "GetContextKeysForCustomPolicy" -> handleGetContextKeysForCustomPolicy(params);
+            case "GetContextKeysForPrincipalPolicy" -> handleGetContextKeysForPrincipalPolicy(params);
 
             default -> AwsQueryResponse.error("UnsupportedOperation",
                     "Operation " + action + " is not supported.", AwsNamespaces.IAM, 400);
@@ -1234,16 +1239,50 @@ public class IamQueryHandler {
     private Response handleSimulatePrincipalPolicy(MultivaluedMap<String, String> params) {
         String policySourceArn = getParam(params, "PolicySourceArn");
         CallerContext caller = iamService.resolvePrincipalContext(policySourceArn);
+        List<String> actionNames = requireActionNames(params);
+        List<String> resourceArns = extractResourceArnsOrWildcard(params);
+        Map<String, List<String>> context = extractContextEntries(params);
+        String result = simulationResultsXml(caller, actionNames, resourceArns, context);
+        return Response.ok(AwsQueryResponse.envelope("SimulatePrincipalPolicy", AwsNamespaces.IAM, result)).build();
+    }
+
+    private Response handleSimulateCustomPolicy(MultivaluedMap<String, String> params) {
+        List<String> policyInputList = requirePolicyInputList(params);
+        List<String> actionNames = requireActionNames(params);
+        List<String> resourceArns = extractResourceArnsOrWildcard(params);
+        Map<String, List<String>> context = extractContextEntries(params);
+        // AWS accepts only one permissions boundary document per simulation; a request that
+        // provides more than one is not modeled and only the first is applied.
+        List<String> boundaryInputList = extractIndexedValues(params, "PermissionsBoundaryPolicyInputList.member");
+        String boundaryDocument = boundaryInputList.isEmpty() ? null : boundaryInputList.get(0);
+        CallerContext caller = new CallerContext(policyInputList, null, boundaryDocument);
+        String result = simulationResultsXml(caller, actionNames, resourceArns, context);
+        return Response.ok(AwsQueryResponse.envelope("SimulateCustomPolicy", AwsNamespaces.IAM, result)).build();
+    }
+
+    private List<String> requireActionNames(MultivaluedMap<String, String> params) {
         List<String> actionNames = extractIndexedValues(params, "ActionNames.member");
         if (actionNames.isEmpty()) {
             throw new AwsException("ValidationError", "At least one ActionNames member is required.", 400);
         }
-        List<String> resourceArns = extractIndexedValues(params, "ResourceArns.member");
-        if (resourceArns.isEmpty()) {
-            resourceArns = List.of("*");
-        }
-        Map<String, List<String>> context = extractContextEntries(params);
+        return actionNames;
+    }
 
+    private List<String> requirePolicyInputList(MultivaluedMap<String, String> params) {
+        List<String> policyInputList = extractIndexedValues(params, "PolicyInputList.member");
+        if (policyInputList.isEmpty()) {
+            throw new AwsException("ValidationError", "At least one PolicyInputList member is required.", 400);
+        }
+        return policyInputList;
+    }
+
+    private List<String> extractResourceArnsOrWildcard(MultivaluedMap<String, String> params) {
+        List<String> resourceArns = extractIndexedValues(params, "ResourceArns.member");
+        return resourceArns.isEmpty() ? List.of("*") : resourceArns;
+    }
+
+    private String simulationResultsXml(CallerContext caller, List<String> actionNames,
+                                         List<String> resourceArns, Map<String, List<String>> context) {
         XmlBuilder results = new XmlBuilder().start("EvaluationResults");
         for (String actionName : actionNames) {
             for (String resourceArn : resourceArns) {
@@ -1258,10 +1297,34 @@ public class IamQueryHandler {
                         .end("member");
             }
         }
-        String result = results.end("EvaluationResults")
+        return results.end("EvaluationResults")
                 .elem("IsTruncated", false)
                 .build();
-        return Response.ok(AwsQueryResponse.envelope("SimulatePrincipalPolicy", AwsNamespaces.IAM, result)).build();
+    }
+
+    private Response handleGetContextKeysForCustomPolicy(MultivaluedMap<String, String> params) {
+        List<String> policyInputList = requirePolicyInputList(params);
+        List<String> keys = policyEvaluator.contextKeysReferencedIn(policyInputList);
+        return Response.ok(AwsQueryResponse.envelope("GetContextKeysForCustomPolicy", AwsNamespaces.IAM,
+                contextKeyNamesXml(keys))).build();
+    }
+
+    private Response handleGetContextKeysForPrincipalPolicy(MultivaluedMap<String, String> params) {
+        String policySourceArn = getParam(params, "PolicySourceArn");
+        CallerContext caller = iamService.resolvePrincipalContext(policySourceArn);
+        List<String> allDocuments = new ArrayList<>(caller.identityPolicies());
+        allDocuments.addAll(extractIndexedValues(params, "PolicyInputList.member"));
+        List<String> keys = policyEvaluator.contextKeysReferencedIn(allDocuments);
+        return Response.ok(AwsQueryResponse.envelope("GetContextKeysForPrincipalPolicy", AwsNamespaces.IAM,
+                contextKeyNamesXml(keys))).build();
+    }
+
+    private String contextKeyNamesXml(List<String> keys) {
+        XmlBuilder xml = new XmlBuilder().start("ContextKeyNames");
+        for (String key : keys) {
+            xml.elem("member", key);
+        }
+        return xml.end("ContextKeyNames").build();
     }
 
     // =========================================================================
@@ -1521,5 +1584,14 @@ public class IamQueryHandler {
     private Response handleUntagInstanceProfile(MultivaluedMap<String, String> params) {
         iamService.untagInstanceProfile(getParam(params, "InstanceProfileName"), extractTagKeys(params));
         return Response.ok(AwsQueryResponse.envelopeNoResult("UntagInstanceProfile", AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleListInstanceProfileTags(MultivaluedMap<String, String> params) {
+        String instanceProfileName = getParam(params, "InstanceProfileName");
+        // AWS documents the result as sorted by tag key.
+        Map<String, String> tags = new TreeMap<>(iamService.listInstanceProfileTags(instanceProfileName));
+        String result = new XmlBuilder().start("Tags").raw(tagsXml(tags)).end("Tags")
+                .elem("IsTruncated", false).build();
+        return Response.ok(AwsQueryResponse.envelope("ListInstanceProfileTags", AwsNamespaces.IAM, result)).build();
     }
 }

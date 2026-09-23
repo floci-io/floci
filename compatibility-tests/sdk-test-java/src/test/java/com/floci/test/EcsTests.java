@@ -508,7 +508,11 @@ class EcsTests {
     @Order(25)
     @DisplayName("PutAttributes - set attributes")
     void putAttributes() {
-        String targetId = cluster.clusterArn();
+        // An attribute targets a container instance of the cluster; ECS rejects anything else with
+        // a TargetNotFoundException, so this test registers one rather than aiming at the cluster.
+        String targetId = ecs.registerContainerInstance(RegisterContainerInstanceRequest.builder()
+                .cluster(clusterName)
+                .build()).containerInstance().containerInstanceArn();
         List<Attribute> stored = ecs.putAttributes(PutAttributesRequest.builder()
                 .cluster(clusterName)
                 .attributes(
@@ -534,6 +538,14 @@ class EcsTests {
                 .build()).attributes();
 
         assertThat(deleted).isNotEmpty();
+
+        // The instance existed only as an attribute target. Deregister it, because ECS refuses to
+        // delete a cluster that still has one and the delete-cluster tests below rely on that.
+        ecs.deregisterContainerInstance(DeregisterContainerInstanceRequest.builder()
+                .cluster(clusterName)
+                .containerInstance(targetId)
+                .force(true)
+                .build());
     }
 
     @Test
@@ -919,12 +931,24 @@ class EcsTests {
 
     @Test
     @Order(50)
-    @DisplayName("CreateTaskSet - create task set")
+    @DisplayName("CreateTaskSet - the full lifecycle on an EXTERNAL-controller service")
     void createTaskSet() {
+        // Task sets only exist on a service that uses the EXTERNAL or CODE_DEPLOY deployment
+        // controller; the rolling service the rest of this class uses cannot hold one.
+        String externalService = serviceName + "-external";
+        ecs.createService(CreateServiceRequest.builder()
+                .cluster(clusterName)
+                .serviceName(externalService)
+                .taskDefinition(family + ":1")
+                .desiredCount(3)
+                .deploymentController(dc -> dc.type(DeploymentControllerType.EXTERNAL))
+                .launchType(LaunchType.FARGATE)
+                .build());
+
         software.amazon.awssdk.services.ecs.model.TaskSet ts =
                 ecs.createTaskSet(CreateTaskSetRequest.builder()
                         .cluster(clusterName)
-                        .service(serviceName)
+                        .service(externalService)
                         .taskDefinition(family + ":1")
                         .launchType(LaunchType.FARGATE)
                         .scale(Scale.builder().value(50.0).unit(ScaleUnit.PERCENT).build())
@@ -933,6 +957,13 @@ class EcsTests {
         assertThat(ts).isNotNull();
         assertThat(ts.taskSetArn()).isNotNull();
         assertThat(ts.status()).isEqualTo("ACTIVE");
+        // 3 desired at 50 percent is 1.5, which ECS rounds up.
+        assertThat(ts.computedDesiredCount()).isEqualTo(2);
+        // Floci places no tasks for a task set, so it reports steady rather than stabilising
+        // towards a count nothing will reach: a client waiting for stability would never return.
+        assertThat(ts.stabilityStatus()).isEqualTo(StabilityStatus.STEADY_STATE);
+        assertThat(ts.stabilityStatusAt()).isNotNull();
+        assertThat(ts.platformVersion()).isNotBlank();
 
         String taskSetArn = ts.taskSetArn();
 
@@ -940,45 +971,68 @@ class EcsTests {
         List<software.amazon.awssdk.services.ecs.model.TaskSet> sets =
                 ecs.describeTaskSets(DescribeTaskSetsRequest.builder()
                         .cluster(clusterName)
-                        .service(serviceName)
+                        .service(externalService)
                         .taskSets(taskSetArn)
                         .build()).taskSets();
 
         assertThat(sets).hasSize(1);
         assertThat(sets.get(0).taskSetArn()).isEqualTo(taskSetArn);
 
+        // An unknown task set is a MISSING failure, not a dropped reference.
+        DescribeTaskSetsResponse missing = ecs.describeTaskSets(DescribeTaskSetsRequest.builder()
+                .cluster(clusterName)
+                .service(externalService)
+                .taskSets("ecs-svc/does-not-exist")
+                .build());
+        assertThat(missing.taskSets()).isEmpty();
+        assertThat(missing.failures()).singleElement()
+                .satisfies(failure -> assertThat(failure.reason()).isEqualTo("MISSING"));
+
         // Update task set
         software.amazon.awssdk.services.ecs.model.TaskSet updated =
                 ecs.updateTaskSet(UpdateTaskSetRequest.builder()
                         .cluster(clusterName)
-                        .service(serviceName)
+                        .service(externalService)
                         .taskSet(taskSetArn)
                         .scale(Scale.builder().value(100.0).unit(ScaleUnit.PERCENT).build())
                         .build()).taskSet();
 
         assertThat(updated).isNotNull();
         assertThat(updated.scale().value()).isEqualTo(100.0);
+        assertThat(updated.computedDesiredCount()).isEqualTo(3);
 
         // Update primary task set
         software.amazon.awssdk.services.ecs.model.TaskSet primary =
                 ecs.updateServicePrimaryTaskSet(UpdateServicePrimaryTaskSetRequest.builder()
                         .cluster(clusterName)
-                        .service(serviceName)
+                        .service(externalService)
                         .primaryTaskSet(taskSetArn)
                         .build()).taskSet();
 
         assertThat(primary).isNotNull();
         assertThat(primary.status()).isEqualTo("PRIMARY");
 
-        // Delete task set
+        // A task set that has not been scaled down to zero needs force to delete.
+        assertThatThrownBy(() -> ecs.deleteTaskSet(DeleteTaskSetRequest.builder()
+                .cluster(clusterName)
+                .service(externalService)
+                .taskSet(taskSetArn)
+                .build()))
+                .isInstanceOf(EcsException.class)
+                .hasMessageContaining("scaled down to zero");
+
         software.amazon.awssdk.services.ecs.model.TaskSet deleted =
                 ecs.deleteTaskSet(DeleteTaskSetRequest.builder()
                         .cluster(clusterName)
-                        .service(serviceName)
+                        .service(externalService)
                         .taskSet(taskSetArn)
+                        .force(true)
                         .build()).taskSet();
 
-        assertThat(deleted).isNotNull();
+        assertThat(deleted.status()).isEqualTo("DRAINING");
+
+        ecs.deleteService(DeleteServiceRequest.builder()
+                .cluster(clusterName).service(externalService).force(true).build());
     }
 
     @Test

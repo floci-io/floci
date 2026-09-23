@@ -198,7 +198,7 @@ public class CloudFormationService implements ResourceProvider {
      */
     public Map<String, String> currentParameters(String stackName, String region) {
         Stack stack = resolveStack(stackName, region);
-        return stack != null ? stack.getParameters() : Map.of();
+        return stack != null ? stack.parametersSnapshot() : Map.of();
     }
 
     /**
@@ -488,13 +488,11 @@ public class CloudFormationService implements ResourceProvider {
                     ? objectMapper.createObjectNode()
                     : parseTemplate(stack.getTemplateBody()).path("Resources");
 
-            Map<String, String> oldParams = stack.getParameters() != null
-                    ? stack.getParameters() : Map.of();
+            Map<String, String> oldParams = stack.parametersSnapshot();
             // Prefer the SSM-resolved values captured by the last executeTemplate run; fall back to
             // the raw parameters for stacks persisted before resolvedParameters existed.
-            Map<String, String> oldResolvedParams = stack.getResolvedParameters() != null
-                    && !stack.getResolvedParameters().isEmpty()
-                    ? stack.getResolvedParameters() : oldParams;
+            Map<String, String> resolvedSnapshot = stack.resolvedParametersSnapshot();
+            Map<String, String> oldResolvedParams = resolvedSnapshot.isEmpty() ? oldParams : resolvedSnapshot;
             // A parameter omitted from the update falls back to the template's Default when
             // ExecuteChangeSet actually runs it, so the preview must resolve the same defaults or
             // it will under-report changes to resources that depend on that fallback value.
@@ -538,7 +536,7 @@ public class CloudFormationService implements ResourceProvider {
             // ground truth execution uses - so no separate old-conditions evaluation is needed.
             Map<String, Boolean> newConditions = resolveConditions(
                     newTemplate, newResolvedParams, null, region, regionResolver.getAccountId());
-            Set<String> deployedIds = stack.getResources().keySet();
+            Set<String> deployedIds = stack.resourcesSnapshot().keySet();
 
             List<ResourceChange> changes = new ArrayList<>();
             newResources.fields().forEachRemaining(e -> {
@@ -693,9 +691,11 @@ public class CloudFormationService implements ResourceProvider {
             cs.setExecutionStatus("EXECUTE_IN_PROGRESS");
             if (requireAvailable) {
                 // CloudFormation deletes every other change set on the stack once one of them executes.
-                existing.getChangeSets().values().removeIf(other -> other != cs);
+                synchronized (existing.getChangeSets()) {
+                    existing.getChangeSets().values().removeIf(other -> other != cs);
+                }
             } else {
-                for (ChangeSet other : existing.getChangeSets().values()) {
+                for (ChangeSet other : existing.changeSetsSnapshot().values()) {
                     if (other != cs && "AVAILABLE".equals(other.getExecutionStatus())) {
                         other.setExecutionStatus("OBSOLETE");
                     }
@@ -847,11 +847,11 @@ public class CloudFormationService implements ResourceProvider {
 
     private StackMutationSnapshot snapshot(Stack stack) {
         Map<ChangeSet, ChangeSetState> states = new IdentityHashMap<>();
-        for (ChangeSet changeSet : stack.getChangeSets().values()) {
+        for (ChangeSet changeSet : stack.changeSetsSnapshot().values()) {
             states.put(changeSet, new ChangeSetState(changeSet.getStatus(), changeSet.getExecutionStatus()));
         }
         return new StackMutationSnapshot(stack.getStatus(), stack.getLastUpdatedTime(),
-                new ArrayList<>(stack.getEvents()), new LinkedHashMap<>(stack.getChangeSets()), states);
+                stack.eventsSnapshot(), stack.changeSetsSnapshot(), states);
     }
 
     private void restore(Stack stack, StackMutationSnapshot snapshot) {
@@ -1071,7 +1071,7 @@ public class CloudFormationService implements ResourceProvider {
             throw new AwsException("ValidationError",
                     "Stack with id " + stackName + " does not exist", 400);
         }
-        List<StackEvent> events = new ArrayList<>(stack.getEvents());
+        List<StackEvent> events = stack.eventsSnapshot();
         Collections.reverse(events);
         return events;
     }
@@ -1080,7 +1080,7 @@ public class CloudFormationService implements ResourceProvider {
 
     public List<StackResource> describeStackResources(String stackName, String region) {
         Stack stack = getStackOrThrow(stackName, region);
-        return new ArrayList<>(stack.getResources().values());
+        return new ArrayList<>(stack.resourcesSnapshot().values());
     }
 
     // ── ListStacks ────────────────────────────────────────────────────────────
@@ -1102,7 +1102,7 @@ public class CloudFormationService implements ResourceProvider {
             if (!accountId.equals(ownerAccount(stack)) || !region.equals(stack.getRegion())) {
                 continue;
             }
-            for (var entry : stack.getExports().entrySet()) {
+            for (var entry : stack.exportsSnapshot().entrySet()) {
                 result.put(entry.getKey(), new ExportEntry(entry.getKey(), entry.getValue(), stack.getStackId()));
             }
         }
@@ -1115,7 +1115,7 @@ public class CloudFormationService implements ResourceProvider {
 
     private void removeStackExports(Stack stack, String region) {
         String accountId = ownerAccount(stack);
-        for (String exportName : stack.getExports().keySet()) {
+        for (String exportName : stack.exportsSnapshot().keySet()) {
             String logicalKey = exportKey(region, exportName);
             exports.remove(accountExportKey(accountId, logicalKey));
             exportBackend.deleteForAccount(accountId, logicalKey);
@@ -1230,8 +1230,7 @@ public class CloudFormationService implements ResourceProvider {
 
             // Merge default parameter values from the template with caller-supplied params
             Map<String, String> givenParams = resolveDefaultParameters(template, params);
-            stack.getParameters().clear();
-            stack.getParameters().putAll(givenParams);
+            stack.replaceParameters(givenParams);
             Map<String, String> resolvedParams = resolveSsmParameters(template, givenParams, region);
             stack.setResolvedParameters(new LinkedHashMap<>(resolvedParams));
 
@@ -1248,7 +1247,7 @@ public class CloudFormationService implements ResourceProvider {
             Map<String, Map<String, String>> resourceAttrs = new LinkedHashMap<>();
 
             // First pass: collect existing physicalIds
-            for (var r : stack.getResources().values()) {
+            for (var r : stack.resourcesSnapshot().values()) {
                 if (r.getPhysicalId() != null) {
                     physicalIds.put(r.getLogicalId(), r.getPhysicalId());
                     resourceAttrs.put(r.getLogicalId(), r.getAttributes());
@@ -1377,7 +1376,7 @@ public class CloudFormationService implements ResourceProvider {
 
             // Resolve outputs before mutating stack/global export state, so failed updates do not
             // leave stale or partially registered exports behind.
-            Map<String, String> oldExports = new LinkedHashMap<>(stack.getExports());
+            Map<String, String> oldExports = stack.exportsSnapshot();
             Map<String, String> newOutputs = new LinkedHashMap<>();
             Map<String, String> newExports = new LinkedHashMap<>();
             Map<String, String> newOutputExportNames = new LinkedHashMap<>();
@@ -1400,12 +1399,9 @@ public class CloudFormationService implements ResourceProvider {
             }
 
             removeStackExports(stack, region);
-            stack.getOutputs().clear();
-            stack.getOutputs().putAll(newOutputs);
-            stack.getExports().clear();
-            stack.getExports().putAll(newExports);
-            stack.getOutputExportNames().clear();
-            stack.getOutputExportNames().putAll(newOutputExportNames);
+            stack.replaceOutputs(newOutputs);
+            stack.replaceExports(newExports);
+            stack.replaceOutputExportNames(newOutputExportNames);
             newExports.forEach((exportName, value) -> {
                 String logicalKey = region + ":" + exportName;
                 String exportKey = accountExportKey(accountId, logicalKey);
@@ -1604,7 +1600,7 @@ public class CloudFormationService implements ResourceProvider {
     }
 
     private boolean hasReplacementUpdates(Stack stack) {
-        return stack.getResources().values().stream()
+        return stack.resourcesSnapshot().values().stream()
                 .anyMatch(provisioner::hasReplacementUpdate);
     }
 
@@ -1612,7 +1608,7 @@ public class CloudFormationService implements ResourceProvider {
         if (!resources.isObject()) {
             return false;
         }
-        for (StackResource resource : stack.getResources().values()) {
+        for (StackResource resource : stack.resourcesSnapshot().values()) {
             JsonNode resDef = resources.get(resource.getLogicalId());
             if (resDef == null) {
                 return true;
@@ -1663,10 +1659,8 @@ public class CloudFormationService implements ResourceProvider {
         // successfully deployed values, even when resource rollback itself fails and the stack lands
         // in UPDATE_ROLLBACK_FAILED, so DescribeStacks and later change-set previews don't keep
         // serving the failed update's attempted values.
-        stack.getParameters().clear();
-        stack.getParameters().putAll(previousState.parameters());
-        stack.getResolvedParameters().clear();
-        stack.getResolvedParameters().putAll(previousState.resolvedParameters());
+        stack.replaceParameters(previousState.parameters());
+        stack.replaceResolvedParameters(previousState.resolvedParameters());
         if (rollbackFailures.isEmpty()) {
             stack.setTemplateBody(previousState.templateBody());
             // GetTemplate reads originalTemplateBody for TemplateStage=Original and templateBody
@@ -1708,7 +1702,7 @@ public class CloudFormationService implements ResourceProvider {
             Map<String, StackResource> previousResources,
             Set<String> attemptedResourceIds,
             String region) {
-        List<StackResource> resources = new ArrayList<>(stack.getResources().values());
+        List<StackResource> resources = new ArrayList<>(stack.resourcesSnapshot().values());
         Collections.reverse(resources);
         List<String> failures = new ArrayList<>();
         List<String> removedResources = new ArrayList<>();
@@ -1777,7 +1771,7 @@ public class CloudFormationService implements ResourceProvider {
     private void restoreOutputAndExportState(
             Stack stack, String region, StackUpdateSnapshot previousState) {
         RuntimeException storageFailure = null;
-        for (String exportName : new ArrayList<>(stack.getExports().keySet())) {
+        for (String exportName : stack.exportsSnapshot().keySet()) {
             String logicalKey = exportKey(region, exportName);
             String key = accountExportKey(ownerAccount(stack), logicalKey);
             exports.remove(key);
@@ -1788,12 +1782,9 @@ public class CloudFormationService implements ResourceProvider {
             }
         }
 
-        stack.getOutputs().clear();
-        stack.getOutputs().putAll(previousState.outputs());
-        stack.getExports().clear();
-        stack.getExports().putAll(previousState.exports());
-        stack.getOutputExportNames().clear();
-        stack.getOutputExportNames().putAll(previousState.outputExportNames());
+        stack.replaceOutputs(previousState.outputs());
+        stack.replaceExports(previousState.exports());
+        stack.replaceOutputExportNames(previousState.outputExportNames());
 
         for (Map.Entry<String, String> entry : previousState.exports().entrySet()) {
             String logicalKey = exportKey(region, entry.getKey());
@@ -1823,12 +1814,12 @@ public class CloudFormationService implements ResourceProvider {
         return new StackUpdateSnapshot(
                 stack.getTemplateBody(),
                 stack.getOriginalTemplateBody(),
-                new LinkedHashMap<>(stack.getParameters()),
-                new LinkedHashMap<>(stack.getResolvedParameters()),
-                new LinkedHashMap<>(stack.getOutputs()),
-                new LinkedHashMap<>(stack.getExports()),
-                new LinkedHashMap<>(stack.getOutputExportNames()),
-                copyResources(stack.getResources()));
+                stack.parametersSnapshot(),
+                stack.resolvedParametersSnapshot(),
+                stack.outputsSnapshot(),
+                stack.exportsSnapshot(),
+                stack.outputExportNamesSnapshot(),
+                copyResources(stack.resourcesSnapshot()));
     }
 
     private Map<String, StackResource> copyResources(
@@ -1870,7 +1861,7 @@ public class CloudFormationService implements ResourceProvider {
 
     /** Deletes every resource created in this execution, in reverse order. */
     private List<String> rollbackCreatedResources(Stack stack, String region) {
-        List<StackResource> resources = new ArrayList<>(stack.getResources().values());
+        List<StackResource> resources = new ArrayList<>(stack.resourcesSnapshot().values());
         Collections.reverse(resources);
         List<String> failedResources = new ArrayList<>();
         for (StackResource resource : resources) {
@@ -1926,7 +1917,7 @@ public class CloudFormationService implements ResourceProvider {
         }
 
         List<UpdateCleanupFailure> failures = new ArrayList<>();
-        List<StackResource> ordered = new ArrayList<>(stack.getResources().values());
+        List<StackResource> ordered = new ArrayList<>(stack.resourcesSnapshot().values());
         Collections.reverse(ordered);
         for (StackResource resource : ordered) {
             JsonNode resDef = resources.get(resource.getLogicalId());
@@ -1981,7 +1972,7 @@ public class CloudFormationService implements ResourceProvider {
      * cannot be read.
      */
     private List<StackResource> resourcesInCreationOrder(Stack stack, String region) {
-        List<StackResource> ordered = new ArrayList<>(stack.getResources().values());
+        List<StackResource> ordered = new ArrayList<>(stack.resourcesSnapshot().values());
         try {
             JsonNode template = parseTemplate(stack.getTemplateBody());
             JsonNode resources = template.path("Resources");
@@ -1989,7 +1980,7 @@ public class CloudFormationService implements ResourceProvider {
                 return ordered;
             }
             Map<String, Boolean> conditions = resolveConditions(
-                    template, stack.getParameters(), stack, region, regionResolver.getAccountId());
+                    template, stack.parametersSnapshot(), stack, region, regionResolver.getAccountId());
             List<String> creationOrder = topologicalSort(resources, conditions);
             Map<String, Integer> rank = new HashMap<>();
             for (int i = 0; i < creationOrder.size(); i++) {
@@ -2418,7 +2409,13 @@ public class CloudFormationService implements ResourceProvider {
             resource.setStatus("CREATE_COMPLETE");
         } else {
             resource.setStatus("CREATE_FAILED");
-            resource.setStatusReason("Nested stack " + childStackName + " failed: " + childStack.getStatusReason());
+            String reason = childStack.getStatusReason();
+            if (reason == null || reason.isBlank()) {
+                reason = "Nested stack " + childStackName + " rolled back or failed with status " + childStack.getStatus();
+            } else {
+                reason = "Nested stack " + childStackName + " failed: " + reason;
+            }
+            resource.setStatusReason(reason);
         }
 
         return resource;
@@ -2809,7 +2806,7 @@ public class CloudFormationService implements ResourceProvider {
                     arn, "cloudformation:stack", "cloudformation",
                     parsed.region(), parsed.accountId(),
                     stack.getCreationTime() != null ? stack.getCreationTime() : Instant.now(),
-                    stack.getTags() != null ? stack.getTags() : Map.of()));
+                    stack.tagsSnapshot()));
         }
         return resources;
     }

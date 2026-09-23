@@ -1,30 +1,24 @@
 package io.github.hectorvent.floci.services.elbv2;
 
+import io.github.hectorvent.floci.testing.RealElbV2DataPlaneProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
-import java.util.Map;
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.anyOf;
 import static org.hamcrest.Matchers.equalTo;
 
 @QuarkusTest
-@TestProfile(ElbV2SamePortHostDispatchIntegrationTest.RealElbV2DataPlaneProfile.class)
+@TestProfile(RealElbV2DataPlaneProfile.class)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class ElbV2SamePortHostDispatchIntegrationTest {
-
-    public static final class RealElbV2DataPlaneProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.elbv2.mock", "false");
-        }
-    }
 
     private static final String AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260629/us-east-1/elasticloadbalancing/aws4_request";
@@ -36,6 +30,8 @@ class ElbV2SamePortHostDispatchIntegrationTest {
     private static String secondLbArn;
     private static String secondDnsName;
     private static String secondListenerArn;
+    private static String firstRuleArn;
+    private static String secondRuleArn;
 
     @Test
     @Order(1)
@@ -117,12 +113,89 @@ class ElbV2SamePortHostDispatchIntegrationTest {
     }
 
     @Test
+    @Order(6)
+    void samePortListenerClaimsAHostItsRulesDeclare() {
+        secondRuleArn = createHostHeaderRule(secondListenerArn, 10,
+                List.of("app.example.test", "*.wild.example.test"), "second-rule");
+
+        assertHostResponse("app.example.test", "second-rule");
+        assertHostResponse("api.wild.example.test", "second-rule");
+        assertHostResponse("APP.EXAMPLE.TEST", "second-rule");
+    }
+
+    /**
+     * AWS states that the rule {@code *.example.com} matches {@code test.example.com} but not
+     * {@code example.com}, so a wildcard must not let a listener claim the bare domain either.
+     */
+    @Test
+    @Order(7)
+    void aWildcardRuleDoesNotClaimTheBareDomain() {
+        assertNoListenerForHost("wild.example.test");
+    }
+
+    @Test
+    @Order(8)
+    void aDeclaredHostDoesNotDisplaceTheLoadBalancerDnsName() {
+        assertHostResponse(firstDnsName, "first");
+        assertHostResponse(secondDnsName, "second");
+    }
+
+    @Test
+    @Order(9)
+    void aHostBothListenersDeclareStaysUnclaimed() {
+        firstRuleArn = createHostHeaderRule(firstListenerArn, 10,
+                List.of("app.example.test"), "first-rule");
+
+        assertNoListenerForHost("app.example.test");
+        assertHostResponse("api.wild.example.test", "second-rule");
+    }
+
+    @Test
     @Order(Integer.MAX_VALUE)
     void cleanup() {
+        deleteRule(firstRuleArn);
+        deleteRule(secondRuleArn);
         deleteListener(firstListenerArn);
         deleteListener(secondListenerArn);
         deleteLoadBalancer(firstLbArn);
         deleteLoadBalancer(secondLbArn);
+    }
+
+    private static String createHostHeaderRule(String listenerArn, int priority, List<String> hosts, String body) {
+        RequestSpecification request = given()
+                .formParam("Action", "CreateRule")
+                .formParam("ListenerArn", listenerArn)
+                .formParam("Priority", String.valueOf(priority))
+                .formParam("Conditions.member.1.Field", "host-header")
+                .formParam("Actions.member.1.Type", "fixed-response")
+                .formParam("Actions.member.1.FixedResponseConfig.StatusCode", "200")
+                .formParam("Actions.member.1.FixedResponseConfig.ContentType", "text/plain")
+                .formParam("Actions.member.1.FixedResponseConfig.MessageBody", body)
+                .header("Authorization", AUTH);
+        for (int i = 0; i < hosts.size(); i++) {
+            request = request.formParam(
+                    "Conditions.member.1.HostHeaderConfig.Values.member." + (i + 1), hosts.get(i));
+        }
+        return request
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract()
+                .path("CreateRuleResponse.CreateRuleResult.Rules.member.RuleArn");
+    }
+
+    private static void deleteRule(String ruleArn) {
+        if (ruleArn != null) {
+            given()
+                    .formParam("Action", "DeleteRule")
+                    .formParam("RuleArn", ruleArn)
+                    .header("Authorization", AUTH)
+                .when()
+                    .post("/")
+                .then()
+                    .statusCode(anyOf(equalTo(200), equalTo(204)));
+        }
     }
 
     private static String createFixedResponseListener(String lbArn, String body) {

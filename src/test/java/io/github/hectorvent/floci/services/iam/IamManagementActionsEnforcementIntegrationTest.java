@@ -1,7 +1,7 @@
 package io.github.hectorvent.floci.services.iam;
 
+import io.github.hectorvent.floci.testing.IamEnforcementProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
@@ -20,7 +20,7 @@ import static org.hamcrest.Matchers.not;
  * AttachUserPolicy, DeleteUser) when enforcement is enabled.
  */
 @QuarkusTest
-@TestProfile(IamManagementActionsEnforcementIntegrationTest.IamEnforcementProfile.class)
+@TestProfile(IamEnforcementProfile.class)
 class IamManagementActionsEnforcementIntegrationTest {
 
     private static final String ACCOUNT_ID = "000000000000";
@@ -115,12 +115,5 @@ class IamManagementActionsEnforcementIntegrationTest {
     private static String auth(String accessKeyId, String service) {
         return "AWS4-HMAC-SHA256 Credential=" + accessKeyId + "/20260919/" + REGION + "/" + service
                 + "/aws4_request, SignedHeaders=host, Signature=abc";
-    }
-
-    public static final class IamEnforcementProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.iam.enforcement-enabled", "true");
-        }
     }
 }

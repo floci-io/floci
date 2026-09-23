@@ -86,9 +86,14 @@ class CloudFormationIntegrationTest {
      * or after ten seconds, so a test can assert on the deleted resources afterwards.
      */
     private static void awaitStackDeleted(String stackNameOrArn) {
+        awaitStackStatus(stackNameOrArn, "DELETE_COMPLETE");
+    }
+
+    private static void awaitStackStatus(String stackNameOrArn, String expectedStatus) {
         long deadline = System.currentTimeMillis() + 10_000;
+        String statusXml = "";
         while (System.currentTimeMillis() < deadline) {
-            String statusXml = given()
+            statusXml = given()
                 .contentType("application/x-www-form-urlencoded")
                 .formParam("Action", "DescribeStacks")
                 .formParam("StackName", stackNameOrArn)
@@ -96,18 +101,23 @@ class CloudFormationIntegrationTest {
                 .post("/")
             .then()
                 .extract().body().asString();
-            assertThat(statusXml, not(containsString("<StackStatus>DELETE_FAILED</StackStatus>")));
-            if (statusXml.contains("<StackStatus>DELETE_COMPLETE</StackStatus>") || statusXml.contains("does not exist")) {
+            if ("DELETE_COMPLETE".equals(expectedStatus)) {
+                assertThat(statusXml, not(containsString("<StackStatus>DELETE_FAILED</StackStatus>")));
+                if (statusXml.contains("<StackStatus>DELETE_COMPLETE</StackStatus>")
+                        || statusXml.contains("does not exist")) {
+                    return;
+                }
+            } else if (statusXml.contains("<StackStatus>" + expectedStatus + "</StackStatus>")) {
                 return;
             }
             try {
-                Thread.sleep(200);
+                Thread.sleep(50);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                throw new AssertionError("Interrupted while waiting for stack " + stackNameOrArn + " to be deleted", e);
+                throw new AssertionError("Interrupted while waiting for stack " + stackNameOrArn + " to reach " + expectedStatus, e);
             }
         }
-        throw new AssertionError("Stack " + stackNameOrArn + " did not reach DELETE_COMPLETE within timeout");
+        assertThat(statusXml, containsString("<StackStatus>" + expectedStatus + "</StackStatus>"));
     }
 
     private static String firstPhysicalResourceId(String xml) {
@@ -200,7 +210,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("cf-test-queue"));
-        
+
         // 4. Describe Stacks
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -4165,15 +4175,7 @@ class CloudFormationIntegrationTest {
             .statusCode(200);
 
         // 4. Stack should reach CREATE_COMPLETE
-        given()
-            .contentType("application/x-www-form-urlencoded")
-            .formParam("Action", "DescribeStacks")
-            .formParam("StackName", "cfn-cs-arn-stack")
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
-            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+        awaitStackStatus("cfn-cs-arn-stack", "CREATE_COMPLETE");
     }
 
     @Test
@@ -6708,6 +6710,97 @@ class CloudFormationIntegrationTest {
             .body(containsString("nested-stack-child-queue"));
     }
 
+    /**
+     * Pins the actual root cause behind issue #3854 (a parent stack output resolving to the raw
+     * {@code LogicalId.Outputs.Key} literal instead of a nested stack's value), which turned out
+     * to have nothing to do with cross-thread visibility.
+     *
+     * <p>{@code executeNestedStack} copies {@code childStack.getOutputs()} into the parent
+     * resource's {@code Outputs.*} attributes right after the child's (synchronous, same-thread)
+     * {@code executeTemplate} call returns. When the child's own resource loop fails, {@code
+     * executeTemplate} never reaches its Outputs block at all: {@code rollbackFailedExecution}
+     * rewrites the child's status straight from {@code CREATE_FAILED} into {@code
+     * ROLLBACK_COMPLETE} before returning. {@code executeNestedStack} used to detect a failed
+     * child only by checking for the literal strings {@code CREATE_FAILED}/{@code UPDATE_FAILED},
+     * which a rolled-back create can never match, so the parent kept going and reported
+     * {@code CREATE_COMPLETE} with its {@code Fn::GetAtt} on the child's outputs left unresolved:
+     * exactly the symptom in #3854. That matching bug was already fixed by allow-listing the
+     * success statuses instead (commit 700d403, PR #3609) before #3854 was even filed; this test
+     * only adds the missing regression coverage tying it to this issue.
+     */
+    @Test
+    void createStack_failingNestedStackResource_rollsBackParentInsteadOfReportingUnresolvedOutput() {
+        String childTemplate = """
+            {
+              "Resources": {
+                "ConflictingSecret": {
+                  "Type": "AWS::SecretsManager::Secret",
+                  "Properties": {
+                    "Name": "cfn-3854-nested-conflict-secret",
+                    "SecretString": "explicit",
+                    "GenerateSecretString": { "PasswordLength": 32 }
+                  }
+                }
+              },
+              "Outputs": {
+                "SecretArn": { "Value": { "Ref": "ConflictingSecret" } }
+              }
+            }
+            """;
+
+        given().when().put("/issue-3854-templates").then();
+        given().contentType("application/json").body(childTemplate)
+                .when().put("/issue-3854-templates/failing-child.json")
+                .then().statusCode(200);
+
+        String parentTemplate = """
+            {
+              "Resources": {
+                "FailingNestedStack": {
+                  "Type": "AWS::CloudFormation::Stack",
+                  "Properties": {
+                    "TemplateURL": "http://localhost/issue-3854-templates/failing-child.json"
+                  }
+                }
+              },
+              "Outputs": {
+                "childSecretArn": {
+                  "Value": { "Fn::GetAtt": ["FailingNestedStack", "Outputs.SecretArn"] }
+                }
+              }
+            }
+            """;
+
+        String stackName = "issue-3854-failing-nested-parent";
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", parentTemplate)
+        .when().post("/").then().statusCode(200);
+
+        String xml = null;
+        long deadline = System.currentTimeMillis() + 20_000;
+        while (System.currentTimeMillis() < deadline) {
+            xml = given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStacks")
+                .formParam("StackName", stackName)
+            .when().post("/")
+            .then().statusCode(200)
+            .extract().asString();
+            if (xml.contains("<StackStatus>ROLLBACK_COMPLETE</StackStatus>")
+                    || xml.contains("<StackStatus>CREATE_COMPLETE</StackStatus>")) {
+                break;
+            }
+        }
+
+        assertThat(xml, containsString("<StackStatus>ROLLBACK_COMPLETE</StackStatus>"));
+        assertThat(xml, not(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>")));
+        assertThat(xml, not(containsString("FailingNestedStack.Outputs")));
+    }
+
     // ── Issue #1072: AWS::ApiGatewayV2::Api WEBSOCKET drops RouteSelectionExpression ───
 
     @Test
@@ -7100,7 +7193,7 @@ class CloudFormationIntegrationTest {
             .body("services[0].taskDefinition",
                     equalTo("arn:aws:ecs:us-east-1:000000000000:task-definition/cfn-ecs-update-taskdef:2"));
     }
-    
+
     @Test
     void deleteStack_ec2SecurityGroup_leavesNoOrphans() {
         String stackName = "sg-delete-cleanup-stack";
@@ -10881,12 +10974,7 @@ class CloudFormationIntegrationTest {
             .formParam("ChangeSetName", "deploy-attempt-2")
         .when().post("/").then().statusCode(200);
 
-        given()
-            .contentType("application/x-www-form-urlencoded")
-            .formParam("Action", "DescribeStacks")
-            .formParam("StackName", stackName)
-        .when().post("/")
-        .then().statusCode(200).body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+        awaitStackStatus(stackName, "CREATE_COMPLETE");
     }
 
     @Test

@@ -247,6 +247,24 @@ class EksPodIdentityAssociationServiceTest {
         assertThrows(AwsException.class, () -> fixture.service.list(fixture.cluster, null, null, null, null));
     }
 
+    @Test
+    void clusterWithNullArnDoesNotThrowNpe() {
+        Fixture fixture = fixture();
+        fixture.cluster.setArn(null);
+        fixture.cluster.setCreatedAt(null);
+
+        CreatePodIdentityAssociationRequest request = new CreatePodIdentityAssociationRequest(
+                fixture.cluster.getName(), NAMESPACE, SERVICE_ACCOUNT, ROLE, null, Map.of(), null, null, null);
+        PodIdentityAssociation created = fixture.service.create(fixture.cluster, request);
+        assertNotNull(created);
+        assertEquals("test-cluster", created.clusterName());
+        assertTrue(created.associationArn().contains(":podidentityassociation/test-cluster/"));
+
+        Optional<PodIdentityAssociation> found = fixture.service.findAssociation(fixture.cluster, NAMESPACE, SERVICE_ACCOUNT);
+        assertTrue(found.isPresent());
+        assertEquals(created.associationId(), found.get().associationId());
+    }
+
     private static Fixture fixture() {
         Cluster cluster = new Cluster();
         cluster.setName("test-cluster");

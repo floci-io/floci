@@ -237,7 +237,14 @@ public class FirehoseService implements ResourceProvider {
         buffers.keySet().forEach(this::flushByKey);
     }
 
-    void tickSafely() {
+    /**
+     * Ticks never overlap: {@code flushExecutor} is single threaded, and the source poll is a
+     * read of the shard iterator, a fetch and an advance that is not atomic across the three, so
+     * two concurrent ticks would fetch the same records twice and buffer them twice. Tests drive
+     * this method directly alongside the scheduled tick, which is the only way a second caller
+     * arises, so the guarantee is stated here rather than left to the executor.
+     */
+    synchronized void tickSafely() {
         try {
             pollKinesisSources();
             flushDueBuffers(clock.instant());

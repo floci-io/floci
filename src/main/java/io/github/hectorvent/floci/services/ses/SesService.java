@@ -235,7 +235,7 @@ public class SesService {
         Map<String, String> suppressedReasons = new LinkedHashMap<>(
                 collectSuppressedReasons(envelope, effectiveConfigSet, region));
         // putIfAbsent so a suppression-list reason already set for an address (e.g. COMPLAINT) wins
-        // over the list-management BOUNCE and keeps its synthetic event type.
+        // over the list-management opt-out and keeps its synthetic event type.
         contactService.collectListManagementOptOuts(envelope, listManagement, region,
                 SesService::extractEmailAddress).forEach(suppressedReasons::putIfAbsent);
 
@@ -259,18 +259,28 @@ public class SesService {
 
         String messageId = UUID.randomUUID().toString();
         String effectiveReturnPath = firstNonBlank(returnPath, source);
+        // SES accepts the message and then rejects it as a whole when the content scan trips, so
+        // the send still succeeds and a REJECT event is published in place of any delivery.
+        boolean rejected = SesContentScan.containsTestVirus(subject, bodyText, bodyHtml)
+                || SesContentScan.containsTestVirus(headerText(additionalHeaders));
         SentEmail email = new SentEmail(messageId, region, source, toAddresses, ccAddresses,
                 bccAddresses, replyToAddresses, subject, bodyText, bodyHtml);
         email.setReturnPath(effectiveReturnPath);
         if (additionalHeaders != null && !additionalHeaders.isEmpty()) {
             email.setHeaders(additionalHeaders);
         }
+        email.setEmailTags(emailTags);
+        email.setInsights(SesMessageInsights.build(envelope,
+                SesRecipientEvents.classify(envelope, suppressedReasons, rejected), email.getSentAt()));
+        if (rejected) {
+            email.discardContent(SesRecipientEvents.CONTENT_REJECT_REASON);
+        }
         sentEmailService.record(region, messageId, email);
 
         List<String> relayedTo = filterUnsuppressed(toAddresses, suppressedReasons);
         List<String> relayedCc = filterUnsuppressed(ccAddresses, suppressedReasons);
         List<String> relayedBcc = filterUnsuppressed(bccAddresses, suppressedReasons);
-        if (sizeOf(relayedTo) + sizeOf(relayedCc) + sizeOf(relayedBcc) > 0) {
+        if (!rejected && sizeOf(relayedTo) + sizeOf(relayedCc) + sizeOf(relayedBcc) > 0) {
             smtpRelay.relay(SmtpRelay.RelayMessage.builder(source)
                     .returnPath(effectiveReturnPath)
                     .to(relayedTo)
@@ -284,15 +294,17 @@ public class SesService {
                     .messageId(messageId)
                     .build());
         } else {
-            LOG.infov("SES email accepted but not relayed (all recipients suppressed): messageId={0}",
-                    messageId);
+            LOG.infov("SES email accepted but not relayed ({0}): messageId={1}",
+                    rejected ? "content rejected" : "all recipients suppressed", messageId);
         }
 
-        LOG.infov("SES email sent: from={0}, to={1}, subject={2}, messageId={3}",
-                source, toAddresses, subject, messageId);
+        if (!rejected) {
+            LOG.infov("SES email sent: from={0}, to={1}, subject={2}, messageId={3}",
+                    source, toAddresses, subject, messageId);
+        }
         publishSendEvents(effectiveConfigSet, messageId, source, subject,
                 toAddresses, ccAddresses, bccAddresses, envelope,
-                suppressedReasons, emailTags, additionalHeaders, region);
+                suppressedReasons, rejected, emailTags, additionalHeaders, region);
         return messageId;
     }
 
@@ -307,7 +319,8 @@ public class SesService {
         // The MIME headers are always parsed: X-SES-CONFIGURATION-SET can name the configuration
         // set that decides whether events are published at all, so the configuration set cannot be
         // resolved before the message has been read.
-        SmtpRelay.RawMessageHeaders headers = SmtpRelay.parseRawHeaders(rawMessage);
+        SmtpRelay.ParsedRawMessage parsed = SmtpRelay.parseRawMessage(rawMessage);
+        SmtpRelay.RawMessageHeaders headers = parsed.headers();
         // AWS accepts the configuration set either as a request field or as the
         // X-SES-CONFIGURATION-SET header on the message itself; the request field wins.
         String requestedConfigSet = firstNonBlank(configurationSetName, headers.configurationSet());
@@ -349,33 +362,64 @@ public class SesService {
         Map<String, String> suppressedReasons = new LinkedHashMap<>(
                 collectSuppressedReasons(effectiveDestinations, effectiveConfigSet, region));
         // putIfAbsent so a suppression-list reason already set for an address (e.g. COMPLAINT) wins
-        // over the list-management BOUNCE and keeps its synthetic event type.
+        // over the list-management opt-out and keeps its synthetic event type.
         contactService.collectListManagementOptOuts(effectiveDestinations, listManagement, region,
                         SesService::extractEmailAddress)
                 .forEach(suppressedReasons::putIfAbsent);
 
         String messageId = UUID.randomUUID().toString();
+        // The scan walks the decoded MIME, so a base64 attachment does not hide the content, and a
+        // message the parser cannot read is refused outright rather than stored and relayed unseen.
+        SesContentScan.Result scan = SesContentScan.scan(parsed.bytes(), parsed.message());
+        if (scan == SesContentScan.Result.UNREADABLE) {
+            throw new AwsException("InvalidParameterValue", "Raw message could not be parsed.", 400);
+        }
+        boolean rejected = scan == SesContentScan.Result.REJECTED;
         // AWS routes bounces to the Return-Path carried by the message, falling back to the
-        // request's return path and then the sender.
-        String effectiveReturnPath = firstNonBlank(headers.returnPath(), returnPath, effectiveSource);
+        // request's return path and then the sender. A rejected message keeps nothing read off its
+        // own headers, and that header's value reaches here unparsed, so it is dropped; an envelope
+        // read off the headers is a list of parsed addresses and carries no message text.
+        String effectiveReturnPath = rejected
+                ? firstNonBlank(returnPath, effectiveSource)
+                : firstNonBlank(headers.returnPath(), returnPath, effectiveSource);
         SentEmail email = new SentEmail(messageId, region, effectiveSource, effectiveDestinations, rawMessage);
         email.setReturnPath(effectiveReturnPath);
+        // The MIME subject is already parsed for the published events; store it too so
+        // GetMessageInsights reports it for a raw send as it does for a simple one. The parser
+        // yields "" for a missing header, and an absent subject must stay absent.
+        email.setSubject(firstNonBlank(headers.subject()));
+        // A rejected message publishes only the tags that came with the request, so the stored
+        // record keeps the same set: tags read off its headers must not resurface through insights.
+        email.setEmailTags(rejected ? requestTags(emailTags) : effectiveTags);
+        email.setInsights(SesMessageInsights.build(effectiveDestinations,
+                SesRecipientEvents.classify(effectiveDestinations, suppressedReasons, rejected),
+                email.getSentAt()));
+        if (rejected) {
+            email.discardContent(SesRecipientEvents.CONTENT_REJECT_REASON);
+        }
         sentEmailService.record(region, messageId, email);
 
         List<String> relayedDestinations = filterUnsuppressed(effectiveDestinations, suppressedReasons);
-        if (!relayedDestinations.isEmpty()) {
+        if (!rejected && !relayedDestinations.isEmpty()) {
             smtpRelay.relayRaw(new SmtpRelay.RawRelayMessage(effectiveSource, effectiveReturnPath,
                     relayedDestinations, rawMessage, messageId));
         } else {
-            LOG.infov("SES raw email accepted but not relayed (all recipients suppressed): messageId={0}",
-                    messageId);
+            LOG.infov("SES raw email accepted but not relayed ({0}): messageId={1}",
+                    rejected ? "content rejected" : "all recipients suppressed", messageId);
         }
 
-        LOG.infov("SES raw email sent: from={0}, messageId={1}", effectiveSource, messageId);
+        if (!rejected) {
+            LOG.infov("SES raw email sent: from={0}, messageId={1}", effectiveSource, messageId);
+        }
+        // The recipient lists are read off the message, so a rejected one publishes none of them
+        // either; mail.destination still carries the envelope.
+        List<String> publishedTo = rejected ? List.of() : headers.to();
+        List<String> publishedCc = rejected ? List.of() : headers.cc();
+        List<String> publishedBcc = rejected ? List.of() : headers.bcc();
         publishSendEvents(effectiveConfigSet, messageId, effectiveSource,
-                headers.subject(), headers.to(), headers.cc(), headers.bcc(),
+                headers.subject(), publishedTo, publishedCc, publishedBcc,
                 effectiveDestinations,
-                suppressedReasons, effectiveTags, List.of(), region);
+                suppressedReasons, rejected, rejected ? requestTags(emailTags) : effectiveTags, List.of(), region);
         return messageId;
     }
 
@@ -397,7 +441,7 @@ public class SesService {
                                    String subject, List<String> toAddresses,
                                    List<String> ccAddresses, List<String> bccAddresses,
                                    List<String> envelopeDestinations,
-                                   Map<String, String> suppressedReasons,
+                                   Map<String, String> suppressedReasons, boolean contentRejected,
                                    List<MessageTag> emailTags,
                                    List<MessageHeader> additionalHeaders, String region) {
         if (eventPublisher == null || messageId == null) {
@@ -430,30 +474,26 @@ public class SesService {
                 : AwsArnUtils.Arn.of("ses", region, sendingAccountId,
                         "identity/" + extractEmailAddress(source)).toString();
 
-        List<String> suppressionBounceRecipients = new ArrayList<>();
-        List<String> suppressionComplaintRecipients = new ArrayList<>();
-        for (Map.Entry<String, String> e : suppressedReasons.entrySet()) {
-            if ("BOUNCE".equals(e.getValue())) {
-                suppressionBounceRecipients.add(e.getKey());
-            } else if ("COMPLAINT".equals(e.getValue())) {
-                suppressionComplaintRecipients.add(e.getKey());
-            }
-        }
-
-        for (String eventType : determineSendEventTypes(envelope,
-                suppressionBounceRecipients, suppressionComplaintRecipients)) {
+        // One event per (type, cause): a message that bounces both at the simulator and on the
+        // suppression list publishes two BOUNCE events, each naming only its own recipients.
+        // A rejected message publishes none of the scanned content: its Send and Reject events
+        // carry the envelope but no subject and no headers, where SES would include them, so the
+        // string reaches no event destination either.
+        String publishedSubject = contentRejected ? null : subject;
+        List<MessageHeader> publishedHeaders = contentRejected ? List.of() : additionalHeaders;
+        for (SesRecipientEvent event : SesRecipientEvents.classify(envelope, suppressedReasons,
+                contentRejected)) {
             if (configSetActive) {
-                eventPublisher.publish(cs, eventType, messageId, source, sourceArn, sendingAccountId,
-                        subject, toAddresses, ccAddresses, bccAddresses, envelope,
-                        suppressionBounceRecipients, suppressionComplaintRecipients,
-                        emailTags, additionalHeaders, timestamp, region);
+                eventPublisher.publish(cs, event, messageId, source, sourceArn, sendingAccountId,
+                        publishedSubject, toAddresses, ccAddresses, bccAddresses, envelope,
+                        emailTags, publishedHeaders, timestamp, region);
             }
-            IdentityNotificationTarget target = identityTargets.get(eventType);
+            IdentityNotificationTarget target = identityTargets.get(event.eventType());
             if (target != null) {
                 eventPublisher.publishIdentityNotification(target.topicArn(), target.includeHeaders(),
-                        eventType, messageId, source, sourceArn, sendingAccountId, subject,
-                        toAddresses, ccAddresses, bccAddresses, envelope, suppressionBounceRecipients,
-                        suppressionComplaintRecipients, additionalHeaders, timestamp, region);
+                        event, messageId, source, sourceArn, sendingAccountId, publishedSubject,
+                        toAddresses, ccAddresses, bccAddresses, envelope, publishedHeaders,
+                        timestamp, region);
             }
         }
     }
@@ -464,7 +504,7 @@ public class SesService {
      * domain identity's topic, per notification type; the headers-in-notifications flag is read from
      * whichever identity supplied the topic. Returns a map keyed by the {@code SEND}-style event name
      * ({@code BOUNCE}/{@code COMPLAINT}/{@code DELIVERY}) so it can be looked up directly against
-     * {@link #determineSendEventTypes}.
+     * the event types {@link SesRecipientEvents#classify} produces.
      */
     private Map<String, IdentityNotificationTarget> resolveIdentityNotificationTargets(String source,
                                                                                        String region) {
@@ -517,34 +557,6 @@ public class SesService {
             return source.substring(open + 1, close).trim();
         }
         return source.trim();
-    }
-
-    private static List<String> determineSendEventTypes(List<String> destinations,
-                                                        List<String> suppressionBounceRecipients,
-                                                        List<String> suppressionComplaintRecipients) {
-        List<String> events = new ArrayList<>();
-        events.add("SEND");
-        for (String d : destinations) {
-            if (SimulatorAddresses.isSuccess(d) && !events.contains("DELIVERY")) {
-                events.add("DELIVERY");
-            }
-            if (SimulatorAddresses.isBounce(d) && !events.contains("BOUNCE")) {
-                events.add("BOUNCE");
-            }
-            if (SimulatorAddresses.isComplaint(d) && !events.contains("COMPLAINT")) {
-                events.add("COMPLAINT");
-            }
-            if (SimulatorAddresses.isSuppressionList(d) && !events.contains("REJECT")) {
-                events.add("REJECT");
-            }
-        }
-        if (!suppressionBounceRecipients.isEmpty() && !events.contains("BOUNCE")) {
-            events.add("BOUNCE");
-        }
-        if (!suppressionComplaintRecipients.isEmpty() && !events.contains("COMPLAINT")) {
-            events.add("COMPLAINT");
-        }
-        return events;
     }
 
     public void setEmailIdentityConfigurationSet(String identityValue, String configurationSetName,
@@ -700,6 +712,9 @@ public class SesService {
                 List.of(emailAddress), List.of(), List.of(), List.of(),
                 template.getTemplateSubject(), null, renderedHtml);
         email.setReturnPath(template.getFromEmailAddress());
+        email.setInsights(SesMessageInsights.build(List.of(emailAddress),
+                SesRecipientEvents.classify(List.of(emailAddress), Map.of(), false),
+                email.getSentAt()));
         sentEmailService.record(region, messageId, email);
         smtpRelay.relay(SmtpRelay.RelayMessage.builder(template.getFromEmailAddress())
                 .returnPath(template.getFromEmailAddress())
@@ -1492,6 +1507,24 @@ public class SesService {
             }
         }
         return results;
+    }
+
+    private static List<String> headerText(List<MessageHeader> headers) {
+        if (headers == null) {
+            return List.of();
+        }
+        List<String> texts = new ArrayList<>(headers.size() * 2);
+        for (MessageHeader header : headers) {
+            texts.add(header.name());
+            texts.add(header.value());
+        }
+        return texts;
+    }
+
+    // Tags read off the raw message's own header are scanned content; only the request's tags,
+    // which the controller validated, are published for a rejected message.
+    private static List<MessageTag> requestTags(List<MessageTag> emailTags) {
+        return emailTags == null ? List.of() : emailTags;
     }
 
     private static int sizeOf(List<?> list) {

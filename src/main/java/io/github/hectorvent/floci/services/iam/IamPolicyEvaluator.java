@@ -14,6 +14,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Evaluates IAM policy documents against a requested action and resource.
@@ -74,6 +76,12 @@ public class IamPolicyEvaluator {
     // Parsing is a pure function of the document text, so entries never go stale. The bound
     // only guards against growth from many distinct session policies.
     static final int MAX_CACHED_DOCUMENTS = 2048;
+
+    // Matches an IAM policy variable such as ${aws:username} inside a Resource pattern or a
+    // Condition value. Stops at the first ',' or '}' so a default value (${key, 'default'}),
+    // whose default may itself contain '{{' / '}}' placeholder markers, doesn't get swept into
+    // the captured key name.
+    private static final Pattern POLICY_VARIABLE = Pattern.compile("\\$\\{\\s*([^,}]+?)\\s*[,}]");
 
     private final ObjectMapper objectMapper;
     private final ConcurrentHashMap<String, CachedDocument> cachedDocuments = new ConcurrentHashMap<>();
@@ -293,6 +301,59 @@ public class IamPolicyEvaluator {
             return SimulationDecision.IMPLICIT_DENY;
         }
         return SimulationDecision.ALLOWED;
+    }
+
+    /**
+     * Returns the context keys referenced across the given policy documents: every Condition
+     * operator's key names, every {@code ${...}} policy variable named in a Resource entry, and
+     * every one named in a Condition value (AWS documents policy variables as usable only in
+     * the Resource element and in Condition values, never in NotResource, Action or Principal).
+     * AWS's own primary example for this response is a Resource-embedded variable:
+     * {@code ${aws:username}} inside a Resource ARN.
+     *
+     * <p>The three single-character escapes ({@code ${*}}, {@code ${?}}, {@code ${$}}) are
+     * literal-character substitutions, not context-key references, and are excluded. A default
+     * value ({@code ${key, 'default'}}) is stripped so only {@code key} is reported.
+     *
+     * <p>Not sorted and not de-duplicated: AWS's own documented example response for
+     * GetContextKeysForPrincipalPolicy repeats a key that is referenced by more than one
+     * statement, so this returns them in statement order exactly as found, matching that
+     * observed behavior rather than imposing an artificial, AWS-inconsistent cleanup.
+     *
+     * <p>A document that fails to parse contributes no keys, matching {@link #parseAll}'s
+     * handling elsewhere in this class.
+     */
+    public List<String> contextKeysReferencedIn(List<String> policyDocuments) {
+        List<String> keys = new ArrayList<>();
+        for (PolicyStatement stmt : parseAll(policyDocuments)) {
+            Map<String, Map<String, List<String>>> conditions = stmt.getConditions();
+            if (conditions != null) {
+                for (Map<String, List<String>> byContextKey : conditions.values()) {
+                    for (Map.Entry<String, List<String>> entry : byContextKey.entrySet()) {
+                        keys.add(entry.getKey());
+                        collectPolicyVariableKeys(entry.getValue(), keys);
+                    }
+                }
+            }
+            collectPolicyVariableKeys(stmt.getResources(), keys);
+        }
+        return keys;
+    }
+
+    /** Appends the key name inside every {@code ${key}} policy variable found in {@code values}. */
+    private void collectPolicyVariableKeys(List<String> values, List<String> keys) {
+        if (values == null) {
+            return;
+        }
+        for (String value : values) {
+            Matcher matcher = POLICY_VARIABLE.matcher(value);
+            while (matcher.find()) {
+                String key = matcher.group(1).trim();
+                if (!key.equals("*") && !key.equals("?") && !key.equals("$")) {
+                    keys.add(key);
+                }
+            }
+        }
     }
 
     /**

@@ -57,6 +57,8 @@ import software.amazon.awssdk.services.iam.model.ListAttachedUserPoliciesRespons
 import software.amazon.awssdk.services.iam.model.ListEntitiesForPolicyResponse;
 import software.amazon.awssdk.services.iam.model.ListGroupsForUserRequest;
 import software.amazon.awssdk.services.iam.model.ListGroupsForUserResponse;
+import software.amazon.awssdk.services.iam.model.ListInstanceProfileTagsRequest;
+import software.amazon.awssdk.services.iam.model.ListInstanceProfileTagsResponse;
 import software.amazon.awssdk.services.iam.model.ListInstanceProfilesResponse;
 import software.amazon.awssdk.services.iam.model.ListRolePoliciesRequest;
 import software.amazon.awssdk.services.iam.model.ListRolePoliciesResponse;
@@ -71,7 +73,10 @@ import software.amazon.awssdk.services.iam.model.RemoveRoleFromInstanceProfileRe
 import software.amazon.awssdk.services.iam.model.RemoveUserFromGroupRequest;
 import software.amazon.awssdk.services.iam.model.SimulatePrincipalPolicyRequest;
 import software.amazon.awssdk.services.iam.model.StatusType;
+import software.amazon.awssdk.services.iam.model.Tag;
+import software.amazon.awssdk.services.iam.model.TagInstanceProfileRequest;
 import software.amazon.awssdk.services.iam.model.TagUserRequest;
+import software.amazon.awssdk.services.iam.model.UntagInstanceProfileRequest;
 import software.amazon.awssdk.services.iam.model.UntagUserRequest;
 import software.amazon.awssdk.services.iam.model.UpdateAccessKeyRequest;
 import software.amazon.awssdk.services.iam.model.UpdateLoginProfileRequest;
@@ -538,6 +543,32 @@ class IamTest {
 
         assertThat(response.instanceProfiles())
                 .anyMatch(p -> INSTANCE_PROFILE_NAME.equals(p.instanceProfileName()));
+    }
+
+    @Test
+    @Order(44)
+    void tagInstanceProfile() {
+        iam.tagInstanceProfile(TagInstanceProfileRequest.builder()
+                .instanceProfileName(INSTANCE_PROFILE_NAME)
+                .tags(Tag.builder().key("env").value("sdk-test").build())
+                .build());
+    }
+
+    @Test
+    @Order(45)
+    void listInstanceProfileTags() {
+        ListInstanceProfileTagsResponse response = iam.listInstanceProfileTags(
+                ListInstanceProfileTagsRequest.builder().instanceProfileName(INSTANCE_PROFILE_NAME).build());
+
+        assertThat(response.tags())
+                .anyMatch(t -> "env".equals(t.key()));
+    }
+
+    @Test
+    @Order(46)
+    void untagInstanceProfile() {
+        iam.untagInstanceProfile(UntagInstanceProfileRequest.builder()
+                .instanceProfileName(INSTANCE_PROFILE_NAME).tagKeys("env").build());
     }
 
     // ── Login Profile ──────────────────────────────────────────────────

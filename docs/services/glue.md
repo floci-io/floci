@@ -124,6 +124,15 @@ was switched on keep their plaintext: the developer guide ("Encrypting connectio
 password is encrypted "was determined when the connection was created or updated", so the setting is not applied
 retroactively.
 
+#### Security configurations
+
+| Action | Description |
+|--------|-------------|
+| CreateSecurityConfiguration | Creates a named security configuration. |
+| GetSecurityConfiguration | Returns a named security configuration. |
+| GetSecurityConfigurations | Lists stored security configurations. `MaxResults` and `NextToken` are currently ignored, so the complete list is returned. |
+| DeleteSecurityConfiguration | Deletes a named security configuration. |
+
 #### Jobs
 
 | Action | Description |

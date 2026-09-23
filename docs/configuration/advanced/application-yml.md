@@ -55,6 +55,8 @@ floci:
       # mount-user: "1001:1001"    # PosixUser: run mounting containers as uid[:gid]
       # mount-group-add: 2000      # supplementary gid added to mounting containers
     wal:
+      # Also the cadence at which journaled stores under persistent mode (CloudWatch Logs events)
+      # fold their .wal file into the store's JSON file.
       compaction-interval-ms: 30000
     services:
       ssm:

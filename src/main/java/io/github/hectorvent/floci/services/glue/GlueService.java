@@ -27,6 +27,7 @@ import io.github.hectorvent.floci.services.glue.model.Partition;
 import io.github.hectorvent.floci.services.glue.model.PartitionIndex;
 import io.github.hectorvent.floci.services.glue.model.PartitionIndexDescriptor;
 import io.github.hectorvent.floci.services.glue.model.SchemaReference;
+import io.github.hectorvent.floci.services.glue.model.SecurityConfiguration;
 import io.github.hectorvent.floci.services.glue.model.StorageDescriptor;
 import io.github.hectorvent.floci.services.glue.model.Table;
 import io.github.hectorvent.floci.services.glue.model.UserDefinedFunction;
@@ -65,6 +66,7 @@ public class GlueService {
     private static final Logger LOG = Logger.getLogger(GlueService.class);
     private static final int MAX_FUNCTION_PATTERN_LENGTH = 255;
     private static final int MAX_FUNCTION_RESULTS = 100;
+    private static final int MAX_SECURITY_CONFIGURATION_NAME_LENGTH = 255;
     private static final Set<String> CSV_HEADER_VALUES = Set.of("UNKNOWN", "PRESENT", "ABSENT");
     private static final Set<String> CSV_SERDE_VALUES = Set.of("OpenCSVSerDe", "LazySimpleSerDe", "None");
     private static final Set<String> CSV_CUSTOM_DATATYPES = Set.of(
@@ -160,6 +162,7 @@ public class GlueService {
     private final StorageBackend<String, Connection> connectionStore;
     private final StorageBackend<String, GluePolicy> resourcePolicyStore;
     private final StorageBackend<String, DataCatalogEncryptionSettings> encryptionSettingsStore;
+    private final StorageBackend<String, SecurityConfiguration> securityConfigurationStore;
     private final GlueSchemaRegistryService schemaRegistryService;
     private final RegionResolver regionResolver;
     private final ResourceGroupsTaggingService resourceGroupsTaggingService;
@@ -188,6 +191,8 @@ public class GlueService {
         this.resourcePolicyStore = storageFactory.create("glue", "resource_policy.json", new TypeReference<>() {});
         this.encryptionSettingsStore = storageFactory.create(
                 "glue", "catalog_encryption_settings.json", new TypeReference<>() {});
+        this.securityConfigurationStore = storageFactory.create(
+            "glue", "security_configurations.json", new TypeReference<>() {});
         this.schemaRegistryService = schemaRegistryService;
         this.regionResolver = regionResolver;
         this.resourceGroupsTaggingService = resourceGroupsTaggingService;
@@ -208,6 +213,7 @@ public class GlueService {
                 StorageBackend<String, Connection> connectionStore,
                 StorageBackend<String, GluePolicy> resourcePolicyStore,
                 StorageBackend<String, DataCatalogEncryptionSettings> encryptionSettingsStore,
+                StorageBackend<String, SecurityConfiguration> securityConfigurationStore,
                 GlueSchemaRegistryService schemaRegistryService,
                 RegionResolver regionResolver,
                 ResourceGroupsTaggingService resourceGroupsTaggingService,
@@ -226,10 +232,66 @@ public class GlueService {
         this.connectionStore = connectionStore;
         this.resourcePolicyStore = resourcePolicyStore;
         this.encryptionSettingsStore = encryptionSettingsStore;
+        this.securityConfigurationStore = securityConfigurationStore;
         this.schemaRegistryService = schemaRegistryService;
         this.regionResolver = regionResolver;
         this.resourceGroupsTaggingService = resourceGroupsTaggingService;
         this.kmsService = kmsService;
+    }
+
+    public SecurityConfiguration createSecurityConfiguration(String name, JsonNode encryptionConfiguration,
+                                                              String region) {
+        validateSecurityConfigurationName(name);
+        if (encryptionConfiguration == null || encryptionConfiguration.isNull()) {
+            throw new AwsException("InvalidInputException", "EncryptionConfiguration is required.", 400);
+        }
+        String key = securityConfigurationKey(region, name);
+        if (securityConfigurationStore.get(key).isPresent()) {
+            throw new AwsException("AlreadyExistsException",
+                    "Security configuration already exists: " + name, 400);
+        }
+        SecurityConfiguration configuration = new SecurityConfiguration();
+        configuration.setName(name);
+        configuration.setCreatedTimeStamp(Instant.now());
+        configuration.setEncryptionConfiguration(encryptionConfiguration.deepCopy());
+        securityConfigurationStore.put(key, configuration);
+        return configuration;
+    }
+
+    public SecurityConfiguration getSecurityConfiguration(String name, String region) {
+        validateSecurityConfigurationName(name);
+        return securityConfigurationStore.get(securityConfigurationKey(region, name))
+                .orElseThrow(() -> new AwsException("EntityNotFoundException",
+                        "Security configuration not found: " + name, 400));
+    }
+
+    public void deleteSecurityConfiguration(String name, String region) {
+        validateSecurityConfigurationName(name);
+        String key = securityConfigurationKey(region, name);
+        if (securityConfigurationStore.get(key).isEmpty()) {
+            throw new AwsException("EntityNotFoundException",
+                    "Security configuration not found: " + name, 400);
+        }
+        securityConfigurationStore.delete(key);
+    }
+
+    public List<SecurityConfiguration> getSecurityConfigurations(String region) {
+        String prefix = region + ":";
+        return securityConfigurationStore.scan(key -> key.startsWith(prefix));
+    }
+
+    private static String securityConfigurationKey(String region, String name) {
+        return region + ":" + name;
+    }
+
+    private static void validateSecurityConfigurationName(String name) {
+        if (name == null || name.isBlank()) {
+            throw new AwsException("InvalidInputException", "Name is required.", 400);
+        }
+        if (name.length() > MAX_SECURITY_CONFIGURATION_NAME_LENGTH) {
+            throw new AwsException("InvalidInputException",
+                    "Name must be between 1 and " + MAX_SECURITY_CONFIGURATION_NAME_LENGTH + " characters.", 400);
+        }
     }
 
     public void createDatabase(Database database) {
