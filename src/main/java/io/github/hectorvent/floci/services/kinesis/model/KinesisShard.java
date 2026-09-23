@@ -17,6 +17,7 @@ public class KinesisShard {
     private SequenceNumberRange sequenceNumberRange;
     private final Object recordsMonitor = new Object();
     private List<KinesisRecord> records = new ArrayList<>();
+    private long prunedRecordCount;
     private boolean closed = false;
     private Instant creationTimestamp = Instant.now();
 
@@ -66,6 +67,45 @@ public class KinesisShard {
     public int recordCount() {
         synchronized (recordsMonitor) {
             return records.size();
+        }
+    }
+
+    /**
+     * Drops every record whose {@link KinesisRecord#getApproximateArrivalTimestamp()} is strictly
+     * before {@code cutoff}, freeing the underlying storage rather than merely hiding them from
+     * scans (bounded memory, per the Kinesis retention-period contract). Records are always
+     * appended in arrival order, so expired records are a contiguous prefix of the log and this is
+     * a single prefix trim, not a general filter. A record with a {@code null} timestamp is never
+     * pruned (defensive: it should not occur in practice, but pruning it would be unverifiable).
+     */
+    public void pruneRecordsBefore(Instant cutoff) {
+        synchronized (recordsMonitor) {
+            int firstRetained = 0;
+            while (firstRetained < records.size()) {
+                Instant arrival = records.get(firstRetained).getApproximateArrivalTimestamp();
+                if (arrival == null || !arrival.isBefore(cutoff)) {
+                    break;
+                }
+                firstRetained++;
+            }
+            if (firstRetained > 0) {
+                records = new ArrayList<>(records.subList(firstRetained, records.size()));
+                prunedRecordCount += firstRetained;
+            }
+        }
+    }
+
+    /** Records pruned from the front of the log since the shard was created. */
+    public long getPrunedRecordCount() {
+        synchronized (recordsMonitor) {
+            return prunedRecordCount;
+        }
+    }
+
+    /** Jackson rehydration only. */
+    public void setPrunedRecordCount(long prunedRecordCount) {
+        synchronized (recordsMonitor) {
+            this.prunedRecordCount = prunedRecordCount;
         }
     }
 

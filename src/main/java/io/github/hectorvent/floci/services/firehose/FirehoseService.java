@@ -85,8 +85,10 @@ public class FirehoseService implements ResourceProvider {
     // DeliveryStartTimestamp and re-deliver the source stream's whole retained history to
     // S3. A Kinesis shard iterator is a self-describing token
     // (streamName|shardId|type|sequenceNumber|index|timestamp, base64) with no
-    // JVM-lifetime component, and KinesisService never trims a shard's record list, so a
-    // checkpoint written before a restart still resolves to the same position after one.
+    // JVM-lifetime component, and KinesisService resolves it by sequence number, so a
+    // checkpoint written before a restart still resolves to the same position after one,
+    // even once retention has pruned older records. If the checkpointed record itself has
+    // expired, reading resumes at the oldest retained record.
     //
     // This store holds only COMMITTED positions: a shard is advanced here once the
     // records read up to that point have actually landed in S3. See

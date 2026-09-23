@@ -781,6 +781,10 @@ class KinesisJsonHandlerTest {
     @Test
     void getRecordsSerializesApproximateArrivalTimestampAsPlainDecimal() throws Exception {
         createStream("test-stream");
+        // The fixed arrival timestamp set below predates "now" by more than the default 24h
+        // retention; extend retention to the AWS max so the record survives to be
+        // read back, without disturbing the exact literal this test asserts on.
+        service.increaseStreamRetentionPeriod("test-stream", 8760, REGION);
 
         ObjectNode putReq = MAPPER.createObjectNode();
         putReq.put("StreamName", "test-stream");
@@ -822,6 +826,9 @@ class KinesisJsonHandlerTest {
     @Test
     void getRecordsWholeSecondArrivalTimestampRemainsNumeric() throws Exception {
         createStream("test-stream");
+        // See getRecordsSerializesApproximateArrivalTimestampAsPlainDecimal: the fixed arrival
+        // timestamp set below predates "now" by more than the default 24h retention.
+        service.increaseStreamRetentionPeriod("test-stream", 8760, REGION);
 
         ObjectNode putReq = MAPPER.createObjectNode();
         putReq.put("StreamName", "test-stream");

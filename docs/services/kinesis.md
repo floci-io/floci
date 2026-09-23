@@ -69,6 +69,10 @@ aws kinesis describe-stream --stream-arn arn:aws:kinesis:us-east-1:000000000000:
 
 A `LATEST` iterator is positioned at the shard tip at the moment the iterator is created, matching AWS: records written after the iterator was obtained are returned, records written before are not. This supports the standard tailing pattern: obtain a `LATEST` iterator, trigger the action that produces the record, then poll `GetRecords` following `NextShardIterator`.
 
+## Record Retention
+
+A stream's retention period (default 24 hours, `IncreaseStreamRetentionPeriod`/`DecreaseStreamRetentionPeriod` up to 8760 hours) is enforced: a record older than the current retention period is not returned by `GetRecords` or the `GET /_aws/kinesis/records` inspection endpoint, and is actually removed from memory rather than merely hidden. Expiry is checked lazily on each stream's next `PutRecord`/`PutRecords` or read after a record ages out; there is no scheduled sweep. After `DecreaseStreamRetentionPeriod`, records outside the new window are inaccessible from the next put or read, in line with AWS making them inaccessible almost immediately. Shard iterators (including `NextShardIterator` continuation tokens and `LATEST`) resolve by sequence number, so they keep working correctly across pruning even if the exact record they were positioned at has since expired.
+
 ## Record Routing
 
 `PutRecord` and `PutRecords` honor `ExplicitHashKey` when it is provided. The value must be a decimal integer in the Kinesis hash-key space, and records are written to the open shard whose `HashKeyRange` contains that value. Without `ExplicitHashKey`, Floci keeps using the partition key to choose a shard.

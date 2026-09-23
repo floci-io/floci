@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.kinesis.model.KinesisConsumer;
 import io.github.hectorvent.floci.services.kinesis.model.KinesisRecord;
 import io.github.hectorvent.floci.services.kinesis.model.KinesisShard;
 import io.github.hectorvent.floci.services.kinesis.model.KinesisStream;
+import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.RepeatedTest;
 import org.junit.jupiter.api.Test;
@@ -17,8 +18,11 @@ import org.junit.jupiter.params.provider.MethodSource;
 
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
@@ -210,10 +214,12 @@ class KinesisServiceTest {
         kinesisService.putRecord("my-stream", "b".getBytes(StandardCharsets.UTF_8), "pk", REGION);
         kinesisService.putRecord("my-stream", "c".getBytes(StandardCharsets.UTF_8), "pk", REGION);
 
-        // Overwrite timestamps so we can assert a deterministic delta.
+        // Overwrite timestamps so we can assert a deterministic delta. Relative to "now" (not a
+        // fixed calendar instant) so the records stay within the default 24-hour retention window
+        // and retention pruning does not remove them before the assertions run.
         KinesisShard shard = kinesisService.describeStream("my-stream", REGION).getShards().getFirst();
         List<KinesisRecord> records = shard.getRecords();
-        Instant base = Instant.parse("2026-01-01T00:00:00Z");
+        Instant base = Instant.now().minusSeconds(30);
         records.get(0).setApproximateArrivalTimestamp(base);
         records.get(1).setApproximateArrivalTimestamp(base.plusMillis(1500));
         records.get(2).setApproximateArrivalTimestamp(base.plusMillis(4000));
@@ -1278,5 +1284,188 @@ class KinesisServiceTest {
                 "a recreated stream must start in the default stream mode");
         assertEquals(24, recreated.getRetentionPeriodHours(),
                 "a recreated stream must start at the default retention period");
+    }
+
+    // ─── Retention: expired records are pruned ──────────────────────────
+
+    @Test
+    void trimHorizonExcludesRecordsOlderThanRetentionPeriod() {
+        MutableClock clock = new MutableClock();
+        KinesisService service = new KinesisService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver("us-east-1", "000000000000"), clock);
+        service.createStream("orders", 1, REGION); // default retention: 24 hours
+
+        service.putRecord("orders", "expired".getBytes(StandardCharsets.UTF_8), "pk", REGION);
+        clock.advance(Duration.ofHours(25)); // older than the 24-hour default retention
+        service.putRecord("orders", "fresh".getBytes(StandardCharsets.UTF_8), "pk", REGION);
+
+        String shardId = service.describeStream("orders", REGION).getShards().getFirst().getShardId();
+        String iterator = service.getShardIterator("orders", shardId, "TRIM_HORIZON", null, REGION);
+        @SuppressWarnings("unchecked")
+        List<KinesisRecord> records = (List<KinesisRecord>) service.getRecords(iterator, 10, REGION).get("Records");
+
+        List<String> data = records.stream()
+                .map(r -> new String(r.getData(), StandardCharsets.UTF_8))
+                .toList();
+        assertEquals(List.of("fresh"), data,
+                "a record older than the retention period must not be returned from TRIM_HORIZON");
+    }
+
+    @Test
+    void decreaseStreamRetentionPeriodExcludesNowOutOfWindowRecords() {
+        MutableClock clock = new MutableClock();
+        KinesisService service = new KinesisService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver("us-east-1", "000000000000"), clock);
+        service.createStream("orders", 1, REGION);
+        service.increaseStreamRetentionPeriod("orders", 48, REGION);
+
+        service.putRecord("orders", "old".getBytes(StandardCharsets.UTF_8), "pk", REGION);
+        clock.advance(Duration.ofHours(30)); // within the 48h retention, but would exceed 24h
+        service.putRecord("orders", "recent".getBytes(StandardCharsets.UTF_8), "pk", REGION);
+
+        // Decreasing retention to 24h must make the 30-hour-old record inaccessible "almost
+        // immediately" (per the AWS retention-period contract), well before it would otherwise
+        // have aged out under the wider 48h window.
+        service.decreaseStreamRetentionPeriod("orders", 24, REGION);
+
+        String shardId = service.describeStream("orders", REGION).getShards().getFirst().getShardId();
+        String iterator = service.getShardIterator("orders", shardId, "TRIM_HORIZON", null, REGION);
+        @SuppressWarnings("unchecked")
+        List<KinesisRecord> records = (List<KinesisRecord>) service.getRecords(iterator, 10, REGION).get("Records");
+
+        List<String> data = records.stream()
+                .map(r -> new String(r.getData(), StandardCharsets.UTF_8))
+                .toList();
+        assertEquals(List.of("recent"), data,
+                "decreasing retention must exclude records older than the new period");
+    }
+
+    @Test
+    void putRecordPrunesExpiredRecordsBoundingShardMemory() {
+        MutableClock clock = new MutableClock();
+        StorageBackend<String, KinesisStream> store = new InMemoryStorage<>();
+        KinesisService service = new KinesisService(store, new InMemoryStorage<>(),
+                new RegionResolver("us-east-1", "000000000000"), clock);
+        service.createStream("orders", 1, REGION); // default retention: 24 hours
+
+        service.putRecord("orders", "expired".getBytes(StandardCharsets.UTF_8), "pk", REGION);
+        clock.advance(Duration.ofHours(25)); // older than the 24-hour default retention
+        // A producer-only workload (no GetRecords calls at all) must still prune: memory must not
+        // grow without bound just because nobody is reading.
+        service.putRecord("orders", "fresh".getBytes(StandardCharsets.UTF_8), "pk", REGION);
+
+        KinesisShard shard = store.get(REGION + "::orders").orElseThrow().getShards().getFirst();
+        assertEquals(1, shard.getRecords().size(),
+                "an expired record must be removed (not merely hidden) on put, so the shard's "
+                        + "memory stays bounded even without any reads");
+    }
+
+    @Test
+    void continuationIteratorResumesCorrectlyAfterEarlierRecordsArePruned() {
+        MutableClock clock = new MutableClock();
+        KinesisService service = new KinesisService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver("us-east-1", "000000000000"), clock);
+        service.createStream("orders", 1, REGION);
+        service.increaseStreamRetentionPeriod("orders", 72, REGION);
+
+        service.putRecord("orders", "r0".getBytes(StandardCharsets.UTF_8), "pk", REGION); // age will be 52h
+        clock.advance(Duration.ofHours(50));
+        service.putRecord("orders", "r1".getBytes(StandardCharsets.UTF_8), "pk", REGION); // age will be 2h
+        clock.advance(Duration.ofHours(1));
+        service.putRecord("orders", "r2".getBytes(StandardCharsets.UTF_8), "pk", REGION); // age will be 1h
+        clock.advance(Duration.ofHours(1));
+        service.putRecord("orders", "r3".getBytes(StandardCharsets.UTF_8), "pk", REGION); // age will be 0h
+
+        String shardId = service.describeStream("orders", REGION).getShards().getFirst().getShardId();
+        String iterator = service.getShardIterator("orders", shardId, "TRIM_HORIZON", null, REGION);
+
+        // Consume only r0, capturing the continuation iterator while all four records are still
+        // present (so it necessarily carries a resume position pointing just past r0).
+        Map<String, Object> firstPage = service.getRecords(iterator, 1, REGION);
+        @SuppressWarnings("unchecked")
+        List<KinesisRecord> firstRecords = (List<KinesisRecord>) firstPage.get("Records");
+        assertEquals(List.of("r0"), recordData(firstRecords));
+        String continuation = (String) firstPage.get("NextShardIterator");
+
+        // r0 (age 52h) ages out of a decreased 24h retention window; r1 (age 2h) stays retained.
+        // This prunes r0 out of the shard's record list, shifting every later record's array index
+        // down by one.
+        service.decreaseStreamRetentionPeriod("orders", 24, REGION);
+
+        Map<String, Object> secondPage = service.getRecords(continuation, 10, REGION);
+        @SuppressWarnings("unchecked")
+        List<KinesisRecord> secondRecords = (List<KinesisRecord>) secondPage.get("Records");
+        assertEquals(List.of("r1", "r2", "r3"), recordData(secondRecords),
+                "a continuation iterator must resume by sequence number, not a raw array index "
+                        + "that pruning has shifted, or it will skip or re-skip retained records");
+    }
+
+    @Test
+    void indexContinuationIteratorFromAnEarlierVersionResumesAfterPruning() {
+        MutableClock clock = new MutableClock();
+        KinesisService service = new KinesisService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver("us-east-1", "000000000000"), clock);
+        service.createStream("orders", 1, REGION);
+        service.putRecord("orders", "r0".getBytes(StandardCharsets.UTF_8), "pk", REGION);
+        service.putRecord("orders", "r1".getBytes(StandardCharsets.UTF_8), "pk", REGION);
+        clock.advance(Duration.ofHours(23));
+        service.putRecord("orders", "r2".getBytes(StandardCharsets.UTF_8), "pk", REGION);
+        service.putRecord("orders", "r3".getBytes(StandardCharsets.UTF_8), "pk", REGION);
+        String shardId = service.describeStream("orders", REGION).getShards().getFirst().getShardId();
+        // Earlier versions encoded a continuation as TRIM_HORIZON plus the index of the next record;
+        // Firehose persists such iterators as checkpoints. This one was issued after reading r0..r2.
+        String legacyIterator = Base64.getEncoder().encodeToString(
+                ("orders|" + shardId + "|TRIM_HORIZON||3|").getBytes(StandardCharsets.UTF_8));
+
+        clock.advance(Duration.ofHours(2)); // r0 and r1 are now past the 24-hour retention
+
+        @SuppressWarnings("unchecked")
+        List<KinesisRecord> records = (List<KinesisRecord>) service.getRecords(legacyIterator, 10, REGION).get("Records");
+        assertEquals(List.of("r3"), recordData(records));
+    }
+
+    @Test
+    void peekRecordsExcludesRecordsOlderThanRetentionPeriod() {
+        MutableClock clock = new MutableClock();
+        KinesisService service = new KinesisService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver("us-east-1", "000000000000"), clock);
+        service.createStream("orders", 1, REGION); // default retention: 24 hours
+
+        service.putRecord("orders", "old".getBytes(StandardCharsets.UTF_8), "pk", REGION);
+        // No further put after this: only the read path below can prune, isolating peekRecords'
+        // own responsibility instead of piggybacking on the write-path pruning a later put would
+        // trigger on the same shard.
+        clock.advance(Duration.ofHours(25)); // older than the 24-hour default retention
+
+        List<KinesisService.PeekedRecord> peeked = service.peekRecords("orders", null, 10, REGION);
+
+        assertEquals(List.of(), peeked,
+                "peekRecords must not surface a record older than the retention period");
+    }
+
+    @Test
+    void getRecordsForAccountExcludesRecordsOlderThanRetentionPeriod() {
+        MutableClock clock = new MutableClock();
+        KinesisService service = new KinesisService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver("us-east-1", "000000000000"), clock);
+        service.createStream("orders", 1, REGION); // default retention: 24 hours
+        String shardId = service.describeStream("orders", REGION).getShards().getFirst().getShardId();
+        String iterator = service.getShardIteratorForAccount(null, "orders", shardId, "TRIM_HORIZON", null, REGION);
+
+        service.putRecord("orders", "old".getBytes(StandardCharsets.UTF_8), "pk", REGION);
+        // No further put after this: only getRecordsForAccount's own read-path pruning is under
+        // test here, not a later put's write-path pruning on the same shard.
+        clock.advance(Duration.ofHours(25)); // older than the 24-hour default retention
+
+        @SuppressWarnings("unchecked")
+        List<KinesisRecord> records =
+                (List<KinesisRecord>) service.getRecordsForAccount(null, iterator, 10, REGION).get("Records");
+
+        assertEquals(List.of(), records,
+                "getRecordsForAccount must not return a record older than the retention period");
+    }
+
+    private static List<String> recordData(List<KinesisRecord> records) {
+        return records.stream().map(r -> new String(r.getData(), StandardCharsets.UTF_8)).toList();
     }
 }
