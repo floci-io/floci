@@ -388,9 +388,11 @@ public class SesService {
         // GetMessageInsights reports it for a raw send as it does for a simple one. The parser
         // yields "" for a missing header, and an absent subject must stay absent.
         email.setSubject(firstNonBlank(headers.subject()));
-        email.setEmailTags(effectiveTags);
+        // A rejected message publishes only the tags that came with the request, so the stored
+        // record keeps the same set: tags read off its headers must not resurface through insights.
+        email.setEmailTags(rejected ? requestTags(emailTags) : effectiveTags);
         email.setInsights(SesMessageInsights.build(effectiveDestinations,
-                SesRecipientEvents.classify(effectiveDestinations, suppressedReasons, false),
+                SesRecipientEvents.classify(effectiveDestinations, suppressedReasons, rejected),
                 email.getSentAt()));
         if (rejected) {
             email.discardContent(SesRecipientEvents.CONTENT_REJECT_REASON);

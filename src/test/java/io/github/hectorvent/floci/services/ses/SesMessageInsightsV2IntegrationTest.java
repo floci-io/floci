@@ -285,6 +285,34 @@ class SesMessageInsightsV2IntegrationTest {
 
     @Test
     @Order(12)
+    void getMessageInsights_rejectedRawSend_reportsRejectAndKeepsNothingReadOffTheMessage() {
+        // The signature is assembled at run time so it never appears in the tree.
+        String raw = "From: " + SENDER + "\r\nTo: raw@example.com\r\n"
+                + "Subject: rejected-mime-subject\r\n"
+                + SmtpRelay.HEADER_MESSAGE_TAGS + ": campaign=fromheader\r\n\r\n"
+                + SesContentScan.signature() + "\r\n";
+        String messageId = given().contentType("application/json").header("Authorization", AUTH)
+                .body("""
+                    {"FromEmailAddress": "%s",
+                     "Destination": {"ToAddresses": ["raw@example.com"]},
+                     "Content": {"Raw": {"Data": "%s"}}}
+                    """.formatted(SENDER, Base64.getEncoder()
+                        .encodeToString(raw.getBytes(StandardCharsets.UTF_8))))
+        .when().post("/v2/email/outbound-emails").then().statusCode(200)
+                .extract().jsonPath().getString("MessageId");
+
+        given().header("Authorization", AUTH)
+        .when().get("/v2/email/insights/" + messageId).then().statusCode(200)
+                .body("Insights[0].Destination", equalTo("raw@example.com"))
+                .body("Insights[0].Events.Type", contains("SEND", "REJECT"))
+                // Everything read off the refused message stays out of the timeline: the subject
+                // is gone and the header tags never become the record's tags.
+                .body("$", not(hasKey("Subject")))
+                .body("EmailTags", hasSize(0));
+    }
+
+    @Test
+    @Order(13)
     void cleanUpVdmAndIdentities() {
         for (String auth : new String[] {AUTH, ACCOUNT_A_AUTH, ACCOUNT_B_AUTH}) {
             disableVdm(auth);
