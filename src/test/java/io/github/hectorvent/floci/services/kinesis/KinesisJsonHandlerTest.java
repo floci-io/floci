@@ -15,7 +15,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
+import java.time.Clock;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
@@ -51,6 +53,18 @@ class KinesisJsonHandlerTest {
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new RegionResolver(REGION, ACCOUNT)
+        );
+        handler = new KinesisJsonHandler(service, MAPPER, 300_000);
+    }
+
+    // Retention is measured against the service clock, so a test that plants a fixed arrival
+    // timestamp pins the clock just after it instead of relying on the wall clock.
+    private void useClockFixedAt(Instant now) {
+        service = new KinesisService(
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new RegionResolver(REGION, ACCOUNT),
+                Clock.fixed(now, ZoneOffset.UTC)
         );
         handler = new KinesisJsonHandler(service, MAPPER, 300_000);
     }
@@ -780,11 +794,8 @@ class KinesisJsonHandlerTest {
 
     @Test
     void getRecordsSerializesApproximateArrivalTimestampAsPlainDecimal() throws Exception {
+        useClockFixedAt(Instant.ofEpochMilli(1_786_959_660_000L));
         createStream("test-stream");
-        // The fixed arrival timestamp set below predates "now" by more than the default 24h
-        // retention; extend retention to the AWS max so the record survives to be
-        // read back, without disturbing the exact literal this test asserts on.
-        service.increaseStreamRetentionPeriod("test-stream", 8760, REGION);
 
         ObjectNode putReq = MAPPER.createObjectNode();
         putReq.put("StreamName", "test-stream");
@@ -825,10 +836,8 @@ class KinesisJsonHandlerTest {
 
     @Test
     void getRecordsWholeSecondArrivalTimestampRemainsNumeric() throws Exception {
+        useClockFixedAt(Instant.ofEpochMilli(1_786_959_660_000L));
         createStream("test-stream");
-        // See getRecordsSerializesApproximateArrivalTimestampAsPlainDecimal: the fixed arrival
-        // timestamp set below predates "now" by more than the default 24h retention.
-        service.increaseStreamRetentionPeriod("test-stream", 8760, REGION);
 
         ObjectNode putReq = MAPPER.createObjectNode();
         putReq.put("StreamName", "test-stream");

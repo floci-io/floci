@@ -21,6 +21,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
@@ -209,24 +210,24 @@ class KinesisServiceTest {
 
     @Test
     void millisBehindLatestIsTimeDeltaWhenBatchLimitHit() {
-        kinesisService.createStream("my-stream", 1, REGION);
-        kinesisService.putRecord("my-stream", "a".getBytes(StandardCharsets.UTF_8), "pk", REGION);
-        kinesisService.putRecord("my-stream", "b".getBytes(StandardCharsets.UTF_8), "pk", REGION);
-        kinesisService.putRecord("my-stream", "c".getBytes(StandardCharsets.UTF_8), "pk", REGION);
+        Instant base = Instant.parse("2026-01-01T00:00:00Z");
+        KinesisService service = new KinesisService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver(REGION, "000000000000"), Clock.fixed(base.plusSeconds(5), ZoneOffset.UTC));
+        service.createStream("my-stream", 1, REGION);
+        service.putRecord("my-stream", "a".getBytes(StandardCharsets.UTF_8), "pk", REGION);
+        service.putRecord("my-stream", "b".getBytes(StandardCharsets.UTF_8), "pk", REGION);
+        service.putRecord("my-stream", "c".getBytes(StandardCharsets.UTF_8), "pk", REGION);
 
-        // Overwrite timestamps so we can assert a deterministic delta. Relative to "now" (not a
-        // fixed calendar instant) so the records stay within the default 24-hour retention window
-        // and retention pruning does not remove them before the assertions run.
-        KinesisShard shard = kinesisService.describeStream("my-stream", REGION).getShards().getFirst();
+        // Overwrite timestamps so we can assert a deterministic delta.
+        KinesisShard shard = service.describeStream("my-stream", REGION).getShards().getFirst();
         List<KinesisRecord> records = shard.getRecords();
-        Instant base = Instant.now().minusSeconds(30);
         records.get(0).setApproximateArrivalTimestamp(base);
         records.get(1).setApproximateArrivalTimestamp(base.plusMillis(1500));
         records.get(2).setApproximateArrivalTimestamp(base.plusMillis(4000));
 
-        String iterator = kinesisService.getShardIterator("my-stream", shard.getShardId(), "TRIM_HORIZON", null, REGION);
+        String iterator = service.getShardIterator("my-stream", shard.getShardId(), "TRIM_HORIZON", null, REGION);
 
-        Map<String, Object> result = kinesisService.getRecords(iterator, 2, REGION);
+        Map<String, Object> result = service.getRecords(iterator, 2, REGION);
 
         var returned = (List<?>) result.get("Records");
         assertEquals(2, returned.size());
