@@ -317,6 +317,19 @@ hand-written and preserved across regeneration, keyed by action name.
 
 Registering a new service's action table is one entry in `tools/docs/services.yaml`.
 
+### Partition literals
+
+Floci serves every AWS partition, so `src/main/java` must not bake the commercial one in.
+`make partition-check` (run in CI) inventories `arn:aws:` prefixes, `amazonaws.com` hosts,
+Route 53 hosted-zone ids and hand-rolled partition regexes per file against
+`tools/partition/baseline.tsv`: a literal in a new file fails, growth fails, and a drop
+fails until you run `make partition-baseline` and commit the smaller baseline.
+`make partition-audit` prints what is left per package; `make partition-test` runs the
+tooling's unit tests. Mint ARNs through `AwsArnUtils` and derive hosts from the region's
+DNS suffix; a literal that really is partition-invariant goes in
+`tools/partition/allowlist.yaml` with a reason, or ends its line with
+`// partition-literal: <reason>`.
+
 ## Reporting Security Issues
 
 Please do **not** open public issues for security vulnerabilities. Report them privately by emailing the maintainer or using [GitHub private vulnerability reporting](https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing/privately-reporting-a-security-vulnerability).

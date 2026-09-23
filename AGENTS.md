@@ -111,6 +111,25 @@ Floci must implement real AWS wire protocols.
 
 ---
 
+### Partition literals
+
+Floci serves every AWS partition, not only the commercial one, so a literal that bakes
+`aws` into a code path is a bug in a GovCloud, China, ISO or EUSC deployment even when it
+prints correctly in `us-east-1`. `make partition-check` (CI: Partition Literals) inventories
+`src/main/java` for `arn:aws:` prefixes, `amazonaws.com` hosts, Route 53 hosted-zone ids
+and hand-rolled `arn:aws[a-z-]*:` regexes against `tools/partition/baseline.tsv`, per file.
+A literal in a new file fails, growth in an existing file fails, and a drop fails until you
+run `make partition-baseline` and commit the smaller baseline.
+
+- Mint ARNs through `AwsArnUtils.Arn.of(...)` / `RegionResolver.buildArn(...)`, recognise
+  them with `AwsArnUtils.isArn` / `PARTITION_REGEX`, and derive hosts from the region's
+  DNS suffix (`AwsRegions.dnsSuffixFor`).
+- A literal that is genuinely partition-invariant (an XML namespace URI, an S3 canned-ACL
+  grantee URI) goes in `tools/partition/allowlist.yaml` with a reason, or ends its line
+  with `// partition-literal: <reason>`. Both are printed by `make partition-audit`.
+- Tests are not scanned; only assert a partition-dependent value when the test is about
+  partitions.
+
 ## XML / JSON Rules
 
 - Use `XmlBuilder` for XML responses

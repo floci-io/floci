@@ -1,0 +1,58 @@
+name: Partition Literals
+
+# Keeps the commercial-partition assumption from growing back while floci moves to
+# serving every AWS partition. tools/partition/partition_literals.py inventories the
+# hardcoded arn:aws: prefixes, amazonaws.com hosts, hosted-zone ids and hand-rolled
+# partition regexes in src/main/java against the checked-in per-file baseline: a
+# literal in a new file fails, growth in an existing file fails, and a drop fails until
+# the baseline is regenerated so the remaining count stays exact. Python-only, so it is
+# fast and independent of the Java build job.
+
+on:
+  pull_request:
+    paths:
+      - 'src/main/java/**'
+      - 'tools/partition/**'
+      - 'Makefile'
+      - '.github/workflows/partition-literals.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/main/java/**'
+      - 'tools/partition/**'
+      - 'Makefile'
+      - '.github/workflows/partition-literals.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  partition-literals:
+    name: Partition literals match baseline
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.x"
+
+      - name: Install tooling deps
+        run: pip install -r tools/partition/requirements.txt
+
+      - name: Run partition tooling tests
+        run: make partition-test
+
+      - name: Check partition literals against the baseline
+        run: make partition-check
+
+      - name: Print the remaining-literal audit
+        if: always()
+        run: make partition-audit

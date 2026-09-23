@@ -1,0 +1,22 @@
+# Literals partition_literals.py must not count. Every entry needs a reason a reviewer can
+# check; the audit prints how many occurrences each entry excuses.
+#
+# files:    the whole file is exempt (path relative to the repo root)
+# patterns: a Python regex matched against the full source line of the literal
+
+files:
+  - path: src/main/java/io/github/hectorvent/floci/core/common/AwsNamespaces.java
+    reason: XML namespace URIs (http://s3.amazonaws.com/doc/2006-03-01/ and the Query
+      namespaces) are identifiers, not hosts, and are byte-identical in every partition;
+      minio and the China/GovCloud SDKs emit the same strings.
+
+patterns:
+  - regex: amazonaws\.com/doc/\d{4}-\d{2}-\d{2}/
+    reason: an XML namespace URI outside AwsNamespaces (CloudFormation keeps its own);
+      the same partition-invariant identifier class as that file.
+  - regex: acs\.amazonaws\.com/groups/
+    reason: S3 canned-ACL grantee URIs (AllUsers, AuthenticatedUsers, LogDelivery) are
+      partition-invariant identifiers in the S3 model.
+  - regex: \bPARTITION_REGEX\b
+    reason: the line builds its regex from AwsArnUtils.PARTITION_REGEX, which is the
+      sanctioned way to recognise an ARN in any partition.
