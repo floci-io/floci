@@ -1351,6 +1351,23 @@ class DynamoDbJsonHandlerTest {
     }
 
     @Test
+    void putItemNamesTheSetTypeWhenABinarySetHasDuplicates() {
+        createUsersTable("eu-west-1");
+        ObjectNode request = mapper.createObjectNode();
+        request.put("TableName", "Users");
+        ObjectNode item = item("userId", "u1");
+        ObjectNode binarySet = mapper.createObjectNode();
+        binarySet.putArray("BS").add("").add("");
+        item.set("bad", binarySet);
+        request.set("Item", item);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("PutItem", request, "eu-west-1"));
+        assertEquals("One or more parameter values were invalid: "
+                + "Input collection [, ]of type BS contains duplicates.", ex.getMessage());
+    }
+
+    @Test
     void putItemRejectsAConditionExpressionOver4096Bytes() {
         createUsersTable("eu-west-1");
         var request = mapper.createObjectNode();

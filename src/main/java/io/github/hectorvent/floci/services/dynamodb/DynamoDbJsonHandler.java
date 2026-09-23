@@ -2474,8 +2474,10 @@ public class DynamoDbJsonHandler {
                     "One or more parameter values were invalid: Binary sets should not be empty", 400);
             Set<String> seen = new HashSet<>();
             for (JsonNode e : bs) {
+                // A binary set names its type, and AWS leaves out the space before "of".
                 if (!seen.add(e.asText())) throw new AwsException("ValidationException",
-                        "One or more parameter values were invalid: Input collection " + formatSetForError(bs) + " contains duplicates.", 400);
+                        "One or more parameter values were invalid: Input collection " + formatSetForError(bs)
+                        + "of type BS contains duplicates.", 400);
             }
         } else if (attr.has("M")) {
             attr.get("M").fields().forEachRemaining(e -> checkAttrSets(e.getValue()));
