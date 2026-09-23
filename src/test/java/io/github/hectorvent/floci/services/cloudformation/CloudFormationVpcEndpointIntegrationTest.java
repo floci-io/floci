@@ -5,14 +5,11 @@ import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
-import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
-import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 
 /**
  * End-to-end check that CloudFormation provisions AWS::EC2::VPCEndpoint for
@@ -87,7 +84,7 @@ class CloudFormationVpcEndpointIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
-        awaitStackDeleted(stackName);
+        CfnStackWaits.awaitStackDeleted(stackName);
 
         String endpointsAfterDelete = given()
             .formParam("Action", "DescribeVpcEndpoints")
@@ -172,36 +169,5 @@ class CloudFormationVpcEndpointIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
-    }
-
-    /**
-     * DeleteStack answers before the stack is gone. The deletion runs on an executor. This waits
-     * until DescribeStacks no longer knows the stack, and fails on DELETE_FAILED or after ten seconds.
-     */
-    private static void awaitStackDeleted(String stackName) {
-        long deadline = System.currentTimeMillis() + 10_000;
-        String body = "";
-        while (System.currentTimeMillis() < deadline) {
-            body = given()
-                .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", CFN_AUTH)
-                .formParam("Action", "DescribeStacks")
-                .formParam("StackName", stackName)
-            .when()
-                .post("/")
-            .then()
-                .extract().body().asString();
-            assertThat(body, not(containsString("<StackStatus>DELETE_FAILED</StackStatus>")));
-            if (body.contains("Stack with id " + stackName + " does not exist")) {
-                return;
-            }
-            try {
-                Thread.sleep(50);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new AssertionError("Interrupted while waiting for stack " + stackName + " to be deleted", e);
-            }
-        }
-        fail("Stack " + stackName + " was not deleted within ten seconds: " + body);
     }
 }
