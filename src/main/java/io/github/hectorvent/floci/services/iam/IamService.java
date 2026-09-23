@@ -882,7 +882,12 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         synchronized (resourceNameLock) {
             String normalizedPath = normalizePath(path);
             String arn = iamArn("policy", normalizedPath, policyName);
-            if (containsNameIgnoreCase(policies, IamPolicy::getPolicyName, policyName)) {
+            boolean nameTaken = resourcesInCurrentAccount(policies)
+                    .filter(existing -> existing.getArn() == null
+                            || !existing.getArn().startsWith(AwsManagedPolicies.ARN_PREFIX))
+                    .map(IamPolicy::getPolicyName)
+                    .anyMatch(existingName -> existingName != null && existingName.equalsIgnoreCase(policyName));
+            if (nameTaken) {
                 throw new AwsException("EntityAlreadyExists",
                         "Policy " + arn + " already exists.", 409);
             }

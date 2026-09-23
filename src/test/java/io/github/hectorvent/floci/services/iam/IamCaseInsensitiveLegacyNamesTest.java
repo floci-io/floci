@@ -17,6 +17,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -92,6 +93,23 @@ class IamCaseInsensitiveLegacyNamesTest {
         assertEquals("RenameSource", source.getUserName());
         assertEquals("/source/", source.getPath());
         assertEquals(originalId, legacyId(ResourceType.USER));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void awsManagedPolicyMirrorsDoNotReserveCustomerPolicyNames(boolean accountPrefixed) {
+        String managedArn = AwsManagedPolicies.ARN_PREFIX + "/AdministratorAccess";
+        String mirrorKey = accountPrefixed ? DEFAULT_ACCOUNT + "/" + managedArn : managedArn;
+        IamPolicy mirror = new IamPolicy("ANPALEGACYAWS", "AdministratorAccess", "/", managedArn,
+                null, "{}");
+        policies.put(mirrorKey, mirror);
+        IamService service = serviceFor(DEFAULT_ACCOUNT);
+
+        IamPolicy customerPolicy = service.createPolicy("AdministratorAccess", "/customer/", null, "{}", null);
+
+        assertEquals("arn:aws:iam::000000000000:policy/customer/AdministratorAccess", customerPolicy.getArn());
+        assertEquals("ANPALEGACYAWS", policies.get(mirrorKey).orElseThrow().getPolicyId());
+        assertAlreadyExists(() -> service.createPolicy("administratoraccess", "/other/", null, "{}", null));
     }
 
     @Test
