@@ -251,8 +251,12 @@ and `TIMESTAMP`. CSV reads support `DELIMITER`, `QUOTE`, `ESCAPE`, `NULL AS`, an
 The query path supports `SELECT *`, explicit column projections, and simple `WHERE` predicates
 over one external table. Queries with joins, grouping, ordering, subqueries, parameters, or
 multiple statements are outside Phase 1 and are forwarded to PostgreSQL, which returns its own
-error. Rows are materialized into a connection-local temporary table before the rewritten query
-is sent to PostgreSQL. The temporary table is not visible to another connection.
+error. Rows are materialized into a connection-local temporary table (`CREATE TEMP TABLE`) before
+the rewritten query is sent to PostgreSQL. The temporary table is not visible to another
+connection. Under the Extended Query protocol, the temporary table is dropped eagerly once
+the cursor is exhausted or closed. Under the Simple Query protocol, the table remains
+session-scoped and is cleaned up when the connection terminates, avoiding race conditions
+with the streaming backend-to-client pump.
 
 `IAM_ROLE` is parsed and retained in the external schema metadata. Phase 1 does not yet assume
 the role or evaluate its IAM policy for Spectrum reads. S3 authorization therefore follows the

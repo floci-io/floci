@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.redshift.spectrum;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.net.Socket;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -10,6 +11,7 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class SpectrumInterceptorTest {
@@ -59,5 +61,14 @@ class SpectrumInterceptorTest {
         SpectrumInterceptor.Decision.Rewritten rewritten = assertInstanceOf(
                 SpectrumInterceptor.Decision.Rewritten.class, decision);
         assertEquals("SELECT * FROM \"spectrum_tmp_x\"", rewritten.sql());
+    }
+
+    @Test
+    void delegatesCleanupToMaterializer() {
+        Socket backend = mock(Socket.class);
+        SpectrumMaterializer.Materialization materialization = new SpectrumMaterializer.Materialization(
+                "spectrum_tmp_x", List.of());
+        interceptor.cleanup(backend, materialization);
+        verify(materializer).cleanup(backend, materialization);
     }
 }

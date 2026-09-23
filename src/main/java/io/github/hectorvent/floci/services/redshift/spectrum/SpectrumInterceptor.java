@@ -76,8 +76,15 @@ public final class SpectrumInterceptor {
         }
     }
 
-    /** Drops the temp table a {@link Decision.Rewritten} materialized, once the client has finished
-     * reading its rows (or failed while doing so). Every {@link Decision.Rewritten} must be cleaned up. */
+    /**
+     * Drops the temp table a {@link Decision.Rewritten} materialized, once the client has finished
+     * reading its rows (or failed while doing so).
+     * <p>
+     * This eager cleanup is used by execution paths that manage the query round-trip explicitly, such
+     * as the Extended Query path in {@code ExtendedSpectrumExchange}. Under the Simple Query protocol,
+     * the temp table is session-scoped (via PostgreSQL {@code CREATE TEMP TABLE}) and cleaned up when
+     * the connection terminates, avoiding race conditions with the streaming backend-to-client pump.
+     */
     public void cleanup(Socket backend, SpectrumMaterializer.Materialization materialization) {
         materializer.cleanup(backend, materialization);
     }
@@ -101,6 +108,11 @@ public final class SpectrumInterceptor {
         record Forward() implements Decision {
         }
 
+        /**
+         * A Spectrum query rewritten into an executable SQL statement querying a temporary table.
+         * The materialized table is dropped eagerly via {@link SpectrumInterceptor#cleanup} on the
+         * Extended Query protocol, or released at session termination on the Simple Query protocol.
+         */
         record Rewritten(String sql, SpectrumMaterializer.Materialization materialization) implements Decision {
         }
     }
