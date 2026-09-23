@@ -2,8 +2,11 @@ package io.github.hectorvent.floci.services.dynamodb;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
+import io.github.hectorvent.floci.services.dynamodb.model.SearchSchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
+import io.github.hectorvent.floci.services.dynamodb.model.VectorIndex;
 
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -17,14 +20,27 @@ import java.util.Map;
  * stored view: one view write for an insert, an in-place update or a delete, two view
  * writes when the index key changes (delete plus insert), and nothing when the stored
  * view is unchanged or the item never touches the index.
+ *
+ * <p>A vector index is charged on the same delta, but reports bytes rather than units.
  */
 final class DynamoDbWriteCapacity {
 
+    /** The smallest figure VectorWriteRequestBytes reports for an entry a write changes. */
+    private static final double VECTOR_WRITE_FLOOR_BYTES = 1024;
+
+    /** What the index stores per vector component, whatever the written decimal text costs. */
+    private static final int VECTOR_COMPONENT_BYTES = 4;
+
     private DynamoDbWriteCapacity() {}
 
-    record Cost(double table, Map<String, Double> gsi, Map<String, Double> lsi) {
+    record Cost(double table, Map<String, Double> gsi, Map<String, Double> lsi,
+                Map<String, Double> vectorBytes) {
 
         private static final Cost ZERO = new Cost(0, Map.of(), Map.of());
+
+        Cost(double table, Map<String, Double> gsi, Map<String, Double> lsi) {
+            this(table, gsi, lsi, Map.of());
+        }
 
         static Cost zero() {
             return ZERO;
@@ -42,7 +58,9 @@ final class DynamoDbWriteCapacity {
             other.gsi().forEach((name, units) -> mergedGsi.merge(name, units, Double::sum));
             var mergedLsi = new LinkedHashMap<>(lsi);
             other.lsi().forEach((name, units) -> mergedLsi.merge(name, units, Double::sum));
-            return new Cost(table + other.table(), mergedGsi, mergedLsi);
+            LinkedHashMap<String, Double> mergedVector = new LinkedHashMap<>(vectorBytes);
+            other.vectorBytes().forEach((name, bytes) -> mergedVector.merge(name, bytes, Double::sum));
+            return new Cost(table + other.table(), mergedGsi, mergedLsi, mergedVector);
         }
     }
 
@@ -71,7 +89,81 @@ final class DynamoDbWriteCapacity {
                 }
             }
         }
-        return new Cost(tableUnits, gsiUnits, lsiUnits);
+        LinkedHashMap<String, Double> vectorBytes = new LinkedHashMap<>();
+        for (VectorIndex vectorIndex : table.getVectorIndexes()) {
+            double bytes = vectorEntryBytes(vectorIndex,
+                    vectorView(table, vectorIndex, oldItem),
+                    vectorView(table, vectorIndex, newItem));
+            if (bytes > 0) {
+                vectorBytes.put(vectorIndex.getIndexName(), bytes);
+            }
+        }
+        return new Cost(tableUnits, gsiUnits, lsiUnits, vectorBytes);
+    }
+
+    private static double vectorEntryBytes(VectorIndex index, JsonNode oldView, JsonNode newView) {
+        if (oldView == null) {
+            return newView == null ? 0 : entryBytes(index, newView);
+        }
+        if (newView == null) {
+            return entryBytes(index, oldView);
+        }
+        if (oldView.equals(newView)) {
+            return 0;
+        }
+        return Math.max(entryBytes(index, oldView), entryBytes(index, newView));
+    }
+
+    /**
+     * The stored entry's size: every projected attribute at its item size, with the vector
+     * itself costing four bytes per component instead of the decimal text the item carries.
+     */
+    private static double entryBytes(VectorIndex index, JsonNode view) {
+        long dimensions = index.getDimensions() != null
+                ? index.getDimensions()
+                : view.path(index.getVectorAttributeName()).path("L").size();
+        double bytes = DynamoDbItemSize.calculateItemSize(view)
+                - DynamoDbItemSize.attributeValueSize(view.get(index.getVectorAttributeName()))
+                + VECTOR_COMPONENT_BYTES * dimensions;
+        return Math.max(VECTOR_WRITE_FLOOR_BYTES, bytes);
+    }
+
+    /**
+     * What the vector index stores for the item, or null when the item is not in the index:
+     * it carries no vector attribute, or none for the search schema's HASH attribute. Both
+     * leave the item out silently rather than failing the write.
+     */
+    private static JsonNode vectorView(TableDefinition table, VectorIndex index, JsonNode item) {
+        if (item == null || !item.has(index.getVectorAttributeName())) {
+            return null;
+        }
+        for (SearchSchemaElement element : index.getSearchSchema()) {
+            if ("HASH".equals(element.getSearchSchemaElementType())
+                    && !item.has(element.getAttributeName())) {
+                return null;
+            }
+        }
+        String projectionType = index.getProjectionType();
+        if (projectionType == null || "ALL".equals(projectionType)) {
+            return item;
+        }
+        LinkedHashSet<String> keep = new LinkedHashSet<>();
+        keep.add(table.getPartitionKeyName());
+        if (table.getSortKeyName() != null) {
+            keep.add(table.getSortKeyName());
+        }
+        keep.add(index.getVectorAttributeName());
+        keep.addAll(index.getSearchSchemaAttributeNames());
+        if ("INCLUDE".equals(projectionType)) {
+            keep.addAll(index.getNonKeyAttributes());
+        }
+        ObjectNode view = JsonNodeFactory.instance.objectNode();
+        for (String name : keep) {
+            if (item.has(name)) {
+                view.set(name, item.get(name));
+            }
+        }
+        return view;
     }
 
     private static double indexUnits(TableDefinition table, List<KeySchemaElement> keySchema,

@@ -5,7 +5,9 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
+import io.github.hectorvent.floci.services.dynamodb.model.SearchSchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
+import io.github.hectorvent.floci.services.dynamodb.model.VectorIndex;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -185,5 +187,87 @@ class DynamoDbWriteCapacityTest {
                 """.formatted("x".repeat(2500))));
         var cost = DynamoDbWriteCapacity.forWrite(table, big, fullItem());
         assertEquals(3.0, cost.table(), "the larger of the two images rounds up per 1KB");
+    }
+
+    /**
+     * Two vector indexes on one attribute, differing only in projection. That pair is what
+     * separates the projection term of VectorWriteRequestBytes from every other term, and it
+     * mirrors the fixture the conformance suite measured against real DynamoDB.
+     */
+    private static TableDefinition vectorTable() {
+        TableDefinition vectorIndexed = new TableDefinition();
+        vectorIndexed.setKeySchema(List.of(new KeySchemaElement("pk", "HASH")));
+        vectorIndexed.setVectorIndexes(List.of(
+                new VectorIndex("vix", "embedding", List.of(), "ALL", List.of(), 3L, "COSINE"),
+                new VectorIndex("vkeys", "embedding", List.of(), "KEYS_ONLY", List.of(), 3L, "COSINE")));
+        return vectorIndexed;
+    }
+
+    private static ObjectNode vectorItem(String key) {
+        return item("""
+                {"pk": {"S": "%s"},
+                 "embedding": {"L": [{"N": "1"}, {"N": "0"}, {"N": "0"}]}}
+                """.formatted(key));
+    }
+
+    @Test
+    void vectorEntryBelowTheFloorReportsTheFloor() {
+        DynamoDbWriteCapacity.Cost cost =
+                DynamoDbWriteCapacity.forWrite(vectorTable(), null, vectorItem("f0"));
+        assertEquals(Map.of("vix", 1024.0, "vkeys", 1024.0), cost.vectorBytes());
+        assertEquals(1.0, cost.total(), "bytes processed are not capacity units");
+    }
+
+    @Test
+    void vectorFloorBindsPerEntryRatherThanPerWrite() {
+        ObjectNode blobbed = vectorItem("3a");
+        blobbed.set("blob", item("""
+                {"S": "%s"}
+                """.formatted("x".repeat(1500))));
+        DynamoDbWriteCapacity.Cost cost = DynamoDbWriteCapacity.forWrite(vectorTable(), null, blobbed);
+        // 4 for the key, 1504 for the blob, 9 for the vector's name, 4 per dimension.
+        assertEquals(1529.0, cost.vectorBytes().get("vix"));
+        assertEquals(1024.0, cost.vectorBytes().get("vkeys"), "KEYS_ONLY never holds the blob");
+    }
+
+    @Test
+    void identicalOverwriteChargesNoVectorWrite() {
+        DynamoDbWriteCapacity.Cost cost =
+                DynamoDbWriteCapacity.forWrite(vectorTable(), vectorItem("a"), vectorItem("a"));
+        assertTrue(cost.vectorBytes().isEmpty(), "replication is delta-based");
+    }
+
+    @Test
+    void vectorIndexIsChargedOnlyWhenItProjectsTheChange() {
+        ObjectNode before = vectorItem("a");
+        before.set("note", item("""
+                {"S": "before"}
+                """));
+        ObjectNode after = vectorItem("a");
+        after.set("note", item("""
+                {"S": "after!"}
+                """));
+        DynamoDbWriteCapacity.Cost cost = DynamoDbWriteCapacity.forWrite(vectorTable(), before, after);
+        assertEquals(1024.0, cost.vectorBytes().get("vix"));
+        assertNull(cost.vectorBytes().get("vkeys"), "the KEYS_ONLY entry did not change");
+    }
+
+    @Test
+    void itemWithoutTheVectorAttributeEntersNoVectorIndex() {
+        DynamoDbWriteCapacity.Cost cost = DynamoDbWriteCapacity.forWrite(vectorTable(), null, item("""
+                {"pk": {"S": "plain"}, "label": {"S": "no-vector"}}
+                """));
+        assertTrue(cost.vectorBytes().isEmpty());
+    }
+
+    @Test
+    void itemMissingTheSearchSchemaHashEntersNoVectorIndex() {
+        TableDefinition partitioned = new TableDefinition();
+        partitioned.setKeySchema(List.of(new KeySchemaElement("pk", "HASH")));
+        partitioned.setVectorIndexes(List.of(new VectorIndex("schema", "embedding",
+                List.of(new SearchSchemaElement("tenant", "HASH")), "ALL", List.of(), 3L, "COSINE")));
+        DynamoDbWriteCapacity.Cost cost =
+                DynamoDbWriteCapacity.forWrite(partitioned, null, vectorItem("no-tenant"));
+        assertTrue(cost.vectorBytes().isEmpty());
     }
 }

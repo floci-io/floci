@@ -2473,8 +2473,22 @@ public class DynamoDbJsonHandler {
             if (!cost.lsi().isEmpty()) {
                 cc.set("LocalSecondaryIndexes", capacityUnitsMap(cost.lsi(), unitsField));
             }
+            if (!cost.vectorBytes().isEmpty()) {
+                cc.set("VectorIndexes", vectorWriteBytesMap(cost.vectorBytes()));
+            }
         }
         return cc;
+    }
+
+    /** A vector index meters bytes processed, so it carries no CapacityUnits of its own. */
+    private ObjectNode vectorWriteBytesMap(Map<String, Double> bytesByIndex) {
+        ObjectNode node = objectMapper.createObjectNode();
+        bytesByIndex.forEach((indexName, bytes) -> {
+            ObjectNode entry = objectMapper.createObjectNode();
+            entry.put("VectorWriteRequestBytes", bytes);
+            node.set(indexName, entry);
+        });
+        return node;
     }
 
     private ObjectNode capacityUnitsMap(Map<String, Double> unitsByIndex, String unitsField) {
