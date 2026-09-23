@@ -239,6 +239,7 @@ public class SchedulerService {
         Schedule updated = new Schedule();
         updated.setName(req.getName());
         updated.setArn(existing.getArn());
+        updated.setAccountId(existing.getAccountId());
         updated.setGroupName(effectiveGroup);
         updated.setState(req.getState() != null ? req.getState() : "ENABLED");
         updated.setScheduleExpression(req.getScheduleExpression());
