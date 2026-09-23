@@ -692,6 +692,9 @@ class RedshiftQueryHandlerTest {
         assertTrue(xml.contains("<LoggingEnabled>false</LoggingEnabled>"));
         // No bucket was ever configured; the element must be omitted, not emitted empty/"null".
         assertFalse(xml.contains("<BucketName>"));
+    }
+
+    @Test
     void describesSnapshotCopyGrants() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("SnapshotCopyGrantName", "grant-1");
