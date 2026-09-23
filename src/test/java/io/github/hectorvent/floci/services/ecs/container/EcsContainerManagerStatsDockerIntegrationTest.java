@@ -118,7 +118,9 @@ class EcsContainerManagerStatsDockerIntegrationTest {
         ContainerDefinition definition = new ContainerDefinition();
         definition.setName(name);
         definition.setImage(BUSYBOX_IMAGE);
-        definition.setCommand(List.of("sleep", "60"));
+        // PID 1 gets no default SIGTERM handler, so a bare "sleep 60" sits out the whole
+        // stopTimeout grace period on teardown, once per container in the task.
+        definition.setCommand(List.of("sh", "-c", "trap 'exit 0' TERM; sleep 60 & wait"));
         return definition;
     }
 

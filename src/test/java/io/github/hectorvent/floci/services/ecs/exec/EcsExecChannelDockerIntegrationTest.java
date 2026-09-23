@@ -67,7 +67,9 @@ class EcsExecChannelDockerIntegrationTest {
         ContainerDefinition app = new ContainerDefinition();
         app.setName("app");
         app.setImage(BUSYBOX_IMAGE);
-        app.setCommand(List.of("sleep", "120"));
+        // PID 1 gets no default SIGTERM handler, so a bare "sleep 120" sits out the whole
+        // stopTimeout grace period on teardown.
+        app.setCommand(List.of("sh", "-c", "trap 'exit 0' TERM; sleep 120 & wait"));
 
         TaskDefinition taskDefinition = new TaskDefinition();
         taskDefinition.setFamily("exec-docker-" + suffix);
