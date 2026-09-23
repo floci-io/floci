@@ -2715,6 +2715,12 @@ public class CognitoService implements ResourceProvider {
         return authFlowHandler.adminInitiateAuth(userPoolId, clientId, authFlow, authParameters, clientMetadata);
     }
 
+    /** Managed login's username and password check; see {@link CognitoAuthFlowHandler#authenticateManagedLogin}. */
+    CognitoUser authenticateManagedLogin(UserPoolClient client, String username, String password) {
+        return authFlowHandler.authenticateManagedLogin(describeUserPool(client.getUserPoolId()), client,
+                username, password);
+    }
+
     public Map<String, Object> respondToAuthChallenge(String clientId, String challengeName,
                                                        String session, Map<String, String> responses) {
         return authFlowHandler.respondToAuthChallenge(clientId, challengeName, session, responses, Map.of());

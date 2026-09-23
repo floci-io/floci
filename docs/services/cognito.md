@@ -75,9 +75,9 @@ AWS-shaped `/oauth2/authorize` and `/oauth2/idpresponse` endpoints to the config
 OIDC provider, exchanges the returned code, provisions or reconciles the federated user,
 and issues a Cognito authorization code for the registered callback.
 
-Only `ProviderType=OIDC` is supported by this flow. Floci does not provide a built-in hosted
-UI and does not implement social providers such as Google, Facebook, Login with Amazon or
-SignInWithApple.
+Only `ProviderType=OIDC` is supported by this flow. Floci does not implement social providers
+such as Google, Facebook, Login with Amazon or SignInWithApple. The pool's own users sign in
+through managed login instead (see [Managed login](#managed-login)).
 
 Two deliberate divergences from AWS, both consequences of not calling out to a third
 party:
@@ -110,8 +110,11 @@ always returns it.
 A domain created with `CustomDomainConfig` answers the OAuth endpoints on that host, as on AWS:
 
 ```
+GET  https://auth.example.localhost.floci.io/oauth2/authorize
 POST https://auth.example.localhost.floci.io/oauth2/token
 GET  https://auth.example.localhost.floci.io/oauth2/userInfo
+GET  https://auth.example.localhost.floci.io/login
+GET  https://auth.example.localhost.floci.io/logout
 ```
 
 Requests are matched on the `Host` header, so the name must resolve to Floci (any
@@ -120,7 +123,8 @@ the account that created it, since these requests carry no AWS credential: a `cl
 another pool is refused with `invalid_client`, and an access token issued by another pool with
 `invalid_token`. Domain names are unique across all accounts, as on AWS. The pool's `openid-configuration` advertises the custom-domain
 URLs when one exists. Prefix domains (`<prefix>.auth.<region>.amazoncognito.com`) are stored but not
-routed, since that hostname never reaches Floci. `/login` and `/logout` are not served on any host.
+routed, since that hostname never reaches Floci. `/login` and `/logout` are served at the root only
+on a custom-domain host; on Floci's own host they are `/cognito-idp/login` and `/cognito-idp/logout`.
 
 With TLS enabled, a custom domain (`CustomDomainConfig` set) is added to Floci's server
 certificate as soon as it is created, so `https://<domain>` verifies without a restart; see
@@ -280,8 +284,8 @@ up, so an oversized request naming something that does not exist reports the req
 problem rather than `ResourceNotFoundException`, and an update violating both reports them
 in one message with the asset list first.
 
-Branding is presentation for the hosted UI, which Floci does not serve, so it is stored
-and returned rather than rendered. Two divergences follow from that:
+Branding is presentation for the managed login pages. Floci's sign-in page is deliberately
+plain, so branding is stored and returned rather than rendered. Two divergences follow from that:
 
 - **`Settings` is stored opaquely.** AWS validates it against a deep schema, rejecting
   unknown properties with `Invalid settings provided. Validation errors: [{property:
@@ -302,19 +306,105 @@ and returned rather than rendered. Two divergences follow from that:
 |------------------------------------------------------|------------------------------------------------------------------|
 | `GET /{userPoolId}/.well-known/openid-configuration` | OpenID discovery document                                        |
 | `GET /{userPoolId}/.well-known/jwks.json`            | JSON Web Key Set for JWT validation                              |
-| `GET /cognito-idp/oauth2/authorize`                  | OIDC authorization-code start endpoint                         |
-| `GET /cognito-idp/oauth2/idpresponse`                | OIDC provider callback endpoint                                |
-| `POST /cognito-idp/oauth2/token`                     | OAuth authorization-code and client-credentials token endpoint |
+| `GET /cognito-idp/oauth2/authorize`                  | Authorization-code start endpoint, for managed login and OIDC    |
+| `GET /cognito-idp/oauth2/idpresponse`                | OIDC provider callback endpoint                                  |
+| `GET`, `POST /cognito-idp/login`                     | Managed login sign-in form                                       |
+| `GET /cognito-idp/logout`                            | Managed login sign-out                                           |
+| `POST /cognito-idp/oauth2/token`                     | OAuth authorization-code and client-credentials token endpoint   |
 
-The OAuth endpoints support browser-style OIDC authorization-code sign-in as well as the
-emulator-friendly client-credentials flow:
+The OAuth endpoints support browser-style authorization-code sign-in, for the pool's own
+users and through a federated OIDC provider, as well as the emulator-friendly
+client-credentials flow:
 
-- `GET /cognito-idp/oauth2/authorize` validates the app client and callback, then redirects
-  to the configured provider with an opaque state and nonce.
+- `GET /cognito-idp/oauth2/authorize` validates the app client and callback. With no
+  `identity_provider`, or `identity_provider=COGNITO`, it starts managed login (below);
+  with any other provider name it redirects to that OIDC provider with an opaque state and nonce.
 - `GET /cognito-idp/oauth2/idpresponse` consumes the provider state, exchanges the provider
   code and redirects to the registered callback with a one-time Cognito authorization code.
-- `POST /cognito-idp/oauth2/token` redeems that authorization code once, or issues a machine
+- `POST /cognito-idp/oauth2/token` redeems that authorization code once, checking its PKCE
+  `code_verifier` when the authorization request sent a `code_challenge`, or issues a machine
   token for `grant_type=client_credentials`.
+
+### Managed login
+
+Managed login signs in the pool's own users with authorization code and, optionally, PKCE.
+The client needs `COGNITO` in `SupportedIdentityProviders`, `AllowedOAuthFlows=["code"]` and
+the callback in `CallbackURLs`. No domain is needed; on a custom domain the same flow runs at
+`/oauth2/authorize`, `/login` and `/logout`.
+
+1. `GET /cognito-idp/oauth2/authorize` redirects to `/cognito-idp/login` with the request's
+   parameters. If the browser already has a managed login session in the pool, it skips the
+   form and redirects straight to the callback with a code, as AWS does.
+2. `GET /cognito-idp/login` renders a plain username and password form. The form carries the
+   request in hidden fields and a CSRF token that must match the `XSRF-TOKEN` cookie set with it.
+3. `POST /cognito-idp/login` checks the password as `USER_PASSWORD_AUTH` does, including
+   sign-in aliases and the pre and post authentication and user migration triggers, but
+   without the client's `ExplicitAuthFlows`. On success it sets a `cognito` session cookie
+   (one hour) and redirects to the callback with `code` and `state`. A wrong password shows
+   the form again with `Incorrect username or password.`; an unknown user reads the same.
+4. `POST /cognito-idp/oauth2/token` redeems the code. The ID token carries the request's
+   `nonce`.
+5. `GET /cognito-idp/logout?client_id=...&logout_uri=...` ends the session and redirects to
+   `logout_uri`, which must be one of the client's `LogoutURLs`. With `redirect_uri` and
+   `response_type=code` instead of `logout_uri`, it ends the session and redirects to the
+   sign-in form for that request.
+
+PKCE follows AWS: `code_challenge_method` must be `S256`, and discovery advertises
+`code_challenge_methods_supported: ["S256"]`. A code issued with a `code_challenge` is
+redeemed only with the matching `code_verifier`, so a public client (no secret) can use it
+alone. A code issued without one is refused if a `code_verifier` is sent, as RFC 9700
+recommends. A failed PKCE check spends the code; a request naming the wrong client or
+`redirect_uri` does not. PKCE applies to federated OIDC sign-in too.
+
+Differences from AWS:
+
+- **No challenge pages.** A user who must change or reset their password, or who is not
+  confirmed, sees an error on the form instead. Sign-up, forgot-password, MFA and passkey
+  pages are not served, and `prompt`, `login_hint`, `lang` and `idp_identifier` are ignored.
+- **Errors are JSON.** An authorization request error returns `400` with an OAuth error body,
+  even after `redirect_uri` is validated, where AWS redirects the error to the callback.
+- **Relative redirect.** The redirect from `/oauth2/authorize` to the sign-in form has a
+  relative `Location`, where AWS's is absolute.
+- **One session cookie per host.** Floci's own host serves every pool, so signing in to a
+  second pool there replaces the first pool's session. Custom domains keep separate sessions,
+  as on AWS. Sessions are held in memory and are lost on restart.
+- **No PreTokenGeneration on code redemption.** As with federated sign-in, the token endpoint
+  does not invoke the pre token generation trigger.
+
+```bash
+EP=http://localhost:4566
+POOL_ID=$(aws --endpoint-url $EP cognito-idp create-user-pool --pool-name web \
+  --query UserPool.Id --output text)
+CLIENT_ID=$(aws --endpoint-url $EP cognito-idp create-user-pool-client --user-pool-id $POOL_ID \
+  --client-name spa --supported-identity-providers COGNITO \
+  --allowed-o-auth-flows-user-pool-client --allowed-o-auth-flows code \
+  --allowed-o-auth-scopes openid email --callback-urls https://app.example.com/cb \
+  --logout-urls https://app.example.com/ --query UserPoolClient.ClientId --output text)
+aws --endpoint-url $EP cognito-idp admin-create-user --user-pool-id $POOL_ID --username alice
+aws --endpoint-url $EP cognito-idp admin-set-user-password --user-pool-id $POOL_ID \
+  --username alice --password 'Perm1234!' --permanent
+
+# PKCE pair: verifier, and its unpadded base64url SHA-256 challenge
+VERIFIER=$(openssl rand -base64 48 | tr '+/' '-_' | tr -d '=\n')
+CHALLENGE=$(printf %s "$VERIFIER" | openssl dgst -sha256 -binary | base64 | tr '+/' '-_' | tr -d '=')
+
+# Open the sign-in form, then post the credentials with its CSRF token
+Q="response_type=code&client_id=$CLIENT_ID&redirect_uri=https%3A%2F%2Fapp.example.com%2Fcb&scope=openid&state=s1&code_challenge=$CHALLENGE&code_challenge_method=S256"
+CSRF=$(curl -s -c jar "$EP/cognito-idp/login?$Q" | sed -n 's/.*name="_csrf" value="\([^"]*\)".*/\1/p')
+CODE=$(curl -s -b jar -c jar -o /dev/null -w '%{redirect_url}' "$EP/cognito-idp/login?$Q" \
+  --data-urlencode "_csrf=$CSRF" --data-urlencode username=alice --data-urlencode 'password=Perm1234!' \
+  | sed -n 's/.*[?&]code=\([^&]*\).*/\1/p')
+
+# Redeem the code with the verifier
+curl -s -X POST "$EP/cognito-idp/oauth2/token" \
+  --data-urlencode grant_type=authorization_code --data-urlencode client_id=$CLIENT_ID \
+  --data-urlencode code=$CODE --data-urlencode redirect_uri=https://app.example.com/cb \
+  --data-urlencode code_verifier=$VERIFIER
+
+# Sign out
+curl -s -b jar -o /dev/null -w '%{http_code} %{redirect_url}\n' \
+  "$EP/cognito-idp/logout?client_id=$CLIENT_ID&logout_uri=https%3A%2F%2Fapp.example.com%2F"
+```
 
 `POST /cognito-idp/oauth2/token` is intentionally emulator-friendly rather than full Cognito parity:
 

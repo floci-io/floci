@@ -14,13 +14,15 @@ import org.jboss.logging.Logger;
 
 import java.net.URI;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * Routes Cognito custom-domain requests by Host. On AWS a custom domain serves
- * {@code https://<domain>/oauth2/token}, {@code /oauth2/userInfo}, {@code /oauth2/authorize}, and
- * {@code /oauth2/idpresponse}; Floci maps those onto
- * the {@code /cognito-idp/oauth2/...} handlers and pins the pool and the account that own the
- * domain, since the request itself carries no AWS credential.
+ * {@code https://<domain>/oauth2/token}, {@code /oauth2/userInfo}, {@code /oauth2/authorize},
+ * {@code /oauth2/idpresponse}, and managed login's {@code /login} and {@code /logout}; Floci maps
+ * those onto the {@code /cognito-idp/...} handlers and pins the pool and the account that own the
+ * domain, since the request itself carries no AWS credential. On any other host these paths are
+ * left alone, so {@code /login} stays an S3 bucket path and {@code /logout} the SSO portal's.
  */
 @Provider
 @PreMatching
@@ -36,7 +38,8 @@ public class CognitoCustomDomainFilter implements ContainerRequestFilter {
 
     private static final Logger LOG = Logger.getLogger(CognitoCustomDomainFilter.class);
     private static final String OAUTH_PREFIX = "/oauth2/";
-    private static final String TARGET_PREFIX = "/cognito-idp/oauth2/";
+    private static final Set<String> MANAGED_LOGIN_PATHS = Set.of("/login", "/logout");
+    private static final String TARGET_PREFIX = "/cognito-idp";
 
     private final CognitoService cognitoService;
 
@@ -49,7 +52,7 @@ public class CognitoCustomDomainFilter implements ContainerRequestFilter {
     public void filter(ContainerRequestContext requestContext) {
         URI originalUri = requestContext.getUriInfo().getRequestUri();
         String path = originalUri.getRawPath();
-        if (path == null || !path.startsWith(OAUTH_PREFIX)) {
+        if (path == null || !(path.startsWith(OAUTH_PREFIX) || MANAGED_LOGIN_PATHS.contains(path))) {
             return;
         }
         String host = RequestHost.of(requestContext);
@@ -62,7 +65,7 @@ public class CognitoCustomDomainFilter implements ContainerRequestFilter {
         }
 
         URI newUri = UriBuilder.fromUri(originalUri)
-                .replacePath(TARGET_PREFIX + path.substring(OAUTH_PREFIX.length()))
+                .replacePath(TARGET_PREFIX + path)
                 .build();
         LOG.debugv("Cognito custom domain routing: {0}{1} -> {2}", host, path, newUri.getPath());
         requestContext.setProperty(POOL_PROPERTY, domain.get().getUserPoolId());

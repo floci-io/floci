@@ -675,6 +675,87 @@ class CognitoLambdaTriggersTest {
     // UserMigration
     // =========================================================================
 
+    // =========================================================================
+    // Managed login shares USER_PASSWORD_AUTH's password check and its triggers
+    // =========================================================================
+
+    @Test
+    void managedLoginFiresPreAndPostAuthenticationButIssuesNoTokens() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of(
+                "PreAuthentication", "arn:aws:lambda:::pre",
+                "PostAuthentication", "arn:aws:lambda:::post",
+                "PreTokenGeneration", "arn:aws:lambda:::pretoken"));
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = createClient(pool);
+        when(lambdaService.invoke(anyString(), anyString(), any(byte[].class), any())).thenReturn(ok(Map.of()));
+
+        CognitoUser user = service.authenticateManagedLogin(client, "alice", "Perm1234!");
+
+        assertEquals("alice", user.getUsername());
+        verify(lambdaService).invoke(anyString(), eq("arn:aws:lambda:::pre"), any(byte[].class), any());
+        verify(lambdaService).invoke(anyString(), eq("arn:aws:lambda:::post"), any(byte[].class), any());
+        verify(lambdaService, never()).invoke(anyString(), eq("arn:aws:lambda:::pretoken"), any(byte[].class), any());
+    }
+
+    @Test
+    void managedLoginPreAuthenticationErrorBlocksSignIn() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of(
+                "PreAuthentication", "arn:aws:lambda:::pre",
+                "PostAuthentication", "arn:aws:lambda:::post"));
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = createClient(pool);
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre"), any(byte[].class), any()))
+                .thenReturn(lambdaError("Unhandled", "Email not verified"));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.authenticateManagedLogin(client, "alice", "Perm1234!"));
+
+        assertEquals("PreAuthentication failed with error Email not verified.", ex.getMessage());
+        verify(lambdaService, never()).invoke(anyString(), eq("arn:aws:lambda:::post"), any(byte[].class), any());
+    }
+
+    @Test
+    void managedLoginMigratesAMissingUser() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("UserMigration", "arn:aws:lambda:::migrate"));
+        UserPoolClient client = createClient(pool);
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::migrate"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of("userAttributes", Map.of("email", "newcomer@example.com"),
+                        "finalUserStatus", "CONFIRMED")));
+
+        CognitoUser user = service.authenticateManagedLogin(client, "newcomer", "MyPassword1!");
+
+        assertEquals("newcomer", user.getUsername());
+        assertEquals("newcomer@example.com", service.adminGetUser(pool.getId(), "newcomer").getAttributes().get("email"));
+    }
+
+    /** Managed login needs neither ALLOW_USER_PASSWORD_AUTH nor a SECRET_HASH for a client with a secret. */
+    @Test
+    void managedLoginIgnoresExplicitAuthFlowsAndSecretHash() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of());
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", true, false, List.of(), List.of(),
+                null, List.of(), null, List.of("ALLOW_REFRESH_TOKEN_AUTH"), null, null, List.of(), null, List.of(),
+                null, null, null, List.of(), null, null);
+
+        assertThrows(AwsException.class, () -> service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!")));
+        assertEquals("alice", service.authenticateManagedLogin(client, "alice", "Perm1234!").getUsername());
+    }
+
+    @Test
+    void managedLoginRefusesAUserWhoMustSetANewPassword() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PostAuthentication", "arn:aws:lambda:::post"));
+        service.adminCreateUser(pool.getId(), "alice", Map.of("email", "alice@example.com"), "Temp1234!");
+        UserPoolClient client = createClient(pool);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.authenticateManagedLogin(client, "alice", "Temp1234!"));
+
+        assertEquals("NotAuthorizedException", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("must set a new password"), ex.getMessage());
+        verify(lambdaService, never()).invoke(anyString(), eq("arn:aws:lambda:::post"), any(byte[].class), any());
+    }
+
     @Test
     @SuppressWarnings("unchecked")
     void userMigrationCreatesAndAuthenticatesMissingUser() {

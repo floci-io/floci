@@ -137,10 +137,26 @@ class CognitoFederationServiceTest {
 
         String redirect = federationService.beginAuthorization(
                 pool.getId(), "cognito-client", "https://application.example.test/callback",
-                List.of("openid"), "nonce-value", "ExampleOidc", "relying-party-state");
+                List.of("openid"), "nonce-value", "ExampleOidc", "relying-party-state", null);
 
         CognitoAuthorizationTransaction transaction = stateStore.consumeTransaction(queryValue(redirect, "state")).orElseThrow();
         assertEquals("relying-party-state", transaction.relyingPartyState());
+    }
+
+    @Test
+    void completeAuthorizationCarriesTheNonceAndCodeChallengeIntoTheCode() {
+        createDefaultProvider();
+        String challenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+        String redirect = federationService.beginAuthorization(
+                pool.getId(), "cognito-client", "https://application.example.test/callback",
+                List.of("openid"), "nonce-value", "ExampleOidc", null, challenge);
+
+        String authorizationCode = federationService.completeAuthorization(queryValue(redirect, "state"), "provider-code");
+
+        CognitoAuthorizationCode storedCode = stateStore.consumeAuthorizationCode(authorizationCode).orElseThrow();
+        assertEquals("nonce-value", storedCode.nonce());
+        assertEquals(challenge, storedCode.codeChallenge());
+        assertFalse(redirect.contains(challenge), "the challenge stays with Cognito: " + redirect);
     }
 
     @Test
@@ -389,7 +405,7 @@ class CognitoFederationServiceTest {
     private String putTransaction(String providerName) {
         return stateStore.putTransaction(new CognitoAuthorizationTransaction(
                 pool.getId(), "cognito-client", "https://application.example.test/callback",
-                List.of("openid"), "nonce-value", providerName, null, CLOCK.instant().plusSeconds(60)));
+                List.of("openid"), "nonce-value", providerName, null, null, CLOCK.instant().plusSeconds(60)));
     }
 
     private String endpoint(String path) {

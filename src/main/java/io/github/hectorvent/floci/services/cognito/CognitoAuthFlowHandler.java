@@ -44,6 +44,8 @@ final class CognitoAuthFlowHandler {
     private static final Logger LOG = Logger.getLogger(CognitoAuthFlowHandler.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final String CUSTOM_MESSAGE_CODE_PARAMETER = "{####}";
+    /** The message of a wrong password, which managed login also shows for an unknown user. */
+    static final String INCORRECT_CREDENTIALS = "Incorrect username or password";
 
     private final CognitoService service;
     private final LambdaService lambdaService;
@@ -285,6 +287,41 @@ final class CognitoAuthFlowHandler {
         if (password == null) throw new AwsException("InvalidParameterException", "PASSWORD is required", 400);
         validateSecretHash(client, params, username);
 
+        CognitoUser user = verifyPassword(pool, client, username, password, clientMetadata);
+
+        if (user.isTemporaryPassword() || "FORCE_CHANGE_PASSWORD".equals(user.getUserStatus())) {
+            return buildNewPasswordRequiredChallenge(pool, client, user);
+        }
+
+        Map<String, Object> result = new HashMap<>();
+        result.put("AuthenticationResult",
+                issueTokens(pool, client, user, "TokenGeneration_Authentication", clientMetadata));
+        return result;
+    }
+
+    /**
+     * Managed login's username and password sign-in: the checks of USER_PASSWORD_AUTH, without the
+     * client's {@code ExplicitAuthFlows} or a {@code SECRET_HASH}, neither of which managed login
+     * uses. It issues no tokens, since the token endpoint redeems the authorization code for them,
+     * and it refuses a user who would get a challenge, because the sign-in page answers none.
+     */
+    CognitoUser authenticateManagedLogin(UserPool pool, UserPoolClient client, String username, String password) {
+        CognitoUser user = verifyPassword(pool, client, username, password, Map.of());
+        if (user.isTemporaryPassword() || "FORCE_CHANGE_PASSWORD".equals(user.getUserStatus())) {
+            throw new AwsException("NotAuthorizedException", "This user must set a new password, which this "
+                    + "sign-in page does not support. Set a permanent password with AdminSetUserPassword.", 400);
+        }
+        firePostAuthentication(pool, client, user, Map.of(), false);
+        return user;
+    }
+
+    /**
+     * The credential check USER_PASSWORD_AUTH and managed login share: finds the user by username or
+     * alias, or through the UserMigration trigger, fires PreAuthentication, refuses a user who cannot
+     * sign in, and compares the password.
+     */
+    private CognitoUser verifyPassword(UserPool pool, UserPoolClient client, String username, String password,
+                                       Map<String, String> clientMetadata) {
         CognitoUser user;
         try {
             user = service.adminGetUser(pool.getId(), username);
@@ -305,17 +342,9 @@ final class CognitoAuthFlowHandler {
             throw new AwsException("UserNotConfirmedException", "User is not confirmed", 400);
         }
         if (user.getPasswordHash() == null || !user.getPasswordHash().equals(service.hashPassword(password))) {
-            throw new AwsException("NotAuthorizedException", "Incorrect username or password", 400);
+            throw new AwsException("NotAuthorizedException", INCORRECT_CREDENTIALS, 400);
         }
-
-        if (user.isTemporaryPassword() || "FORCE_CHANGE_PASSWORD".equals(user.getUserStatus())) {
-            return buildNewPasswordRequiredChallenge(pool, client, user);
-        }
-
-        Map<String, Object> result = new HashMap<>();
-        result.put("AuthenticationResult",
-                issueTokens(pool, client, user, "TokenGeneration_Authentication", clientMetadata));
-        return result;
+        return user;
     }
 
     private Map<String, Object> handleRefreshToken(UserPool pool, UserPoolClient client,

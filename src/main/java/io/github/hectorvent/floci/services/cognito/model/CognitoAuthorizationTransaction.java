@@ -11,6 +11,7 @@ public record CognitoAuthorizationTransaction(
         String nonce,
         String providerName,
         String relyingPartyState,
+        String codeChallenge,
         Instant expiresAt) {
 
     public CognitoAuthorizationTransaction {

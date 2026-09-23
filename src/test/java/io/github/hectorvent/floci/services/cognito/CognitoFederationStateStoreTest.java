@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cognito;
 
 import io.github.hectorvent.floci.services.cognito.model.CognitoAuthorizationCode;
 import io.github.hectorvent.floci.services.cognito.model.CognitoAuthorizationTransaction;
+import io.github.hectorvent.floci.services.cognito.model.CognitoManagedLoginSession;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Field;
@@ -121,6 +122,53 @@ class CognitoFederationStateStoreTest {
         assertTrue(store.consumeAuthorizationCode(code).isEmpty());
     }
 
+    @Test
+    void findSession_returnsStoredUnexpiredSessionUntilDeleted() {
+        CognitoFederationStateStore store = storeAt(NOW);
+        CognitoManagedLoginSession session = new CognitoManagedLoginSession("pool-id", "user", NOW.plusSeconds(60));
+
+        String sessionId = store.putSession(session);
+
+        assertEquals(Optional.of(session), store.findSession(sessionId));
+        assertEquals(Optional.of(session), store.findSession(sessionId));
+        store.deleteSession(sessionId);
+        assertTrue(store.findSession(sessionId).isEmpty());
+    }
+
+    @Test
+    void findSession_expiredSessionReturnsEmptyAndIsRemoved() throws ReflectiveOperationException {
+        MutableClock clock = new MutableClock(NOW);
+        CognitoFederationStateStore store = new CognitoFederationStateStore(clock);
+        String sessionId = store.putSession(new CognitoManagedLoginSession("pool-id", "user", NOW.plusSeconds(60)));
+
+        clock.set(NOW.plusSeconds(60));
+
+        assertTrue(store.findSession(sessionId).isEmpty());
+        assertTrue(storeMap(store, "sessions").isEmpty());
+    }
+
+    @Test
+    void findSession_missingOrUnknownIdReturnsEmpty() {
+        CognitoFederationStateStore store = storeAt(NOW);
+
+        assertTrue(store.findSession(null).isEmpty());
+        assertTrue(store.findSession("unknown").isEmpty());
+        store.deleteSession(null);
+    }
+
+    @Test
+    void putSession_idsAreOpaqueAndDistinct() {
+        CognitoFederationStateStore store = storeAt(NOW);
+        CognitoManagedLoginSession session = new CognitoManagedLoginSession("pool-id", "user", NOW.plusSeconds(60));
+
+        String first = store.putSession(session);
+        String second = store.putSession(session);
+
+        assertFalse(first.equals(second));
+        assertTrue(first.matches("[A-Za-z0-9_-]{43}"), first);
+        assertFalse(first.contains("user") || first.contains("pool-id"));
+    }
+
     private CognitoFederationStateStore storeAt(Instant now) {
         return new CognitoFederationStateStore(Clock.fixed(now, ZoneOffset.UTC));
     }
@@ -128,14 +176,14 @@ class CognitoFederationStateStoreTest {
     private CognitoAuthorizationTransaction transaction(Instant expiresAt) {
         return new CognitoAuthorizationTransaction(
             "pool-id", "client-id", "https://example.com/callback", List.of("openid", "email"),
-            "nonce", "ExampleOidc", null, expiresAt
+            "nonce", "ExampleOidc", null, null, expiresAt
         );
     }
 
     private CognitoAuthorizationCode authorizationCode(Instant expiresAt) {
         return new CognitoAuthorizationCode(
             "pool-id", "client-id", "user-id", "https://example.com/callback", List.of("openid", "email"),
-            expiresAt
+            null, null, expiresAt
         );
     }
 
@@ -144,6 +192,13 @@ class CognitoFederationStateStoreTest {
         Field field = CognitoFederationStateStore.class.getDeclaredField(fieldName);
         field.setAccessible(true);
         field.set(store, replacement);
+    }
+
+    private ConcurrentHashMap<?, ?> storeMap(CognitoFederationStateStore store, String fieldName)
+            throws ReflectiveOperationException {
+        Field field = CognitoFederationStateStore.class.getDeclaredField(fieldName);
+        field.setAccessible(true);
+        return (ConcurrentHashMap<?, ?>) field.get(store);
     }
 
     private static final class MutableClock extends Clock {

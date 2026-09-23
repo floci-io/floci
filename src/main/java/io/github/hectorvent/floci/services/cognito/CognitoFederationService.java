@@ -42,19 +42,24 @@ public class CognitoFederationService {
 
     public String beginAuthorization(String userPoolId, String clientId, String redirectUri, List<String> scopes,
                                      String nonce, String providerName) {
-        return beginAuthorization(userPoolId, clientId, redirectUri, scopes, nonce, providerName, null);
+        return beginAuthorization(userPoolId, clientId, redirectUri, scopes, nonce, providerName, null, null);
     }
 
+    /**
+     * @param codeChallenge the relying party's S256 PKCE challenge, or null. It stays with Cognito:
+     *                      the relying party proves it at Cognito's token endpoint, not the provider's.
+     */
     public String beginAuthorization(String userPoolId, String clientId, String redirectUri, List<String> scopes,
-                                     String nonce, String providerName, String relyingPartyState) {
+                                     String nonce, String providerName, String relyingPartyState,
+                                     String codeChallenge) {
         IdentityProvider provider = cognitoService.describeIdentityProvider(userPoolId, providerName);
         requireOidcProvider(provider);
         String authorizeEndpoint = requiredProviderDetail(provider, "authorize_url", "authorize endpoint");
         String providerClientId = requiredProviderDetail(provider, "client_id", "client_id");
         validateAuthorizeEndpoint(authorizeEndpoint, provider.getProviderName());
         Instant expiresAt = clock.instant().plus(TRANSACTION_LIFETIME);
-        CognitoAuthorizationTransaction transaction = new CognitoAuthorizationTransaction(
-                userPoolId, clientId, redirectUri, scopes, nonce, providerName, relyingPartyState, expiresAt);
+        CognitoAuthorizationTransaction transaction = new CognitoAuthorizationTransaction(userPoolId, clientId,
+                redirectUri, scopes, nonce, providerName, relyingPartyState, codeChallenge, expiresAt);
         String state = stateStore.putTransaction(transaction);
 
         Map<String, String> parameters = new LinkedHashMap<>();
@@ -89,7 +94,8 @@ public class CognitoFederationService {
                 subject, issuer, mapAttributes(provider, claims));
         CognitoAuthorizationCode authorizationCode = new CognitoAuthorizationCode(
                 transaction.userPoolId(), transaction.clientId(), user.getUsername(), transaction.redirectUri(),
-                transaction.scopes(), clock.instant().plus(AUTHORIZATION_CODE_LIFETIME));
+                transaction.scopes(), transaction.nonce(), transaction.codeChallenge(),
+                clock.instant().plus(AUTHORIZATION_CODE_LIFETIME));
         return stateStore.putAuthorizationCode(authorizationCode);
     }
 
