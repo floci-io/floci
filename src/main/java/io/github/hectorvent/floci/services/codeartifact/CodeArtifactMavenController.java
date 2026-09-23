@@ -101,7 +101,7 @@ public class CodeArtifactMavenController {
                 .orElseThrow(() -> new NotAuthorizedException("Basic realm=\"floci-codeartifact\""));
         String repoId;
         try {
-            repoId = service.ensureMavenRepositoryId(scope.region(), domain, scope.owner(), repository);
+            repoId = service.ensureFormatContainerId("maven", scope.region(), domain, scope.owner(), repository);
         } catch (AwsException e) {
             throw new NotFoundException();
         }

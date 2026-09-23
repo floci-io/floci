@@ -70,6 +70,26 @@ public class ReposiliteSidecarManager {
         this.managedSecret = managedSecret;
     }
 
+    /**
+     * Whether there could possibly be anything on the Reposilite side to release: either
+     * {@link #ensureReady()} has already resolved an endpoint in this process, or
+     * {@code FLOCI_SERVICES_CODEARTIFACT_MAVEN_URL} names an external instance this process has
+     * simply not talked to yet. Never starts anything itself, unlike {@link #ensureReady()}.
+     *
+     * <p>The two cases are not the same guarantee. A managed container keeps no volume, so one
+     * that was never started this process could not hold anything, full stop. An external,
+     * pre-configured instance's lifecycle is independent of this process's {@code resolvedUrl}: it
+     * may already hold real data from an earlier Floci run, so "this process has not resolved it
+     * yet" must not be read as "nothing is there" the way it can for the managed case.
+     */
+    public boolean isStarted() {
+        if (resolvedUrl != null) {
+            return true;
+        }
+        Optional<String> configuredUrl = config.services().codeartifact().mavenUrl();
+        return configuredUrl.isPresent() && !configuredUrl.get().isBlank();
+    }
+
     /** Base URL of a ready Reposilite instance, starting the managed container if needed. */
     public synchronized String ensureReady() {
         if (resolvedUrl != null) {

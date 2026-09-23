@@ -64,6 +64,14 @@ public class CodeArtifactService implements Resettable {
     private static final Set<String> PACKAGE_FORMATS =
             Set.of("npm", "pypi", "maven", "nuget", "generic", "ruby", "swift", "cargo");
     private static final Set<String> ENDPOINT_TYPES = Set.of("dualstack", "ipv4");
+    /**
+     * Formats served by a real package-manager-protocol proxy backed by a per-format sidecar, and
+     * so need an {@link #ensureFormatContainerId} entry assigned at creation. Adding the next
+     * format's proxy only needs a new entry here; {@link CodeArtifactRepository#getSidecarContainerIds()}
+     * and the backfill in {@link #ensureFormatContainerId} already handle it, including for
+     * repositories created before that format's proxy existed.
+     */
+    private static final List<String> CONTAINER_BACKED_FORMATS = List.of("maven");
 
     private static final Logger LOG = Logger.getLogger(CodeArtifactService.class);
 
@@ -101,6 +109,7 @@ public class CodeArtifactService implements Resettable {
     private final AccountAwareStorageBackend<CodeArtifactPackageVersion> packageVersions;
     private final RegionResolver regionResolver;
     private final EmulatorConfig config;
+    private final CodeArtifactSidecarRegistry sidecarRegistry;
     // Asset bytes never go through the JSON/WAL-backed `packageVersions` store (see PackageAsset's
     // @JsonIgnore content field): they're kept here instead, on disk in persistent/hybrid/wal mode
     // or in this map in memory mode, so a publish only ever rewrites metadata.
@@ -113,7 +122,7 @@ public class CodeArtifactService implements Resettable {
 
     @Inject
     public CodeArtifactService(StorageFactory storageFactory, RegionResolver regionResolver, EmulatorConfig config,
-                                ServiceConfigAccess serviceConfigAccess) {
+                                ServiceConfigAccess serviceConfigAccess, CodeArtifactSidecarRegistry sidecarRegistry) {
         this(
                 storageFactory.create("codeartifact", "codeartifact-domains.json",
                         new TypeReference<Map<String, CodeArtifactDomain>>() {}),
@@ -123,7 +132,8 @@ public class CodeArtifactService implements Resettable {
                         new TypeReference<Map<String, CodeArtifactPackageVersion>>() {}),
                 regionResolver, config,
                 "memory".equals(serviceConfigAccess.storageMode("codeartifact")),
-                Path.of(config.storage().persistentPath()).resolve(ASSET_STORAGE_DIR));
+                Path.of(config.storage().persistentPath()).resolve(ASSET_STORAGE_DIR),
+                sidecarRegistry);
     }
 
     /** Package-private constructor for testing. */
@@ -131,12 +141,13 @@ public class CodeArtifactService implements Resettable {
                          AccountAwareStorageBackend<CodeArtifactRepository> repositories,
                          AccountAwareStorageBackend<CodeArtifactPackageVersion> packageVersions,
                          RegionResolver regionResolver, EmulatorConfig config,
-                         boolean inMemory, Path assetRoot) {
+                         boolean inMemory, Path assetRoot, CodeArtifactSidecarRegistry sidecarRegistry) {
         this.domains = domains;
         this.repositories = repositories;
         this.packageVersions = packageVersions;
         this.regionResolver = regionResolver;
         this.config = config;
+        this.sidecarRegistry = sidecarRegistry;
         this.inMemory = inMemory;
         this.assetRoot = assetRoot;
         if (!inMemory) {
@@ -280,11 +291,17 @@ public class CodeArtifactService implements Resettable {
         r.setUpstreams(upstreams != null ? new ArrayList<>(upstreams) : new ArrayList<>());
         r.setCreatedTime(Instant.now().getEpochSecond());
         r.setTags(validateTags(tags, Map.of(), repository, "repository"));
-        // A bare UUID, not a domain/repository-derived name: Reposilite rejects any repository id
-        // over 64 characters, and CodeArtifact domain (max 50) and repository (max 100) names can
-        // easily exceed that combined. The id is purely internal and never surfaced by the public
-        // API, so readability doesn't matter here, only fitting the limit and staying unique.
-        r.setMavenRepositoryId(newRevision());
+        // A bare UUID per container-backed format, not a domain/repository-derived name:
+        // Reposilite rejects any repository id over 64 characters, and CodeArtifact domain (max
+        // 50) and repository (max 100) names can easily exceed that combined. Each id is purely
+        // internal and never surfaced by the public API, so readability doesn't matter here, only
+        // fitting the limit and staying unique per creation, so a repository deleted and recreated
+        // under the same name never inherits the previous one's sidecar-side content.
+        Map<String, String> sidecarContainerIds = new LinkedHashMap<>();
+        for (String format : CONTAINER_BACKED_FORMATS) {
+            sidecarContainerIds.put(format, newRevision());
+        }
+        r.setSidecarContainerIds(sidecarContainerIds);
         repositories.putForAccount(owner, key, r);
         return r;
     }
@@ -296,6 +313,25 @@ public class CodeArtifactService implements Resettable {
         String key = repositoryKey(region, domain, repository);
         CodeArtifactRepository r = requireRepository(owner, key, repository);
         repositories.deleteForAccount(owner, key);
+        // Generic over whatever formats this repository actually has sidecar ids for: adding the
+        // next format's sidecar needs no change here, only a new RepositorySidecarManager
+        // implementation that CodeArtifactSidecarRegistry discovers.
+        //
+        // Best-effort: the metadata delete above already committed, matching real CodeArtifact's
+        // own DeleteRepository (synchronous and always succeeds once the repository exists; actual
+        // content cleanup is an internal detail never exposed to the caller). A sidecar that is
+        // unreachable when this runs must not turn an already-successful delete into a 500, and
+        // must not leave the repository stuck: a retry would just 404, since the record above is
+        // already gone.
+        r.getSidecarContainerIds().forEach((format, containerId) ->
+                sidecarRegistry.forFormat(format).ifPresent(manager -> {
+                    try {
+                        manager.release(containerId);
+                    } catch (RuntimeException e) {
+                        LOG.warnv(e, "Failed to release {0} sidecar storage for repository {1}/{2}: {3}",
+                                format, domain, repository, e.getMessage());
+                    }
+                }));
         return r;
     }
 
@@ -307,21 +343,27 @@ public class CodeArtifactService implements Resettable {
     }
 
     /**
-     * {@code mavenRepositoryId} is assigned at {@link #createRepository}, but a repository
-     * persisted before that field existed has none; backfills it lazily on first Maven-format use
-     * rather than leaving every caller of {@link CodeArtifactRepository#getMavenRepositoryId()} to
-     * handle a null it can otherwise never see.
+     * A sidecar container id for one format is assigned at {@link #createRepository}, but a
+     * repository persisted before that format's proxy existed has none; backfills it lazily on
+     * first use of that format rather than leaving every caller handle a missing entry it can
+     * otherwise never see. {@code format} is expected to be one of
+     * {@link #CONTAINER_BACKED_FORMATS}, though nothing here enforces that: an unlisted format
+     * simply gets its own id assigned the same way.
      */
-    public synchronized String ensureMavenRepositoryId(String region, String domain, String domainOwner,
-                                                         String repository) {
+    public synchronized String ensureFormatContainerId(String format, String region, String domain,
+                                                         String domainOwner, String repository) {
         String owner = effectiveOwner(domainOwner);
         String key = repositoryKey(region, domain, repository);
         CodeArtifactRepository r = requireRepository(owner, key, repository);
-        if (r.getMavenRepositoryId() == null) {
-            r.setMavenRepositoryId(newRevision());
+        String id = r.getSidecarContainerIds().get(format);
+        if (id == null) {
+            id = newRevision();
+            Map<String, String> sidecarContainerIds = new LinkedHashMap<>(r.getSidecarContainerIds());
+            sidecarContainerIds.put(format, id);
+            r.setSidecarContainerIds(sidecarContainerIds);
             repositories.putForAccount(owner, key, r);
         }
-        return r.getMavenRepositoryId();
+        return id;
     }
 
     public synchronized CodeArtifactRepository updateRepository(String region, String domain, String domainOwner,
