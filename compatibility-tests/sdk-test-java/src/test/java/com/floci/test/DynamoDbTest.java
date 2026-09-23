@@ -7,6 +7,7 @@ import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 import software.amazon.awssdk.services.dynamodb.model.BatchGetItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.BatchGetItemResponse;
 import software.amazon.awssdk.services.dynamodb.model.BatchWriteItemRequest;
+import software.amazon.awssdk.services.dynamodb.model.BillingMode;
 import software.amazon.awssdk.services.dynamodb.model.CreateReplicationGroupMemberAction;
 import software.amazon.awssdk.services.dynamodb.model.CreateTableRequest;
 import software.amazon.awssdk.services.dynamodb.model.CreateTableResponse;
@@ -20,12 +21,15 @@ import software.amazon.awssdk.services.dynamodb.model.DescribeTimeToLiveRequest;
 import software.amazon.awssdk.services.dynamodb.model.DescribeTimeToLiveResponse;
 import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.GetItemResponse;
+import software.amazon.awssdk.services.dynamodb.model.IndexStatus;
 import software.amazon.awssdk.services.dynamodb.model.KeySchemaElement;
 import software.amazon.awssdk.services.dynamodb.model.KeysAndAttributes;
 import software.amazon.awssdk.services.dynamodb.model.KeyType;
 import software.amazon.awssdk.services.dynamodb.model.ListTablesResponse;
 import software.amazon.awssdk.services.dynamodb.model.ListTagsOfResourceRequest;
 import software.amazon.awssdk.services.dynamodb.model.ListTagsOfResourceResponse;
+import software.amazon.awssdk.services.dynamodb.model.Projection;
+import software.amazon.awssdk.services.dynamodb.model.ProjectionType;
 import software.amazon.awssdk.services.dynamodb.model.ProvisionedThroughput;
 import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.PutRequest;
@@ -36,6 +40,9 @@ import software.amazon.awssdk.services.dynamodb.model.ReturnValue;
 import software.amazon.awssdk.services.dynamodb.model.ScalarAttributeType;
 import software.amazon.awssdk.services.dynamodb.model.ScanRequest;
 import software.amazon.awssdk.services.dynamodb.model.ScanResponse;
+import software.amazon.awssdk.services.dynamodb.model.SearchResultItem;
+import software.amazon.awssdk.services.dynamodb.model.SearchVectorsRequest;
+import software.amazon.awssdk.services.dynamodb.model.SearchVectorsResponse;
 import software.amazon.awssdk.services.dynamodb.model.TableStatus;
 import software.amazon.awssdk.services.dynamodb.model.TagResourceRequest;
 import software.amazon.awssdk.services.dynamodb.model.TimeToLiveStatus;
@@ -45,6 +52,10 @@ import software.amazon.awssdk.services.dynamodb.model.UpdateItemResponse;
 import software.amazon.awssdk.services.dynamodb.model.UpdateReplicationGroupMemberAction;
 import software.amazon.awssdk.services.dynamodb.model.UpdateTableRequest;
 import software.amazon.awssdk.services.dynamodb.model.UpdateTableResponse;
+import software.amazon.awssdk.services.dynamodb.model.VectorAttributeDefinition;
+import software.amazon.awssdk.services.dynamodb.model.VectorDistanceFunction;
+import software.amazon.awssdk.services.dynamodb.model.VectorIndex;
+import software.amazon.awssdk.services.dynamodb.model.VectorIndexDescription;
 import software.amazon.awssdk.services.dynamodb.model.WriteRequest;
 
 import java.util.List;
@@ -58,6 +69,8 @@ class DynamoDbTest {
 
     private static DynamoDbClient ddb;
     private static final String TABLE_NAME = "sdk-test-table";
+    private static final String VECTOR_TABLE_NAME = "sdk-test-vector-table";
+    private static final String VECTOR_INDEX_NAME = "embedding-index";
     private static String tableArn;
 
     @BeforeAll
@@ -70,6 +83,10 @@ class DynamoDbTest {
         if (ddb != null) {
             try {
                 ddb.deleteTable(DeleteTableRequest.builder().tableName(TABLE_NAME).build());
+            } catch (Exception ignored) {}
+            // Nothing to delete when searchVectors did not get as far as creating it.
+            try {
+                ddb.deleteTable(DeleteTableRequest.builder().tableName(VECTOR_TABLE_NAME).build());
             } catch (Exception ignored) {}
             ddb.close();
         }
@@ -387,5 +404,87 @@ class DynamoDbTest {
 
         ListTablesResponse response = ddb.listTables();
         assertThat(response.tableNames()).doesNotContain(TABLE_NAME);
+    }
+
+    @Test
+    @Order(20)
+    void searchVectors() {
+        ddb.createTable(CreateTableRequest.builder()
+                .tableName(VECTOR_TABLE_NAME)
+                .keySchema(KeySchemaElement.builder()
+                        .attributeName("docId").keyType(KeyType.HASH).build())
+                .attributeDefinitions(AttributeDefinition.builder()
+                        .attributeName("docId").attributeType(ScalarAttributeType.S).build())
+                .billingMode(BillingMode.PAY_PER_REQUEST)
+                .vectorIndexes(VectorIndex.builder()
+                        .indexName(VECTOR_INDEX_NAME)
+                        .vectorAttribute(VectorAttributeDefinition.builder()
+                                .attributeName("embedding").build())
+                        .projection(Projection.builder().projectionType(ProjectionType.ALL).build())
+                        .dimensions(3L)
+                        .distanceFunction(VectorDistanceFunction.COSINE)
+                        .build())
+                .build());
+
+        DescribeTableResponse described = ddb.describeTable(
+                DescribeTableRequest.builder().tableName(VECTOR_TABLE_NAME).build());
+        VectorIndexDescription index = described.table().vectorIndexes().get(0);
+        assertThat(index.indexName()).isEqualTo(VECTOR_INDEX_NAME);
+        assertThat(index.dimensions()).isEqualTo(3L);
+        assertThat(index.distanceFunction()).isEqualTo(VectorDistanceFunction.COSINE);
+        assertThat(index.indexStatus()).isEqualTo(IndexStatus.ACTIVE);
+        assertThat(index.backfilling()).isNull();
+
+        putVector("near", "1", "0", "0");
+        putVector("mid", "0.6", "0.8", "0");
+        putVector("far", "-1", "0", "0");
+
+        SearchVectorsResponse ranked = ddb.searchVectors(SearchVectorsRequest.builder()
+                .tableName(VECTOR_TABLE_NAME)
+                .indexName(VECTOR_INDEX_NAME)
+                .searchVector(number("1"), number("0"), number("0"))
+                .topK(3)
+                .build());
+
+        assertThat(ranked.searchResults())
+                .extracting(result -> result.item().get("docId").s())
+                .containsExactly("near", "mid", "far");
+        assertThat(ranked.searchResults())
+                .extracting(SearchResultItem::score)
+                .containsExactly(0.0, 0.3999999761581421, 2.0);
+        assertThat(ranked.searchResults().get(0).item())
+                .containsKey("title")
+                .doesNotContainKey("embedding");
+
+        SearchVectorsResponse projected = ddb.searchVectors(SearchVectorsRequest.builder()
+                .tableName(VECTOR_TABLE_NAME)
+                .indexName(VECTOR_INDEX_NAME)
+                .searchVector(number("1"), number("0"), number("0"))
+                .topK(1)
+                .projectionExpression("docId, embedding")
+                .build());
+
+        Map<String, AttributeValue> item = projected.searchResults().get(0).item();
+        assertThat(item).containsOnlyKeys("docId", "embedding");
+        // The index serves its own 32 bit copy, so "1" comes back as "1.0".
+        assertThat(item.get("embedding").l())
+                .extracting(AttributeValue::n)
+                .containsExactly("1.0", "0.0", "0.0");
+    }
+
+    private static void putVector(String docId, String x, String y, String z) {
+        ddb.putItem(PutItemRequest.builder()
+                .tableName(VECTOR_TABLE_NAME)
+                .item(Map.of(
+                        "docId", AttributeValue.builder().s(docId).build(),
+                        "title", AttributeValue.builder().s("title " + docId).build(),
+                        "embedding", AttributeValue.builder()
+                                .l(number(x), number(y), number(z)).build()
+                ))
+                .build());
+    }
+
+    private static AttributeValue number(String value) {
+        return AttributeValue.builder().n(value).build();
     }
 }

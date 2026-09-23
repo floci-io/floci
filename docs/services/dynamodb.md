@@ -18,6 +18,7 @@
 | `UpdateItem` | Partially update an item |
 | `Query` | Query by partition key with optional filter |
 | `Scan` | Full table scan with optional filter |
+| `SearchVectors` | Rank a vector index by distance from a query vector |
 | `BatchWriteItem` | Write/delete up to 25 items across tables |
 | `BatchGetItem` | Read up to 100 items across tables |
 | `TransactWriteItems` | ACID write transaction |
@@ -61,6 +62,8 @@ landing table, checkpoint, and retry behavior.
 | `FLOCI_SERVICES_DYNAMODB_ENABLED` | `true` | Enable or disable the service |
 | `FLOCI_STORAGE_SERVICES_DYNAMODB_MODE` | *(global default)* | Storage mode override for DynamoDB (`memory`, `persistent`, `hybrid`, `wal`) |
 | `FLOCI_STORAGE_SERVICES_DYNAMODB_FLUSH_INTERVAL_MS` | `5000` | Flush interval for `hybrid`/`wal` storage modes (milliseconds) |
+| `FLOCI_SERVICES_DYNAMODB_VECTOR_INDEX_ALLOCATION_SECONDS` | `4` | Seconds a vector index added by `UpdateTable` spends in resource allocation |
+| `FLOCI_SERVICES_DYNAMODB_VECTOR_INDEX_BACKFILL_SECONDS` | `10` | Seconds that index then spends backfilling before it goes `ACTIVE` |
 
 ### Storage and Performance
 
@@ -141,6 +144,62 @@ aws dynamodb create-table \
   --billing-mode PAY_PER_REQUEST \
   --endpoint-url $AWS_ENDPOINT_URL
 ```
+
+## Vector indexes
+
+A vector index serves `SearchVectors`, which ranks a table's items by the distance between a query
+vector and the vector attribute each item carries. Indexes are declared on `CreateTable` or added
+later with `UpdateTable`, on `PAY_PER_REQUEST` tables only. An item that does not carry the vector
+attribute, or that lacks the index's `HASH` search schema attribute, is still written but stays out
+of that index. `Query`, `Scan` and PartiQL cannot read a vector index.
+
+```bash
+# A table with a vector index
+aws dynamodb create-table \
+  --table-name Docs \
+  --attribute-definitions AttributeName=docId,AttributeType=S \
+  --key-schema AttributeName=docId,KeyType=HASH \
+  --billing-mode PAY_PER_REQUEST \
+  --vector-indexes '[{
+    "IndexName": "embedding-index",
+    "VectorAttribute": {"AttributeName": "embedding"},
+    "Projection": {"ProjectionType": "ALL"},
+    "Dimensions": 3,
+    "DistanceFunction": "COSINE"
+  }]' \
+  --endpoint-url $AWS_ENDPOINT_URL
+
+# Write an item carrying a vector
+aws dynamodb put-item \
+  --table-name Docs \
+  --item '{"docId":{"S":"d1"},"title":{"S":"first"},"embedding":{"L":[{"N":"1"},{"N":"0"},{"N":"0"}]}}' \
+  --endpoint-url $AWS_ENDPOINT_URL
+
+# Search it
+aws dynamodb search-vectors \
+  --table-name Docs \
+  --index-name embedding-index \
+  --search-vector '[{"N":"1"},{"N":"0"},{"N":"0"}]' \
+  --top-k 5 \
+  --endpoint-url $AWS_ENDPOINT_URL
+```
+
+`DistanceFunction` is `COSINE`, `EUCLIDEAN` or `DOT_PRODUCT`. The first two rank the lowest score
+first, `DOT_PRODUCT` the highest. The vector attribute is left out of a result unless
+`--projection-expression` names it, and when it is named the values returned are the index's own
+32 bit copies, so a `1` written to the table comes back as `1.0`.
+
+Deviations from AWS: the search is exact rather than approximate. AWS uses an approximate index, so
+on a large index it may return a slightly different set or order. `ItemCount` and `IndexSizeBytes`
+always report 0, which is what AWS reports for a fresh index because it refreshes both roughly every
+six hours. An index created with its table is `ACTIVE` at once. One added by `UpdateTable` walks a
+resource allocation phase and then a backfill phase, whose lengths are
+`FLOCI_SERVICES_DYNAMODB_VECTOR_INDEX_ALLOCATION_SECONDS` and
+`FLOCI_SERVICES_DYNAMODB_VECTOR_INDEX_BACKFILL_SECONDS`, 4 and 10 seconds by default against minutes
+on AWS. `SearchVectors` is served on Floci's ordinary endpoint. AWS gives the operation a dedicated
+search endpoint, but the SDKs honor an endpoint override, so this is invisible to callers. Vector
+search capacity is reported with the same 1024 byte floor AWS uses, but `VectorSearchRequestBytes`
+is a fixed figure rather than a measured one, because AWS's own value is not deterministic.
 
 ## Export to S3
 
