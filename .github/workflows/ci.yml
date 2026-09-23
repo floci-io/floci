@@ -61,7 +61,8 @@ jobs:
       # Derived from test sources, not target/test-classes, so shard.txt exists
       # before Compile and the image prefetch below overlaps the compile instead
       # of starting moments before the tests that need the images. Every test is
-      # a top-level class in src/test/java, so the file name is the class name.
+      # a top-level class in src/test/java, so the file name is the class name;
+      # the step after Compile fails the shard if that ever stops being true.
       - name: Compute shard include list
         run: |
           cd src/test/java
@@ -81,6 +82,22 @@ jobs:
 
       - name: Compile
         run: ./mvnw test-compile -B
+
+      # all-classes.txt is derived from file names, so a test class whose name
+      # differs from its file would drop out of both it and the shard union
+      # without the completeness check noticing. The compiled classes are the
+      # ground truth; fail here if the two lists ever disagree.
+      - name: Verify shard list matches compiled test classes
+        run: |
+          cd target/test-classes
+          find . \( -name '*Test.class' -o -name 'Test*.class' \
+                    -o -name '*Tests.class' -o -name '*TestCase.class' \) \
+                  ! -name '*$*' \
+            | sed 's|^\./||; s|\.class$||' | LC_ALL=C sort \
+            > "$RUNNER_TEMP/compiled-classes.txt"
+          cd "$GITHUB_WORKSPACE"
+          cmp -s all-classes.txt "$RUNNER_TEMP/compiled-classes.txt" \
+            || { echo "::error::test class list from src/test/java differs from target/test-classes:"; diff all-classes.txt "$RUNNER_TEMP/compiled-classes.txt" | head -50; exit 1; }
 
       - name: Run tests
         run: >
