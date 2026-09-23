@@ -18,7 +18,6 @@ import static org.hamcrest.Matchers.notNullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 
 /**
  * Deploys the AppSync shape a Serverless Framework {@code appSync:} block compiles to: an API with
@@ -150,7 +149,7 @@ class AppSyncCfnIntegrationTest {
         """;
 
     @Test
-    void createUpdateAndDeleteAnAppSyncApi() throws InterruptedException {
+    void createUpdateAndDeleteAnAppSyncApi() {
         cloudFormation("CreateStack", Map.of("FieldLogLevel", "ERROR"));
         String created = describeStacks("CREATE_COMPLETE");
 
@@ -229,7 +228,7 @@ class AppSyncCfnIntegrationTest {
             .body("resolver.pipelineConfig.functions[0]", equalTo(functionId));
 
         cloudFormation("DeleteStack", Map.of());
-        awaitStackDeleted();
+        CfnStackWaits.awaitStackDeleted(STACK);
 
         appSync("/v1/apis/" + apiId).statusCode(404);
     }
@@ -261,25 +260,6 @@ class AppSyncCfnIntegrationTest {
         .when().post("/").then().statusCode(200)
             .body(containsString("<StackStatus>" + expectedStatus + "</StackStatus>"))
             .extract().asString();
-    }
-
-    private static void awaitStackDeleted() throws InterruptedException {
-        for (int i = 0; i < 200; i++) {
-            String body = given()
-                .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", CFN_AUTH)
-                .formParam("Action", "DescribeStacks")
-                .formParam("StackName", STACK)
-            .when().post("/").then().extract().asString();
-            if (body.contains("does not exist")) {
-                return;
-            }
-            if (body.contains("<StackStatus>DELETE_FAILED</StackStatus>")) {
-                fail("stack delete failed: " + body);
-            }
-            Thread.sleep(50);
-        }
-        fail("stack " + STACK + " was not deleted within the timeout");
     }
 
     private static String outputValue(String xml, String key) {

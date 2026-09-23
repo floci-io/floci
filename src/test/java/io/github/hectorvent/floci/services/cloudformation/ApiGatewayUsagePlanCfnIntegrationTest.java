@@ -19,7 +19,6 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.fail;
 
 /**
  * Provisions an {@code AWS::ApiGateway::UsagePlan} over a deployed REST API stage and an
@@ -86,7 +85,7 @@ class ApiGatewayUsagePlanCfnIntegrationTest {
     }
 
     @Test
-    void createUpdateAndDeleteAUsagePlanWithAKey() throws InterruptedException {
+    void createUpdateAndDeleteAUsagePlanWithAKey() {
         String apiId = createMockApi(STACK);
         String deploymentId = createDeployment(apiId);
         createStage(apiId, "dev", deploymentId);
@@ -128,7 +127,7 @@ class ApiGatewayUsagePlanCfnIntegrationTest {
             getUsagePlanKey(planId, keyId).statusCode(200);
 
             cloudFormation("DeleteStack", Map.of());
-            awaitStackDeleted();
+            CfnStackWaits.awaitStackDeleted(STACK);
 
             // The stack owned the plan and the association, not the key.
             getUsagePlan(planId).statusCode(404);
@@ -176,24 +175,6 @@ class ApiGatewayUsagePlanCfnIntegrationTest {
     }
 
     /** DeleteStack runs asynchronously; a successful delete removes the stack entirely. */
-    private static void awaitStackDeleted() throws InterruptedException {
-        for (int i = 0; i < 100; i++) {
-            String body = given()
-                .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", CFN_AUTH)
-                .formParam("Action", "DescribeStacks")
-                .formParam("StackName", STACK)
-            .when().post("/").then().extract().asString();
-            if (body.contains("does not exist")) {
-                return;
-            }
-            if (body.contains("<StackStatus>DELETE_FAILED</StackStatus>")) {
-                fail("stack delete failed: " + body);
-            }
-            Thread.sleep(50);
-        }
-        fail("stack " + STACK + " was not deleted within the timeout");
-    }
 
     private static String outputValue(String xml, String key) {
         return XmlParser.extractPairs(xml, "Outputs", "OutputKey", "OutputValue").get(key);

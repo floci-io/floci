@@ -14,7 +14,6 @@ import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 
 /**
  * A public/private networking stack the way CDK lays one out: internet gateway and attachment,
@@ -82,7 +81,7 @@ class CloudFormationEc2NetworkingIntegrationTest {
                 "the subnet's prior MapPublicIpOnLaunch must be back");
 
         cloudFormation(ROLLBACK_STACK, "DeleteStack", null);
-        awaitStackDeleted(ROLLBACK_STACK);
+        CfnStackWaits.awaitStackDeleted(ROLLBACK_STACK);
         ec2("DeleteVpc", Map.of("VpcId", vpcId));
     }
 
@@ -203,7 +202,7 @@ class CloudFormationEc2NetworkingIntegrationTest {
         out = replaced;
 
         cloudFormation("DeleteStack", null);
-        awaitStackDeleted();
+        CfnStackWaits.awaitStackDeleted(STACK);
 
         for (String id : List.of(out.get("SubnetId"), out.get("PublicRtId"), out.get("PrivateRtId"),
                 out.get("AssocId"), out.get("NatId"), out.get("EipAllocationId"), out.get("IgwId"))) {
@@ -250,29 +249,6 @@ class CloudFormationEc2NetworkingIntegrationTest {
         .when().post("/").then().statusCode(200)
             .body(containsString("<StackStatus>" + expectedStatus + "</StackStatus>"))
             .extract().asString();
-    }
-
-    private static void awaitStackDeleted() throws InterruptedException {
-        awaitStackDeleted(STACK);
-    }
-
-    private static void awaitStackDeleted(String stack) throws InterruptedException {
-        for (int i = 0; i < 200; i++) {
-            String body = given()
-                .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", CFN_AUTH)
-                .formParam("Action", "DescribeStacks")
-                .formParam("StackName", stack)
-            .when().post("/").then().extract().asString();
-            if (body.contains("does not exist")) {
-                return;
-            }
-            if (body.contains("<StackStatus>DELETE_FAILED</StackStatus>")) {
-                fail("stack delete failed: " + body);
-            }
-            Thread.sleep(50);
-        }
-        fail("stack " + stack + " was not deleted within the timeout");
     }
 
     private static String ec2(String action) {

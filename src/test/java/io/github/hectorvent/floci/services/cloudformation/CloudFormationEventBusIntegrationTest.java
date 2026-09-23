@@ -250,7 +250,7 @@ class CloudFormationEventBusIntegrationTest {
     }
 
     @Test
-    void customEventBusIsRegisteredSoRuleReferencingItSucceeds() throws InterruptedException {
+    void customEventBusIsRegisteredSoRuleReferencingItSucceeds() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String busName = "domain-events-" + suffix;
         String stackName = "eventbus-stack-" + suffix;
@@ -288,7 +288,7 @@ class CloudFormationEventBusIntegrationTest {
         // Deleting the stack must remove the bus (and its rule) from EventBridge, not leak it: the
         // rule lives on the custom bus, so its cleanup must target that bus or the bus delete fails.
         deleteStack(stackName);
-        awaitStackDeleted(stackName);
+        CfnStackWaits.awaitStackDeleted(stackName);
         given()
             .contentType("application/x-amz-json-1.1")
             .header("Authorization", EVENTS_AUTH)
@@ -302,7 +302,7 @@ class CloudFormationEventBusIntegrationTest {
     }
 
     @Test
-    void getAttRuleNameResolvesToTheRuleName() throws InterruptedException {
+    void getAttRuleNameResolvesToTheRuleName() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String ruleName = "cfn-rulename-" + suffix;
         String stackName = "rulename-stack-" + suffix;
@@ -350,30 +350,8 @@ class CloudFormationEventBusIntegrationTest {
             assertEquals(outputs.get("UnnamedRef"), outputs.get("UnnamedRuleName"));
         } finally {
             deleteStack(stackName);
-            awaitStackDeleted(stackName);
+            CfnStackWaits.awaitStackDeleted(stackName);
         }
-    }
-
-    private void awaitStackDeleted(String stackName) throws InterruptedException {
-        String lastBody = null;
-        for (int i = 0; i < 100; i++) {
-            lastBody = given()
-                .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", CFN_AUTH)
-                .formParam("Action", "DescribeStacks")
-                .formParam("StackName", stackName)
-            .when().post("/").then().extract().asString();
-            if (lastBody.contains("does not exist")
-                    || lastBody.contains("<StackStatus>DELETE_COMPLETE</StackStatus>")) {
-                return;
-            }
-            if (lastBody.contains("<StackStatus>DELETE_FAILED</StackStatus>")) {
-                throw new AssertionError("Stack " + stackName + " deletion failed: " + lastBody);
-            }
-            Thread.sleep(50);
-        }
-        throw new AssertionError(
-                "Timed out waiting for stack " + stackName + " to be deleted. Last response: " + lastBody);
     }
 
     private void awaitStackStatus(String stackName, String expectedStatus) throws InterruptedException {
@@ -395,7 +373,7 @@ class CloudFormationEventBusIntegrationTest {
     }
 
     @Test
-    void eventBusWithExistingNameInAnotherStackFailsWithoutAdoption() throws InterruptedException {
+    void eventBusWithExistingNameInAnotherStackFailsWithoutAdoption() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String busName = "collision-bus-" + suffix;
         String stackA = "eventbus-collision-a-" + suffix;
@@ -417,11 +395,11 @@ class CloudFormationEventBusIntegrationTest {
         }
 
         deleteStack(stackB);
-        awaitStackDeleted(stackB);
+        CfnStackWaits.awaitStackDeleted(stackB);
         callEventBridge("AWSEvents.DescribeEventBus", "{\"Name\":\"" + busName + "\"}", 200);
 
         deleteStack(stackA);
-        awaitStackDeleted(stackA);
+        CfnStackWaits.awaitStackDeleted(stackA);
 
         given()
             .contentType("application/x-amz-json-1.1")
@@ -437,7 +415,7 @@ class CloudFormationEventBusIntegrationTest {
 
     @Test
     void sameStackNoOpUpdateReusesOwnedBusAndMutableDescriptionIsRejected()
-            throws InterruptedException {
+            {
         String suffix = Long.toString(System.nanoTime(), 36);
         String busName = "update-bus-" + suffix;
         String stackName = "eventbus-update-" + suffix;
@@ -469,7 +447,7 @@ class CloudFormationEventBusIntegrationTest {
         }
 
         deleteStack(stackName);
-        awaitStackDeleted(stackName);
+        CfnStackWaits.awaitStackDeleted(stackName);
 
         given()
             .contentType("application/x-amz-json-1.1")
@@ -484,7 +462,7 @@ class CloudFormationEventBusIntegrationTest {
     }
 
     @Test
-    void explicitBusNameChangeFailsWithoutReplacingOwnedBus() throws InterruptedException {
+    void explicitBusNameChangeFailsWithoutReplacingOwnedBus() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String originalName = "original-bus-" + suffix;
         String replacementName = "replacement-bus-" + suffix;
@@ -508,7 +486,7 @@ class CloudFormationEventBusIntegrationTest {
         callEventBridge("AWSEvents.DescribeEventBus", "{\"Name\":\"" + originalName + "\"}", 200);
 
         deleteStack(stackName);
-        awaitStackDeleted(stackName);
+        CfnStackWaits.awaitStackDeleted(stackName);
         callEventBridge("AWSEvents.DescribeEventBus", "{\"Name\":\"" + originalName + "\"}", 400);
     }
 
@@ -591,7 +569,7 @@ class CloudFormationEventBusIntegrationTest {
     }
 
     @Test
-    void mutableEventBusTagUpdateRollsBackWithoutChangingTags() throws InterruptedException {
+    void mutableEventBusTagUpdateRollsBackWithoutChangingTags() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String busName = "tagged-bus-" + suffix;
         String stackName = "eventbus-tags-" + suffix;
@@ -630,11 +608,11 @@ class CloudFormationEventBusIntegrationTest {
         }
 
         deleteStack(stackName);
-        awaitStackDeleted(stackName);
+        CfnStackWaits.awaitStackDeleted(stackName);
     }
 
     @Test
-    void mutableEventBusPolicyUpdateRollsBackWithoutChangingPolicy() throws InterruptedException {
+    void mutableEventBusPolicyUpdateRollsBackWithoutChangingPolicy() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String busName = "policy-bus-" + suffix;
         String stackName = "eventbus-policy-" + suffix;
@@ -666,7 +644,7 @@ class CloudFormationEventBusIntegrationTest {
         }
 
         deleteStack(stackName);
-        awaitStackDeleted(stackName);
+        CfnStackWaits.awaitStackDeleted(stackName);
     }
 
     @Test
@@ -766,7 +744,7 @@ class CloudFormationEventBusIntegrationTest {
 
         callEventBridge("AWSEvents.DeleteEventBus", "{\"Name\":\"" + busName + "\"}", 200);
         deleteStack(stackName);
-        awaitStackDeleted(stackName);
+        CfnStackWaits.awaitStackDeleted(stackName);
     }
 
     @Test
@@ -789,12 +767,12 @@ class CloudFormationEventBusIntegrationTest {
         callEventBridge("AWSEvents.DeleteRule",
                 "{\"Name\":\"" + ruleName + "\",\"EventBusName\":\"" + busName + "\"}", 200);
         deleteStack(stackName);
-        awaitStackDeleted(stackName);
+        CfnStackWaits.awaitStackDeleted(stackName);
         callEventBridge("AWSEvents.DescribeEventBus", "{\"Name\":\"" + busName + "\"}", 400);
     }
 
     @Test
-    void deletingStackTreatsAlreadyAbsentBusAsSuccess() throws InterruptedException {
+    void deletingStackTreatsAlreadyAbsentBusAsSuccess() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String busName = "already-gone-bus-" + suffix;
         String stackName = "eventbus-already-gone-" + suffix;
@@ -804,7 +782,7 @@ class CloudFormationEventBusIntegrationTest {
         callEventBridge("AWSEvents.DeleteEventBus", "{\"Name\":\"" + busName + "\"}", 200);
 
         deleteStack(stackName);
-        awaitStackDeleted(stackName);
+        CfnStackWaits.awaitStackDeleted(stackName);
     }
 
     @Test

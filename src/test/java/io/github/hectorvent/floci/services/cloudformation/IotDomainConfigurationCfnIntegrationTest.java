@@ -13,7 +13,6 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 
 /**
  * Provisions an {@code AWS::IoT::DomainConfiguration} through a CloudFormation stack and asserts
@@ -103,7 +102,7 @@ class IotDomainConfigurationCfnIntegrationTest {
             .body("domainConfigurationStatus", equalTo("DISABLED"));
 
         cloudFormation("DeleteStack", null);
-        awaitStackDeleted();
+        CfnStackWaits.awaitStackDeleted(STACK);
 
         given()
         .when()
@@ -137,24 +136,6 @@ class IotDomainConfigurationCfnIntegrationTest {
     }
 
     /** DeleteStack runs asynchronously; a successful delete removes the stack entirely. */
-    private static void awaitStackDeleted() throws InterruptedException {
-        for (int i = 0; i < 100; i++) {
-            String body = given()
-                .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", CFN_AUTH)
-                .formParam("Action", "DescribeStacks")
-                .formParam("StackName", STACK)
-            .when().post("/").then().extract().asString();
-            if (body.contains("does not exist")) {
-                return;
-            }
-            if (body.contains("<StackStatus>DELETE_FAILED</StackStatus>")) {
-                fail("stack delete failed: " + body);
-            }
-            Thread.sleep(50);
-        }
-        fail("stack " + STACK + " was not deleted within the timeout");
-    }
 
     private static String outputValue(String xml, String key) {
         return XmlParser.extractPairs(xml, "Outputs", "OutputKey", "OutputValue").get(key);

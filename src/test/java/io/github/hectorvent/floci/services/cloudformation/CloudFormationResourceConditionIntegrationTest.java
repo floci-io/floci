@@ -5,14 +5,10 @@ import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
-import java.time.Duration;
-
 import static io.restassured.RestAssured.given;
-import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 @QuarkusTest
@@ -273,7 +269,7 @@ class CloudFormationResourceConditionIntegrationTest {
         } finally {
             given().header("Host", bucketName + ".localhost").delete("/object.txt");
             deleteStack(stackName);
-            awaitStackGone(stackName);
+            CfnStackWaits.awaitStackDeleted(stackName);
         }
     }
 
@@ -918,7 +914,7 @@ class CloudFormationResourceConditionIntegrationTest {
             // and reclaim the backing bucket rather than orphaning it.
             given().header("Host", bucketName + ".localhost").delete("/object.txt").then().statusCode(204);
             deleteStack(stackName);
-            awaitStackGone(stackName);
+            CfnStackWaits.awaitStackDeleted(stackName);
             given().header("Host", bucketName + ".localhost").when().get("/").then().statusCode(404);
         } finally {
             given().header("Host", bucketName + ".localhost").delete("/object.txt");
@@ -1053,7 +1049,7 @@ class CloudFormationResourceConditionIntegrationTest {
             // Clear the blocker, then DeleteStack retries the DELETE_FAILED resource
             given().header("Host", bucketName + ".localhost").delete("/object.txt").then().statusCode(204);
             deleteStack(stackName);
-            awaitStackGone(stackName);
+            CfnStackWaits.awaitStackDeleted(stackName);
             given().header("Host", bucketName + ".localhost").when().get("/").then().statusCode(404);
         } finally {
             given().header("Host", bucketName + ".localhost").delete("/object.txt");
@@ -1097,22 +1093,5 @@ class CloudFormationResourceConditionIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
-    }
-
-    private static void awaitStackGone(String stackName) {
-        await()
-            .atMost(Duration.ofSeconds(30))
-            .pollInterval(Duration.ofMillis(50))
-            .untilAsserted(() -> {
-                String body = given()
-                    .contentType("application/x-www-form-urlencoded")
-                    .formParam("Action", "DescribeStacks")
-                    .formParam("StackName", stackName)
-                .when().post("/").then().extract().asString();
-                if (body.contains("<StackStatus>DELETE_FAILED</StackStatus>")) {
-                    fail("stack delete failed: " + body);
-                }
-                assertTrue(body.contains("does not exist"), "stack still exists: " + body);
-            });
     }
 }

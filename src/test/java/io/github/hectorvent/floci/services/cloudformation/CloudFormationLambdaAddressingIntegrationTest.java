@@ -6,7 +6,6 @@ import org.junit.jupiter.api.Test;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 
 /**
  * End-to-end check that CloudFormation provisions the Lambda addressing
@@ -111,7 +110,7 @@ class CloudFormationLambdaAddressingIntegrationTest {
     }
 
     @Test
-    void updateKeepsVersionAppliesRoutingAndDeleteCleansUp() throws InterruptedException {
+    void updateKeepsVersionAppliesRoutingAndDeleteCleansUp() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String stackName = "cfn-lambda-addr-upd-" + suffix;
         String fnName = "addr-upd-fn-" + suffix;
@@ -256,25 +255,6 @@ class CloudFormationLambdaAddressingIntegrationTest {
         // A permission, version or alias whose delete fails leaves the stack in DELETE_FAILED
         // and it never drops out of DescribeStacks — so waiting for the stack to disappear
         // exercises all three delete paths.
-        awaitStackGone(stackName);
-    }
-
-    private static void awaitStackGone(String stackName) throws InterruptedException {
-        for (int i = 0; i < 200; i++) {
-            var response = given()
-                .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", CFN_AUTH)
-                .formParam("Action", "DescribeStacks")
-                .formParam("StackName", stackName)
-            .when().post("/").then().extract();
-            if (response.statusCode() != 200) {
-                return;
-            }
-            String body = response.asString();
-            assertFalse(body.contains("DELETE_FAILED"),
-                    "stack delete failed instead of completing: " + body);
-            Thread.sleep(50);
-        }
-        throw new AssertionError("Timed out waiting for stack " + stackName + " to be deleted");
+        CfnStackWaits.awaitStackDeleted(stackName);
     }
 }

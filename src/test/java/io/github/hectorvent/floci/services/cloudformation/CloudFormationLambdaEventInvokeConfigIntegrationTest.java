@@ -107,7 +107,7 @@ class CloudFormationLambdaEventInvokeConfigIntegrationTest {
     }
 
     @Test
-    void configurationFollowsTheTemplateThroughCreateUpdateReplacementAndDelete() throws InterruptedException {
+    void configurationFollowsTheTemplateThroughCreateUpdateReplacementAndDelete() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String functionStack = "cfn-event-invoke-fn-" + suffix;
         String stack = "cfn-event-invoke-" + suffix;
@@ -148,18 +148,18 @@ class CloudFormationLambdaEventInvokeConfigIntegrationTest {
         assertEvent(describeEvents(stack), "DELETE_COMPLETE", fn + "|$LATEST");
 
         cloudFormation(stack, "DeleteStack", null, Map.of());
-        awaitStackDeleted(stack);
+        CfnStackWaits.awaitStackDeleted(stack);
         getConfig(fn, version).then()
             .statusCode(404)
             .body("__type", equalTo("ResourceNotFoundException"));
         given().when().get("/2015-03-31/functions/" + fn).then().statusCode(200);
 
         cloudFormation(functionStack, "DeleteStack", null, Map.of());
-        awaitStackDeleted(functionStack);
+        CfnStackWaits.awaitStackDeleted(functionStack);
     }
 
     @Test
-    void aFailedUpdateRollsTheReplacementBack() throws InterruptedException {
+    void aFailedUpdateRollsTheReplacementBack() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String functionStack = "cfn-event-invoke-rb-fn-" + suffix;
         String stack = "cfn-event-invoke-rb-" + suffix;
@@ -182,14 +182,14 @@ class CloudFormationLambdaEventInvokeConfigIntegrationTest {
             .body("__type", equalTo("ResourceNotFoundException"));
 
         cloudFormation(stack, "DeleteStack", null, Map.of());
-        awaitStackDeleted(stack);
+        CfnStackWaits.awaitStackDeleted(stack);
         cloudFormation(functionStack, "DeleteStack", null, Map.of());
-        awaitStackDeleted(functionStack);
+        CfnStackWaits.awaitStackDeleted(functionStack);
     }
 
     /** An in-place settings change is put back from the snapshot the update took. */
     @Test
-    void aFailedUpdateRestoresTheSettingsAnInPlaceUpdateChanged() throws InterruptedException {
+    void aFailedUpdateRestoresTheSettingsAnInPlaceUpdateChanged() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String functionStack = "cfn-event-invoke-ip-fn-" + suffix;
         String stack = "cfn-event-invoke-ip-" + suffix;
@@ -210,9 +210,9 @@ class CloudFormationLambdaEventInvokeConfigIntegrationTest {
             .body("DestinationConfig.OnFailure.Destination", equalTo(DLQ_ARN));
 
         cloudFormation(stack, "DeleteStack", null, Map.of());
-        awaitStackDeleted(stack);
+        CfnStackWaits.awaitStackDeleted(stack);
         cloudFormation(functionStack, "DeleteStack", null, Map.of());
-        awaitStackDeleted(functionStack);
+        CfnStackWaits.awaitStackDeleted(functionStack);
     }
 
     @Test
@@ -231,9 +231,9 @@ class CloudFormationLambdaEventInvokeConfigIntegrationTest {
         getConfig(fn, "$LATEST").then().statusCode(404);
 
         cloudFormation(stack, "DeleteStack", null, Map.of());
-        awaitStackDeleted(stack);
+        CfnStackWaits.awaitStackDeleted(stack);
         cloudFormation(functionStack, "DeleteStack", null, Map.of());
-        awaitStackDeleted(functionStack);
+        CfnStackWaits.awaitStackDeleted(functionStack);
     }
 
     /** Creates the function stack and returns the number of the version it published. */
@@ -310,25 +310,6 @@ class CloudFormationLambdaEventInvokeConfigIntegrationTest {
             Thread.sleep(50);
         }
         return fail("stack " + stack + " did not reach " + expectedStatus + " within the timeout");
-    }
-
-    private static void awaitStackDeleted(String stack) throws InterruptedException {
-        for (int i = 0; i < 100; i++) {
-            String body = given()
-                .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", CFN_AUTH)
-                .formParam("Action", "DescribeStacks")
-                .formParam("StackName", stack)
-            .when().post("/").then().extract().asString();
-            if (body.contains("does not exist")) {
-                return;
-            }
-            if (body.contains("<StackStatus>DELETE_FAILED</StackStatus>")) {
-                fail("stack delete failed: " + body);
-            }
-            Thread.sleep(50);
-        }
-        fail("stack " + stack + " was not deleted within the timeout");
     }
 
     private static String outputValue(String xml, String key) {

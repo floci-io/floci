@@ -200,12 +200,12 @@ class CloudFormationLogsMetricFilterIntegrationTest {
                 "Requested update requires the replacement of the existing resource; deleting existing resource, then creating a new one."));
 
         cloudFormation(stack, "DeleteStack", null, Map.of());
-        awaitStackDeleted(stack);
+        CfnStackWaits.awaitStackDeleted(stack);
         describeFilters(group).then()
             .statusCode(200)
             .body("metricFilters", hasSize(0));
         cloudFormation(groupStack, "DeleteStack", null, Map.of());
-        awaitStackDeleted(groupStack);
+        CfnStackWaits.awaitStackDeleted(groupStack);
     }
 
     @Test
@@ -232,9 +232,9 @@ class CloudFormationLogsMetricFilterIntegrationTest {
         describeFilters(group).then().body("metricFilters[0].filterPattern", equalTo("{ $.latency > 10 }"));
 
         cloudFormation(stack, "DeleteStack", null, Map.of());
-        awaitStackDeleted(stack);
+        CfnStackWaits.awaitStackDeleted(stack);
         cloudFormation(groupStack, "DeleteStack", null, Map.of());
-        awaitStackDeleted(groupStack);
+        CfnStackWaits.awaitStackDeleted(groupStack);
     }
 
     @Test
@@ -259,9 +259,9 @@ class CloudFormationLogsMetricFilterIntegrationTest {
         assertPublishedValue(group, "Stack/" + suffix, "ERROR", 1);
 
         cloudFormation(stack, "DeleteStack", null, Map.of());
-        awaitStackDeleted(stack);
+        CfnStackWaits.awaitStackDeleted(stack);
         cloudFormation(groupStack, "DeleteStack", null, Map.of());
-        awaitStackDeleted(groupStack);
+        CfnStackWaits.awaitStackDeleted(groupStack);
     }
 
     @Test
@@ -290,9 +290,9 @@ class CloudFormationLogsMetricFilterIntegrationTest {
                 "fatal:CREATE_IN_PROGRESS", "errors:CREATE_COMPLETE", "errors:UPDATE_COMPLETE"));
 
         cloudFormation(stack, "DeleteStack", null, Map.of());
-        awaitStackDeleted(stack);
+        CfnStackWaits.awaitStackDeleted(stack);
         cloudFormation(groupStack, "DeleteStack", null, Map.of());
-        awaitStackDeleted(groupStack);
+        CfnStackWaits.awaitStackDeleted(groupStack);
     }
 
     @Test
@@ -325,9 +325,9 @@ class CloudFormationLogsMetricFilterIntegrationTest {
         assertTrue(template.contains("MetricValue"), template);
         assertTrue(template.contains("&quot;2&quot;") || template.contains("\"2\""), template);
         cloudFormation(stack, "DeleteStack", null, Map.of());
-        awaitStackDeleted(stack);
+        CfnStackWaits.awaitStackDeleted(stack);
         cloudFormation(groupStack, "DeleteStack", null, Map.of());
-        awaitStackDeleted(groupStack);
+        CfnStackWaits.awaitStackDeleted(groupStack);
     }
 
     @Test
@@ -355,9 +355,9 @@ class CloudFormationLogsMetricFilterIntegrationTest {
         describeFilters(group).then().body("metricFilters[0].applyOnTransformedLogs", equalTo(false))
                 .body("metricFilters[0].emitSystemFieldDimensions", hasSize(2));
         cloudFormation(stack, "DeleteStack", null, Map.of());
-        awaitStackDeleted(stack);
+        CfnStackWaits.awaitStackDeleted(stack);
         cloudFormation(groupStack, "DeleteStack", null, Map.of());
-        awaitStackDeleted(groupStack);
+        CfnStackWaits.awaitStackDeleted(groupStack);
     }
 
     @ParameterizedTest
@@ -649,9 +649,9 @@ class CloudFormationLogsMetricFilterIntegrationTest {
         String events = awaitStackStatus(stack, "ROLLBACK_COMPLETE");
         assertTrue(events.contains("Invalid filter pattern"), "the status reason carries the parse error: " + events);
         cloudFormation(stack, "DeleteStack", null, Map.of());
-        awaitStackDeleted(stack);
+        CfnStackWaits.awaitStackDeleted(stack);
         cloudFormation(groupStack, "DeleteStack", null, Map.of());
-        awaitStackDeleted(groupStack);
+        CfnStackWaits.awaitStackDeleted(groupStack);
     }
 
     private static void createGroupStack(String stack, String group) {
@@ -731,25 +731,6 @@ class CloudFormationLogsMetricFilterIntegrationTest {
             Thread.sleep(50);
         }
         return fail("stack " + stack + " did not reach " + expectedStatus + " within the timeout");
-    }
-
-    private static void awaitStackDeleted(String stack) throws InterruptedException {
-        for (int i = 0; i < 100; i++) {
-            String body = given()
-                .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", CFN_AUTH)
-                .formParam("Action", "DescribeStacks")
-                .formParam("StackName", stack)
-            .when().post("/").then().extract().asString();
-            if (body.contains("does not exist")) {
-                return;
-            }
-            if (body.contains("<StackStatus>DELETE_FAILED</StackStatus>")) {
-                fail("stack delete failed: " + body);
-            }
-            Thread.sleep(50);
-        }
-        fail("stack " + stack + " was not deleted within the timeout");
     }
 
     private static String outputValue(String xml, String key) {

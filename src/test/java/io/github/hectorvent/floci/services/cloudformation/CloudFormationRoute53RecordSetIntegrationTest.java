@@ -8,11 +8,9 @@ import org.junit.jupiter.api.Test;
 import java.time.Duration;
 
 import static io.restassured.RestAssured.given;
-import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 
 /**
  * {@code AWS::Route53::RecordSet} through the per-service provisioner: {@code Ref} is the record
@@ -84,7 +82,7 @@ class CloudFormationRoute53RecordSetIntegrationTest {
             assertTrue(records.contains("10.0.0.1"), "record value not written to zone: " + records);
         } finally {
             deleteStack(stackName);
-            awaitStackGone(stackName);
+            CfnStackWaits.awaitStackDeleted(stackName);
         }
     }
 
@@ -133,23 +131,5 @@ class CloudFormationRoute53RecordSetIntegrationTest {
             .body("{\"Name\":\"" + name + "\"}")
         .when().post("/").then().statusCode(200)
             .extract().jsonPath().getString("Parameter.Value");
-    }
-
-    private void awaitStackGone(String stackName) {
-        await()
-            .atMost(STACK_DELETE_TIMEOUT)
-            .pollInterval(STACK_DELETE_POLL_INTERVAL)
-            .untilAsserted(() -> {
-                String body = given()
-                    .contentType("application/x-www-form-urlencoded")
-                    .header("Authorization", CFN_AUTH)
-                    .formParam("Action", "DescribeStacks")
-                    .formParam("StackName", stackName)
-                .when().post("/").then().extract().asString();
-                if (body.contains("<StackStatus>DELETE_FAILED</StackStatus>")) {
-                    fail("stack delete failed: " + body);
-                }
-                assertTrue(body.contains("does not exist"), "stack still exists: " + body);
-            });
     }
 }

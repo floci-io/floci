@@ -17,7 +17,6 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 
 /**
  * Provisions two {@code AWS::AutoScaling::ScalingPolicy} resources on a group the same stack
@@ -98,7 +97,7 @@ class AutoScalingScalingPolicyCfnIntegrationTest {
     AutoScalingService autoScalingService;
 
     @Test
-    void createUpdateAndDeleteScalingPolicies() throws InterruptedException {
+    void createUpdateAndDeleteScalingPolicies() {
         cloudFormation("CreateStack", Map.of("TargetValue", "50", "Cooldown", "60"));
         String created = describeStacks("CREATE_COMPLETE");
         String trackingArn = outputValue(created, "TrackingRef");
@@ -138,7 +137,7 @@ class AutoScalingScalingPolicyCfnIntegrationTest {
         assertEquals(2, autoScalingService.describePolicies(REGION, ASG, null).size());
 
         cloudFormation("DeleteStack", Map.of());
-        awaitStackDeleted();
+        CfnStackWaits.awaitStackDeleted(STACK);
 
         assertEquals(List.of(), autoScalingService.describePolicies(REGION, null, List.of(trackingName, simpleName)));
     }
@@ -177,24 +176,6 @@ class AutoScalingScalingPolicyCfnIntegrationTest {
     }
 
     /** DeleteStack runs asynchronously; a successful delete removes the stack entirely. */
-    private static void awaitStackDeleted() throws InterruptedException {
-        for (int i = 0; i < 100; i++) {
-            String body = given()
-                .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", CFN_AUTH)
-                .formParam("Action", "DescribeStacks")
-                .formParam("StackName", STACK)
-            .when().post("/").then().extract().asString();
-            if (body.contains("does not exist")) {
-                return;
-            }
-            if (body.contains("<StackStatus>DELETE_FAILED</StackStatus>")) {
-                fail("stack delete failed: " + body);
-            }
-            Thread.sleep(50);
-        }
-        fail("stack " + STACK + " was not deleted within the timeout");
-    }
 
     private static String outputValue(String xml, String key) {
         return XmlParser.extractPairs(xml, "Outputs", "OutputKey", "OutputValue").get(key);
