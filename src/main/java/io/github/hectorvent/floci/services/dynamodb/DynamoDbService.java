@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.services.dynamodb.model.ImportSummary;
 import io.github.hectorvent.floci.services.dynamodb.model.ImportTableDescription;
 import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
+import io.github.hectorvent.floci.services.dynamodb.model.SearchSchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.StreamDescription;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.VectorIndex;
@@ -3930,6 +3931,58 @@ public class DynamoDbService implements ResourceProvider {
         if (table.getLocalSecondaryIndexes() != null) {
             for (LocalSecondaryIndex lsi : table.getLocalSecondaryIndexes()) {
                 validateIndexKeySchema(table, item, lsi.getIndexName(), lsi.getKeySchema(), isUpdate);
+            }
+        }
+        for (VectorIndex vectorIndex : table.getVectorIndexes()) {
+            validateVectorIndexWrite(table, item, vectorIndex, isUpdate);
+        }
+    }
+
+    // A vector index constrains the shape of the vector attribute and, through its search
+    // schema, the HASH attribute it partitions on. An item carrying neither is written and
+    // left out of the index; one carrying a vector of the wrong shape is refused.
+    private void validateVectorIndexWrite(TableDefinition table, JsonNode item,
+                                          VectorIndex index, boolean isUpdate) {
+        JsonNode vector = item.get(index.getVectorAttributeName());
+        if (vector != null) {
+            validateVectorAttribute(vector, index);
+        }
+        for (SearchSchemaElement element : index.getSearchSchema()) {
+            if ("HASH".equals(element.getSearchSchemaElementType())) {
+                validateIndexKeySchema(table, item, index.getIndexName(),
+                        List.of(new KeySchemaElement(element.getAttributeName(), "HASH")), isUpdate);
+            }
+        }
+    }
+
+    // AWS punctuates these three inconsistently, which is reproduced here character for
+    // character: "Actual: S." carries a period and "Actual: 2" and "list" do not.
+    private void validateVectorAttribute(JsonNode vector, VectorIndex index) {
+        String attributeName = index.getVectorAttributeName();
+        String indexName = index.getIndexName();
+        validateAttributeValueShape(vector);
+        JsonNode components = vector.get("L");
+        if (components == null || !components.isArray()) {
+            throw new AwsException("ValidationException",
+                    "One or more parameter values were invalid. Invalid type for parameter "
+                    + attributeName + ", Expected: 32-bit floating point number list IndexName: "
+                    + indexName, 400);
+        }
+        Long dimensions = index.getDimensions();
+        if (dimensions != null && components.size() != dimensions) {
+            throw new AwsException("ValidationException",
+                    "One or more parameter values were invalid. Invalid size for parameter "
+                    + attributeName + ", Expected: " + dimensions
+                    + ", Actual: " + components.size() + " IndexName: " + indexName, 400);
+        }
+        for (int i = 0; i < components.size(); i++) {
+            JsonNode component = components.get(i);
+            validateAttributeValueShape(component);
+            if (!component.has("N")) {
+                throw new AwsException("ValidationException",
+                        "One or more parameter values were invalid. Invalid type for parameter "
+                        + attributeName + "[" + i + "], Expected: 32-bit floating point number, "
+                        + "Actual: " + component.fieldNames().next() + ". IndexName: " + indexName, 400);
             }
         }
     }
