@@ -233,8 +233,8 @@ public class DynamoDbJsonHandler {
         if (streamSpecCheck.isObject() && !streamSpecCheck.path("StreamEnabled").asBoolean(false)
                 && streamSpecCheck.hasNonNull("StreamViewType")) {
             throw new AwsException("ValidationException",
-                    "One or more parameter values were invalid: StreamViewType cannot be specified "
-                    + "when StreamEnabled is false", 400);
+                    "One or more parameter values were invalid: Table is being created with a stream "
+                    + "disabled, UpdateViewType should not be specified", 400);
         }
 
         TableDefinition table = dynamoDbService.createTable(tableName, keySchema, attrDefs,

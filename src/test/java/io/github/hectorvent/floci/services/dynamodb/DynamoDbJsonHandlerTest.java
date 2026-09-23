@@ -1034,8 +1034,8 @@ class DynamoDbJsonHandlerTest {
                     "StreamSpecification": {"StreamEnabled": false, "StreamViewType": "NEW_AND_OLD_IMAGES"}
                 }
                 """));
-        assertEquals("One or more parameter values were invalid: "
-                + "StreamViewType cannot be specified when StreamEnabled is false", ex.getMessage());
+        assertEquals("One or more parameter values were invalid: Table is being created with a stream "
+                + "disabled, UpdateViewType should not be specified", ex.getMessage());
     }
 
     @Test
