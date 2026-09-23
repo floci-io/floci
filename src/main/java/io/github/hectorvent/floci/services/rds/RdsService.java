@@ -20,9 +20,13 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsService;
+import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dimension;
+import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricDatum;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.ec2.model.Vpc;
+import io.github.hectorvent.floci.services.rds.container.AutoPauseListener;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerHandle;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
@@ -179,11 +183,16 @@ public class RdsService implements Resettable, ResourceProvider {
     private final DockerHostResolver dockerHostResolver;
     private final CurrentContainerNetworkResolver currentContainerNetworkResolver;
     private final ResourceGroupsTaggingService taggingService;
+    // Null when a test constructs the service without CloudWatch; auto-pause then reports no metrics.
+    private final CloudWatchMetricsService metricsService;
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
     private static final Pattern IMAGE_TAG_VERSION_PATTERN = Pattern.compile("^(\\d+(?:\\.\\d+)*)(.*)$");
     private static final Pattern SAFE_IMAGE_TAG_PATTERN = Pattern.compile("[A-Za-z0-9._-]+");
     private static final int SERVERLESS_V2_DEFAULT_AUTO_PAUSE_SECONDS = 300;
     private static final int SERVERLESS_V2_MAX_AUTO_PAUSE_SECONDS = 86_400;
+    /** Only Aurora Serverless v2 instances pause; a provisioned one keeps its whole cluster awake. */
+    private static final String SERVERLESS_V2_INSTANCE_CLASS = "db.serverless";
+    private static final List<String> AUTO_PAUSE_EVENT_CATEGORIES = List.of("notification", "serverless");
     private static final Pattern DB_PROXY_NAME_PATTERN =
             Pattern.compile("[a-zA-Z](?:-?[a-zA-Z0-9]+)*");
     /**
@@ -212,7 +221,8 @@ public class RdsService implements Resettable, ResourceProvider {
                       DockerHostResolver dockerHostResolver,
                       CurrentContainerNetworkResolver currentContainerNetworkResolver,
                       ResourceGroupsTaggingService taggingService,
-                      KmsService kmsService) {
+                      KmsService kmsService,
+                      CloudWatchMetricsService metricsService) {
         this.containerManager = containerManager;
         this.proxyManager = proxyManager;
         this.ec2Service = ec2Service;
@@ -223,6 +233,7 @@ public class RdsService implements Resettable, ResourceProvider {
         this.dockerHostResolver = dockerHostResolver;
         this.currentContainerNetworkResolver = currentContainerNetworkResolver;
         this.taggingService = taggingService;
+        this.metricsService = metricsService;
         this.instances = storageFactory.create("rds", "rds-instances.json",
                 new TypeReference<Map<String, DbInstance>>() {});
         this.clusters = storageFactory.create("rds", "rds-clusters.json",
@@ -380,6 +391,7 @@ public class RdsService implements Resettable, ResourceProvider {
         this.proxies = proxies;
         this.proxyTargetGroups = proxyTargetGroups;
         this.taggingService = taggingService;
+        this.metricsService = null;
         this.globalClusters = new io.github.hectorvent.floci.core.storage.InMemoryStorage<>();
         this.snapshots = new io.github.hectorvent.floci.core.storage.InMemoryStorage<>();
         this.clusterSnapshots = new InMemoryStorage<>();
@@ -2938,6 +2950,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     (user, pw) -> validateDbClusterPasswordForScope(accountId, clusterRegion, id, user, pw),
                     proxyBinding(cluster.getEngine(), cluster.getEndpoint().address(), cluster.getProxyPort(),
                             clusterRegion, accountId, cluster.getDbClusterResourceId()));
+            applyAutoPause(cluster);
         }
     }
 
@@ -3167,6 +3180,7 @@ public class RdsService implements Resettable, ResourceProvider {
         cluster.setContainerHost(started.getHost());
         cluster.setContainerPort(started.getPort());
         putClusterForScope(currentAccountId(), effectiveRegion, id, cluster);
+        applyAutoPause(cluster);
         LOG.infov("Backing database container for DB cluster {0} started on retry", id);
         return cluster;
     }
@@ -3453,6 +3467,7 @@ public class RdsService implements Resettable, ResourceProvider {
             }
             throw e;
         }
+        applyAutoPause(cluster);
         LOG.infov("DB cluster {0} created (mock={1}), engine={2}, endpoint={3}:{4}",
                 id, String.valueOf(mock), engine, endpoint.address(), String.valueOf(endpoint.port()));
         return cluster;
@@ -3529,6 +3544,175 @@ public class RdsService implements Resettable, ResourceProvider {
         return engineIdentifier != null
                 && ("aurora-mysql".equalsIgnoreCase(engineIdentifier)
                 || "aurora-postgresql".equalsIgnoreCase(engineIdentifier));
+    }
+
+    // ── Aurora Serverless v2 auto-pause ───────────────────────────────────────
+
+    /**
+     * Hands a cluster's auto-pause interval to its container: SecondsUntilAutoPause for an Aurora
+     * cluster whose MinCapacity is 0, otherwise none, which keeps the container running.
+     */
+    private void applyAutoPause(DbCluster cluster) {
+        if (config.services().rds().mock() || cluster.getDbClusterArn() == null) {
+            return;
+        }
+        Integer secondsUntilAutoPause = isAuroraEngine(cluster.getEngineIdentifier())
+                ? cluster.getServerlessV2SecondsUntilAutoPause()
+                : null;
+        containerManager.configureAutoPause(cluster.getDbClusterArn(), secondsUntilAutoPause,
+                new ClusterAutoPause(accountIdFromArn(cluster.getDbClusterArn()),
+                        regionFromArn(cluster.getDbClusterArn()), cluster.getDbClusterIdentifier()));
+    }
+
+    /**
+     * Aurora's conditions for pausing an idle cluster besides its zero MinCapacity: the cluster
+     * and its instances are available, every instance is Aurora Serverless v2 (a provisioned one
+     * keeps the writer awake), and the cluster is neither in a global database nor the target of
+     * an RDS Proxy, which holds connections open to it.
+     */
+    private boolean clusterMayAutoPause(String accountId, String region, String clusterId) {
+        DbCluster cluster = findClusterForScope(accountId, region, clusterId);
+        if (cluster == null
+                || (cluster.getStatus() != null && cluster.getStatus() != DbInstanceStatus.AVAILABLE)
+                || cluster.getServerlessV2SecondsUntilAutoPause() == null
+                || cluster.getGlobalClusterIdentifier() != null) {
+            return false;
+        }
+        List<String> memberIds = List.copyOf(cluster.getDbClusterMembers());
+        if (memberIds.isEmpty()) {
+            return false;
+        }
+        for (String memberId : memberIds) {
+            DbInstance member = findInstanceForScope(accountId, region, memberId);
+            if (member == null
+                    || (member.getStatus() != null && member.getStatus() != DbInstanceStatus.AVAILABLE)
+                    || !SERVERLESS_V2_INSTANCE_CLASS.equalsIgnoreCase(member.getDbInstanceClass())) {
+                return false;
+            }
+        }
+        return !isDbProxyTargetOfAccount(accountId, region, clusterId, memberIds);
+    }
+
+    /** {@link #isRegisteredProxyTarget} for an explicit account, since auto-pause runs outside a request. */
+    private boolean isDbProxyTargetOfAccount(String accountId, String region, String clusterId,
+                                             List<String> memberIds) {
+        List<DbProxyTargetGroup> targetGroups =
+                proxyTargetGroups instanceof AccountAwareStorageBackend<DbProxyTargetGroup> aware
+                        ? aware.scanForAccount(accountId, key -> true)
+                        : proxyTargetGroups.scan(key -> true);
+        return targetGroups.stream()
+                .filter(targetGroup -> targetGroupBelongsTo(targetGroup, accountId, region))
+                .flatMap(targetGroup -> targetGroup.getTargets().stream())
+                .anyMatch(target -> ("TRACKED_CLUSTER".equals(target.getType())
+                        && clusterId.equals(target.getRdsResourceId()))
+                        || ("RDS_INSTANCE".equals(target.getType())
+                        && memberIds.contains(target.getRdsResourceId())));
+    }
+
+    private List<DbInstance> serverlessMembers(String accountId, String region, String clusterId) {
+        DbCluster cluster = findClusterForScope(accountId, region, clusterId);
+        if (cluster == null) {
+            return List.of();
+        }
+        List<DbInstance> members = new ArrayList<>();
+        for (String memberId : List.copyOf(cluster.getDbClusterMembers())) {
+            DbInstance member = findInstanceForScope(accountId, region, memberId);
+            if (member != null && SERVERLESS_V2_INSTANCE_CLASS.equalsIgnoreCase(member.getDbInstanceClass())) {
+                members.add(member);
+            }
+        }
+        return members;
+    }
+
+    /**
+     * Records an auto-pause step as the RDS-EVENT-0370 to 0374 event of each Serverless v2 instance,
+     * under the cluster's own account, since auto-pause runs outside a request.
+     */
+    private void recordAutoPauseEvents(String accountId, List<DbInstance> members,
+                                       AutoPauseListener.Event event, Instant at) {
+        String message = switch (event) {
+            case PAUSE_INITIATED -> "Initiated pause for the DB instance.";
+            case PAUSE_CANCELED -> "Pause was canceled for the DB instance.";
+            case PAUSED -> "Successfully paused the DB instance.";
+            case RESUME_INITIATED -> "Initiated resume for the DB instance.";
+            case RESUMED -> "Successfully resumed the DB instance.";
+            // Aurora emits no event while an instance stays paused; that only shows in metrics.
+            case STILL_PAUSED -> null;
+        };
+        if (message == null) {
+            return;
+        }
+        for (DbInstance member : members) {
+            String eventId = "auto-pause:" + member.getDbInstanceArn() + ":" + event + ":" + at;
+            putEventForAccount(accountId, eventId, new RdsEvent(eventId, member.getDbInstanceIdentifier(),
+                    "db-instance", message, AUTO_PAUSE_EVENT_CATEGORIES, at, member.getDbInstanceArn()));
+        }
+    }
+
+    private void putEventForAccount(String accountId, String eventId, RdsEvent event) {
+        if (events instanceof AccountAwareStorageBackend<RdsEvent> aware) {
+            aware.putForAccount(accountId, eventId, event);
+        } else {
+            events.put(eventId, event);
+        }
+    }
+
+    /**
+     * Publishes what a paused Aurora Serverless v2 instance still sends CloudWatch: a zero
+     * ServerlessDatabaseCapacity, ACUUtilization and CPUUtilization, for the cluster and for each
+     * instance.
+     */
+    private void publishPausedCapacity(String accountId, String region, String clusterId,
+                                       List<DbInstance> members, Instant at) {
+        if (metricsService == null) {
+            return;
+        }
+        publishZeroCapacity(accountId, region, new Dimension("DBClusterIdentifier", clusterId), at);
+        for (DbInstance member : members) {
+            publishZeroCapacity(accountId, region,
+                    new Dimension("DBInstanceIdentifier", member.getDbInstanceIdentifier()), at);
+        }
+    }
+
+    private void publishZeroCapacity(String accountId, String region, Dimension dimension, Instant at) {
+        for (String metricName : List.of("ServerlessDatabaseCapacity", "ACUUtilization", "CPUUtilization")) {
+            MetricDatum datum = new MetricDatum();
+            datum.setMetricName(metricName);
+            datum.setUnit("ServerlessDatabaseCapacity".equals(metricName) ? "Count" : "Percent");
+            datum.setDimensions(List.of(dimension));
+            datum.setTimestamp(at.getEpochSecond());
+            datum.setValue(0.0);
+            metricsService.publishMetricForAccount(accountId, "AWS/RDS", datum, region,
+                    "rds-auto-pause:" + dimension.name() + "=" + dimension.value() + ":" + metricName + ":" + at);
+        }
+    }
+
+    /** The auto-pause of one cluster's container: Aurora's pause rules, its events and its metrics. */
+    private final class ClusterAutoPause implements AutoPauseListener {
+
+        private final String accountId;
+        private final String region;
+        private final String clusterId;
+
+        private ClusterAutoPause(String accountId, String region, String clusterId) {
+            this.accountId = accountId;
+            this.region = region;
+            this.clusterId = clusterId;
+        }
+
+        @Override
+        public boolean mayPause() {
+            return clusterMayAutoPause(accountId, region, clusterId);
+        }
+
+        @Override
+        public void onAutoPause(Event event, Instant at) {
+            List<DbInstance> members = serverlessMembers(accountId, region, clusterId);
+            recordAutoPauseEvents(accountId, members, event, at);
+            if (event == Event.PAUSED || event == Event.STILL_PAUSED) {
+                publishPausedCapacity(accountId, region, clusterId, members, at);
+            }
+        }
     }
 
     /**
@@ -3684,6 +3868,9 @@ public class RdsService implements Resettable, ResourceProvider {
             cluster.setServerlessV2SecondsUntilAutoPause(effectiveAutoPauseSeconds);
         }
         putClusterForScope(currentAccountId(), effectiveRegion, id, cluster);
+        if (modifiesServerlessV2Scaling) {
+            applyAutoPause(cluster);
+        }
 
         // A cluster rotation applies to every endpoint: the cluster's own proxy and each member
         // instance's proxy hold start-time password snapshots, and member endpoints validate
@@ -6822,6 +7009,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 cluster.setStatus(DbInstanceStatus.AVAILABLE);
                 putClusterForScope(accountId, clusterRegion,
                         cluster.getDbClusterIdentifier(), cluster);
+                applyAutoPause(cluster);
             } catch (Exception e) {
                 if (!config.services().rds().mock()) {
                     try {

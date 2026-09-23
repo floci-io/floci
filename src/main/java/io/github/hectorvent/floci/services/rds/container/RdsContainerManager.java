@@ -1,10 +1,12 @@
 package io.github.hectorvent.floci.services.rds.container;
 
 import com.github.dockerjava.api.async.ResultCallback;
+import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.model.Frame;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.ServiceConfigAccess;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
@@ -15,6 +17,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.E
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
@@ -27,22 +30,32 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
 /**
  * Manages backend Docker container lifecycle for RDS DB instances and clusters.
  * Starts postgres/mysql/mariadb containers and resolves the backend host:port for the auth proxy.
+ * Every client of a container enters it through {@link #enter}, which is how an Aurora Serverless
+ * v2 cluster with MinCapacity 0 knows when it is idle enough to pause and when to resume.
  */
 @ApplicationScoped
-public class RdsContainerManager {
+public class RdsContainerManager implements RdsBackendGate, Resettable {
 
     private static final Logger LOG = Logger.getLogger(RdsContainerManager.class);
     private static final Pattern SAFE_STORAGE_COMPONENT = Pattern.compile("[A-Za-z0-9._-]+");
@@ -59,6 +72,29 @@ public class RdsContainerManager {
     private final Set<String> claimedRuntimes = ConcurrentHashMap.newKeySet();
     private final Set<String> cleanupPending = ConcurrentHashMap.newKeySet();
     private volatile boolean dockerUnavailableLogged;
+    // Auto-pause state of every running container, by runtime id. The timer thread only keeps
+    // time: each task it fires runs on a virtual thread of its own, since a pause first asks the
+    // RDS service whether the cluster may pause. Events reach the listener one at a time, in order.
+    private final Map<String, AutoPauseController> autoPauses = new ConcurrentHashMap<>();
+    private final ScheduledExecutorService autoPauseTimer = Executors.newSingleThreadScheduledExecutor(
+            runnable -> {
+                Thread thread = new Thread(runnable, "rds-auto-pause-timer");
+                thread.setDaemon(true);
+                return thread;
+            });
+    private final ExecutorService autoPauseEvents = Executors.newSingleThreadExecutor(
+            Thread.ofVirtual().name("rds-auto-pause-events").factory());
+    private final AutoPauseController.Freezer dockerFreezer = new AutoPauseController.Freezer() {
+        @Override
+        public void pause(String containerId) {
+            pauseContainer(containerId);
+        }
+
+        @Override
+        public void unpause(String containerId) {
+            unpauseContainer(containerId);
+        }
+    };
 
     @Inject
     public RdsContainerManager(ContainerBuilder containerBuilder,
@@ -281,6 +317,9 @@ public class RdsContainerManager {
                             info.containerId(), logGroup, logStream, runtimeIdentity.region(),
                             "rds:" + effectiveRuntimeId);
             handle.setLogStream(logHandle);
+            // Before the handle is returned, so that the connections of every proxy started on it
+            // are counted from the first one.
+            registerAutoPause(effectiveRuntimeId, handle);
             activeContainers.put(effectiveRuntimeId, handle);
 
             return handle;
@@ -349,6 +388,7 @@ public class RdsContainerManager {
         }
         RdsContainerHandle active = activeContainers.get(handle.getRuntimeId());
         RdsContainerHandle effectiveHandle = active != null ? active : handle;
+        releaseAutoPause(effectiveHandle.getRuntimeId());
         try {
             lifecycleManager.stopAndRemoveStrict(
                     effectiveHandle.getContainerId(), effectiveHandle.getLogStream());
@@ -408,6 +448,156 @@ public class RdsContainerManager {
                 LOG.warnv(e, "Failed to stop RDS container {0} during shutdown; continuing",
                         handle.getContainerId());
             }
+        }
+    }
+
+    /**
+     * Applies an Aurora Serverless v2 auto-pause interval to a running container: it pauses once
+     * no client has used it for that many seconds, and a null interval, for MinCapacity above 0
+     * or with auto-pause turned off, keeps it running. The listener decides whether the cluster
+     * may pause at that moment and is told each step.
+     */
+    public void configureAutoPause(String runtimeId, Integer secondsUntilAutoPause,
+                                   AutoPauseListener listener) {
+        AutoPauseController controller = runtimeId != null ? autoPauses.get(runtimeId) : null;
+        if (controller == null) {
+            return;
+        }
+        boolean enabled = config.services().rds().auroraAutoPauseEnabled();
+        controller.configure(enabled ? secondsUntilAutoPause : null, listener);
+    }
+
+    @Override
+    public Lease enter(String host, int port) throws InterruptedException {
+        if (host == null) {
+            return Lease.NONE;
+        }
+        for (AutoPauseController controller : autoPauses.values()) {
+            if (controller.serves(host, port)) {
+                return controller.acquire();
+            }
+        }
+        return Lease.NONE;
+    }
+
+    /**
+     * Runs a runtime's auto-pause idle check now instead of after SecondsUntilAutoPause, which
+     * the API does not let drop below 300 seconds. Returns whether the container paused.
+     */
+    boolean pauseIfIdle(String runtimeId) {
+        AutoPauseController controller = autoPauses.get(runtimeId);
+        return controller != null && controller.pauseIfIdle();
+    }
+
+    /**
+     * A reset wipes the RDS records but leaves their containers running, as it always has. It
+     * releases their auto-pause, which thaws a paused container, so none stays frozen with no
+     * cluster left to resume it.
+     */
+    @Override
+    public void clear() {
+        for (String runtimeId : List.copyOf(autoPauses.keySet())) {
+            releaseAutoPause(runtimeId);
+        }
+    }
+
+    @PreDestroy
+    void shutdownAutoPause() {
+        autoPauseTimer.shutdownNow();
+        autoPauseEvents.shutdownNow();
+    }
+
+    private void registerAutoPause(String runtimeId, RdsContainerHandle handle) {
+        Duration resumeDelay = Duration.ofMillis(
+                Math.max(0, config.services().rds().auroraResumeDelayMillis()));
+        AutoPauseController controller = new AutoPauseController(
+                handle.getContainerId(), handle.getHost(), handle.getPort(), dockerFreezer,
+                this::scheduleAutoPauseTask, autoPauseEvents, Clock.systemUTC(), resumeDelay);
+        // Clients find a container by its address, so the new container owns it from now on,
+        // even if Docker removed the previous owner without Floci stopping it.
+        for (Map.Entry<String, AutoPauseController> entry : List.copyOf(autoPauses.entrySet())) {
+            if (entry.getValue().serves(handle.getHost(), handle.getPort())
+                    && autoPauses.remove(entry.getKey(), entry.getValue())) {
+                entry.getValue().close();
+            }
+        }
+        AutoPauseController previous = autoPauses.put(runtimeId, controller);
+        if (previous != null) {
+            previous.close();
+        }
+    }
+
+    /** Stops a runtime's auto-pause before its container goes away, thawing it when paused. */
+    private void releaseAutoPause(String runtimeId) {
+        AutoPauseController controller = autoPauses.remove(runtimeId);
+        if (controller != null) {
+            controller.close();
+        }
+    }
+
+    /** Keeps a container awake, resuming it first, while Floci runs a command inside it. */
+    private Lease holdContainer(String containerId) {
+        if (containerId == null) {
+            return Lease.NONE;
+        }
+        for (AutoPauseController controller : autoPauses.values()) {
+            if (controller.runs(containerId)) {
+                try {
+                    return controller.acquire();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(
+                            "Interrupted while resuming RDS container " + containerId, e);
+                }
+            }
+        }
+        return Lease.NONE;
+    }
+
+    private Future<?> scheduleAutoPauseTask(Runnable task, Duration delay) {
+        try {
+            return autoPauseTimer.schedule(
+                    () -> Thread.ofVirtual().name("rds-auto-pause").start(task),
+                    delay.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (RejectedExecutionException e) {
+            LOG.debugv("RDS auto-pause timer is shut down; not scheduling: {0}", e.getMessage());
+            return CompletableFuture.completedFuture(null);
+        }
+    }
+
+    private void pauseContainer(String containerId) {
+        try {
+            lifecycleManager.getDockerClient().pauseContainerCmd(containerId).exec();
+        } catch (RuntimeException e) {
+            // Docker refuses to pause a paused container; that one is where it should be.
+            if (!isRunning(containerId, true)) {
+                throw e;
+            }
+        }
+    }
+
+    private void unpauseContainer(String containerId) {
+        try {
+            lifecycleManager.getDockerClient().unpauseContainerCmd(containerId).exec();
+        } catch (RuntimeException e) {
+            // Docker refuses to unpause a container that is not paused, as after a manual
+            // `docker unpause`; one still running is where it should be.
+            if (!isRunning(containerId, false)) {
+                throw e;
+            }
+        }
+    }
+
+    /** Whether the container runs, paused or not as asked; false when Docker cannot say. */
+    private boolean isRunning(String containerId, boolean paused) {
+        try {
+            InspectContainerResponse.ContainerState state =
+                    lifecycleManager.getDockerClient().inspectContainerCmd(containerId).exec().getState();
+            return state != null && Boolean.TRUE.equals(state.getRunning())
+                    && paused == Boolean.TRUE.equals(state.getPaused());
+        } catch (RuntimeException e) {
+            LOG.debugv("Could not inspect RDS container {0}: {1}", containerId, e.getMessage());
+            return false;
         }
     }
 
@@ -555,9 +745,11 @@ public class RdsContainerManager {
      */
     public void rotateMasterPassword(String containerName, String containerId, DatabaseEngine engine,
                                      String masterUsername, String oldPassword, String newPassword) {
-        execUntilSuccess(containerName, containerId,
-                passwordRotationCommand(engine, masterUsername, oldPassword, newPassword),
-                "master-password rotation");
+        try (Lease _ = holdContainer(containerId)) {
+            execUntilSuccess(containerName, containerId,
+                    passwordRotationCommand(engine, masterUsername, oldPassword, newPassword),
+                    "master-password rotation");
+        }
     }
 
     static String[] passwordRotationCommand(DatabaseEngine engine, String masterUsername,
@@ -679,7 +871,7 @@ public class RdsContainerManager {
                 "pg_dumpall",
                 "-U", effectiveUser
         };
-        try {
+        try (Lease _ = holdContainer(containerId)) {
             ContainerExecResult result = execInContainer(containerId, cmd, 120);
             if (result.exitCode() != 0) {
                 throw new RuntimeException("pg_dumpall failed with exit code " + result.exitCode() + ": " + result.stderr());
@@ -693,7 +885,7 @@ public class RdsContainerManager {
     public void restorePostgresSnapshot(String containerId, String masterUsername, String sqlDump) {
         String effectiveUser = (masterUsername != null && !masterUsername.isBlank()) ? masterUsername : "postgres";
 
-        try {
+        try (Lease _ = holdContainer(containerId)) {
             String restoreScript = postgresRestoreScript();
 
             java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();

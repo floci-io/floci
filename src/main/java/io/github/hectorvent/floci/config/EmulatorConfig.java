@@ -1541,6 +1541,18 @@ public interface EmulatorConfig {
         int proxyBackendConnectTimeoutMillis();
         @WithDefault("100")
         int proxyMaxConnections();
+
+        /** Whether an Aurora Serverless v2 cluster with MinCapacity 0 pauses its container
+         *  after SecondsUntilAutoPause without connections, as Aurora does.
+         *  Env: FLOCI_SERVICES_RDS_AURORA_AUTO_PAUSE_ENABLED */
+        @WithDefault("true")
+        boolean auroraAutoPauseEnabled();
+
+        /** How long the first connection to an auto-paused cluster is held while it resumes.
+         *  Aurora takes about 15 seconds; 0 resumes at once.
+         *  Env: FLOCI_SERVICES_RDS_AURORA_RESUME_DELAY_MILLIS */
+        @WithDefault("0")
+        int auroraResumeDelayMillis();
     }
 
     interface RdsDataServiceConfig {

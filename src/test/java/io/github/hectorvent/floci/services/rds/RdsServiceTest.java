@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
 import io.github.hectorvent.floci.services.rds.model.DbClusterSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
+import io.github.hectorvent.floci.services.rds.container.AutoPauseListener;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerHandle;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
 import io.github.hectorvent.floci.services.rds.model.DbEndpoint;
@@ -72,6 +73,7 @@ import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -1602,6 +1604,102 @@ class RdsServiceTest {
         assertEquals(0.0, passwordOnlyChange.getServerlessV2MinCapacity());
         assertEquals(32.0, passwordOnlyChange.getServerlessV2MaxCapacity());
         assertEquals(300, passwordOnlyChange.getServerlessV2SecondsUntilAutoPause());
+    }
+
+    @Test
+    void auroraClusterHandsItsAutoPauseIntervalToItsContainer() {
+        DbCluster cluster = createAutoPauseCluster(rdsService, "paused", 600);
+
+        verify(containerManager).configureAutoPause(eq(cluster.getDbClusterArn()), eq(600), any());
+
+        rdsService.modifyDbCluster("paused", null, null, 0.5, null, null);
+        verify(containerManager).configureAutoPause(eq(cluster.getDbClusterArn()), isNull(), any());
+    }
+
+    @Test
+    void auroraClusterMayAutoPauseOnlyWithServerlessInstancesAndNothingHoldingItAwake() {
+        DbCluster cluster = createAutoPauseCluster(rdsService, "paused", 300);
+        AutoPauseListener listener = capturedAutoPauseListener(cluster);
+        assertFalse(listener.mayPause(), "a cluster without instances has nothing to pause");
+
+        createMember(rdsService, "paused-1", "db.serverless", "paused");
+        assertTrue(listener.mayPause());
+
+        createMember(rdsService, "paused-2", "db.r6g.large", "paused");
+        assertFalse(listener.mayPause(), "a provisioned instance keeps the cluster awake");
+        rdsService.deleteDbInstance("paused-2");
+        assertTrue(listener.mayPause());
+
+        rdsService.modifyDbCluster("paused", null, null, 0.5, null, null);
+        assertFalse(listener.mayPause(), "a nonzero MinCapacity never pauses");
+        rdsService.modifyDbCluster("paused", null, null, 0.0, null, null);
+        assertTrue(listener.mayPause());
+
+        rdsService.createGlobalCluster("global-1", "paused", null, null, null, null, null,
+                Map.of(), "us-east-1");
+        assertFalse(listener.mayPause(), "a global database keeps its primary awake");
+    }
+
+    @Test
+    void auroraClusterBehindAnRdsProxyDoesNotAutoPause() {
+        InMemoryStorage<String, DbProxyTargetGroup> targetGroups = new InMemoryStorage<>();
+        RdsService service = proxyStoreService(regionResolver, config, new InMemoryStorage<>(),
+                targetGroups, new InMemoryStorage<>(), new InMemoryStorage<>());
+        DbCluster cluster = createAutoPauseCluster(service, "paused", 300);
+        createMember(service, "paused-1", "db.serverless", "paused");
+        AutoPauseListener listener = capturedAutoPauseListener(cluster);
+        assertTrue(listener.mayPause());
+
+        DbProxyTargetGroup targetGroup = persistedTargetGroup("app-proxy", "us-east-1", "123456789012", "abc");
+        targetGroup.setTargets(List.of(new DbProxyTarget("TRACKED_CLUSTER", "paused",
+                cluster.getDbClusterArn(), "localhost", 5432)));
+        targetGroups.put("us-east-1::app-proxy", targetGroup);
+
+        assertFalse(listener.mayPause(), "an RDS Proxy holds connections open to its targets");
+    }
+
+    @Test
+    void autoPauseStepsAreRecordedAsEventsOfEachServerlessInstance() {
+        DbCluster cluster = createAutoPauseCluster(rdsService, "paused", 300);
+        DbInstance member = createMember(rdsService, "paused-1", "db.serverless", "paused");
+        AutoPauseListener listener = capturedAutoPauseListener(cluster);
+        Instant start = Instant.now();
+
+        listener.onAutoPause(AutoPauseListener.Event.PAUSE_INITIATED, start);
+        listener.onAutoPause(AutoPauseListener.Event.PAUSED, start.plusSeconds(1));
+        listener.onAutoPause(AutoPauseListener.Event.STILL_PAUSED, start.plusSeconds(61));
+        listener.onAutoPause(AutoPauseListener.Event.RESUME_INITIATED, start.plusSeconds(90));
+        listener.onAutoPause(AutoPauseListener.Event.RESUMED, start.plusSeconds(91));
+
+        List<RdsEvent> events = rdsService.describeEvents(
+                "paused-1", "db-instance", start.minusSeconds(1), start.plusSeconds(120), null);
+        assertEquals(List.of(
+                        "Initiated pause for the DB instance.",
+                        "Successfully paused the DB instance.",
+                        "Initiated resume for the DB instance.",
+                        "Successfully resumed the DB instance."),
+                events.stream().map(RdsEvent::message).toList());
+        RdsEvent paused = events.get(1);
+        assertEquals(List.of("notification", "serverless"), paused.eventCategories());
+        assertEquals(member.getDbInstanceArn(), paused.sourceArn());
+        assertEquals(start.plusSeconds(1), paused.date());
+    }
+
+    private static DbCluster createAutoPauseCluster(RdsService service, String id, int secondsUntilAutoPause) {
+        return service.createDbCluster(id, "aurora-postgresql", "16.3", "admin", "password", "dbname",
+                false, null, null, null, false, "us-east-1", 0.0, 4.0, secondsUntilAutoPause);
+    }
+
+    private static DbInstance createMember(RdsService service, String id, String instanceClass, String clusterId) {
+        return service.createDbInstance(id, "aurora-postgresql", "16.3", "admin", "password", "dbname",
+                instanceClass, 20, false, null, null, clusterId);
+    }
+
+    private AutoPauseListener capturedAutoPauseListener(DbCluster cluster) {
+        ArgumentCaptor<AutoPauseListener> listener = ArgumentCaptor.forClass(AutoPauseListener.class);
+        verify(containerManager, atLeastOnce())
+                .configureAutoPause(eq(cluster.getDbClusterArn()), any(), listener.capture());
+        return listener.getValue();
     }
 
     @Test

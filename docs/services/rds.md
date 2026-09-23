@@ -152,6 +152,8 @@ checked against the instance's other window. Modifications apply immediately —
 | `FLOCI_SERVICES_RDS_PROXY_HANDSHAKE_TIMEOUT_MILLIS` | `10000` | Max time a client has to complete the startup/auth handshake before the proxy drops it |
 | `FLOCI_SERVICES_RDS_PROXY_BACKEND_CONNECT_TIMEOUT_MILLIS` | `5000` | Max time the proxy waits for the backend TCP connect |
 | `FLOCI_SERVICES_RDS_PROXY_MAX_CONNECTIONS` | `100` | Max concurrent connections per proxy before new ones are refused |
+| `FLOCI_SERVICES_RDS_AURORA_AUTO_PAUSE_ENABLED` | `true` | Pause an Aurora Serverless v2 cluster whose `MinCapacity` is 0 after `SecondsUntilAutoPause` without connections; see [Automatic pause and resume](#automatic-pause-and-resume) |
+| `FLOCI_SERVICES_RDS_AURORA_RESUME_DELAY_MILLIS` | `0` | How long the first connection to a paused cluster is held while it resumes; Aurora takes about `15000` |
 
 ### Docker Compose
 
@@ -258,8 +260,47 @@ values. `AWS::RDS::DBCluster` creation also maps the equivalent CloudFormation p
 If a persisted cluster record does not contain its original AWS engine identifier, Floci rejects a
 new scaling configuration instead of assuming that the cluster is Aurora.
 
-This is control-plane compatibility: Floci persists and returns the scaling configuration, but it
-does not resize or automatically pause the backing Docker container.
+Floci persists and returns the scaling configuration but does not resize the backing Docker
+container: capacity between `MinCapacity` and `MaxCapacity` is not modeled. A `MinCapacity` of 0
+does take effect, as described next.
+
+### Automatic pause and resume
+
+A cluster whose `MinCapacity` is 0 pauses the way Aurora Serverless v2 does. Once nothing has used
+it for `SecondsUntilAutoPause`, Floci freezes its database container with `docker pause`, which
+keeps its data and its endpoint. The next connection resumes it: the client is held, not refused,
+until the database runs again, and is then served as usual. As on AWS, a connection attempt with
+wrong credentials also resumes the cluster.
+
+- **What keeps a cluster awake.** Every open connection through the cluster endpoint, the reader
+  endpoint, an instance endpoint or an RDS Proxy, every RDS Data API call and every open Data API
+  transaction. The idle clock starts when the last of them ends.
+- **Which clusters pause.** Aurora PostgreSQL and Aurora MySQL clusters with at least one instance,
+  all of them `db.serverless` and available. As on AWS, a cluster with a provisioned instance, a
+  cluster in a global database and a cluster registered with an RDS Proxy stay running. Floci runs
+  a cluster's instances in one container, so they pause and resume together, like Aurora's writer
+  and its tier 0 and 1 readers; a reader in tiers 2 to 15 does not pause on its own.
+- **What you can observe.** The cluster `Status` and each `DBInstanceStatus` stay `available`.
+  `DescribeEvents` reports RDS-EVENT-0370 to 0374 for each instance, for example "Successfully
+  paused the DB instance.". While the cluster is paused, `ServerlessDatabaseCapacity` reports 0
+  and `ACUUtilization` and `CPUUtilization` report 0 percent in the `AWS/RDS` namespace once a
+  minute, by `DBClusterIdentifier` and by `DBInstanceIdentifier`. Floci publishes none of them
+  while the cluster runs.
+- **Resume delay.** Aurora takes about 15 seconds to resume. Floci resumes at once unless
+  `FLOCI_SERVICES_RDS_AURORA_RESUME_DELAY_MILLIS` is set; `15000` exercises client connect timeouts,
+  retries and connection-pool validation against a realistic cold start.
+- **Configuration changes.** A `ModifyDBCluster` that raises `MinCapacity` above 0 or changes
+  `SecondsUntilAutoPause` resumes a paused cluster and restarts its idle clock.
+- **Commands Floci runs in the container.** `CreateDBClusterSnapshot` and a master password change
+  run inside the database container, so they resume a paused cluster first. Aurora takes snapshots
+  from storage without resuming it.
+- Stopping, rebooting or deleting a cluster, restarting Floci and resetting its state never leave a
+  container frozen. A cluster that was paused when Floci stopped comes back running.
+- `FLOCI_SERVICES_RDS_AURORA_AUTO_PAUSE_ENABLED=false` keeps every cluster running.
+
+Not emulated: Data API requests to a paused cluster wait for the resume, as the Aurora user guide
+describes, and never fail with `DatabaseResumingException`; logical or binlog replication does not
+keep a cluster awake; and parameter group changes do not resume one.
 
 ## Examples
 

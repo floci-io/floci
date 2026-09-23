@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.rds.container.RdsBackendGate;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
@@ -18,9 +19,12 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Types;
 import java.time.Duration;
+import java.util.List;
 import java.util.Properties;
 import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.h2.Driver;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -774,6 +778,66 @@ class RdsDataServiceTest {
     }
 
     @Test
+    void statementOutsideATransactionHoldsTheClusterAwakeOnlyWhileItRuns() throws Exception {
+        TestHarness harness = new TestHarness();
+        harness.createTables();
+
+        harness.service.executeStatement(harness.request("select 1"), REGION);
+
+        assertEquals(List.of("127.0.0.1:3306"), harness.gate.entered);
+        assertEquals(0, harness.gate.held.get());
+    }
+
+    @Test
+    void transactionHoldsTheClusterAwakeUntilItEnds() throws Exception {
+        TestHarness harness = new TestHarness();
+        harness.createTables();
+
+        String committed = harness.service.beginTransaction(harness.beginRequest(), REGION)
+                .get("transactionId").asText();
+        ObjectNode insert = harness.request("insert into data_api_items(id, title, score) values ('held', 'Held', 1)");
+        insert.put("transactionId", committed);
+        harness.service.executeStatement(insert, REGION);
+        assertEquals(1, harness.gate.held.get(), "an open transaction keeps the cluster from pausing");
+        harness.service.commitTransaction(harness.transactionRequest(committed), REGION);
+        assertEquals(0, harness.gate.held.get());
+
+        String rolledBack = harness.service.beginTransaction(harness.beginRequest(), REGION)
+                .get("transactionId").asText();
+        assertEquals(1, harness.gate.held.get());
+        harness.service.rollbackTransaction(harness.transactionRequest(rolledBack), REGION);
+        assertEquals(0, harness.gate.held.get());
+        assertEquals(2, harness.gate.entered.size(), "statements in a transaction reuse its hold");
+    }
+
+    @Test
+    void expiredTransactionLetsTheClusterPause() throws Exception {
+        TestHarness harness = new TestHarness(Duration.ofMillis(50));
+        String tx = harness.service.beginTransaction(harness.beginRequest(), REGION)
+                .get("transactionId").asText();
+        Thread.sleep(200);
+
+        ObjectNode next = harness.request("select 1");
+        next.put("transactionId", tx);
+        assertThrows(AwsException.class, () -> harness.service.executeStatement(next, REGION));
+
+        assertEquals(0, harness.gate.held.get());
+    }
+
+    @Test
+    void clusterThatCannotResumeFailsTheRequestAsAnInternalError() {
+        TestHarness harness = new TestHarness();
+        harness.gate.failure = new IllegalStateException("Could not resume auto-paused RDS container");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> harness.service.executeStatement(harness.request("select 1"), REGION));
+
+        assertEquals("InternalServerErrorException", error.getErrorCode());
+        assertEquals(500, error.getHttpStatus());
+        assertEquals(0, harness.gate.held.get());
+    }
+
+    @Test
     void closesConnectionWhenTransactionSetupFails() {
         RdsDataResourceResolver resolver = mock(RdsDataResourceResolver.class);
         SecretsManagerService secrets = defaultSecrets();
@@ -921,10 +985,33 @@ class RdsDataServiceTest {
                 });
     }
 
+    /** Counts the backends the Data API enters and the holds still open on them. */
+    private static final class CountingGate implements RdsBackendGate {
+        private final List<String> entered = new CopyOnWriteArrayList<>();
+        private final AtomicInteger held = new AtomicInteger();
+        private volatile IllegalStateException failure;
+
+        @Override
+        public Lease enter(String host, int port) {
+            if (failure != null) {
+                throw failure;
+            }
+            entered.add(host + ":" + port);
+            held.incrementAndGet();
+            AtomicBoolean closed = new AtomicBoolean();
+            return () -> {
+                if (closed.compareAndSet(false, true)) {
+                    held.decrementAndGet();
+                }
+            };
+        }
+    }
+
     private final class TestHarness {
         private final String jdbcUrl;
         private final RdsDataResourceResolver resolver;
         private final RdsDataResourceResolver.DatabaseTarget target;
+        private final CountingGate gate = new CountingGate();
         private final RdsDataService service;
 
         private TestHarness() {
@@ -966,7 +1053,7 @@ class RdsDataServiceTest {
                     return getConnection();
                 }
             };
-            service = new RdsDataService(resolver, secrets, objectMapper, connectionFactory, transactionTtl);
+            service = new RdsDataService(resolver, secrets, objectMapper, connectionFactory, transactionTtl, gate);
         }
 
         private Connection getConnection() throws SQLException {

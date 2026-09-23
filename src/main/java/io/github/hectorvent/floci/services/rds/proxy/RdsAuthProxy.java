@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.rds.proxy;
 
+import io.github.hectorvent.floci.services.rds.container.RdsBackendGate;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import org.jboss.logging.Logger;
 
@@ -34,6 +35,7 @@ public class RdsAuthProxy {
     private final int handshakeTimeoutMillis;
     private final int backendConnectTimeoutMillis;
     private final Semaphore connectionPermits;
+    private final RdsBackendGate backendGate;
 
     private volatile boolean running;
     private ServerSocket serverSocket;
@@ -47,7 +49,8 @@ public class RdsAuthProxy {
                         int maxConnections) {
         this(instanceId, backendHost, backendPort, engine, iamEnabled, masterUsername, masterPassword,
                 dbName, sigV4, tlsCertificates, passwordValidator, handshakeTimeoutMillis,
-                backendConnectTimeoutMillis, maxConnections, null, username -> false);
+                backendConnectTimeoutMillis, maxConnections, null, username -> false,
+                RdsBackendGate.OPEN);
     }
 
     public RdsAuthProxy(String instanceId, String backendHost, int backendPort,
@@ -56,11 +59,11 @@ public class RdsAuthProxy {
                         RdsSigV4Validator sigV4, RdsProxyTlsCertificates tlsCertificates,
                         MasterPasswordCheck passwordValidator,
                         int handshakeTimeoutMillis, int backendConnectTimeoutMillis,
-                        int maxConnections, RdsProxyBinding binding) {
+                        int maxConnections, RdsProxyBinding binding, RdsBackendGate backendGate) {
         this(instanceId, backendHost, backendPort, engine, iamEnabled, masterUsername, masterPassword,
                 dbName, sigV4, tlsCertificates, passwordValidator, handshakeTimeoutMillis,
                 backendConnectTimeoutMillis, maxConnections, binding,
-                username -> binding != null);
+                username -> binding != null, backendGate);
     }
 
     public RdsAuthProxy(String instanceId, String backendHost, int backendPort,
@@ -70,7 +73,8 @@ public class RdsAuthProxy {
                         MasterPasswordCheck passwordValidator,
                         int handshakeTimeoutMillis, int backendConnectTimeoutMillis,
                         int maxConnections, RdsProxyBinding binding,
-                        MySqlProtocolHandler.IamUserChecker iamUserChecker) {
+                        MySqlProtocolHandler.IamUserChecker iamUserChecker,
+                        RdsBackendGate backendGate) {
         this.instanceId = instanceId;
         this.backendHost = backendHost;
         this.backendPort = backendPort;
@@ -87,6 +91,7 @@ public class RdsAuthProxy {
         this.handshakeTimeoutMillis = handshakeTimeoutMillis;
         this.backendConnectTimeoutMillis = backendConnectTimeoutMillis;
         this.connectionPermits = new Semaphore(Math.max(1, maxConnections));
+        this.backendGate = backendGate;
     }
 
     public void start(int proxyPort) throws IOException {
@@ -151,7 +156,11 @@ public class RdsAuthProxy {
     private void handleConnection(Socket client) {
         Socket backend = null;
         PostgresProtocolHandler.AuthenticatedSession session = null;
+        RdsBackendGate.Lease lease = null;
         try {
+            // An auto-paused Aurora backend resumes before the client is served: the client is
+            // held, not refused, and the backend stays awake for as long as the connection lasts.
+            lease = backendGate.enter(backendHost, backendPort);
             client.setTcpNoDelay(true);
 
             // RDS only proxy-validates the master user; a non-master user passes through so the
@@ -196,6 +205,9 @@ public class RdsAuthProxy {
                     TcpStreamBridge.relay(client, backend);
                 }
             }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            LOG.debugv("RDS connection for instance {0} interrupted while its backend resumed", instanceId);
         } catch (Exception e) {
             LOG.debugv("RDS connection error for instance {0}: {1}", instanceId, e.getMessage());
         } finally {
@@ -208,6 +220,9 @@ public class RdsAuthProxy {
             closeQuietly(backend);
             if (session != null) {
                 closeQuietly(session.backend());
+            }
+            if (lease != null) {
+                lease.close();
             }
         }
     }

@@ -12,9 +12,11 @@ import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.mockito.InOrder;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -24,6 +26,8 @@ import java.util.concurrent.TimeUnit;
 
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.CopyArchiveToContainerCmd;
+import com.github.dockerjava.api.command.PauseContainerCmd;
+import com.github.dockerjava.api.command.UnpauseContainerCmd;
 import com.github.dockerjava.api.model.Bind;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 
@@ -31,14 +35,17 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -1153,6 +1160,118 @@ class RdsContainerManagerTest {
 
         assertTrue(script.contains("USER=\"$1\""),
                 "Script must assign the first argument to the USER variable");
+    }
+
+    @Test
+    void autoPausedContainerResumesForItsNextClientAndIsThawedBeforeItStops() throws Exception {
+        EmulatorConfig config = config(tempDir.resolve("auto-pause-root"));
+        when(config.services().rds().auroraAutoPauseEnabled()).thenReturn(true);
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        stubStarts(lifecycleManager, new ContainerLifecycleManager.ContainerInfo(
+                "cluster-container", Map.of(3306, new ContainerLifecycleManager.EndpointInfo("db1", 3306))));
+        DockerClient dockerClient = mock(DockerClient.class);
+        PauseContainerCmd pause = mock(PauseContainerCmd.class);
+        UnpauseContainerCmd unpause = mock(UnpauseContainerCmd.class);
+        when(dockerClient.pauseContainerCmd("cluster-container")).thenReturn(pause);
+        when(dockerClient.unpauseContainerCmd("cluster-container")).thenReturn(unpause);
+        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+        RdsContainerManager manager = autoPauseManager(config, lifecycleManager);
+        String runtimeId = "arn:aws:rds:us-east-1:000000000000:cluster:paused";
+        RdsContainerHandle handle = manager.start(runtimeId, "paused", null,
+                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db");
+        manager.configureAutoPause(runtimeId, 300, alwaysMayPause());
+
+        try (RdsBackendGate.Lease client = manager.enter("db1", 3306)) {
+            assertFalse(manager.pauseIfIdle(runtimeId), "a client is connected");
+        }
+        assertTrue(manager.pauseIfIdle(runtimeId));
+        verify(pause).exec();
+
+        manager.enter("db1", 3306).close();
+        verify(unpause).exec();
+
+        assertTrue(manager.pauseIfIdle(runtimeId));
+        manager.stop(handle);
+        InOrder order = inOrder(unpause, lifecycleManager);
+        order.verify(unpause, times(2)).exec();
+        order.verify(lifecycleManager).stopAndRemoveStrict(eq("cluster-container"), any());
+        assertSame(RdsBackendGate.Lease.NONE, manager.enter("db1", 3306));
+    }
+
+    @Test
+    void resetThawsAPausedContainerAndEndsItsAutoPause() throws Exception {
+        EmulatorConfig config = config(tempDir.resolve("auto-pause-root"));
+        when(config.services().rds().auroraAutoPauseEnabled()).thenReturn(true);
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        stubStarts(lifecycleManager, new ContainerLifecycleManager.ContainerInfo(
+                "cluster-container", Map.of(3306, new ContainerLifecycleManager.EndpointInfo("db1", 3306))));
+        DockerClient dockerClient = mock(DockerClient.class);
+        UnpauseContainerCmd unpause = mock(UnpauseContainerCmd.class);
+        when(dockerClient.pauseContainerCmd("cluster-container")).thenReturn(mock(PauseContainerCmd.class));
+        when(dockerClient.unpauseContainerCmd("cluster-container")).thenReturn(unpause);
+        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+        RdsContainerManager manager = autoPauseManager(config, lifecycleManager);
+        String runtimeId = "arn:aws:rds:us-east-1:000000000000:cluster:paused";
+        manager.start(runtimeId, "paused", null, DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db");
+        manager.configureAutoPause(runtimeId, 300, alwaysMayPause());
+        assertTrue(manager.pauseIfIdle(runtimeId));
+
+        manager.clear();
+
+        verify(unpause).exec();
+        assertSame(RdsBackendGate.Lease.NONE, manager.enter("db1", 3306));
+        assertFalse(manager.pauseIfIdle(runtimeId));
+    }
+
+    @Test
+    void containerStartedOnAnAddressTakesItOverFromOneDockerRemoved() throws Exception {
+        EmulatorConfig config = config(tempDir.resolve("auto-pause-root"));
+        when(config.services().rds().auroraAutoPauseEnabled()).thenReturn(true);
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        ContainerLifecycleManager.EndpointInfo address = new ContainerLifecycleManager.EndpointInfo("db1", 3306);
+        stubStarts(lifecycleManager,
+                new ContainerLifecycleManager.ContainerInfo("removed-container", Map.of(3306, address)),
+                new ContainerLifecycleManager.ContainerInfo("new-container", Map.of(3306, address)));
+        DockerClient dockerClient = mock(DockerClient.class);
+        when(dockerClient.pauseContainerCmd(any())).thenReturn(mock(PauseContainerCmd.class));
+        when(dockerClient.unpauseContainerCmd(any())).thenReturn(mock(UnpauseContainerCmd.class));
+        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+        RdsContainerManager manager = autoPauseManager(config, lifecycleManager);
+        String removedRuntime = "arn:aws:rds:us-east-1:000000000000:cluster:removed";
+        manager.start(removedRuntime, "removed", null,
+                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db");
+        manager.configureAutoPause(removedRuntime, 300, alwaysMayPause());
+        assertTrue(manager.pauseIfIdle(removedRuntime));
+
+        manager.start("arn:aws:rds:us-east-1:000000000000:cluster:new", "new", null,
+                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db");
+        manager.enter("db1", 3306).close();
+
+        verify(dockerClient, never()).unpauseContainerCmd("new-container");
+        assertFalse(manager.pauseIfIdle(removedRuntime), "the removed container's auto-pause is gone");
+    }
+
+    private RdsContainerManager autoPauseManager(EmulatorConfig config, ContainerLifecycleManager lifecycleManager) {
+        ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
+        lenient().when(logStreamer.generateLogStreamName(any())).thenReturn("log-stream");
+        return new RdsContainerManager(
+                new ContainerBuilder(config, mock(DockerHostResolver.class), mock(EmbeddedDnsServer.class)),
+                lifecycleManager, logStreamer, mock(ContainerDetector.class), config,
+                new RegionResolver("us-east-1", "000000000000"),
+                mock(ServiceConfigAccess.class));
+    }
+
+    private static AutoPauseListener alwaysMayPause() {
+        return new AutoPauseListener() {
+            @Override
+            public boolean mayPause() {
+                return true;
+            }
+
+            @Override
+            public void onAutoPause(Event event, Instant at) {
+            }
+        };
     }
 
     private static EmulatorConfig config(Path hostRoot) {
