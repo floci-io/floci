@@ -409,6 +409,42 @@ class CloudFrontManagementProtocolTest {
         }
     }
 
+    @Test
+    void managedOriginRequestPoliciesAreReadableListableAndImmutable() {
+        String exceptHost = "b689b0a8-53d0-40ab-baf2-68738e2966ac";
+        given()
+            .when()
+                .get(API + "origin-request-policy/" + exceptHost)
+            .then()
+                .statusCode(200)
+                .body(hasXPath("//*[local-name()='Name']/text()",
+                        equalTo("Managed-AllViewerExceptHostHeader")))
+                .body(hasXPath("//*[local-name()='HeaderBehavior']/text()", equalTo("allExcept")))
+                .body(hasXPath("//*[local-name()='Headers']//*[local-name()='Name']/text()",
+                        equalTo("Host")))
+                .body(hasXPath("//*[local-name()='CookieBehavior']/text()", equalTo("all")))
+                .body(hasXPath("//*[local-name()='QueryStringBehavior']/text()", equalTo("all")));
+
+        given()
+                .queryParam("Type", "managed")
+            .when()
+                .get(API + "origin-request-policy")
+            .then()
+                .statusCode(200)
+                .body(hasXPath("/*/*[local-name()='Quantity']/text()", equalTo("8")))
+                .body(hasXPath("//*[local-name()='OriginRequestPolicySummary']"
+                        + "[.//*[local-name()='Id' and text()='" + exceptHost + "']]"
+                        + "/*[local-name()='Type']/text()", equalTo("managed")));
+
+        given()
+                .header("If-Match", "E23ZP02F085DFQ")
+            .when()
+                .delete(API + "origin-request-policy/" + exceptHost)
+            .then()
+                .statusCode(400)
+                .body(hasXPath("//*[local-name()='Code']/text()", equalTo("IllegalDelete")));
+    }
+
     private static String cachePolicyBody(String name, String comment, String defaultTtl, String cookie) {
         return """
                 <CachePolicyConfig xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">

@@ -468,7 +468,7 @@ public class CloudFrontController {
                                               @QueryParam("Type") String type) {
         try {
             Page<OriginRequestPolicy> page = page(
-                    service.listOriginRequestPolicies(marker, paginationFetchLimit(maxItems)),
+                    service.listOriginRequestPolicies(marker, paginationFetchLimit(maxItems), type),
                     maxItems, OriginRequestPolicy::getId);
 
             XmlBuilder xml = new XmlBuilder()
@@ -479,7 +479,8 @@ public class CloudFrontController {
                     .start("Items");
             for (OriginRequestPolicy p : page.items()) {
                 xml.start("OriginRequestPolicySummary")
-                        .elem("Type", "custom")
+                        .elem("Type", CloudFrontService.isManagedOriginRequestPolicy(p.getId())
+                                ? "managed" : "custom")
                         .raw(xmlOriginRequestPolicyResponse(p))
                         .end("OriginRequestPolicySummary");
             }

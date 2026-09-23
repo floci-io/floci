@@ -159,9 +159,6 @@ PUT, PATCH and DELETE).
   `Content-Type`; `Content-Length` is set from the body. Their responses are never cached, as on AWS.
   Signed URL and signed cookie enforcement applies to them like any other method. Request bodies are
   bounded by the emulator-wide `floci.protocols.max-request-size` limit.
-- The viewer's `Authorization` header is forwarded to custom origins on POST, PUT, PATCH and DELETE
-  and removed from GET and HEAD requests, as on AWS. Floci also removes it from OPTIONS requests;
-  AWS removes it there only when OPTIONS is a cached method.
 - Every distribution is also served as `{id}.cloudfront.{host}` for each endpoint host Floci
   resolves: `localhost`, `localhost.floci.io`, `localhost.localstack.cloud`, `FLOCI_HOSTNAME` and
   every `FLOCI_DNS_EXTRA_SUFFIXES` entry. `{id}.cloudfront.localhost.floci.io` and
@@ -169,7 +166,7 @@ PUT, PATCH and DELETE).
   HTTPS certificate, so a signed URL for either can be downloaded over `https://`. See
   [Downloading over HTTPS](#downloading-over-https).
 - Origin custom headers are persisted through the CloudFront API and CloudFormation. They replace
-  same-named viewer headers on every custom-origin request. For in-process S3 origins, a
+  every same-named forwarded viewer header on custom-origin requests. For in-process S3 origins, a
   configured `Origin` header is used for S3 CORS evaluation. AWS-prohibited names, malformed
   values, inconsistent quantities, duplicates, and quota violations are rejected with modeled
   CloudFront errors when the distribution is created or updated.
@@ -190,9 +187,44 @@ PUT, PATCH and DELETE).
   service-principal bucket-policy grants (including the distribution `AWS:SourceArn`) when strict S3
   authentication is enabled. OAC `always`, `never`, and unsigned `no-override` requests follow their
   documented signing behavior; signed `no-override` viewer requests retain their authorization.
-- Cache-policy, origin-request-policy, and legacy `ForwardedValues` data-plane evaluation is not
-  implemented yet. Viewer query strings therefore follow CloudFront's default behavior and are not
-  forwarded to origins.
+- Requests to custom origins carry what the matched cache behavior forwards. With a cache policy,
+  the viewer headers, cookies and query strings selected by the cache policy's
+  `ParametersInCacheKeyAndForwardedToOrigin` and by the origin request policy are forwarded (the
+  union of both). `HeaderBehavior` `none`, `whitelist`, `allViewer`,
+  `allViewerAndWhitelistCloudFront` and `allExcept`, `CookieBehavior` and `QueryStringBehavior`
+  `none`, `whitelist`, `allExcept` and `all` are evaluated. A cache policy that selects nothing and no
+  origin request policy forwards no viewer headers, cookies or query strings, as on AWS.
+- A cache behavior without a cache policy uses its legacy `ForwardedValues`: `QueryString=true`
+  forwards every query string (`QueryStringCacheKeys` only narrows the cache key), cookies follow
+  `Forward` `none`, `whitelist` (with `*` and `?` wildcards) or `all`, and viewer headers are
+  forwarded by default except `Accept`, `Accept-Charset`, `Accept-Language`, `Authorization`,
+  `Host`, `Referer`, `User-Agent` and `X-HTTP-Method-Override`, which `Headers` can add back (`*`
+  forwards all of them). An origin request policy needs a cache policy on AWS, so a behavior without
+  one ignores it.
+- Whatever the policies, CloudFront sets `Host` to the origin's domain name unless the viewer's
+  `Host` is forwarded, sends `User-Agent: Amazon CloudFront` unless the viewer's `User-Agent` is
+  forwarded, appends the viewer address to `X-Forwarded-For`, adds a
+  `Via: <viewer HTTP version> <distribution domain> (CloudFront)` hop and an `X-Amz-Cf-Id`.
+  `Authorization` is always forwarded on POST, PUT, PATCH and DELETE, and on OPTIONS unless OPTIONS
+  is a cached method; `Content-Type` travels with a request body. Cache policy compression settings
+  normalize `Accept-Encoding` to `br,gzip`, `gzip`, `br` or `identity`. Forwarded cookies are sorted
+  by name, and cookies that are not `name=value` or whose name starts with `$` are dropped.
+  Hop-by-hop headers, `Expect`, `X-Edge-*`, `X-Real-IP`, `X-Forwarded-Proto` and viewer-supplied
+  `CloudFront-*` headers are never forwarded.
+- Of the CloudFront request headers, `CloudFront-Forwarded-Proto`, `CloudFront-Viewer-Address` and
+  `CloudFront-Viewer-Http-Version` are generated when a policy names them, or when an `allExcept`
+  header behavior does not exclude them (AWS documents Managed-AllViewerExceptHostHeader as adding
+  them). Device-type, geolocation, TLS, JA3/JA4 and header-order headers are not generated.
+- The eight AWS managed origin request policies are available by their AWS IDs through
+  `GetOriginRequestPolicy` and `ListOriginRequestPolicies` (`Type` is `managed` or `custom`), and
+  cannot be updated or deleted. AWS managed cache policies are not modeled: a behavior that
+  references one forwards nothing on its account, which matches `CachingDisabled`,
+  `CachingOptimized` and `CachingOptimizedForUncompressedObjects` but not `Amplify`,
+  `Elemental-MediaPackage` or the `UseOriginCacheControlHeaders` policies.
+- In-process S3 origins do not apply forwarding settings: viewer query strings, cookies and headers
+  do not change the S3 read.
+- Origin `Set-Cookie` headers always reach the viewer. With legacy `Forward=none`, AWS strips them
+  from the response; Floci does not.
 - Custom origins that resolve to loopback, private, link-local, carrier-grade NAT, or other non-routable addresses are rejected by default. Development-only private origins must be explicitly allowlisted by exact hostname.
 - Response headers policies validate the AWS configuration shape and are applied after the origin
   response, including CORS preflight fields, origin override behavior, custom headers, security

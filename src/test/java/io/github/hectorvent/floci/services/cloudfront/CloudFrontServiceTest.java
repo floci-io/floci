@@ -983,6 +983,40 @@ class CloudFrontServiceTest {
     }
 
     @Test
+    void exposesTheAwsManagedOriginRequestPoliciesAsImmutable() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+
+        OriginRequestPolicy exceptHost = service.getOriginRequestPolicy(
+                CloudFrontService.MANAGED_ALL_VIEWER_EXCEPT_HOST_HEADER_ORIGIN_REQUEST_POLICY_ID);
+        assertEquals("Managed-AllViewerExceptHostHeader", exceptHost.getName());
+        assertEquals(Map.of("HeaderBehavior", "allExcept", "Headers", List.of("Host")),
+                exceptHost.getConfig().get("HeadersConfig"));
+        assertEquals(Map.of("CookieBehavior", "all"), exceptHost.getConfig().get("CookiesConfig"));
+        assertEquals(Map.of("QueryStringBehavior", "all"),
+                exceptHost.getConfig().get("QueryStringsConfig"));
+        assertEquals(Map.of("HeaderBehavior", "allViewer"), service.getOriginRequestPolicy(
+                CloudFrontService.MANAGED_ALL_VIEWER_ORIGIN_REQUEST_POLICY_ID)
+                .getConfig().get("HeadersConfig"));
+        assertEquals(Map.of("HeaderBehavior", "whitelist", "Headers", List.of("Host")),
+                service.getOriginRequestPolicy(
+                        CloudFrontService.MANAGED_HOST_HEADER_ONLY_ORIGIN_REQUEST_POLICY_ID)
+                        .getConfig().get("HeadersConfig"));
+
+        OriginRequestPolicy custom =
+                service.createOriginRequestPolicy(namedOriginRequestPolicy("custom-orp"));
+        assertEquals(8, service.listOriginRequestPolicies(null, 100, "managed").size());
+        assertEquals(List.of(custom.getId()), service.listOriginRequestPolicies(null, 100, "custom")
+                .stream().map(OriginRequestPolicy::getId).toList());
+        assertEquals(9, service.listOriginRequestPolicies(null, 100, null).size());
+        assertAws("InvalidArgument", () -> service.listOriginRequestPolicies(null, 100, "MANAGED"));
+
+        assertAws("IllegalUpdate", () -> service.updateOriginRequestPolicy(exceptHost.getId(),
+                exceptHost.getEtag(), namedOriginRequestPolicy("replacement")));
+        assertAws("IllegalDelete",
+                () -> service.deleteOriginRequestPolicy(exceptHost.getId(), exceptHost.getEtag()));
+    }
+
+    @Test
     void deletesAnUnattachedCachePolicy() {
         CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
         CachePolicy policy = service.createCachePolicy(namedCachePolicy("free-cache-policy"));

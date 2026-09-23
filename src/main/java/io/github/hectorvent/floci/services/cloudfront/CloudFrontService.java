@@ -83,6 +83,24 @@ public class CloudFrontService {
             "60669652-455b-4ae9-85a4-c4c02393f86c";
     private static final Map<String, ResponseHeadersPolicy> MANAGED_RESPONSE_HEADERS_POLICIES =
             managedResponseHeadersPolicies();
+    static final String MANAGED_ALL_VIEWER_ORIGIN_REQUEST_POLICY_ID =
+            "216adef6-5c7f-47e4-b989-5492eafa07d3";
+    static final String MANAGED_ALL_VIEWER_AND_CLOUDFRONT_HEADERS_ORIGIN_REQUEST_POLICY_ID =
+            "33f36d7e-f396-46d9-90e0-52428a34d9dc";
+    static final String MANAGED_ALL_VIEWER_EXCEPT_HOST_HEADER_ORIGIN_REQUEST_POLICY_ID =
+            "b689b0a8-53d0-40ab-baf2-68738e2966ac";
+    static final String MANAGED_CORS_CUSTOM_ORIGIN_ORIGIN_REQUEST_POLICY_ID =
+            "59781a5b-3903-41f3-afcb-af62929ccde1";
+    static final String MANAGED_CORS_S3_ORIGIN_ORIGIN_REQUEST_POLICY_ID =
+            "88a5eaf4-2fd4-4709-b370-b4c650ea3fcf";
+    static final String MANAGED_MEDIATAILOR_ORIGIN_REQUEST_POLICY_ID =
+            "775133bc-15f2-49f9-abea-afb2e0bf67d2";
+    static final String MANAGED_HOST_HEADER_ONLY_ORIGIN_REQUEST_POLICY_ID =
+            "bf0718e1-ba1e-49d1-88b1-f726733018ae";
+    static final String MANAGED_USER_AGENT_REFERER_ORIGIN_REQUEST_POLICY_ID =
+            "acba4595-bd28-49b8-b9fe-13317c0390fa";
+    private static final Map<String, OriginRequestPolicy> MANAGED_ORIGIN_REQUEST_POLICIES =
+            managedOriginRequestPolicies();
 
     private final StorageBackend<String, Distribution> distStore;
     private final StorageBackend<String, List<Invalidation>> invalidationStore;
@@ -543,14 +561,19 @@ public class CloudFrontService {
     }
 
     public OriginRequestPolicy getOriginRequestPolicy(String id) {
-        return orpStore.get(id).orElseThrow(() ->
-                new AwsException("NoSuchOriginRequestPolicy",
+        return orpStore.get(id)
+                .or(() -> Optional.ofNullable(MANAGED_ORIGIN_REQUEST_POLICIES.get(id)))
+                .orElseThrow(() -> new AwsException("NoSuchOriginRequestPolicy",
                         "The specified origin request policy does not exist.", 404));
     }
 
     public synchronized OriginRequestPolicy updateOriginRequestPolicy(String id, String ifMatch,
                                                                        OriginRequestPolicy updated) {
         OriginRequestPolicy existing = getOriginRequestPolicy(id);
+        if (isManagedOriginRequestPolicy(id)) {
+            throw new AwsException("IllegalUpdate",
+                    "AWS managed origin request policies cannot be updated.", 400);
+        }
         if (!existing.getEtag().equals(ifMatch)) {
             throw new AwsException("InvalidIfMatchVersion",
                     "The If-Match version is missing or not valid for the resource.", 400);
@@ -564,6 +587,10 @@ public class CloudFrontService {
 
     public synchronized void deleteOriginRequestPolicy(String id, String ifMatch) {
         OriginRequestPolicy existing = getOriginRequestPolicy(id);
+        if (isManagedOriginRequestPolicy(id)) {
+            throw new AwsException("IllegalDelete",
+                    "AWS managed origin request policies cannot be deleted.", 400);
+        }
         if (!existing.getEtag().equals(ifMatch)) {
             throw new AwsException("InvalidIfMatchVersion",
                     "The If-Match version is missing or not valid for the resource.", 400);
@@ -577,10 +604,32 @@ public class CloudFrontService {
     }
 
     public List<OriginRequestPolicy> listOriginRequestPolicies(String marker, int maxItems) {
-        List<OriginRequestPolicy> all = new ArrayList<>(orpStore.scan(k -> true));
+        return listOriginRequestPolicies(marker, maxItems, null);
+    }
+
+    /**
+     * Lists custom and AWS managed origin request policies; {@code type} narrows the list to the
+     * AWS lowercase {@code managed} or {@code custom} value.
+     */
+    public List<OriginRequestPolicy> listOriginRequestPolicies(String marker, int maxItems, String type) {
+        if (type != null && !"custom".equals(type) && !"managed".equals(type)) {
+            throw new AwsException("InvalidArgument",
+                    "Origin request policy Type must be managed or custom.", 400);
+        }
+        List<OriginRequestPolicy> all = new ArrayList<>();
+        if (!"managed".equals(type)) {
+            all.addAll(orpStore.scan(k -> true));
+        }
+        if (!"custom".equals(type)) {
+            all.addAll(MANAGED_ORIGIN_REQUEST_POLICIES.values());
+        }
         all.sort((a, b) -> a.getName() != null && b.getName() != null
                 ? a.getName().compareTo(b.getName()) : a.getId().compareTo(b.getId()));
         return paginate(all, marker, maxItems, OriginRequestPolicy::getId);
+    }
+
+    static boolean isManagedOriginRequestPolicy(String id) {
+        return MANAGED_ORIGIN_REQUEST_POLICIES.containsKey(id);
     }
 
     // ── Response Headers Policies ─────────────────────────────────────────────
@@ -838,6 +887,112 @@ public class CloudFrontService {
                 "Allows all origins for simple CORS requests",
                 Map.of("CorsConfig", simpleCors)));
         return Map.copyOf(policies);
+    }
+
+    /**
+     * The AWS managed origin request policies, with the IDs and settings the CloudFront Developer
+     * Guide lists under "Use managed origin request policies".
+     */
+    private static Map<String, OriginRequestPolicy> managedOriginRequestPolicies() {
+        Map<String, OriginRequestPolicy> policies = new LinkedHashMap<>();
+        policies.put(MANAGED_ALL_VIEWER_ORIGIN_REQUEST_POLICY_ID, managedOriginRequestPolicy(
+                MANAGED_ALL_VIEWER_ORIGIN_REQUEST_POLICY_ID, "Managed-AllViewer",
+                "Includes all values (headers, cookies, and query strings) from the viewer request",
+                selection("HeaderBehavior", "allViewer", "Headers", List.of()),
+                selection("CookieBehavior", "all", "Cookies", List.of()),
+                selection("QueryStringBehavior", "all", "QueryStrings", List.of())));
+        policies.put(MANAGED_ALL_VIEWER_AND_CLOUDFRONT_HEADERS_ORIGIN_REQUEST_POLICY_ID,
+                managedOriginRequestPolicy(
+                        MANAGED_ALL_VIEWER_AND_CLOUDFRONT_HEADERS_ORIGIN_REQUEST_POLICY_ID,
+                        "Managed-AllViewerAndCloudFrontHeaders-2022-06",
+                        "Includes all values from the viewer request and all CloudFront headers "
+                                + "released through June 2022",
+                        selection("HeaderBehavior", "allViewerAndWhitelistCloudFront", "Headers",
+                                List.of("CloudFront-Forwarded-Proto", "CloudFront-Is-Android-Viewer",
+                                        "CloudFront-Is-Desktop-Viewer", "CloudFront-Is-IOS-Viewer",
+                                        "CloudFront-Is-Mobile-Viewer", "CloudFront-Is-SmartTV-Viewer",
+                                        "CloudFront-Is-Tablet-Viewer", "CloudFront-Viewer-Address",
+                                        "CloudFront-Viewer-ASN", "CloudFront-Viewer-City",
+                                        "CloudFront-Viewer-Country", "CloudFront-Viewer-Country-Name",
+                                        "CloudFront-Viewer-Country-Region",
+                                        "CloudFront-Viewer-Country-Region-Name",
+                                        "CloudFront-Viewer-Http-Version", "CloudFront-Viewer-Latitude",
+                                        "CloudFront-Viewer-Longitude", "CloudFront-Viewer-Metro-Code",
+                                        "CloudFront-Viewer-Postal-Code", "CloudFront-Viewer-Time-Zone",
+                                        "CloudFront-Viewer-TLS")),
+                        selection("CookieBehavior", "all", "Cookies", List.of()),
+                        selection("QueryStringBehavior", "all", "QueryStrings", List.of())));
+        policies.put(MANAGED_ALL_VIEWER_EXCEPT_HOST_HEADER_ORIGIN_REQUEST_POLICY_ID,
+                managedOriginRequestPolicy(
+                        MANAGED_ALL_VIEWER_EXCEPT_HOST_HEADER_ORIGIN_REQUEST_POLICY_ID,
+                        "Managed-AllViewerExceptHostHeader",
+                        "Includes all values from the viewer request except the Host header",
+                        selection("HeaderBehavior", "allExcept", "Headers", List.of("Host")),
+                        selection("CookieBehavior", "all", "Cookies", List.of()),
+                        selection("QueryStringBehavior", "all", "QueryStrings", List.of())));
+        policies.put(MANAGED_CORS_CUSTOM_ORIGIN_ORIGIN_REQUEST_POLICY_ID, managedOriginRequestPolicy(
+                MANAGED_CORS_CUSTOM_ORIGIN_ORIGIN_REQUEST_POLICY_ID, "Managed-CORS-CustomOrigin",
+                "Includes the header that enables CORS requests when the origin is a custom origin",
+                selection("HeaderBehavior", "whitelist", "Headers", List.of("Origin")),
+                selection("CookieBehavior", "none", "Cookies", List.of()),
+                selection("QueryStringBehavior", "none", "QueryStrings", List.of())));
+        policies.put(MANAGED_CORS_S3_ORIGIN_ORIGIN_REQUEST_POLICY_ID, managedOriginRequestPolicy(
+                MANAGED_CORS_S3_ORIGIN_ORIGIN_REQUEST_POLICY_ID, "Managed-CORS-S3Origin",
+                "Includes the headers that enable CORS requests when the origin is an Amazon S3 bucket",
+                selection("HeaderBehavior", "whitelist", "Headers", List.of(
+                        "Origin", "Access-Control-Request-Headers", "Access-Control-Request-Method")),
+                selection("CookieBehavior", "none", "Cookies", List.of()),
+                selection("QueryStringBehavior", "none", "QueryStrings", List.of())));
+        policies.put(MANAGED_MEDIATAILOR_ORIGIN_REQUEST_POLICY_ID, managedOriginRequestPolicy(
+                MANAGED_MEDIATAILOR_ORIGIN_REQUEST_POLICY_ID,
+                "Managed-Elemental-MediaTailor-PersonalizedManifests",
+                "For use with an origin that is an AWS Elemental MediaTailor endpoint",
+                selection("HeaderBehavior", "whitelist", "Headers", List.of(
+                        "Origin", "Access-Control-Request-Headers", "Access-Control-Request-Method",
+                        "User-Agent", "X-Forwarded-For")),
+                selection("CookieBehavior", "none", "Cookies", List.of()),
+                selection("QueryStringBehavior", "all", "QueryStrings", List.of())));
+        policies.put(MANAGED_HOST_HEADER_ONLY_ORIGIN_REQUEST_POLICY_ID, managedOriginRequestPolicy(
+                MANAGED_HOST_HEADER_ONLY_ORIGIN_REQUEST_POLICY_ID, "Managed-HostHeaderOnly",
+                "Includes only the Host header from the viewer request",
+                selection("HeaderBehavior", "whitelist", "Headers", List.of("Host")),
+                selection("CookieBehavior", "none", "Cookies", List.of()),
+                selection("QueryStringBehavior", "none", "QueryStrings", List.of())));
+        policies.put(MANAGED_USER_AGENT_REFERER_ORIGIN_REQUEST_POLICY_ID, managedOriginRequestPolicy(
+                MANAGED_USER_AGENT_REFERER_ORIGIN_REQUEST_POLICY_ID, "Managed-UserAgentRefererHeaders",
+                "Includes only the User-Agent and Referer headers",
+                selection("HeaderBehavior", "whitelist", "Headers", List.of("User-Agent", "Referer")),
+                selection("CookieBehavior", "none", "Cookies", List.of()),
+                selection("QueryStringBehavior", "none", "QueryStrings", List.of())));
+        return Map.copyOf(policies);
+    }
+
+    private static OriginRequestPolicy managedOriginRequestPolicy(
+            String id, String name, String comment, Map<String, Object> headers,
+            Map<String, Object> cookies, Map<String, Object> queryStrings) {
+        Map<String, Object> config = new LinkedHashMap<>();
+        config.put("HeadersConfig", headers);
+        config.put("CookiesConfig", cookies);
+        config.put("QueryStringsConfig", queryStrings);
+        OriginRequestPolicy policy = new OriginRequestPolicy();
+        policy.setId(id);
+        policy.setName(name);
+        policy.setComment(comment);
+        policy.setEtag("E23ZP02F085DFQ");
+        policy.setLastModifiedTime(Instant.EPOCH);
+        policy.setConfig(Map.copyOf(config));
+        return policy;
+    }
+
+    /** One policy selection block, in the shape {@link CloudFrontPolicyConfigCodec} stores. */
+    private static Map<String, Object> selection(String behaviorKey, String behavior,
+                                                 String listKey, List<String> names) {
+        Map<String, Object> block = new LinkedHashMap<>();
+        block.put(behaviorKey, behavior);
+        if (!names.isEmpty()) {
+            block.put(listKey, List.copyOf(names));
+        }
+        return Map.copyOf(block);
     }
 
     private static ResponseHeadersPolicy managedResponseHeadersPolicy(

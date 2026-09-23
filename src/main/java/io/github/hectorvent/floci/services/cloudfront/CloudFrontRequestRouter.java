@@ -166,6 +166,35 @@ public final class CloudFrontRequestRouter {
         return allowedMethodsOrDefault(dflt != null ? dflt.getAllowedMethods() : null);
     }
 
+    /**
+     * The settings that decide what the cache behavior serving a normalized path forwards to its
+     * origin: cache policy, origin request policy, legacy {@code ForwardedValues} and cached methods.
+     */
+    public record BehaviorForwarding(String cachePolicyId, String originRequestPolicyId,
+                                     Map<String, Object> forwardedValues,
+                                     List<String> cachedMethods) {
+    }
+
+    /** Returns the forwarding settings of the cache behavior that serves a normalized path. */
+    public static BehaviorForwarding matchForwarding(DistributionConfig config, String normalizedPath) {
+        List<CacheBehavior> behaviors = config.getCacheBehaviors();
+        if (behaviors != null) {
+            for (CacheBehavior behavior : behaviors) {
+                if (pathPatternMatches(behavior.getPathPattern(), normalizedPath)) {
+                    return new BehaviorForwarding(behavior.getCachePolicyId(),
+                            behavior.getOriginRequestPolicyId(), behavior.getForwardedValues(),
+                            behavior.getCachedMethods());
+                }
+            }
+        }
+        DefaultCacheBehavior dflt = config.getDefaultCacheBehavior();
+        if (dflt == null) {
+            return new BehaviorForwarding(null, null, null, null);
+        }
+        return new BehaviorForwarding(dflt.getCachePolicyId(), dflt.getOriginRequestPolicyId(),
+                dflt.getForwardedValues(), dflt.getCachedMethods());
+    }
+
     private static List<String> allowedMethodsOrDefault(List<String> methods) {
         return methods == null || methods.isEmpty() ? List.of("GET", "HEAD") : methods;
     }

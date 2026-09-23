@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.cloudfront.model.Origin;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -122,6 +123,32 @@ class CloudFrontRequestRouterTest {
     }
 
     @Test
+    void matchForwardingReturnsTheSelectedBehaviorsPoliciesAndForwardedValues() {
+        CacheBehavior api = behavior("api/*", "api-origin");
+        api.setCachePolicyId("api-cache-policy");
+        api.setOriginRequestPolicyId("api-origin-request-policy");
+        api.setCachedMethods(List.of("GET", "HEAD", "OPTIONS"));
+        DefaultCacheBehavior dflt = defaultBehavior("default-origin");
+        dflt.setForwardedValues(Map.of("QueryString", true));
+
+        DistributionConfig cfg = new DistributionConfig();
+        cfg.setCacheBehaviors(List.of(api));
+        cfg.setDefaultCacheBehavior(dflt);
+
+        CloudFrontRequestRouter.BehaviorForwarding matched =
+                CloudFrontRequestRouter.matchForwarding(cfg, "/api/data");
+        assertEquals("api-cache-policy", matched.cachePolicyId());
+        assertEquals("api-origin-request-policy", matched.originRequestPolicyId());
+        assertEquals(List.of("GET", "HEAD", "OPTIONS"), matched.cachedMethods());
+        assertNull(matched.forwardedValues());
+
+        CloudFrontRequestRouter.BehaviorForwarding fallback =
+                CloudFrontRequestRouter.matchForwarding(cfg, "/index.html");
+        assertNull(fallback.cachePolicyId());
+        assertEquals(Map.of("QueryString", true), fallback.forwardedValues());
+    }
+
+    @Test
     void matchAllowedMethodsUsesTheSelectedBehaviorAndDefaultsToGetHead() {
         CacheBehavior api = behavior("api/*", "api-origin");
         api.setAllowedMethods(List.of("GET", "HEAD", "OPTIONS"));
@@ -175,7 +202,7 @@ class CloudFrontRequestRouterTest {
         Origin s3 = new Origin();
         s3.setId("s3-origin");
         s3.setDomainName("my-bucket.s3.us-east-1.amazonaws.com");
-        s3.setS3OriginConfig(java.util.Map.of("originAccessIdentity", ""));
+        s3.setS3OriginConfig(Map.of("originAccessIdentity", ""));
         DistributionConfig cfg = new DistributionConfig();
         cfg.setOrigins(List.of(s3));
 

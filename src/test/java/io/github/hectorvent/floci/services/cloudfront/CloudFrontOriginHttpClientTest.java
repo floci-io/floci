@@ -201,7 +201,7 @@ class CloudFrontOriginHttpClientTest {
                     .build();
 
             HttpResponse<byte[]> response = client.send(
-                    request, Map.of(), payload, HttpResponse.BodyHandlers.ofByteArray());
+                    request, List.of(), Map.of(), payload, HttpResponse.BodyHandlers.ofByteArray());
 
             assertEquals(204, response.statusCode());
             assertEquals("PUT", method.get());
