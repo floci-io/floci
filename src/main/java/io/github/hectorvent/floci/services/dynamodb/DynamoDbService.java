@@ -362,7 +362,8 @@ public class DynamoDbService implements ResourceProvider {
             }
         }
 
-        validateVectorIndexes(vectorIndexes, List.of(), attributeDefinitions, billingMode);
+        validateVectorIndexes(vectorIndexes, List.of(), attributeDefinitions, billingMode,
+                "vectorIndexes.%d.member");
 
         Set<String> referencedAttrs = new HashSet<>();
         keySchema.forEach(k -> referencedAttrs.add(k.getAttributeName()));
@@ -498,11 +499,16 @@ public class DynamoDbService implements ResourceProvider {
      * @param attributeDefinitions every definition a SearchSchema element may resolve against
      * @param billingMode          the billing mode the table will have, null when the request
      *                             leaves it at the PROVISIONED default
+     * @param memberPathTemplate   the request-model path AWS reports per-member constraints
+     *                             under, with the 1-based member index as its only format
+     *                             argument. CreateTable and UpdateTable name different members,
+     *                             so the caller supplies it
      */
     private static void validateVectorIndexes(List<VectorIndex> newIndexes,
                                               List<VectorIndex> existingIndexes,
                                               List<AttributeDefinition> attributeDefinitions,
-                                              String billingMode) {
+                                              String billingMode,
+                                              String memberPathTemplate) {
         if (newIndexes == null || newIndexes.isEmpty()) {
             return;
         }
@@ -510,7 +516,7 @@ public class DynamoDbService implements ResourceProvider {
         // before any of the "One or more parameter values were invalid" checks below.
         for (int i = 0; i < newIndexes.size(); i++) {
             VectorIndex index = newIndexes.get(i);
-            String memberPath = "vectorIndexes." + (i + 1) + ".member";
+            String memberPath = memberPathTemplate.formatted(i + 1);
             String indexName = index.getIndexName();
             if (indexName == null || indexName.length() < MIN_VECTOR_INDEX_NAME_LENGTH) {
                 throw new AwsException("ValidationException",
@@ -2336,7 +2342,8 @@ public class DynamoDbService implements ResourceProvider {
                     "Subscriber limit exceeded: Only 1 online index can be created or deleted "
                     + "simultaneously per table", 400);
         }
-        validateVectorIndexes(creates, table.getVectorIndexes(), attributeDefinitions, billingMode);
+        validateVectorIndexes(creates, table.getVectorIndexes(), attributeDefinitions, billingMode,
+                "vectorIndexUpdates.%d.member.create");
     }
 
     /**

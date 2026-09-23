@@ -1241,8 +1241,10 @@ public class DynamoDbJsonHandler {
         }
         int topK = request.get("TopK").asInt();
         if (topK < 1) {
+            // AWS names this member TopK and quotes no value, unlike every other member of this
+            // family. Measured on real DynamoDB, eu-west-2, 2026-09-23.
             throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + topK + "' at 'topK' failed to satisfy "
+                    "1 validation error detected: Value at 'TopK' failed to satisfy "
                     + "constraint: Member must have value greater than or equal to 1", 400);
         }
 

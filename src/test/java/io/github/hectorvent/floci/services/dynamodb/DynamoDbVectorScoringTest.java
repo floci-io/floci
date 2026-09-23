@@ -75,6 +75,26 @@ class DynamoDbVectorScoringTest {
         assertEquals("0.1", DynamoDbVectorScoring.render(0.1f));
         assertEquals("16777216.0", DynamoDbVectorScoring.render(16777217f));
         assertEquals("1.0", DynamoDbVectorScoring.render(1.000000059604644775390625f));
+        assertEquals("7.0", DynamoDbVectorScoring.render(7f));
+        assertEquals("-0.5", DynamoDbVectorScoring.render(-0.5f));
+        assertEquals("0.0", DynamoDbVectorScoring.render(-0f));
+        assertEquals("0.000123", DynamoDbVectorScoring.render(0.000123f));
+        assertEquals("1234568000.0", DynamoDbVectorScoring.render(1234567900f));
+        assertEquals("-10000000000.0", DynamoDbVectorScoring.render(-1e10f));
+    }
+
+    @Test
+    void rendersOutsideThePlainBandInScientificNotation() {
+        assertEquals("0.000001", DynamoDbVectorScoring.render(1e-6f));
+        assertEquals("0.0000011", DynamoDbVectorScoring.render(1.1e-6f));
+        assertEquals("9.9e-7", DynamoDbVectorScoring.render(9.9e-7f));
+        assertEquals("1e-7", DynamoDbVectorScoring.render(1e-7f));
+        assertEquals("1.25e-7", DynamoDbVectorScoring.render(1.25e-7f));
+        assertEquals("9000000000000.0", DynamoDbVectorScoring.render(9e12f));
+        assertEquals("1e13", DynamoDbVectorScoring.render(1e13f));
+        assertEquals("1.5e13", DynamoDbVectorScoring.render(1.5e13f));
+        assertEquals("1e30", DynamoDbVectorScoring.render(1e30f));
+        assertEquals("3.4e38", DynamoDbVectorScoring.render(3.4e38f));
     }
 
     private static float[] ones(int dimensions) {

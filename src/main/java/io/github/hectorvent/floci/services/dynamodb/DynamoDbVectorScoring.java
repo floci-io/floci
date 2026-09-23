@@ -17,6 +17,10 @@ import java.math.BigDecimal;
  */
 final class DynamoDbVectorScoring {
 
+    // The band AWS writes in plain notation. Outside it the value comes back in scientific form.
+    private static final BigDecimal PLAIN_LOWER_BOUND = new BigDecimal("0.000001");
+    private static final BigDecimal PLAIN_UPPER_BOUND = new BigDecimal("1E+13");
+
     static final String COSINE = "COSINE";
     static final String EUCLIDEAN = "EUCLIDEAN";
     static final String DOT_PRODUCT = "DOT_PRODUCT";
@@ -89,12 +93,46 @@ final class DynamoDbVectorScoring {
     }
 
     /**
-     * A stored f32 value as AWS writes it back: the shortest decimal naming that float, in plain
-     * notation, always with a fractional part. Measured on real DynamoDB (eu-west-2, 2026-09-23),
-     * where 1 comes back as {@code 1.0} and 16777217 as {@code 16777216.0}.
+     * A stored f32 value as AWS writes it back: the shortest decimal naming that float. Plain
+     * notation with at least one fractional digit inside {@code [1e-6, 1e13)}, and
+     * {@code <mantissa>e<exponent>} outside it, with a lowercase e, no plus and no zero padding.
+     *
+     * <p>Both boundaries were measured on real DynamoDB (eu-west-2, 2026-09-23): 9.9e-7 comes back
+     * scientific and 1e-6 plain, 9e12 comes back plain and 1e13 scientific. 1 comes back as
+     * {@code 1.0} and 16777217 as {@code 16777216.0}.
+     *
+     * <p>{@code Float.toString} supplies the shortest round-tripping decimal, which it is for every
+     * normal float. Subnormals below {@link Float#MIN_NORMAL} are the one exception: AWS writes
+     * {@code Float.MIN_VALUE} as {@code 1e-45} where this renders {@code 1.4e-45}.
      */
     static String render(float value) {
-        String plain = new BigDecimal(Float.toString(value)).toPlainString();
-        return plain.indexOf('.') < 0 ? plain + ".0" : plain;
+        if (value == 0f) {
+            return "0.0";
+        }
+        BigDecimal shortest = new BigDecimal(Float.toString(value)).stripTrailingZeros();
+        BigDecimal magnitude = shortest.abs();
+        if (magnitude.compareTo(PLAIN_LOWER_BOUND) >= 0 && magnitude.compareTo(PLAIN_UPPER_BOUND) < 0) {
+            String plain = shortest.toPlainString();
+            return plain.indexOf('.') < 0 ? plain + ".0" : plain;
+        }
+        return scientific(shortest);
+    }
+
+    /**
+     * The mantissa carries the shortest digits with no trailing {@code .0}, so 1e13 is written
+     * {@code 1e13} rather than {@code 1.0e13}.
+     */
+    private static String scientific(BigDecimal stripped) {
+        String digits = stripped.unscaledValue().abs().toString();
+        int exponent = digits.length() - 1 - stripped.scale();
+        StringBuilder out = new StringBuilder();
+        if (stripped.signum() < 0) {
+            out.append('-');
+        }
+        out.append(digits.charAt(0));
+        if (digits.length() > 1) {
+            out.append('.').append(digits, 1, digits.length());
+        }
+        return out.append('e').append(exponent).toString();
     }
 }
