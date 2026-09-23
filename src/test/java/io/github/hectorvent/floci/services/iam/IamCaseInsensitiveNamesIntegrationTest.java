@@ -48,6 +48,11 @@ class IamCaseInsensitiveNamesIntegrationTest {
                 "PolicyName", "casecollisionpolicy",
                 "Path", "/second/",
                 "PolicyDocument", POLICY_DOCUMENT));
+
+        iam("CreateInstanceProfile", Map.of("InstanceProfileName", "CaseCollisionProfile"))
+                .statusCode(200);
+        assertAlreadyExists(
+                "CreateInstanceProfile", Map.of("InstanceProfileName", "casecollisionprofile"));
     }
 
     @Test

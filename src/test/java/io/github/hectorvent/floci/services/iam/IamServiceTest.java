@@ -1281,6 +1281,17 @@ class IamServiceTest {
     }
 
     @Test
+    void createInstanceProfileRejectsNameThatDiffersOnlyByCase() {
+        iamService.createInstanceProfile("CaseProfile", "/");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> iamService.createInstanceProfile("caseprofile", "/"));
+
+        assertEquals("EntityAlreadyExists", error.getErrorCode());
+        assertEquals(409, error.getHttpStatus());
+    }
+
+    @Test
     void addAndRemoveRoleFromInstanceProfile() {
         iamService.createRole("LambdaExec", "/", "{}", null, 0, null);
         iamService.createInstanceProfile("MyProfile", "/");
