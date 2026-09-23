@@ -260,7 +260,7 @@ class ContainerLifecycleManagerNetworkTest {
                 "busybox:stable", "probe", List.of(), null, null, null, portBindings, List.of(),
                 exposedPorts, networkMode, List.of(), List.of(), List.of(), List.of(), Map.of(), null,
                 false, null, List.of(), null, null, List.of(), List.of(), null, null, false,
-                List.of());
+                List.of(), Map.of());
     }
 
     private static ContainerSpec specWithLinkLocalIp(Map<Integer, Integer> portBindings) {
