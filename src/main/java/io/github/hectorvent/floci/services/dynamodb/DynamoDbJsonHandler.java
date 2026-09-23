@@ -600,7 +600,7 @@ public class DynamoDbJsonHandler {
 
         JsonNode oldItem = null;
         if ("ALL_OLD".equals(returnValues) || expected != null) {
-            dynamoDbService.describeTable(tableName, region);
+            dynamoDbService.requireTableForItemCall(tableName, region);
             oldItem = dynamoDbService.getItem(tableName, item, region);
         }
 
@@ -971,7 +971,7 @@ public class DynamoDbJsonHandler {
                 ? request.get("ReturnItemCollectionMetrics").asText() : null;
         if (!"SIZE".equals(ricm) || itemOrKey == null) return;
         try {
-            TableDefinition table = dynamoDbService.describeTable(tableName, region);
+            TableDefinition table = dynamoDbService.requireTableForItemCall(tableName, region);
             String pkName = table.getPartitionKeyName();
             JsonNode pkValue = itemOrKey.get(pkName);
             if (pkValue == null) return;
@@ -1109,7 +1109,7 @@ public class DynamoDbJsonHandler {
                     "1 validation error detected: " + SELECT_NEEDS_PROJECTION, 400);
         }
 
-        TableDefinition queryTable = dynamoDbService.describeTable(tableName, region);
+        TableDefinition queryTable = dynamoDbService.requireTableForItemCall(tableName, region);
         DynamoDbAccessPath queryAccessPath = DynamoDbAccessPath.resolve(queryTable, indexName);
         DynamoDbAccessPathValidator.validateQuery(queryTable, queryAccessPath, keyConditions,
                 keyConditionExpr, filterExpr, queryFilter, exprAttrNames, exprAttrValues);
@@ -1287,7 +1287,7 @@ public class DynamoDbJsonHandler {
             throw new AwsException("ValidationException", SELECT_NEEDS_PROJECTION, 400);
         }
 
-        TableDefinition scanTable = dynamoDbService.describeTable(tableName, region);
+        TableDefinition scanTable = dynamoDbService.requireTableForItemCall(tableName, region);
         DynamoDbAccessPath scanAccessPath = DynamoDbAccessPath.resolve(scanTable, indexNameScan);
         DynamoDbAccessPathValidator.validateSelection(scanTable, scanAccessPath, select,
                 projectionExpressionScan, attributesToGetScan, exprAttrNames);
@@ -1481,7 +1481,7 @@ public class DynamoDbJsonHandler {
         }
 
         for (Map.Entry<String, List<JsonNode>> entry : items.entrySet()) {
-            TableDefinition bwTable = dynamoDbService.describeTable(entry.getKey(), region);
+            TableDefinition bwTable = dynamoDbService.requireTableForItemCall(entry.getKey(), region);
             Set<String> seen = new HashSet<>();
             for (JsonNode writeReq : entry.getValue()) {
                 JsonNode keyNode = writeReq.has("PutRequest")
@@ -1508,7 +1508,7 @@ public class DynamoDbJsonHandler {
         if (!"NONE".equals(returnCCBatch)) {
             costs = new LinkedHashMap<>();
             for (var entry : items.entrySet()) {
-                var costTable = dynamoDbService.describeTable(entry.getKey(), region);
+                var costTable = dynamoDbService.requireTableForItemCall(entry.getKey(), region);
                 var cost = DynamoDbWriteCapacity.Cost.zero();
                 for (var writeReq : entry.getValue()) {
                     var newItem = writeReq.has("PutRequest")
@@ -1569,7 +1569,7 @@ public class DynamoDbJsonHandler {
         }
 
         for (Map.Entry<String, JsonNode> entry : items.entrySet()) {
-            TableDefinition bgTable = dynamoDbService.describeTable(entry.getKey(), region);
+            TableDefinition bgTable = dynamoDbService.requireTableForItemCall(entry.getKey(), region);
             JsonNode keys = entry.getValue().get("Keys");
             if (keys == null || !keys.isArray()) continue;
             Set<String> seen = new HashSet<>();
@@ -2007,7 +2007,7 @@ public class DynamoDbJsonHandler {
             if (op == null) continue;
             String opTable = op.path("TableName").asText();
             TableDefinition txTable = tableCache.computeIfAbsent(opTable,
-                    tn -> dynamoDbService.describeTable(tn, region));
+                    tn -> dynamoDbService.requireTableForItemCall(tn, region));
             JsonNode keyNode = op.has("Item") ? op.get("Item") : op.get("Key");
             if (keyNode == null) continue;
             String key = region + "::" + opTable + "::" + dynamoDbService.buildItemKey(txTable, keyNode);
@@ -2111,7 +2111,7 @@ public class DynamoDbJsonHandler {
             if (get == null) continue;
             String opTable = get.path("TableName").asText();
             TableDefinition txTable = tableCache.computeIfAbsent(opTable,
-                    tn -> dynamoDbService.describeTable(tn, region));
+                    tn -> dynamoDbService.requireTableForItemCall(tn, region));
             JsonNode keyNode = get.get("Key");
             if (keyNode == null) continue;
             try {
@@ -2579,7 +2579,7 @@ public class DynamoDbJsonHandler {
                                            String region, JsonNode oldItem, JsonNode newItem) {
         String returnCC = request.path("ReturnConsumedCapacity").asText("NONE");
         if ("NONE".equals(returnCC)) return;
-        TableDefinition table = dynamoDbService.describeTable(tableName, region);
+        TableDefinition table = dynamoDbService.requireTableForItemCall(tableName, region);
         var cost = DynamoDbWriteCapacity.forWrite(table, oldItem,
                 newItem != null ? DynamoDbNumberUtils.normalizeNumbersInItem(newItem) : null);
         response.set("ConsumedCapacity",
@@ -3291,7 +3291,7 @@ public class DynamoDbJsonHandler {
         if (select.index() != null) {
             throw batchSelectNeedsKey();
         }
-        TableDefinition table = dynamoDbService.describeTable(select.table(), region);
+        TableDefinition table = dynamoDbService.requireTableForItemCall(select.table(), region);
         DynamoDbPartiQLHandler.requireReadsWithinLimit(table, select.where());
         if (!DynamoDbPartiQLHandler.namesOnlyTheKey(table, select.where())) {
             throw batchSelectNeedsKey();

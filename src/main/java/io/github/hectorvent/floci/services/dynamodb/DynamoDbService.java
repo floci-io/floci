@@ -884,7 +884,7 @@ public class DynamoDbService implements ResourceProvider {
                          JsonNode exprAttrNames, JsonNode exprAttrValues,
                          String region, String returnValuesOnConditionCheckFailure) {
         var canonicalTableName = canonicalTableName(region, tableName);
-        requireActiveTable(regionKey(region, canonicalTableName), canonicalTableName);
+        requireActiveTable(regionKey(region, canonicalTableName));
         return putItemInternal(tableName, item, conditionExpression, exprAttrNames, exprAttrValues,
                         region, returnValuesOnConditionCheckFailure, true);
     }
@@ -918,7 +918,7 @@ public class DynamoDbService implements ResourceProvider {
         String canonicalTableName = canonicalTableName(region, tableName);
         String storageKey = regionKey(region, canonicalTableName);
         TableDefinition table = tableStore.get(storageKey)
-                .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
+                .orElseThrow(DynamoDbService::itemCallResourceNotFound);
 
         // Validate and normalize all number attributes before storage
         final JsonNode normalizedItem = DynamoDbNumberUtils.normalizeNumbersInItem(item);
@@ -968,7 +968,7 @@ public class DynamoDbService implements ResourceProvider {
     public JsonNode getItem(String tableName, JsonNode key, String region) {
         String canonicalTableName = canonicalTableName(region, tableName);
         String storageKey = regionKey(region, canonicalTableName);
-        var table = requireActiveTable(storageKey, canonicalTableName);
+        TableDefinition table = requireActiveTable(storageKey);
 
         String itemKey = buildItemKey(table, key, true);
         var items = currentItems(storageKey, false);
@@ -1025,7 +1025,7 @@ public class DynamoDbService implements ResourceProvider {
                                          Map<String, ConcurrentSkipListMap<String, JsonNode>> stagedItems) {
         String canonicalTableName = canonicalTableName(region, tableName);
         String storageKey = regionKey(region, canonicalTableName);
-        var table = requireActiveTable(storageKey, canonicalTableName);
+        TableDefinition table = requireActiveTable(storageKey);
 
         String itemKey = buildItemKey(table, key, true);
 
@@ -1136,7 +1136,7 @@ public class DynamoDbService implements ResourceProvider {
                                              UpdateSizeRule sizeRule) {
         String canonicalTableName = canonicalTableName(region, tableName);
         String storageKey = regionKey(region, canonicalTableName);
-        var table = requireActiveTable(storageKey, canonicalTableName);
+        TableDefinition table = requireActiveTable(storageKey);
 
         String itemKey = buildItemKey(table, key, true);
 
@@ -1318,7 +1318,7 @@ public class DynamoDbService implements ResourceProvider {
                               JsonNode exclusiveStartKey, JsonNode exprAttrNames, String region) {
         String canonicalTableName = canonicalTableName(region, tableName);
         String storageKey = regionKey(region, canonicalTableName);
-        var table = requireActiveTable(storageKey, canonicalTableName);
+        TableDefinition table = requireActiveTable(storageKey);
 
         DynamoDbAccessPath accessPath = DynamoDbAccessPath.resolve(table, indexName);
         String partitionKeyValuePlaceholder = DynamoDbAccessPathValidator.validateQuery(
@@ -1487,7 +1487,7 @@ public class DynamoDbService implements ResourceProvider {
         DynamoDbReservedWords.check(filterExpression, "FilterExpression");
         String canonicalTableName = canonicalTableName(region, tableName);
         String storageKey = regionKey(region, canonicalTableName);
-        var table = requireActiveTable(storageKey, canonicalTableName);
+        TableDefinition table = requireActiveTable(storageKey);
 
         DynamoDbAccessPath accessPath = DynamoDbAccessPath.resolve(table, indexName);
 
@@ -1616,7 +1616,7 @@ public class DynamoDbService implements ResourceProvider {
         for (Map.Entry<String, List<JsonNode>> entry : requestItems.entrySet()) {
             String tableName = canonicalTableName(region, entry.getKey());
             String storageKey = regionKey(region, tableName);
-            var table = requireActiveTable(storageKey, tableName);
+            TableDefinition table = requireActiveTable(storageKey);
             Set<String> seenKeys = new HashSet<>();
             for (JsonNode writeRequest : entry.getValue()) {
                 String itemKey;
@@ -1914,7 +1914,7 @@ public class DynamoDbService implements ResourceProvider {
                 cost = DynamoDbTransactCapacity.conditionCheck(oldItem);
             } else {
                 cost = DynamoDbTransactCapacity.write(
-                        requireActiveTable(participant.storageKey(), participant.tableName()), oldItem, newItem);
+                        requireActiveTable(participant.storageKey()), oldItem, newItem);
             }
             byTable.merge(participant.tableName(), cost, DynamoDbWriteCapacity.Cost::plus);
         }
@@ -1950,7 +1950,7 @@ public class DynamoDbService implements ResourceProvider {
         }
 
         String storageKey = regionKey(region, tableName);
-        var table = requireActiveTable(storageKey, tableName);
+        TableDefinition table = requireActiveTable(storageKey);
         String itemKey = buildItemKey(table, keyOrItem);
         return new TransactParticipant(storageKey, itemKey, tableName);
     }
@@ -1990,7 +1990,7 @@ public class DynamoDbService implements ResourceProvider {
             return;
         }
         String tableName = canonicalTableName(region, target.path("TableName").asText());
-        TableDefinition table = requireActiveTable(regionKey(region, tableName), tableName);
+        TableDefinition table = requireActiveTable(regionKey(region, tableName));
         List<String> keyNames = table.getSortKeyName() == null
                 ? List.of(table.getPartitionKeyName())
                 : List.of(table.getPartitionKeyName(), table.getSortKeyName());
@@ -2059,7 +2059,7 @@ public class DynamoDbService implements ResourceProvider {
         JsonNode exprAttrValues = target.has("ExpressionAttributeValues") ? target.get("ExpressionAttributeValues") : null;
 
         String storageKey = regionKey(region, canonicalTableName);
-        var table = requireActiveTable(storageKey, canonicalTableName);
+        TableDefinition table = requireActiveTable(storageKey);
 
         String itemKey = buildItemKey(table, key);
         var tableItems = itemsFor(storageKey, stagedItems, false);
@@ -2106,7 +2106,7 @@ public class DynamoDbService implements ResourceProvider {
             JsonNode put = transactItem.get("Put");
             String tableName = canonicalTableName(region, put.path("TableName").asText());
             String storageKey = regionKey(region, tableName);
-            var table = requireActiveTable(storageKey, tableName);
+            TableDefinition table = requireActiveTable(storageKey);
             JsonNode item = put.get("Item");
             if (item == null) {
                 throw new AwsException("ValidationException", "Item is required for Put", 400);
@@ -2120,7 +2120,7 @@ public class DynamoDbService implements ResourceProvider {
             JsonNode del = transactItem.get("Delete");
             String tableName = canonicalTableName(region, del.path("TableName").asText());
             String storageKey = regionKey(region, tableName);
-            var table = requireActiveTable(storageKey, tableName);
+            TableDefinition table = requireActiveTable(storageKey);
             JsonNode key = del.get("Key");
             if (key == null) {
                 throw new AwsException("ValidationException", "Key is required for Delete", 400);
@@ -2130,7 +2130,7 @@ public class DynamoDbService implements ResourceProvider {
             JsonNode upd = transactItem.get("Update");
             String tableName = canonicalTableName(region, upd.path("TableName").asText());
             String storageKey = regionKey(region, tableName);
-            var table = requireActiveTable(storageKey, tableName);
+            TableDefinition table = requireActiveTable(storageKey);
             JsonNode key = upd.get("Key");
             if (key == null) {
                 throw new AwsException("ValidationException", "Key is required for Update", 400);
@@ -4441,14 +4441,24 @@ public class DynamoDbService implements ResourceProvider {
                 "Requested resource not found: Table: " + tableName + " not found", 400);
     }
 
-    /** Item calls treat a CREATING table as absent. AWS answers them without the table name. */
-    private TableDefinition requireActiveTable(String storageKey, String canonicalTableName) {
-        var table = tableStore.get(storageKey)
-                .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
+    /** Item calls never name the table, and they treat a CREATING table as absent. */
+    private static AwsException itemCallResourceNotFound() {
+        return new AwsException("ResourceNotFoundException", "Requested resource not found", 400);
+    }
+
+    private TableDefinition requireActiveTable(String storageKey) {
+        TableDefinition table = tableStore.get(storageKey)
+                .orElseThrow(DynamoDbService::itemCallResourceNotFound);
         if ("CREATING".equals(table.getTableStatus())) {
-            throw new AwsException("ResourceNotFoundException", "Requested resource not found", 400);
+            throw itemCallResourceNotFound();
         }
         return table;
+    }
+
+    /** Resolves a table for an item call, so a miss reports the message AWS uses there. */
+    public TableDefinition requireTableForItemCall(String tableName, String region) {
+        String canonicalTableName = canonicalTableName(region, tableName);
+        return requireActiveTable(regionKey(region, canonicalTableName));
     }
 
     public record UpdateResult(JsonNode newItem, JsonNode oldItem, List<TouchedPath> touched) {}
