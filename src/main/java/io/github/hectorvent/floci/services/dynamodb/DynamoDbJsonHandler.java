@@ -195,8 +195,11 @@ public class DynamoDbJsonHandler {
         List<VectorIndex> vectorIndexes = new ArrayList<>();
         JsonNode vectorIndexArray = request.path("VectorIndexes");
         if (vectorIndexArray.isArray()) {
+            int vectorPosition = 0;
             for (JsonNode vectorIndexNode : vectorIndexArray) {
-                vectorIndexes.add(parseVectorIndex(vectorIndexNode));
+                vectorPosition++;
+                vectorIndexes.add(parseVectorIndex(vectorIndexNode,
+                        "vectorIndexes." + vectorPosition + ".member"));
             }
         }
 
@@ -315,7 +318,16 @@ public class DynamoDbJsonHandler {
     }
 
     /** Reads a VectorIndex or the CreateVectorIndexAction of a VectorIndexUpdate; same members. */
-    private static VectorIndex parseVectorIndex(JsonNode node) {
+    private static VectorIndex parseVectorIndex(JsonNode node, String memberPath) {
+        // An absent VectorAttribute is reported as the member itself, one that is present but
+        // carries no AttributeName as the nested member. Only the request shape tells them apart.
+        JsonNode vectorAttribute = node.path("VectorAttribute");
+        if (vectorAttribute.isObject() && !vectorAttribute.hasNonNull("AttributeName")) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value null at '" + memberPath
+                    + ".vectorAttribute.attributeName' failed to satisfy constraint: "
+                    + "Member must not be null", 400);
+        }
         List<SearchSchemaElement> searchSchema = new ArrayList<>();
         JsonNode searchSchemaArray = node.path("SearchSchema");
         if (searchSchemaArray.isArray()) {
@@ -325,7 +337,8 @@ public class DynamoDbJsonHandler {
                         element.path("SearchSchemaElementType").asText(null)));
             }
         }
-        String projectionType = node.path("Projection").path("ProjectionType").asText("ALL");
+        String projectionType = node.hasNonNull("Projection")
+                ? node.path("Projection").path("ProjectionType").asText("ALL") : null;
         List<String> nonKeyAttributes = new ArrayList<>();
         JsonNode nonKeyAttrArray = node.path("Projection").path("NonKeyAttributes");
         if (nonKeyAttrArray.isArray()) {
@@ -333,6 +346,7 @@ public class DynamoDbJsonHandler {
                 nonKeyAttributes.add(nonKeyAttr.asText());
             }
         }
+        validateProjectionSpec(projectionType, nonKeyAttributes);
         Long dimensions = node.hasNonNull("Dimensions") ? node.get("Dimensions").asLong() : null;
         return new VectorIndex(
                 node.path("IndexName").asText(null),
@@ -1223,22 +1237,23 @@ public class DynamoDbJsonHandler {
     // so every search reports the floor (measured in eu-west-2, 2026-09-23).
     private static final double VECTOR_SEARCH_REQUEST_BYTES = 1024;
 
+    private static final int MAX_VECTOR_SEARCH_TOP_K = 100;
+
     private Response handleSearchVectors(JsonNode request, String region) {
+        requireSearchVectorsMember(request, "SearchVector");
+        requireSearchVectorsMember(request, "IndexName");
         String tableName = request.path("TableName").asText();
         String indexName = request.has("IndexName") ? request.get("IndexName").asText() : null;
         String rccSearch = request.has("ReturnConsumedCapacity")
                 ? request.get("ReturnConsumedCapacity").asText() : null;
         if (rccSearch != null && !VALID_RETURN_CONSUMED_CAPACITY.contains(rccSearch)) {
+            // No "N validation errors detected" envelope here, unlike every other operation.
             throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + rccSearch + "' at 'returnConsumedCapacity' "
+                    "Value '" + rccSearch + "' at 'returnConsumedCapacity' "
                     + "failed to satisfy constraint: Member must satisfy enum value set: "
                     + "[INDEXES, TOTAL, NONE]", 400);
         }
-        if (!request.hasNonNull("TopK")) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value null at 'topK' failed to satisfy constraint: "
-                    + "Member must not be null", 400);
-        }
+        requireSearchVectorsMember(request, "TopK");
         int topK = request.get("TopK").asInt();
         if (topK < 1) {
             // AWS names this member TopK and quotes no value, unlike every other member of this
@@ -1246,6 +1261,13 @@ public class DynamoDbJsonHandler {
             throw new AwsException("ValidationException",
                     "1 validation error detected: Value at 'TopK' failed to satisfy "
                     + "constraint: Member must have value greater than or equal to 1", 400);
+        }
+        // Both bounds answer before the table and the index are resolved: AWS reports the range
+        // even for a table that does not exist.
+        if (topK > MAX_VECTOR_SEARCH_TOP_K) {
+            throw new AwsException("ValidationException",
+                    "Provided TopK value '" + topK + "' is out of valid range. "
+                    + "The value must be between 1 and " + MAX_VECTOR_SEARCH_TOP_K + " inclusive", 400);
         }
 
         TableDefinition table = dynamoDbService.describeTable(tableName, region);
@@ -1281,6 +1303,19 @@ public class DynamoDbJsonHandler {
     }
 
     /**
+     * Rejects an omitted required member of SearchVectors the way the AWS frontend does: as a
+     * deserialisation failure quoting the offset of the body's closing brace, which for the
+     * compact JSON an SDK sends is the body length. Measured in eu-west-2, 2026-09-23.
+     */
+    private static void requireSearchVectorsMember(JsonNode request, String member) {
+        if (!request.hasNonNull(member)) {
+            throw new AwsException("ValidationException",
+                    "missing field `" + member + "` at line 1 column "
+                    + request.toString().length(), 400);
+        }
+    }
+
+    /**
      * The vector index a search may run against.
      *
      * <p>An index still in its resource allocation phase answers as if the table did not have it,
@@ -1288,12 +1323,15 @@ public class DynamoDbJsonHandler {
      */
     private VectorIndex requireSearchableVectorIndex(TableDefinition table, String indexName) {
         VectorIndex index = table.findVectorIndex(indexName).orElse(null);
-        if (index == null || ("CREATING".equals(index.getIndexStatus())
-                && !dynamoDbService.isVectorIndexBackfilling(index))) {
+        if (index == null) {
             throw new AwsException("ValidationException",
                     "The table does not have the specified index: " + indexName, 400);
         }
         if ("CREATING".equals(index.getIndexStatus())) {
+            if (!dynamoDbService.isVectorIndexBackfilling(index)) {
+                throw new AwsException("ValidationException",
+                        "The table does not have the specified index: " + indexName, 400);
+            }
             throw new AwsException("ValidationException",
                     "Cannot search backfilling vector index: " + indexName, 400);
         }
@@ -1587,14 +1625,21 @@ public class DynamoDbJsonHandler {
             }
         }
 
-        List<VectorIndex> vectorCreates = new ArrayList<>();
+        List<DynamoDbService.VectorIndexCreate> vectorCreates = new ArrayList<>();
         List<String> vectorDeletes = new ArrayList<>();
         JsonNode vectorIndexUpdates = request.path("VectorIndexUpdates");
         if (vectorIndexUpdates.isArray()) {
+            // AWS reports a per-member constraint under the position in this array, which a
+            // create shares with the deletes beside it.
+            int updatePosition = 0;
             for (JsonNode update : vectorIndexUpdates) {
+                updatePosition++;
                 JsonNode createNode = update.path("Create");
                 if (createNode.isObject()) {
-                    vectorCreates.add(parseVectorIndex(createNode));
+                    vectorCreates.add(new DynamoDbService.VectorIndexCreate(
+                            parseVectorIndex(createNode,
+                                    "vectorIndexUpdates." + updatePosition + ".member.create"),
+                            updatePosition));
                 }
                 JsonNode deleteNode = update.path("Delete");
                 if (deleteNode.isObject()) {

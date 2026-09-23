@@ -37,7 +37,9 @@ public class VectorIndex {
         this.indexName = indexName;
         this.vectorAttributeName = vectorAttributeName;
         this.searchSchema = searchSchema != null ? searchSchema : new ArrayList<>();
-        this.projectionType = projectionType != null ? projectionType : "ALL";
+        // Left null when the request omitted Projection, which is a required member the
+        // CreateTable and UpdateTable validation rejects.
+        this.projectionType = projectionType;
         if ("INCLUDE".equals(this.projectionType) && nonKeyAttributes != null) {
             this.nonKeyAttributes = nonKeyAttributes;
         } else {

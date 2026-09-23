@@ -53,9 +53,13 @@ class DynamoDbVectorIndexLifecycleTest {
         return new VectorIndex(indexName, "embedding", List.of(), "ALL", List.of(), 3L, "COSINE");
     }
 
+    private static DynamoDbService.VectorIndexCreate create(String indexName, int memberPosition) {
+        return new DynamoDbService.VectorIndexCreate(vectorIndex(indexName), memberPosition);
+    }
+
     private TableDefinition addIndex(String indexName) {
         return service.updateTable(TABLE, null, null, List.of(), List.of(), List.of(),
-                List.of(vectorIndex(indexName)), List.of(), null, REGION);
+                List.of(create(indexName, 1)), List.of(), null, REGION);
     }
 
     private TableDefinition deleteIndex(String indexName) {
@@ -152,7 +156,7 @@ class DynamoDbVectorIndexLifecycleTest {
     void twoCreatesInOneRequestExceedTheOnlineIndexLimit() {
         AwsException refused = assertThrows(AwsException.class, () ->
                 service.updateTable(TABLE, null, null, List.of(), List.of(), List.of(),
-                        List.of(vectorIndex("one"), vectorIndex("two")), List.of(), null, REGION));
+                        List.of(create("one", 1), create("two", 2)), List.of(), null, REGION));
 
         assertEquals("LimitExceededException", refused.getErrorCode());
         assertEquals("Subscriber limit exceeded: Only 1 online index can be created or deleted "

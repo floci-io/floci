@@ -27,7 +27,6 @@ final class DynamoDbVectorSearch {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    private static final int MAX_TOP_K = 100;
     private static final String HASH = "HASH";
 
     private DynamoDbVectorSearch() {}
@@ -36,17 +35,12 @@ final class DynamoDbVectorSearch {
     record Hit(ObjectNode item, double score) {}
 
     /** A scored candidate, before the top-K cut decides whether it is worth projecting. */
-    private record Candidate(JsonNode item, double score) {}
+    private record Candidate(JsonNode item, float[] vector, double score) {}
 
     static List<Hit> search(TableDefinition table, VectorIndex index, List<JsonNode> items,
                             JsonNode searchVector, int topK, String searchConditionExpression,
                             JsonNode exprAttrNames, JsonNode exprAttrValues,
                             String projectionExpression) {
-        if (topK > MAX_TOP_K) {
-            throw new AwsException("ValidationException",
-                    "Provided TopK value '" + topK + "' is out of valid range. "
-                    + "The value must be between 1 and " + MAX_TOP_K + " inclusive", 400);
-        }
         float[] query = parseSearchVector(searchVector, index);
         ExpressionEvaluator.Expr condition = parseSearchCondition(index, searchConditionExpression,
                 exprAttrNames, exprAttrValues);
@@ -56,17 +50,17 @@ final class DynamoDbVectorSearch {
         String distanceFunction = index.getDistanceFunction();
         List<Candidate> candidates = new ArrayList<>();
         for (JsonNode item : items) {
-            float[] stored = storedVector(item, index);
-            if (stored == null) {
-                continue;
-            }
             if (hashAttribute != null && !item.hasNonNull(hashAttribute)) {
                 continue;
             }
             if (!ExpressionEvaluator.evaluate(condition, item, exprAttrNames, exprAttrValues)) {
                 continue;
             }
-            candidates.add(new Candidate(item,
+            float[] stored = storedVector(item, index);
+            if (stored == null) {
+                continue;
+            }
+            candidates.add(new Candidate(item, stored,
                     DynamoDbVectorScoring.score(distanceFunction, query, stored)));
         }
 
@@ -76,8 +70,8 @@ final class DynamoDbVectorSearch {
 
         List<Hit> hits = new ArrayList<>();
         for (Candidate candidate : candidates.subList(0, Math.min(topK, candidates.size()))) {
-            hits.add(new Hit(projectHit(candidate.item(), table, index, projectionExpression,
-                    exprAttrNames), candidate.score()));
+            hits.add(new Hit(projectHit(candidate.item(), candidate.vector(), table, index,
+                    projectionExpression, exprAttrNames), candidate.score()));
         }
         return hits;
     }
@@ -254,14 +248,15 @@ final class DynamoDbVectorSearch {
      * The attributes a hit carries. The index view is intersected with the ProjectionExpression
      * when there is one, and the vector attribute is left out unless that expression names it.
      */
-    private static ObjectNode projectHit(JsonNode item, TableDefinition table, VectorIndex index,
-                                         String projectionExpression, JsonNode exprAttrNames) {
+    private static ObjectNode projectHit(JsonNode item, float[] vector, TableDefinition table,
+                                         VectorIndex index, String projectionExpression,
+                                         JsonNode exprAttrNames) {
         ObjectNode view = "ALL".equals(index.getProjectionType())
                 ? shallowCopy((ObjectNode) item)
                 : ProjectionEvaluator.trimToAttributes((ObjectNode) item,
                         projectedAttributeNames(table, index));
         if (projectionExpression != null && !projectionExpression.isBlank()) {
-            view.set(index.getVectorAttributeName(), renderVector(storedVector(item, index)));
+            view.set(index.getVectorAttributeName(), renderVector(vector));
             return ProjectionEvaluator.project(view, projectionExpression, exprAttrNames);
         }
         view.remove(index.getVectorAttributeName());

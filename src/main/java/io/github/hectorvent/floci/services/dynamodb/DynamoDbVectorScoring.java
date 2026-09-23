@@ -33,8 +33,9 @@ final class DynamoDbVectorScoring {
             case COSINE -> cosine(query, stored);
             case EUCLIDEAN -> euclidean(query, stored);
             case DOT_PRODUCT -> dotProduct(query, stored);
-            // AWS rejects any other value at CreateTable, so no index should carry one.
-            default -> throw new AwsException("ValidationException",
+            // CreateTable and UpdateTable reject an unknown value, so only a missing one reaches
+            // here: answer it rather than letting a null selector throw.
+            case null, default -> throw new AwsException("ValidationException",
                     "Unsupported distance function: " + distanceFunction, 400);
         };
     }

@@ -8,6 +8,7 @@ import io.restassured.RestAssured;
 import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -52,6 +53,13 @@ class DynamoDbVectorSearchIntegrationTest {
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
+    // @AfterAll runs after Quarkus has reset the shared port, so it needs its own copy. Taken
+    // per test rather than in createTables, which a filtered single-method run never reaches.
+    @BeforeEach
+    void capturePort() {
+        testPort = RestAssured.port;
     }
 
     @AfterAll
@@ -131,8 +139,6 @@ class DynamoDbVectorSearchIntegrationTest {
     @Test
     @Order(1)
     void createTables() {
-        testPort = RestAssured.port;
-
         call("CreateTable", """
             {
                 "TableName": "%s",
@@ -635,4 +641,317 @@ class DynamoDbVectorSearchIntegrationTest {
             """.formatted(PLAIN),
                 "Scan operation not supported on this index type");
     }
+
+    @Test
+    @Order(29)
+    void createTableRejectsADistanceFunctionOutsideTheEnum() {
+        for (String distanceFunction : List.of("MANHATTAN", "cosine")) {
+            expectValidation("CreateTable", """
+                {
+                    "TableName": "%s",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "BillingMode": "PAY_PER_REQUEST",
+                    "VectorIndexes": [
+                        {"IndexName": "vix",
+                         "VectorAttribute": {"AttributeName": "embedding"},
+                         "Projection": {"ProjectionType": "ALL"},
+                         "Dimensions": 3,
+                         "DistanceFunction": "%s"}
+                    ]
+                }
+                """.formatted(REJECTED, distanceFunction),
+                    "1 validation error detected: Value '" + distanceFunction + "' at "
+                    + "'vectorIndexes.1.member.distanceFunction' failed to satisfy constraint: "
+                    + "Member must satisfy enum value set: [DOT_PRODUCT, COSINE, EUCLIDEAN]");
+        }
+    }
+
+    @Test
+    @Order(30)
+    void updateTableRejectsADistanceFunctionOutsideTheEnum() {
+        expectValidation("UpdateTable", """
+            {
+                "TableName": "%s",
+                "VectorIndexUpdates": [
+                    {"Create": {"IndexName": "vix",
+                                "VectorAttribute": {"AttributeName": "embedding"},
+                                "Projection": {"ProjectionType": "ALL"},
+                                "Dimensions": 3,
+                                "DistanceFunction": "MANHATTAN"}}
+                ]
+            }
+            """.formatted(PLAIN),
+                "1 validation error detected: Value 'MANHATTAN' at "
+                + "'vectorIndexUpdates.1.member.create.distanceFunction' failed to satisfy "
+                + "constraint: Member must satisfy enum value set: [DOT_PRODUCT, COSINE, EUCLIDEAN]");
+    }
+
+    @Test
+    @Order(31)
+    void createTableRequiresDimensionsVectorAttributeAndProjection() {
+        expectValidation("CreateTable", vectorIndexTable("""
+            {"IndexName": "vix",
+             "VectorAttribute": {"AttributeName": "embedding"},
+             "Projection": {"ProjectionType": "ALL"},
+             "DistanceFunction": "COSINE"}"""),
+                requiredMember("dimensions"));
+
+        expectValidation("CreateTable", vectorIndexTable("""
+            {"IndexName": "vix",
+             "Projection": {"ProjectionType": "ALL"},
+             "Dimensions": 3,
+             "DistanceFunction": "COSINE"}"""),
+                requiredMember("vectorAttribute"));
+
+        expectValidation("CreateTable", vectorIndexTable("""
+            {"IndexName": "vix",
+             "VectorAttribute": {"AttributeName": "embedding"},
+             "Dimensions": 3,
+             "DistanceFunction": "COSINE"}"""),
+                requiredMember("projection"));
+    }
+
+    /** A CreateTable body carrying the one vector index given. */
+    private static String vectorIndexTable(String vectorIndex) {
+        return """
+            {
+                "TableName": "%s",
+                "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                "BillingMode": "PAY_PER_REQUEST",
+                "VectorIndexes": [%s]
+            }
+            """.formatted(REJECTED, vectorIndex);
+    }
+
+    private static String requiredMember(String member) {
+        return "1 validation error detected: Value null at 'vectorIndexes.1.member." + member
+                + "' failed to satisfy constraint: Member must not be null";
+    }
+
+    @Test
+    @Order(32)
+    void createTableRejectsAVectorIndexNamedLikeAnotherIndex() {
+        expectValidation("CreateTable", """
+            {
+                "TableName": "%s",
+                "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                "AttributeDefinitions": [
+                    {"AttributeName": "pk", "AttributeType": "S"},
+                    {"AttributeName": "gsk", "AttributeType": "S"}
+                ],
+                "BillingMode": "PAY_PER_REQUEST",
+                "GlobalSecondaryIndexes": [
+                    {"IndexName": "dup",
+                     "KeySchema": [{"AttributeName": "gsk", "KeyType": "HASH"}],
+                     "Projection": {"ProjectionType": "ALL"}}
+                ],
+                "VectorIndexes": [
+                    {"IndexName": "dup",
+                     "VectorAttribute": {"AttributeName": "embedding"},
+                     "Projection": {"ProjectionType": "ALL"},
+                     "Dimensions": 3,
+                     "DistanceFunction": "COSINE"}
+                ]
+            }
+            """.formatted(REJECTED),
+                "One or more parameter values were invalid: Duplicate index name: dup");
+
+        expectValidation("CreateTable", """
+            {
+                "TableName": "%s",
+                "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                "BillingMode": "PAY_PER_REQUEST",
+                "VectorIndexes": [
+                    {"IndexName": "dup",
+                     "VectorAttribute": {"AttributeName": "embedding"},
+                     "Projection": {"ProjectionType": "ALL"},
+                     "Dimensions": 3,
+                     "DistanceFunction": "COSINE"},
+                    {"IndexName": "dup",
+                     "VectorAttribute": {"AttributeName": "embedding"},
+                     "Projection": {"ProjectionType": "ALL"},
+                     "Dimensions": 3,
+                     "DistanceFunction": "COSINE"}
+                ]
+            }
+            """.formatted(REJECTED),
+                "One or more parameter values were invalid: Duplicate index name: dup");
+    }
+
+    @Test
+    @Order(33)
+    void searchVectorsChecksTheTopKRangeBeforeTheTableAndTheIndex() {
+        String outOfRange = "Provided TopK value '1000' is out of valid range. The value must be "
+                + "between 1 and 100 inclusive";
+
+        expectValidation("SearchVectors", search("VectorNoSuchTable", "cosine", 1000, ""), outOfRange);
+        expectValidation("SearchVectors", search(DOCS, "VectorNoSuchIndex", 1000, ""), outOfRange);
+    }
+
+    /**
+     * AWS deserialises SearchVectors with serde and points at the body's closing brace, so the
+     * column is the length of the compact JSON an SDK sends. Both bodies below are compact, which
+     * is what pins the rule rather than the shape of the message.
+     */
+    @Test
+    @Order(34)
+    void searchVectorsReportsAnOmittedMemberAtTheBodyLength() {
+        String withoutVector = """
+            {"TableName":"%s","IndexName":"plain","TopK":1}""".formatted(PLAIN);
+        expectValidation("SearchVectors", withoutVector,
+                "missing field `SearchVector` at line 1 column " + withoutVector.length());
+
+        String withoutIndex = """
+            {"TableName":"%s","SearchVector":[{"N":"1"},{"N":"0"},{"N":"0"}],"TopK":1}"""
+                .formatted(PLAIN);
+        expectValidation("SearchVectors", withoutIndex,
+                "missing field `IndexName` at line 1 column " + withoutIndex.length());
+    }
+
+    @Test
+    @Order(35)
+    void updateTableRejectsLeavingPayPerRequestWhileAVectorIndexExists() {
+        expectValidation("UpdateTable", """
+            {"TableName": "%s", "BillingMode": "PROVISIONED"}
+            """.formatted(PLAIN),
+                "One or more parameter values were invalid: Vector indexes are only supported "
+                + "for PAY_PER_REQUEST tables");
+    }
+
+    @Test
+    @Order(36)
+    void updateTableReportsThePositionInTheVectorIndexUpdatesArray() {
+        expectValidation("UpdateTable", """
+            {
+                "TableName": "%s",
+                "VectorIndexUpdates": [
+                    {"Delete": {"IndexName": "plain"}},
+                    {"Create": {"IndexName": "ab",
+                                "VectorAttribute": {"AttributeName": "embedding"},
+                                "Projection": {"ProjectionType": "ALL"},
+                                "Dimensions": 3,
+                                "DistanceFunction": "COSINE"}}
+                ]
+            }
+            """.formatted(PLAIN),
+                "1 validation error detected: Value 'ab' at "
+                + "'vectorIndexUpdates.2.member.create.indexName' failed to satisfy constraint: "
+                + "Member must have length greater than or equal to 3");
+
+        call("DescribeTable", """
+            {"TableName": "%s"}
+            """.formatted(PLAIN))
+                .statusCode(200)
+                .body("Table.VectorIndexes.IndexName", contains("plain"));
+    }
+
+    @Test
+    @Order(37)
+    void createTableRejectsAnIncludeProjectionWithNoNonKeyAttributes() {
+        expectValidation("CreateTable", """
+            {
+                "TableName": "%s",
+                "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                "BillingMode": "PAY_PER_REQUEST",
+                "VectorIndexes": [
+                    {"IndexName": "vix",
+                     "VectorAttribute": {"AttributeName": "embedding"},
+                     "Projection": {"ProjectionType": "INCLUDE"},
+                     "Dimensions": 3,
+                     "DistanceFunction": "COSINE"}
+                ]
+            }
+            """.formatted(REJECTED),
+                "One or more parameter values were invalid: ProjectionType is INCLUDE, but "
+                + "NonKeyAttributes is not specified");
+    }
+
+    @Test
+    @Order(38)
+    void updateTableRejectsAKeysOnlyProjectionWithNonKeyAttributes() {
+        expectValidation("UpdateTable", """
+            {
+                "TableName": "%s",
+                "VectorIndexUpdates": [
+                    {"Create": {"IndexName": "vix",
+                                "VectorAttribute": {"AttributeName": "embedding"},
+                                "Projection": {"ProjectionType": "KEYS_ONLY",
+                                               "NonKeyAttributes": ["label"]},
+                                "Dimensions": 3,
+                                "DistanceFunction": "COSINE"}}
+                ]
+            }
+            """.formatted(PLAIN),
+                "One or more parameter values were invalid: ProjectionType is KEYS_ONLY, but "
+                + "NonKeyAttributes is specified");
+    }
+
+    @Test
+    @Order(39)
+    void createTableReportsTheNestedVectorAttributeMember() {
+        expectValidation("CreateTable", """
+            {
+                "TableName": "vec_nested_attr",
+                "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                "BillingMode": "PAY_PER_REQUEST",
+                "VectorIndexes": [
+                    {"IndexName": "vix", "VectorAttribute": {},
+                     "Projection": {"ProjectionType": "ALL"},
+                     "Dimensions": 3, "DistanceFunction": "COSINE"}
+                ]
+            }
+            """,
+                "1 validation error detected: Value null at "
+                + "'vectorIndexes.1.member.vectorAttribute.attributeName' failed to satisfy "
+                + "constraint: Member must not be null");
+    }
+
+    @Test
+    @Order(40)
+    void createTableRequiresADistanceFunction() {
+        expectValidation("CreateTable", """
+            {
+                "TableName": "vec_no_distance",
+                "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                "BillingMode": "PAY_PER_REQUEST",
+                "VectorIndexes": [
+                    {"IndexName": "vix", "VectorAttribute": {"AttributeName": "embedding"},
+                     "Projection": {"ProjectionType": "ALL"}, "Dimensions": 3}
+                ]
+            }
+            """,
+                "1 validation error detected: Value null at "
+                + "'vectorIndexes.1.member.distanceFunction' failed to satisfy constraint: "
+                + "Member must not be null");
+    }
+
+    @Test
+    @Order(41)
+    void searchVectorsReportsAnOmittedTopKAtTheBodyLength() {
+        String withoutTopK = """
+            {"TableName":"%s","IndexName":"plain","SearchVector":[{"N":"1"},{"N":"0"},{"N":"0"}]}"""
+                .formatted(PLAIN);
+        expectValidation("SearchVectors", withoutTopK,
+                "missing field `TopK` at line 1 column " + withoutTopK.length());
+    }
+
+    /** SearchVectors is served by its own frontend, which omits the envelope other operations add. */
+    @Test
+    @Order(42)
+    void searchVectorsRejectsAReturnConsumedCapacityWithNoEnvelope() {
+        expectValidation("SearchVectors", """
+            {"TableName": "%s", "IndexName": "plain",
+             "SearchVector": [{"N": "1"}, {"N": "0"}, {"N": "0"}],
+             "TopK": 1, "ReturnConsumedCapacity": "BOGUS"}
+            """.formatted(PLAIN),
+                "Value 'BOGUS' at 'returnConsumedCapacity' failed to satisfy constraint: "
+                + "Member must satisfy enum value set: [INDEXES, TOTAL, NONE]");
+    }
+
 }

@@ -120,6 +120,21 @@ public class DynamoDbService implements ResourceProvider {
     private static final int MAX_VECTOR_INDEXES_PER_TABLE = 5;
     private static final int MAX_VECTOR_DIMENSIONS = 4096;
     private static final int MIN_VECTOR_INDEX_NAME_LENGTH = 3;
+    // The order AWS prints the enum constraint in, which is neither alphabetical nor the order
+    // the API reference lists.
+    private static final List<String> VECTOR_DISTANCE_FUNCTIONS = List.of(
+            DynamoDbVectorScoring.DOT_PRODUCT,
+            DynamoDbVectorScoring.COSINE,
+            DynamoDbVectorScoring.EUCLIDEAN);
+
+    /**
+     * A vector index a request adds, with the 1-based position of the request element carrying it.
+     *
+     * <p>AWS reports a per-member constraint under that position. An UpdateTable create shares the
+     * {@code VectorIndexUpdates} array with the deletes beside it, so the position is not the one
+     * the create holds among the creates.
+     */
+    public record VectorIndexCreate(VectorIndex index, int memberPosition) {}
 
     private record IdempotencyEntry(String requestHash, long insertedAtNanos,
                                     CompletableFuture<Map<String, DynamoDbWriteCapacity.Cost>> replayCapacity) {}
@@ -362,8 +377,9 @@ public class DynamoDbService implements ResourceProvider {
             }
         }
 
-        validateVectorIndexes(vectorIndexes, List.of(), attributeDefinitions, billingMode,
-                "vectorIndexes.%d.member");
+        List<VectorIndexCreate> vectorIndexCreates = vectorIndexCreates(vectorIndexes);
+        validateVectorIndexMembers(vectorIndexCreates, "vectorIndexes.%d.member");
+        validateVectorIndexes(vectorIndexCreates, List.of(), attributeDefinitions, billingMode);
 
         Set<String> referencedAttrs = new HashSet<>();
         keySchema.forEach(k -> referencedAttrs.add(k.getAttributeName()));
@@ -419,6 +435,15 @@ public class DynamoDbService implements ResourceProvider {
                 if (!indexNames.add(lsi.getIndexName())) {
                     throw new AwsException("ValidationException",
                             "One or more parameter values were invalid: Duplicate index name: " + lsi.getIndexName(), 400);
+                }
+            }
+        }
+        if (vectorIndexes != null) {
+            for (VectorIndex vectorIndex : vectorIndexes) {
+                if (!indexNames.add(vectorIndex.getIndexName())) {
+                    throw new AwsException("ValidationException",
+                            "One or more parameter values were invalid: Duplicate index name: "
+                            + vectorIndex.getIndexName(), 400);
                 }
             }
         }
@@ -492,31 +517,26 @@ public class DynamoDbService implements ResourceProvider {
     }
 
     /**
-     * Validates the vector indexes a CreateTable or UpdateTable request carries.
+     * Validates each vector index a request adds against its own request model, the
+     * "N validation errors detected" family. AWS answers these before every other check on the
+     * request, including the online index limit an UpdateTable is held to.
      *
-     * @param newIndexes           the indexes the request adds
-     * @param existingIndexes      the indexes already on the table, empty on CreateTable
-     * @param attributeDefinitions every definition a SearchSchema element may resolve against
-     * @param billingMode          the billing mode the table will have, null when the request
-     *                             leaves it at the PROVISIONED default
-     * @param memberPathTemplate   the request-model path AWS reports per-member constraints
-     *                             under, with the 1-based member index as its only format
-     *                             argument. CreateTable and UpdateTable name different members,
-     *                             so the caller supplies it
+     * @param newIndexes         the indexes the request adds, each with its member position
+     * @param memberPathTemplate the request-model path AWS reports per-member constraints under,
+     *                           with the 1-based member position as its only format argument.
+     *                           CreateTable and UpdateTable name different members, so the caller
+     *                           supplies it
      */
-    private static void validateVectorIndexes(List<VectorIndex> newIndexes,
-                                              List<VectorIndex> existingIndexes,
-                                              List<AttributeDefinition> attributeDefinitions,
-                                              String billingMode,
-                                              String memberPathTemplate) {
-        if (newIndexes == null || newIndexes.isEmpty()) {
-            return;
-        }
-        // AWS reports the per-member constraints of the "N validation errors detected" family
-        // before any of the "One or more parameter values were invalid" checks below.
-        for (int i = 0; i < newIndexes.size(); i++) {
-            VectorIndex index = newIndexes.get(i);
-            String memberPath = memberPathTemplate.formatted(i + 1);
+    private static void validateVectorIndexMembers(List<VectorIndexCreate> newIndexes,
+                                                   String memberPathTemplate) {
+        // The required members are reported before the length and range constraints.
+        for (VectorIndexCreate create : newIndexes) {
+            VectorIndex index = create.index();
+            String memberPath = memberPathTemplate.formatted(create.memberPosition());
+            requireVectorIndexMember(index.getDimensions(), memberPath + ".dimensions");
+            requireVectorIndexMember(index.getVectorAttributeName(), memberPath + ".vectorAttribute");
+            requireVectorIndexMember(index.getProjectionType(), memberPath + ".projection");
+            requireVectorIndexMember(index.getDistanceFunction(), memberPath + ".distanceFunction");
             String indexName = index.getIndexName();
             if (indexName == null || indexName.length() < MIN_VECTOR_INDEX_NAME_LENGTH) {
                 throw new AwsException("ValidationException",
@@ -524,13 +544,40 @@ public class DynamoDbService implements ResourceProvider {
                         + memberPath + ".indexName' failed to satisfy constraint: "
                         + "Member must have length greater than or equal to " + MIN_VECTOR_INDEX_NAME_LENGTH, 400);
             }
+            String distanceFunction = index.getDistanceFunction();
+            if (!VECTOR_DISTANCE_FUNCTIONS.contains(distanceFunction)) {
+                throw new AwsException("ValidationException",
+                        "1 validation error detected: Value '" + distanceFunction + "' at '"
+                        + memberPath + ".distanceFunction' failed to satisfy constraint: "
+                        + "Member must satisfy enum value set: " + VECTOR_DISTANCE_FUNCTIONS, 400);
+            }
             Long dimensions = index.getDimensions();
-            if (dimensions != null && dimensions < 1) {
+            if (dimensions < 1) {
                 throw new AwsException("ValidationException",
                         "1 validation error detected: Value '" + dimensions + "' at '"
                         + memberPath + ".dimensions' failed to satisfy constraint: "
                         + "Member must have value greater than or equal to 1", 400);
             }
+        }
+    }
+
+    /**
+     * Validates the vector indexes a request adds against the table they join, the
+     * "One or more parameter values were invalid" family. Runs after
+     * {@link #validateVectorIndexMembers}, so every index here carries its required members.
+     *
+     * @param newIndexes           the indexes the request adds
+     * @param existingIndexes      the indexes already on the table, empty on CreateTable
+     * @param attributeDefinitions every definition a SearchSchema element may resolve against
+     * @param billingMode          the billing mode the table will have, null when the request
+     *                             leaves it at the PROVISIONED default
+     */
+    private static void validateVectorIndexes(List<VectorIndexCreate> newIndexes,
+                                              List<VectorIndex> existingIndexes,
+                                              List<AttributeDefinition> attributeDefinitions,
+                                              String billingMode) {
+        if (newIndexes.isEmpty()) {
+            return;
         }
 
         if (existingIndexes.size() + newIndexes.size() > MAX_VECTOR_INDEXES_PER_TABLE) {
@@ -558,9 +605,10 @@ public class DynamoDbService implements ResourceProvider {
             }
         }
 
-        for (VectorIndex index : newIndexes) {
+        for (VectorIndexCreate create : newIndexes) {
+            VectorIndex index = create.index();
             Long dimensions = index.getDimensions();
-            if (dimensions != null && dimensions > MAX_VECTOR_DIMENSIONS) {
+            if (dimensions > MAX_VECTOR_DIMENSIONS) {
                 throw new AwsException("ValidationException",
                         "One or more parameter values were invalid: Number of dimensions must be "
                         + "between 1 and " + MAX_VECTOR_DIMENSIONS + " inclusive.", 400);
@@ -573,9 +621,6 @@ public class DynamoDbService implements ResourceProvider {
                 }
             }
             String vectorAttribute = index.getVectorAttributeName();
-            if (vectorAttribute == null || dimensions == null) {
-                continue;
-            }
             Long seen = dimensionsByVectorAttribute.putIfAbsent(vectorAttribute, dimensions);
             if (seen != null && !seen.equals(dimensions)) {
                 throw new AwsException("ValidationException",
@@ -584,6 +629,26 @@ public class DynamoDbService implements ResourceProvider {
                         + "attribute must use the same dimensions.", 400);
             }
         }
+    }
+
+    private static void requireVectorIndexMember(Object value, String memberPath) {
+        if (value == null) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value null at '" + memberPath
+                    + "' failed to satisfy constraint: Member must not be null", 400);
+        }
+    }
+
+    /** CreateTable carries the indexes themselves, so each one's member position is its own. */
+    private static List<VectorIndexCreate> vectorIndexCreates(List<VectorIndex> vectorIndexes) {
+        if (vectorIndexes == null) {
+            return List.of();
+        }
+        List<VectorIndexCreate> creates = new ArrayList<>();
+        for (int i = 0; i < vectorIndexes.size(); i++) {
+            creates.add(new VectorIndexCreate(vectorIndexes.get(i), i + 1));
+        }
+        return creates;
     }
 
     public TableDefinition describeTable(String tableName, String region) {
@@ -616,11 +681,13 @@ public class DynamoDbService implements ResourceProvider {
         }
         Instant now = Instant.now();
         boolean changed = false;
+        boolean anySettling = false;
         boolean anyAllocating = false;
         for (VectorIndex index : indexes) {
             if (index.getCreationStartedAt() == null || !"CREATING".equals(index.getIndexStatus())) {
                 continue;
             }
+            anySettling = true;
             Instant backfillStart = index.getCreationStartedAt().plusSeconds(vectorIndexAllocationSeconds);
             Instant activeAt = backfillStart.plusSeconds(vectorIndexBackfillSeconds);
             if (!now.isBefore(activeAt)) {
@@ -631,7 +698,9 @@ public class DynamoDbService implements ResourceProvider {
                 anyAllocating = true;
             }
         }
-        if (!anyAllocating && "UPDATING".equals(table.getTableStatus())) {
+        // Only a table this method is driving may leave UPDATING here: another caller's
+        // UPDATING is not this method's to clear.
+        if (anySettling && !anyAllocating && "UPDATING".equals(table.getTableStatus())) {
             table.setTableStatus("ACTIVE");
             changed = true;
         }
@@ -2179,7 +2248,7 @@ public class DynamoDbService implements ResourceProvider {
     public TableDefinition updateTable(String tableName, Long readCapacity, Long writeCapacity,
                                         List<GlobalSecondaryIndex> gsiCreates, List<String> gsiDeletes,
                                         List<AttributeDefinition> newAttrDefs,
-                                        List<VectorIndex> vectorCreates, List<String> vectorDeletes,
+                                        List<VectorIndexCreate> vectorCreates, List<String> vectorDeletes,
                                         String billingMode, String region) {
         String canonicalTableName = canonicalTableName(region, tableName);
         String storageKey = regionKey(region, canonicalTableName);
@@ -2236,7 +2305,7 @@ public class DynamoDbService implements ResourceProvider {
             }
         }
 
-        List<VectorIndex> vectorIndexCreates = vectorCreates != null ? vectorCreates : List.of();
+        List<VectorIndexCreate> vectorIndexCreates = vectorCreates != null ? vectorCreates : List.of();
         List<String> vectorIndexDeletes = vectorDeletes != null ? vectorDeletes : List.of();
         List<AttributeDefinition> knownAttrDefs = new ArrayList<>(table.getAttributeDefinitions());
         if (newAttrDefs != null) {
@@ -2265,11 +2334,14 @@ public class DynamoDbService implements ResourceProvider {
             table.getVectorIndexes().removeIf(v -> indexName.equals(v.getIndexName()));
         }
 
-        for (VectorIndex vectorIndex : vectorIndexCreates) {
+        for (VectorIndexCreate create : vectorIndexCreates) {
+            VectorIndex vectorIndex = create.index();
             vectorIndex.setIndexArn(table.getTableArn() + "/index/" + vectorIndex.getIndexName());
             vectorIndex.setIndexStatus("CREATING");
             vectorIndex.setCreationStartedAt(Instant.now());
             table.getVectorIndexes().add(vectorIndex);
+        }
+        if (!vectorIndexCreates.isEmpty()) {
             table.setTableStatus("UPDATING");
         }
 
@@ -2300,18 +2372,26 @@ public class DynamoDbService implements ResourceProvider {
      * allocation phase is refused with a different error, and the same delete is accepted once
      * the index reaches backfilling.
      */
-    private void validateVectorIndexUpdates(TableDefinition table, List<VectorIndex> creates,
+    private void validateVectorIndexUpdates(TableDefinition table, List<VectorIndexCreate> creates,
                                             List<String> deletes,
                                             List<AttributeDefinition> attributeDefinitions,
                                             String billingMode) {
+        validateVectorIndexMembers(creates, "vectorIndexUpdates.%d.member.create");
+        // A table that holds a vector index may not leave PAY_PER_REQUEST, whether or not the
+        // request touches its indexes.
+        if (!table.getVectorIndexes().isEmpty() && !"PAY_PER_REQUEST".equals(billingMode)) {
+            throw new AwsException("ValidationException",
+                    "One or more parameter values were invalid: Vector indexes are only supported "
+                    + "for PAY_PER_REQUEST tables", 400);
+        }
         if (creates.isEmpty() && deletes.isEmpty()) {
             return;
         }
-        for (VectorIndex create : creates) {
-            if (table.findVectorIndex(create.getIndexName()).isPresent()) {
+        for (VectorIndexCreate create : creates) {
+            if (table.findVectorIndex(create.index().getIndexName()).isPresent()) {
                 throw new AwsException("ValidationException",
                         "One or more parameter values were invalid: Duplicate index name: "
-                        + create.getIndexName(), 400);
+                        + create.index().getIndexName(), 400);
             }
         }
         int deletesOfBuildingIndexes = 0;
@@ -2342,8 +2422,7 @@ public class DynamoDbService implements ResourceProvider {
                     "Subscriber limit exceeded: Only 1 online index can be created or deleted "
                     + "simultaneously per table", 400);
         }
-        validateVectorIndexes(creates, table.getVectorIndexes(), attributeDefinitions, billingMode,
-                "vectorIndexUpdates.%d.member.create");
+        validateVectorIndexes(creates, table.getVectorIndexes(), attributeDefinitions, billingMode);
     }
 
     /**
