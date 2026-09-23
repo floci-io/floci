@@ -315,6 +315,15 @@ public class EksClusterManager {
 
         List<String> serverArgs = buildServerArgs(config.services().eks().disableCni(), serviceCidr, clusterCidr);
 
+        try {
+            String providerId = deriveClusterNodeProviderId(cluster);
+            serverArgs.add("--kubelet-arg=provider-id=" + providerId);
+        } catch (Exception e) {
+            String clusterName = cluster != null ? cluster.getName() : "unknown";
+            LOG.warnv("EKS node provider ID injection disabled for cluster {0}: could not derive provider ID: {1}",
+                    clusterName, e.getMessage());
+        }
+
         // The account label comes from the cluster record when set (restore runs with no request
         // context); regionResolver is the fallback for the create path.
         String labelAccountId = resolveClusterAccountId(cluster);
@@ -1706,20 +1715,58 @@ public class EksClusterManager {
         return "us-east-1";
     }
 
-    Instance synthesizeClusterNodeInstance(Cluster cluster, String containerIp, String region, String accountId) {
-        Instance inst = new Instance();
-        String safeClusterName = cluster.getName() != null ? cluster.getName() : "eks-cluster";
-        String safeAccountId = accountId != null ? accountId : config.defaultAccountId();
-        String safeRegion = region != null ? region : clusterRegion(cluster);
+    String deriveClusterNodeAvailabilityZone(Cluster cluster, String region) {
+        String safeRegion = (region != null && !region.isBlank()) ? region : clusterRegion(cluster);
+        return safeRegion + "a";
+    }
+
+    String deriveClusterNodeInstanceId(Cluster cluster, String region, String accountId) {
+        String safeClusterName = (cluster != null && cluster.getName() != null && !cluster.getName().isBlank())
+                ? cluster.getName()
+                : "eks-cluster";
+        String safeAccountId = (accountId != null && !accountId.isBlank())
+                ? accountId
+                : resolveClusterAccountId(cluster);
+        String safeRegion = (region != null && !region.isBlank())
+                ? region
+                : clusterRegion(cluster);
 
         String seed = safeClusterName + "-" + safeAccountId + "-" + safeRegion;
         String hex = UUID.nameUUIDFromBytes(seed.getBytes(StandardCharsets.UTF_8)).toString().replace("-", "");
-        String instanceId = "i-" + (hex.length() >= 17 ? hex.substring(0, 17) : (hex + "00000000000000000").substring(0, 17));
+        return "i-" + (hex.length() >= 17 ? hex.substring(0, 17) : (hex + "00000000000000000").substring(0, 17));
+    }
+
+    String deriveClusterNodeProviderId(Cluster cluster, String region, String accountId) {
+        String az = deriveClusterNodeAvailabilityZone(cluster, region);
+        String instanceId = deriveClusterNodeInstanceId(cluster, region, accountId);
+        return "aws:///" + az + "/" + instanceId;
+    }
+
+    String deriveClusterNodeProviderId(Cluster cluster) {
+        String accountId = resolveClusterAccountId(cluster);
+        String region = clusterRegion(cluster);
+        return deriveClusterNodeProviderId(cluster, region, accountId);
+    }
+
+    Instance synthesizeClusterNodeInstance(Cluster cluster, String containerIp, String region, String accountId) {
+        Instance inst = new Instance();
+        String safeClusterName = (cluster != null && cluster.getName() != null && !cluster.getName().isBlank())
+                ? cluster.getName()
+                : "eks-cluster";
+        String safeAccountId = (accountId != null && !accountId.isBlank())
+                ? accountId
+                : resolveClusterAccountId(cluster);
+        String safeRegion = (region != null && !region.isBlank())
+                ? region
+                : clusterRegion(cluster);
+
+        String instanceId = deriveClusterNodeInstanceId(cluster, safeRegion, safeAccountId);
+        String az = deriveClusterNodeAvailabilityZone(cluster, safeRegion);
 
         inst.setInstanceId(instanceId);
         inst.setImageId("ami-eks-k3s");
         inst.setInstanceType("m5.large");
-        inst.setPlacement(new Placement(safeRegion + "a"));
+        inst.setPlacement(new Placement(az));
         inst.setRegion(safeRegion);
         inst.setState(InstanceState.running());
 

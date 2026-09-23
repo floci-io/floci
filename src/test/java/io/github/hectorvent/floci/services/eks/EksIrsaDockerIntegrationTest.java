@@ -23,6 +23,7 @@ import java.util.concurrent.TimeUnit;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -193,6 +194,14 @@ class EksIrsaDockerIntegrationTest {
             Thread.sleep(2000);
         }
         assertTrue(podRunning, "irsa-workload-pod must reach Running state");
+
+        // The pod is Running, so it was scheduled onto the node, which the kubelet
+        // registered with its provider ID: the node is guaranteed to exist here.
+        ExecResult nodeResult = execInContainerWithExitCode(containerId,
+                new String[]{"kubectl", "get", "nodes", "-o", "jsonpath={.items[0].spec.providerID}"});
+        assertEquals(0, nodeResult.exitCode(), "kubectl get nodes failed");
+        assertEquals(eksClusterManager.deriveClusterNodeProviderId(cluster), nodeResult.stdout().trim(),
+                "Node providerID must match the derived AWS provider ID");
 
         // Extract the projected token from the pod volume
         String token = execInContainer(containerId,

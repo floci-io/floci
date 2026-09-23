@@ -778,6 +778,30 @@ class EksClusterManagerTest {
         }
 
         @Test
+        void derivesClusterNodeProviderIdMatchingExpectedFormat() {
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+
+            String providerId = manager.deriveClusterNodeProviderId(cluster, "us-west-2", "123456789012");
+            assertEquals("aws:///us-west-2a/i-0e413a1bfb5c3cd79", providerId);
+        }
+
+        @Test
+        void derivedProviderIdAgreesWithSynthesizedClusterNodeInstance() {
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+            cluster.setRoleArn("arn:aws:iam::123456789012:role/eks-node-role");
+
+            Instance instance = manager.synthesizeClusterNodeInstance(cluster, "172.17.0.2", "us-west-2", "123456789012");
+            String providerId = manager.deriveClusterNodeProviderId(cluster, "us-west-2", "123456789012");
+
+            String expectedProviderId = "aws:///" + instance.getPlacement().getAvailabilityZone() + "/" + instance.getInstanceId();
+            assertEquals(expectedProviderId, providerId);
+            assertEquals(instance.getInstanceId(), manager.deriveClusterNodeInstanceId(cluster, "us-west-2", "123456789012"));
+            assertEquals(instance.getPlacement().getAvailabilityZone(), manager.deriveClusterNodeAvailabilityZone(cluster, "us-west-2"));
+        }
+
+        @Test
         void configuresMetadataProxyWhenEnabled() {
             Cluster cluster = new Cluster();
             cluster.setName("test-cluster");
@@ -1222,6 +1246,44 @@ class EksClusterManagerTest {
 
             verify(copyCmd).withHostResource(privFile.toString());
             verify(copyCmd).withHostResource(pubFile.toString());
+        }
+
+        @Test
+        void startClusterConfiguresKubeletProviderIdArg() {
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+            cluster.setAccountId("123456789012");
+            cluster.setArn("arn:aws:eks:us-west-2:123456789012:cluster/prod-cluster");
+
+            manager.startCluster(cluster);
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+            List<String> cmd = cmdCaptor.getValue();
+
+            String expectedProviderId = manager.deriveClusterNodeProviderId(cluster);
+            assertEquals("aws:///us-west-2a/i-0e413a1bfb5c3cd79", expectedProviderId);
+            assertTrue(cmd.contains("--kubelet-arg=provider-id=" + expectedProviderId));
+        }
+
+        @Test
+        void startClusterContinuesWhenProviderIdDerivationFails() {
+            EksClusterManager spyManager = Mockito.spy(manager);
+            Mockito.doThrow(new RuntimeException("derivation failure"))
+                    .when(spyManager).deriveClusterNodeProviderId(any());
+
+            Cluster cluster = new Cluster();
+            cluster.setName("fail-cluster");
+
+            assertDoesNotThrow(() -> spyManager.startCluster(cluster));
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+            List<String> cmd = cmdCaptor.getValue();
+
+            assertFalse(cmd.stream().anyMatch(arg -> arg.startsWith("--kubelet-arg=provider-id=")));
         }
 
         @Test

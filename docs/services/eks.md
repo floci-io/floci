@@ -369,6 +369,18 @@ A restored cluster reports `CREATING` until its API server answers again, then r
 back (for example Docker is unavailable), the cluster is marked `FAILED` instead of appearing
 `ACTIVE` while unreachable.
 
+#### Cluster node provider ID
+
+In real mode, cluster nodes carry a Kubernetes `spec.providerID` matching the AWS format:
+
+```text
+aws:///<availability-zone>/<instance-id>
+```
+
+For example, `aws:///us-east-1a/i-0123456789abcdef0`. Floci derives this identifier deterministically before container startup and passes `--kubelet-arg=provider-id=<providerId>` to k3s.
+
+The derived availability zone and instance ID match the synthetic EC2 node instance created for link-local IMDS, ensuring consistent identity across node metadata and kubelet registration. The provider ID enables controllers that reconcile nodes against EC2 (such as CSI drivers) to extract the instance ID. Note that nothing yet resolves that synthetic instance through the EC2 API.
+
 ## Configuration
 
 | Variable | Default | Description |
