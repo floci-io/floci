@@ -334,6 +334,13 @@ public class CloudWatchLogsService implements ResourceProvider {
         return result;
     }
 
+    public long getStoredBytesForLogGroup(String groupName, String region) {
+        String storagePrefix = streamKeyPrefix(region, groupName);
+        return streamStore.scan(k -> k.startsWith(storagePrefix)).stream()
+                .mapToLong(LogStream::getStoredBytes)
+                .sum();
+    }
+
     public void putLogGroupDeletionProtection(String groupName, boolean enabled, String region) {
         String key = groupKey(region, groupName);
         LogGroup group = groupStore.get(key)
