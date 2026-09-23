@@ -213,7 +213,7 @@ class DynamoDbPartiQLHandler {
                     ean.isEmpty() ? null : ean.toNode(mapper),
                     eav.isEmpty() ? null : eav.toNode(mapper),
                     null, limit, exclusiveStartKey, accessPath.indexName(), region);
-            return new Page(result.items(), result.lastEvaluatedKey(), result.scannedBytes(), List.of());
+            return new Page(result.items(), result.lastEvaluatedKey(), result.scannedBytes(), result.scannedItems());
         }
         if (accessPath.kind() == DynamoDbAccessPath.Kind.TABLE && skName == null
                 && skCond == null && filterConds.isEmpty()) {

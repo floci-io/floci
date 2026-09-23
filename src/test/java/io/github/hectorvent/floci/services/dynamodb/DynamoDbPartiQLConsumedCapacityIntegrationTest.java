@@ -169,6 +169,21 @@ class DynamoDbPartiQLConsumedCapacityIntegrationTest {
             """)
             .body("ConsumedCapacity.CapacityUnits", equalTo(0.5f))
             .body("ConsumedCapacity.Table.CapacityUnits", equalTo(0.0f));
+        send("ExecuteStatement", """
+            {
+                "Statement": "SELECT nonproj FROM \\"PartiQLCapacityLsiTable\\".\\"lsi-keys\\"",
+                "ReturnConsumedCapacity": "INDEXES"
+            }
+            """)
+            .body("ConsumedCapacity.Table.CapacityUnits", equalTo(1.5f))
+            .body("ConsumedCapacity.LocalSecondaryIndexes.'lsi-keys'.CapacityUnits", equalTo(0.5f));
+        send("ExecuteStatement", """
+            {
+                "Statement": "SELECT lsiSk FROM \\"PartiQLCapacityLsiTable\\".\\"lsi-keys\\"",
+                "ReturnConsumedCapacity": "INDEXES"
+            }
+            """)
+            .body("ConsumedCapacity.Table.CapacityUnits", equalTo(0.0f));
         send("DeleteTable", """
             {"TableName": "PartiQLCapacityLsiTable"}
             """);

@@ -1195,7 +1195,7 @@ public class DynamoDbService implements ResourceProvider {
         DynamoDbAccessPath accessPath = DynamoDbAccessPath.resolve(table, indexName);
 
         var items = itemsByTable.get(scopedItemsKey(storageKey));
-        if (items == null) return new ScanResult(List.of(), 0, 0, null);
+        if (items == null) return new ScanResult(List.of(), 0, 0, null, List.of());
 
         // ConcurrentSkipListMap keeps items sorted by base item key — no sort needed.
         // Use tailMap for O(log n) pagination instead of O(n) linear search.
@@ -1221,6 +1221,7 @@ public class DynamoDbService implements ResourceProvider {
         int totalScanned = 0;
         int accSize = 0;
         List<JsonNode> results = new ArrayList<>();
+        List<JsonNode> scannedItems = new ArrayList<>();
         JsonNode lastEvaluatedKey = null;
         JsonNode lastScanned = null;
         for (JsonNode item : source) {
@@ -1252,6 +1253,7 @@ public class DynamoDbService implements ResourceProvider {
             }
             accSize += sz;
             totalScanned++;
+            scannedItems.add(item);
             lastScanned = item;
             if (!isExpired(item, table)) {
                 boolean matched = (filterExpression == null
@@ -1272,7 +1274,7 @@ public class DynamoDbService implements ResourceProvider {
 
         LOG.tracev("Scan on {0}: returned={1} scanned={2}",
                 canonicalTableName, results.size(), totalScanned);
-        return new ScanResult(results, totalScanned, accSize, lastEvaluatedKey);
+        return new ScanResult(results, totalScanned, accSize, lastEvaluatedKey, scannedItems);
     }
 
     // A read served by a KEYS_ONLY or INCLUDE index is sized on the projection the
@@ -3885,7 +3887,8 @@ public class DynamoDbService implements ResourceProvider {
 
     // scannedBytes carries the pre-filter size of the read items: DynamoDB bills a
     // Query or Scan on what it read, not on what survived the filter or projection.
-    public record ScanResult(List<JsonNode> items, int scannedCount, long scannedBytes, JsonNode lastEvaluatedKey) {}
+    public record ScanResult(List<JsonNode> items, int scannedCount, long scannedBytes, JsonNode lastEvaluatedKey,
+                            List<JsonNode> scannedItems) {}
     public record QueryResult(List<JsonNode> items, int scannedCount, long scannedBytes, JsonNode lastEvaluatedKey,
                               List<JsonNode> scannedItems) {}
 
