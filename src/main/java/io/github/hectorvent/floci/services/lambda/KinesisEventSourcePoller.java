@@ -41,6 +41,7 @@ public class KinesisEventSourcePoller implements Resettable {
     private final KinesisService kinesisService;
     private final LambdaExecutorService executorService;
     private final LambdaFunctionStore functionStore;
+    private final LambdaAliasStore aliasStore;
     private final EsmStore esmStore;
     private final long pollIntervalMs;
     private final ObjectMapper objectMapper;
@@ -57,6 +58,7 @@ public class KinesisEventSourcePoller implements Resettable {
     public KinesisEventSourcePoller(Vertx vertx, KinesisService kinesisService,
                                      LambdaExecutorService executorService,
                                      LambdaFunctionStore functionStore,
+                                     LambdaAliasStore aliasStore,
                                      EsmStore esmStore, EmulatorConfig config,
                                      ObjectMapper objectMapper,
                                      PipesFilterMatcher filterMatcher) {
@@ -64,6 +66,7 @@ public class KinesisEventSourcePoller implements Resettable {
         this.kinesisService = kinesisService;
         this.executorService = executorService;
         this.functionStore = functionStore;
+        this.aliasStore = aliasStore;
         this.esmStore = esmStore;
         this.pollIntervalMs = config.services().lambda().pollIntervalMs();
         this.objectMapper = objectMapper;
@@ -115,7 +118,7 @@ public class KinesisEventSourcePoller implements Resettable {
         if (activePolls.putIfAbsent(esm.getUuid(), Boolean.TRUE) != null) return;
         pollExecutor.submit(() -> {
             try {
-                LambdaFunction fn = functionStore.getForAccount(esm.getAccountId(), esm.getRegion(), esm.getFunctionName()).orElse(null);
+                LambdaFunction fn = EsmFunctionResolver.resolve(functionStore, aliasStore, esm).orElse(null);
                 if (fn == null) return;
 
                 String streamName = streamNameFromArn(esm.getEventSourceArn());

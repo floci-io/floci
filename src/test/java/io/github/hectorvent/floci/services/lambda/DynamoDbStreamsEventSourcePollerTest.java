@@ -18,6 +18,7 @@ import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.lambda.model.EventSourceMapping;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
+import io.github.hectorvent.floci.services.lambda.model.LambdaAlias;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.pipes.PipesFilterMatcher;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -81,6 +82,7 @@ class DynamoDbStreamsEventSourcePollerTest {
     private DynamoDbStreamService streamService;
     private LambdaExecutorService executorService;
     private LambdaFunctionStore functionStore;
+    private LambdaAliasStore aliasStore;
     private EsmStore esmStore;
     private EmulatorConfig config;
     private PipesFilterMatcher filterMatcher;
@@ -106,6 +108,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         streamService = mock(DynamoDbStreamService.class);
         executorService = mock(LambdaExecutorService.class);
         functionStore = mock(LambdaFunctionStore.class);
+        aliasStore = mock(LambdaAliasStore.class);
         esmStore = new EsmStore(new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, ACCOUNT_ID));
         filterMatcher = new PipesFilterMatcher(OBJECT_MAPPER);
         sqsService = mock(io.github.hectorvent.floci.services.sqs.SqsService.class);
@@ -115,7 +118,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         // A mocked Vertx makes setPeriodic a no-op, so startPolling registers no live timer and
         // the tests drive pollAndInvoke deterministically.
         poller = new DynamoDbStreamsEventSourcePoller(
-                mock(Vertx.class), streamService, executorService, functionStore,
+                mock(Vertx.class), streamService, executorService, functionStore, aliasStore,
                 esmStore, OBJECT_MAPPER, config, filterMatcher, sqsService, snsService, s3Service, clock::get);
     }
 
@@ -189,7 +192,7 @@ class DynamoDbStreamsEventSourcePollerTest {
 
     private DynamoDbStreamsEventSourcePoller pollerWith(EsmStore store) {
         return new DynamoDbStreamsEventSourcePoller(
-                mock(Vertx.class), streamService, executorService, functionStore,
+                mock(Vertx.class), streamService, executorService, functionStore, aliasStore,
                 store, OBJECT_MAPPER, config, filterMatcher, sqsService, snsService, s3Service, clock::get);
     }
 
@@ -274,6 +277,47 @@ class DynamoDbStreamsEventSourcePollerTest {
 
     private static final String PATTERN =
             "{\"eventName\":[\"INSERT\"],\"dynamodb\":{\"NewImage\":{\"status\":{\"S\":[\"active\"]}}}}";
+
+    @Test
+    void versionQualifiedMappingInvokesThatVersion() {
+        stubTrimHorizon(List.of(ddbRecord("s1", "INSERT", "{\"status\":{\"S\":\"active\"}}")));
+        LambdaFunction version1 = stubVersion("1");
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(new InvokeResult());
+        EventSourceMapping esm = filterEsm();
+        esm.setFunctionArn("arn:aws:lambda:us-east-1:" + ACCOUNT_ID + ":function:fn:1");
+
+        pollerWith(mock(EsmStore.class)).pollAndInvoke(esm);
+
+        verify(executorService, timeout(2000)).invoke(eq(version1), any(byte[].class), eq(InvocationType.RequestResponse));
+    }
+
+    @Test
+    void aliasQualifiedMappingInvokesTheAliasVersion() {
+        stubTrimHorizon(List.of(ddbRecord("s1", "INSERT", "{\"status\":{\"S\":\"active\"}}")));
+        LambdaFunction version2 = stubVersion("2");
+        LambdaAlias alias = new LambdaAlias();
+        alias.setName("live");
+        alias.setFunctionName("fn");
+        alias.setFunctionVersion("2");
+        when(aliasStore.getForAccount(ACCOUNT_ID, "us-east-1", "fn", "live")).thenReturn(Optional.of(alias));
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(new InvokeResult());
+        EventSourceMapping esm = filterEsm();
+        esm.setFunctionArn("arn:aws:lambda:us-east-1:" + ACCOUNT_ID + ":function:fn:live");
+
+        pollerWith(mock(EsmStore.class)).pollAndInvoke(esm);
+
+        verify(executorService, timeout(2000)).invoke(eq(version2), any(byte[].class), eq(InvocationType.RequestResponse));
+    }
+
+    private LambdaFunction stubVersion(String version) {
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("fn");
+        fn.setVersion(version);
+        when(functionStore.getForAccount(ACCOUNT_ID, "us-east-1", "fn", version)).thenReturn(Optional.of(fn));
+        return fn;
+    }
 
     @Test
     void filterDeliversMatchingRecordsAndCheckpointsNewestFetched() {

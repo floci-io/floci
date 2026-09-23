@@ -50,6 +50,7 @@ public class SqsEventSourcePoller implements Resettable {
     private final SqsService sqsService;
     private final LambdaExecutorService executorService;
     private final LambdaFunctionStore functionStore;
+    private final LambdaAliasStore aliasStore;
     private final EsmStore esmStore;
     private final long pollIntervalMs;
     private final String baseUrl;
@@ -73,6 +74,7 @@ public class SqsEventSourcePoller implements Resettable {
     public SqsEventSourcePoller(Vertx vertx, SqsService sqsService,
                                 LambdaExecutorService executorService,
                                 LambdaFunctionStore functionStore,
+                                LambdaAliasStore aliasStore,
                                 EsmStore esmStore, EmulatorConfig config,
                                 ObjectMapper objectMapper,
                                 PipesFilterMatcher filterMatcher) {
@@ -80,6 +82,7 @@ public class SqsEventSourcePoller implements Resettable {
         this.sqsService = sqsService;
         this.executorService = executorService;
         this.functionStore = functionStore;
+        this.aliasStore = aliasStore;
         this.esmStore = esmStore;
         this.pollIntervalMs = config.services().lambda().pollIntervalMs();
         this.baseUrl = config.effectiveBaseUrl();
@@ -165,8 +168,7 @@ public class SqsEventSourcePoller implements Resettable {
                 // Look up the function first so we can set an appropriate visibility
                 // timeout: fn.timeout + 30s keeps messages hidden while Lambda runs.
                 // Use account-scoped lookup since this runs outside request scope.
-                LambdaFunction fn = functionStore.getForAccount(esm.getAccountId(), esm.getRegion(), esm.getFunctionName())
-                        .orElse(null);
+                LambdaFunction fn = EsmFunctionResolver.resolve(functionStore, aliasStore, esm).orElse(null);
                 if (fn == null) {
                     LOG.warnv("ESM {0}: function {1} not found in region {2}, skipping",
                             esm.getUuid(), esm.getFunctionName(), esm.getRegion());
