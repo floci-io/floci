@@ -131,8 +131,10 @@ public class EksClusterManager implements ClusterNodeInstanceProvider {
     private final EksOidcService oidcService;
     private final FlociCertificateAuthority certificateAuthority;
     private final ContainerLogStreamer logStreamer;
-    private final Map<String, Instance> clusterNodeInstances = new ConcurrentHashMap<>();
+    private final Map<String, ClusterNodeRecord> clusterNodeInstances = new ConcurrentHashMap<>();
     private final Map<String, Closeable> clusterLogHandles = new ConcurrentHashMap<>();
+
+    record ClusterNodeRecord(String accountId, String region, Instance instance) {}
 
     public EksClusterManager(ContainerBuilder containerBuilder,
                              ContainerLifecycleManager lifecycleManager,
@@ -1608,7 +1610,7 @@ public class EksClusterManager implements ClusterNodeInstanceProvider {
             String region = clusterRegion(cluster);
             ContainerIps containerIps = resolveContainerIps(containerId);
             Instance nodeInstance = synthesizeClusterNodeInstance(cluster, containerIps.primaryIp(), region, accountId);
-            clusterNodeInstances.put(clusterResourceName(cluster), nodeInstance);
+            clusterNodeInstances.put(clusterResourceName(cluster), new ClusterNodeRecord(accountId, region, nodeInstance));
         } catch (Exception e) {
             LOG.warnv("Could not register cluster node instance for EKS cluster {0}: {1}",
                     cluster.getName(), e.getMessage());
@@ -1620,13 +1622,14 @@ public class EksClusterManager implements ClusterNodeInstanceProvider {
             return;
         }
         try {
-            Instance nodeInstance = clusterNodeInstances.get(clusterResourceName(cluster));
+            ClusterNodeRecord record = clusterNodeInstances.get(clusterResourceName(cluster));
+            Instance nodeInstance = record != null ? record.instance() : null;
             ContainerIps containerIps = resolveContainerIps(containerId);
             if (nodeInstance == null) {
                 String accountId = resolveClusterAccountId(cluster);
                 String region = clusterRegion(cluster);
                 nodeInstance = synthesizeClusterNodeInstance(cluster, containerIps.primaryIp(), region, accountId);
-                clusterNodeInstances.put(clusterResourceName(cluster), nodeInstance);
+                clusterNodeInstances.put(clusterResourceName(cluster), new ClusterNodeRecord(accountId, region, nodeInstance));
             }
 
             if (metadataServer != null) {
@@ -1717,7 +1720,8 @@ public class EksClusterManager implements ClusterNodeInstanceProvider {
     }
 
     void unregisterMetadataEndpoint(Cluster cluster) {
-        Instance nodeInstance = clusterNodeInstances.remove(clusterResourceName(cluster));
+        ClusterNodeRecord record = clusterNodeInstances.remove(clusterResourceName(cluster));
+        Instance nodeInstance = record != null ? record.instance() : null;
         if (metadataServer != null && nodeInstance != null) {
             metadataServer.unregisterInstance(nodeInstance);
         }
@@ -1782,19 +1786,24 @@ public class EksClusterManager implements ClusterNodeInstanceProvider {
     }
 
     @Override
-    public Optional<Instance> findInstance(String region, String instanceId) {
+    public Optional<Instance> findInstance(String accountId, String region, String instanceId) {
         if (instanceId == null || instanceId.isBlank()) {
             return Optional.empty();
         }
         return clusterNodeInstances.values().stream()
-                .filter(i -> (region == null || region.equals(i.getRegion())) && instanceId.equals(i.getInstanceId()))
+                .filter(rec -> accountId == null || accountId.equals(rec.accountId()))
+                .filter(rec -> region == null || region.equals(rec.region()))
+                .map(ClusterNodeRecord::instance)
+                .filter(i -> instanceId.equals(i.getInstanceId()))
                 .findFirst();
     }
 
     @Override
-    public List<Instance> listInstances(String region) {
+    public List<Instance> listInstances(String accountId, String region) {
         return clusterNodeInstances.values().stream()
-                .filter(i -> region == null || region.equals(i.getRegion()))
+                .filter(rec -> accountId == null || accountId.equals(rec.accountId()))
+                .filter(rec -> region == null || region.equals(rec.region()))
+                .map(ClusterNodeRecord::instance)
                 .toList();
     }
 
@@ -1830,7 +1839,8 @@ public class EksClusterManager implements ClusterNodeInstanceProvider {
     }
 
     Instance getRegisteredClusterNodeInstance(Cluster cluster) {
-        return clusterNodeInstances.get(clusterResourceName(cluster));
+        ClusterNodeRecord record = clusterNodeInstances.get(clusterResourceName(cluster));
+        return record != null ? record.instance() : null;
     }
 
     ContainerExecResult execInContainerForResult(String containerId, String[] cmd, int timeoutSeconds) throws Exception {

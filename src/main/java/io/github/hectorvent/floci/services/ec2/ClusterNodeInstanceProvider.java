@@ -15,19 +15,21 @@ import java.util.Optional;
 public interface ClusterNodeInstanceProvider {
 
     /**
-     * Finds an external cluster node instance by region and instance ID.
+     * Finds an external cluster node instance by account, region, and instance ID.
      *
+     * @param accountId the AWS account ID (or {@code null} to match any account)
      * @param region the AWS region (or {@code null} to match any region)
      * @param instanceId the EC2 instance ID
      * @return the matching instance, or empty if not found
      */
-    Optional<Instance> findInstance(String region, String instanceId);
+    Optional<Instance> findInstance(String accountId, String region, String instanceId);
 
     /**
-     * Lists all external cluster node instances for the given region.
+     * Lists external cluster node instances for the given account and region.
      *
+     * @param accountId the AWS account ID (or {@code null} for all accounts)
      * @param region the AWS region (or {@code null} for all regions)
      * @return list of cluster node instances
      */
-    List<Instance> listInstances(String region);
+    List<Instance> listInstances(String accountId, String region);
 }

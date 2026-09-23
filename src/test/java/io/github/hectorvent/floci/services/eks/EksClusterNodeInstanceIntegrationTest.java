@@ -127,6 +127,46 @@ class EksClusterNodeInstanceIntegrationTest {
                     .then()
                     .statusCode(400)
                     .body("Response.Errors.Error.Code", equalTo("OperationNotPermitted"));
+
+            // Cross-account isolation: another account cannot see or query the instance
+            String otherAccount = "999999999999";
+            given().header("Authorization", auth(otherAccount, "ec2"))
+                    .formParam("Action", "DescribeInstances")
+                    .formParam("InstanceId.1", nodeId)
+                    .post("/")
+                    .then()
+                    .statusCode(400)
+                    .body("Response.Errors.Error.Code", equalTo("InvalidInstanceID.NotFound"));
+
+            // Tagging the node instance works through EC2 and is visible in DescribeTags
+            given().header("Authorization", auth(account, "ec2"))
+                    .formParam("Action", "CreateTags")
+                    .formParam("ResourceId.1", nodeId)
+                    .formParam("Tag.1.Key", "Environment")
+                    .formParam("Tag.1.Value", "stage")
+                    .post("/")
+                    .then()
+                    .statusCode(200);
+
+            given().header("Authorization", auth(account, "ec2"))
+                    .formParam("Action", "DescribeTags")
+                    .formParam("Filter.1.Name", "resource-id")
+                    .formParam("Filter.1.Value.1", nodeId)
+                    .post("/")
+                    .then()
+                    .statusCode(200)
+                    .body("DescribeTagsResponse.tagSet.item.key", hasItem("Environment"))
+                    .body("DescribeTagsResponse.tagSet.item.key", hasItem("eks:cluster-name"));
+
+            // Other account does not see the instance's tags in DescribeTags
+            given().header("Authorization", auth(otherAccount, "ec2"))
+                    .formParam("Action", "DescribeTags")
+                    .formParam("Filter.1.Name", "resource-id")
+                    .formParam("Filter.1.Value.1", nodeId)
+                    .post("/")
+                    .then()
+                    .statusCode(200)
+                    .body("DescribeTagsResponse.tagSet", equalTo(""));
         } finally {
             eksClusterManager.unregisterMetadataEndpoint(cluster);
         }

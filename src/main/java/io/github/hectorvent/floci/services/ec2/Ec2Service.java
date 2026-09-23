@@ -3112,7 +3112,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         }
         List<Instance> all = new ArrayList<>(instances.scan(k -> true));
         Set<String> seenIds = all.stream().map(Instance::getInstanceId).collect(Collectors.toSet());
-        for (Instance external : listExternalInstances(region)) {
+        for (Instance external : listExternalInstances(callerAccountId(), region)) {
             if (seenIds.add(external.getInstanceId())) {
                 all.add(external);
             }
@@ -3351,7 +3351,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         }
         List<Instance> all = new ArrayList<>(instances.scan(k -> true));
         Set<String> seenIds = all.stream().map(Instance::getInstanceId).collect(Collectors.toSet());
-        for (Instance external : listExternalInstances(region)) {
+        for (Instance external : listExternalInstances(callerAccountId(), region)) {
             if (seenIds.add(external.getInstanceId())) {
                 all.add(external);
             }
@@ -3706,34 +3706,100 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                         + "Valid values are: standard, unlimited.", 400);
     }
 
-    private Optional<Instance> findExternalInstance(String region, String instanceId) {
+    private List<Tag> getTagsForAccount(String accountId, String resourceId, List<Tag> fallback) {
+        String safeAccount = accountId != null ? accountId : callerAccountId();
+        Optional<List<Tag>> stored = tags instanceof AccountAwareStorageBackend<List<Tag>> aware
+                ? aware.getForAccount(safeAccount, resourceId)
+                : tags.get(resourceId);
+        return stored.orElse(fallback);
+    }
+
+    private Instance copyExternalInstance(String accountId, Instance source) {
+        if (source == null) {
+            return null;
+        }
+        Instance copy = new Instance();
+        copy.setInstanceId(source.getInstanceId());
+        copy.setImageId(source.getImageId());
+        copy.setState(source.getState());
+        copy.setStateTransitionReason(source.getStateTransitionReason());
+        copy.setInstanceType(source.getInstanceType());
+        copy.setPlacement(source.getPlacement());
+        copy.setSubnetId(source.getSubnetId());
+        copy.setVpcId(source.getVpcId());
+        copy.setPrivateIpAddress(source.getPrivateIpAddress());
+        copy.setLogicalPrivateIpAddress(source.getLogicalPrivateIpAddress());
+        copy.setPublicIpAddress(source.getPublicIpAddress());
+        copy.setPrivateDnsName(source.getPrivateDnsName());
+        copy.setPublicDnsName(source.getPublicDnsName());
+        copy.setAssociatePublicIp(source.isAssociatePublicIp());
+        copy.setKeyName(source.getKeyName());
+        copy.setArchitecture(source.getArchitecture());
+        copy.setHypervisor(source.getHypervisor());
+        copy.setVirtualizationType(source.getVirtualizationType());
+        copy.setRootDeviceName(source.getRootDeviceName());
+        copy.setRootDeviceType(source.getRootDeviceType());
+        copy.setLaunchTime(source.getLaunchTime());
+        copy.setAmiLaunchIndex(source.getAmiLaunchIndex());
+        copy.setClientToken(source.getClientToken());
+        copy.setMonitoring(source.getMonitoring());
+        copy.setSourceDestCheck(source.isSourceDestCheck());
+        copy.setEbsOptimized(source.isEbsOptimized());
+        copy.setEnaSupport(source.isEnaSupport());
+        copy.setIamInstanceProfileArn(source.getIamInstanceProfileArn());
+        copy.setIamInstanceProfileAssociationTime(source.getIamInstanceProfileAssociationTime());
+        copy.setStateReasonCode(source.getStateReasonCode());
+        copy.setStateReasonMessage(source.getStateReasonMessage());
+        copy.setRegion(source.getRegion());
+        copy.setRootVolumeId(source.getRootVolumeId());
+        copy.setDisableApiStop(source.isDisableApiStop());
+        copy.setDisableApiTermination(source.isDisableApiTermination());
+        copy.setMetadataOptions(source.getMetadataOptions());
+        copy.setCreditSpecificationCpuCredits(source.getCreditSpecificationCpuCredits());
+        if (source.getSecurityGroups() != null) {
+            copy.setSecurityGroups(new ArrayList<>(source.getSecurityGroups()));
+        }
+        if (source.getNetworkInterfaces() != null) {
+            copy.setNetworkInterfaces(new ArrayList<>(source.getNetworkInterfaces()));
+        }
+        List<Tag> effectiveTags = getTagsForAccount(accountId, source.getInstanceId(), source.getTags());
+        copy.setTags(effectiveTags != null ? new ArrayList<>(effectiveTags) : new ArrayList<>());
+        return copy;
+    }
+
+    private Optional<Instance> findExternalInstance(String accountId, String region, String instanceId) {
         if (testClusterNodeInstanceProvider != null) {
-            return testClusterNodeInstanceProvider.findInstance(region, instanceId);
+            return testClusterNodeInstanceProvider.findInstance(accountId, region, instanceId)
+                    .map(inst -> copyExternalInstance(accountId, inst));
         }
         if (clusterNodeInstanceProviders == null || clusterNodeInstanceProviders.isUnsatisfied()) {
             return Optional.empty();
         }
         for (ClusterNodeInstanceProvider provider : clusterNodeInstanceProviders) {
-            Optional<Instance> inst = provider.findInstance(region, instanceId);
+            Optional<Instance> inst = provider.findInstance(accountId, region, instanceId);
             if (inst.isPresent()) {
-                return inst;
+                return inst.map(i -> copyExternalInstance(accountId, i));
             }
         }
         return Optional.empty();
     }
 
-    private List<Instance> listExternalInstances(String region) {
+    private List<Instance> listExternalInstances(String accountId, String region) {
         if (testClusterNodeInstanceProvider != null) {
-            return testClusterNodeInstanceProvider.listInstances(region);
+            return testClusterNodeInstanceProvider.listInstances(accountId, region).stream()
+                    .map(inst -> copyExternalInstance(accountId, inst))
+                    .toList();
         }
         if (clusterNodeInstanceProviders == null || clusterNodeInstanceProviders.isUnsatisfied()) {
             return List.of();
         }
         List<Instance> result = new ArrayList<>();
         for (ClusterNodeInstanceProvider provider : clusterNodeInstanceProviders) {
-            List<Instance> list = provider.listInstances(region);
+            List<Instance> list = provider.listInstances(accountId, region);
             if (list != null && !list.isEmpty()) {
-                result.addAll(list);
+                for (Instance inst : list) {
+                    result.add(copyExternalInstance(accountId, inst));
+                }
             }
         }
         return result;
@@ -3741,13 +3807,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
     private boolean isExternalInstance(String region, String instanceId) {
         return instances.get(key(region, instanceId)).isEmpty()
-                && findExternalInstance(region, instanceId).isPresent();
+                && findExternalInstance(callerAccountId(), region, instanceId).isPresent();
     }
 
     private Instance getRequiredInstance(String region, String instanceId) {
         Instance inst = instances.get(key(region, instanceId)).orElse(null);
         if (inst == null) {
-            inst = findExternalInstance(region, instanceId).orElse(null);
+            inst = findExternalInstance(callerAccountId(), region, instanceId).orElse(null);
         }
         if (inst == null) {
             throw new AwsException("InvalidInstanceID.NotFound", "The instance ID '" + instanceId + "' does not exist", 400);
@@ -5146,7 +5212,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         if (found.isPresent()) {
             return found;
         }
-        return findExternalInstance(region, instanceId);
+        return findExternalInstance(accountId, region, instanceId);
     }
 
     public Instance findInstanceById(String instanceId) {
@@ -5157,7 +5223,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         if (inst != null) {
             return inst;
         }
-        return findExternalInstance(null, instanceId).orElse(null);
+        return findExternalInstance(null, null, instanceId).orElse(null);
     }
 
     public boolean isInstanceContainerRunning(String instanceId) {
@@ -6428,7 +6494,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         for (String resourceId : resourceIds) {
             withTopologyLockIfNeeded(region, resourceId, () -> {
                 synchronized (lockFor(key(region, resourceId))) {
-                    List<Tag> existing = new ArrayList<>(tags.get(resourceId).orElse(List.of()));
+                    List<Tag> existing = new ArrayList<>(tags.get(resourceId).orElseGet(() -> {
+                        Instance ext = findExternalInstance(callerAccountId(), region, resourceId).orElse(null);
+                        return ext != null && ext.getTags() != null ? ext.getTags() : List.of();
+                    }));
                     for (Tag tag : tagList) {
                         existing.removeIf(t -> t.getKey().equals(tag.getKey()));
                         existing.add(tag);
@@ -6462,7 +6531,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         for (String resourceId : resourceIds) {
             withTopologyLockIfNeeded(region, resourceId, () -> {
             synchronized (lockFor(key(region, resourceId))) {
-                List<Tag> stored = tags.get(resourceId).orElse(null);
+                List<Tag> stored = tags.get(resourceId).orElseGet(() -> {
+                    Instance ext = findExternalInstance(callerAccountId(), region, resourceId).orElse(null);
+                    return ext != null && ext.getTags() != null ? ext.getTags() : null;
+                });
                 if (stored != null) {
                     List<Tag> existing = new ArrayList<>(stored);
                     for (Tag tag : tagList) {
@@ -6481,8 +6553,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         String storeKey = key(region, resourceId);
         Instance inst = instances.get(storeKey).orElse(null);
         if (inst != null) { inst.setTags(new ArrayList<>(tagList)); instances.put(storeKey, inst); return; }
-        inst = findExternalInstance(region, resourceId).orElse(null);
-        if (inst != null) { inst.setTags(new ArrayList<>(tagList)); return; }
+        if (findExternalInstance(callerAccountId(), region, resourceId).isPresent()) {
+            return;
+        }
         Vpc vpc = vpcs.get(storeKey).orElse(null);
         if (vpc != null) { vpc.setTags(new ArrayList<>(tagList)); vpcs.put(storeKey, vpc); return; }
         CapacityReservation cr = capacityReservations.get(storeKey).orElse(null);
@@ -6551,7 +6624,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         List<String> filterValues        = filters != null ? filters.get("value")          : null;
 
         List<Map<String, String>> result = new ArrayList<>();
+        Set<String> processedResourceIds = new LinkedHashSet<>();
         for (String resourceId : new ArrayList<>(tags.keys())) {
+            processedResourceIds.add(resourceId);
             String resourceType = inferResourceType(resourceId);
 
             if (filterResourceIds != null && !filterResourceIds.contains(resourceId)) {
@@ -6561,6 +6636,34 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 continue;
             }
             for (Tag tag : tags.get(resourceId).orElse(List.of())) {
+                if (filterKeys != null && !filterKeys.contains(tag.getKey())) {
+                    continue;
+                }
+                if (filterValues != null && !filterValues.contains(tag.getValue())) {
+                    continue;
+                }
+                Map<String, String> item = new LinkedHashMap<>();
+                item.put("resourceId", resourceId);
+                item.put("resourceType", resourceType);
+                item.put("key", tag.getKey());
+                item.put("value", tag.getValue());
+                result.add(item);
+            }
+        }
+
+        for (Instance ext : listExternalInstances(callerAccountId(), region)) {
+            String resourceId = ext.getInstanceId();
+            if (processedResourceIds.contains(resourceId)) {
+                continue;
+            }
+            String resourceType = inferResourceType(resourceId);
+            if (filterResourceIds != null && !filterResourceIds.contains(resourceId)) {
+                continue;
+            }
+            if (filterResourceTypes != null && !filterResourceTypes.contains(resourceType)) {
+                continue;
+            }
+            for (Tag tag : ext.getTags() != null ? ext.getTags() : List.<Tag>of()) {
                 if (filterKeys != null && !filterKeys.contains(tag.getKey())) {
                     continue;
                 }

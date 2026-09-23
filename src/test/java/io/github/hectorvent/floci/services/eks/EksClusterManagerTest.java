@@ -940,18 +940,21 @@ class EksClusterManagerTest {
             Instance registered = manager.getRegisteredClusterNodeInstance(cluster);
             assertNotNull(registered);
 
-            assertTrue(manager.findInstance("us-east-1", registered.getInstanceId()).isPresent());
-            assertEquals(registered.getInstanceId(), manager.findInstance("us-east-1", registered.getInstanceId()).get().getInstanceId());
-            assertTrue(manager.findInstance(null, registered.getInstanceId()).isPresent());
-            assertTrue(manager.findInstance("eu-central-1", registered.getInstanceId()).isEmpty());
+            assertTrue(manager.findInstance("123456789012", "us-east-1", registered.getInstanceId()).isPresent());
+            assertEquals(registered.getInstanceId(), manager.findInstance("123456789012", "us-east-1", registered.getInstanceId()).get().getInstanceId());
+            assertTrue(manager.findInstance(null, null, registered.getInstanceId()).isPresent());
+            assertTrue(manager.findInstance("123456789012", null, registered.getInstanceId()).isPresent());
+            assertTrue(manager.findInstance("999999999999", "us-east-1", registered.getInstanceId()).isEmpty());
+            assertTrue(manager.findInstance("123456789012", "eu-central-1", registered.getInstanceId()).isEmpty());
 
-            List<Instance> eastInstances = manager.listInstances("us-east-1");
+            List<Instance> eastInstances = manager.listInstances("123456789012", "us-east-1");
             assertTrue(eastInstances.stream().anyMatch(i -> registered.getInstanceId().equals(i.getInstanceId())));
-            assertTrue(manager.listInstances("eu-central-1").isEmpty());
+            assertTrue(manager.listInstances("999999999999", "us-east-1").isEmpty());
+            assertTrue(manager.listInstances("123456789012", "eu-central-1").isEmpty());
 
             manager.unregisterMetadataEndpoint(cluster);
-            assertTrue(manager.findInstance("us-east-1", registered.getInstanceId()).isEmpty());
-            assertTrue(manager.listInstances("us-east-1").isEmpty());
+            assertTrue(manager.findInstance("123456789012", "us-east-1", registered.getInstanceId()).isEmpty());
+            assertTrue(manager.listInstances("123456789012", "us-east-1").isEmpty());
         }
 
         @Test

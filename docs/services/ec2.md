@@ -170,7 +170,7 @@ When an EKS cluster is running, its synthesized node instance is registered and 
 
 - **Visibility**: Exposed via `DescribeInstances` and `DescribeInstanceStatus` with its synthesized instance ID (`i-...`), type (`m5.large`), running state, VPC, subnet, launch time, and cluster tags (`Name`, `kubernetes.io/cluster/<cluster-name>=owned`, `eks:cluster-name=<cluster-name>`). It can be queried by ID, filtered, or listed with other instances.
 - **Operations**: Supports volume attachments (`AttachVolume`, `DetachVolume`), instance attribute inspection and modification, and resource tagging (`CreateTags`, `DeleteTags`, `DescribeTags`).
-- **Lifecycle protection**: Lifecycle actions that would mutate or delete the node through EC2 (`TerminateInstances`, `StopInstances`, `StartInstances`, `RebootInstances`) are rejected with `OperationNotPermitted` (HTTP 400). The instance lifecycle is managed solely through the EKS cluster lifecycle.
+- **Lifecycle protection**: Lifecycle actions that would mutate or delete the node through EC2 (`TerminateInstances`, `StopInstances`, `StartInstances`, `RebootInstances`) are rejected with `OperationNotPermitted` (HTTP 400) as a Floci emulation limitation because the instance directly represents the underlying k3s cluster container. In real AWS, cluster node instances in an Auto Scaling group can be terminated or stopped and are subsequently replaced by the ASG. In Floci, the node instance lifecycle is managed solely through the EKS cluster lifecycle.
 
 ## Default Resources
 
