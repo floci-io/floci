@@ -98,4 +98,15 @@ class OpenSearchServiceTest {
         assertFalse(service.describeDomain("ready-recovery").isProcessing());
         verify(domainManager, atLeast(2)).isReady(any());
     }
+
+    @Test
+    void shutdownLeavesDomainContainersRunningWhenRetentionIsEnabled() {
+        when(domainManager.tryStartDomain(any())).thenReturn(true);
+        when(osConfig.keepRunningOnShutdown()).thenReturn(true);
+        service.createDomain("kept-domain", "OpenSearch_2.11", null, null, null, "us-east-1");
+
+        service.shutdown();
+
+        verify(domainManager, Mockito.never()).stopDomain(any());
+    }
 }

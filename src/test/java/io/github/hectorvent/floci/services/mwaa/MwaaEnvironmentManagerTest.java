@@ -43,6 +43,7 @@ class MwaaEnvironmentManagerTest {
     private ContainerLifecycleManager lifecycleManager;
     private ContainerDetector containerDetector;
     private MwaaEnvironmentManager manager;
+    private EmulatorConfig.MwaaServiceConfig mwaaConfig;
 
     @BeforeEach
     void setUp() {
@@ -51,7 +52,7 @@ class MwaaEnvironmentManagerTest {
         when(dockerConfig.logMaxSize()).thenReturn("10m");
         when(dockerConfig.logMaxFile()).thenReturn("3");
 
-        EmulatorConfig.MwaaServiceConfig mwaaConfig = Mockito.mock(EmulatorConfig.MwaaServiceConfig.class);
+        mwaaConfig = Mockito.mock(EmulatorConfig.MwaaServiceConfig.class);
         when(mwaaConfig.dockerNetwork()).thenReturn(Optional.empty());
         when(mwaaConfig.defaultPostgresImage()).thenReturn("postgres:16-alpine");
 
@@ -503,5 +504,24 @@ class MwaaEnvironmentManagerTest {
 
             assertFalse(manager.hasAnyContainerExited(environmentWithContainers("db-container-id", "airflow-container-id")));
         }
+    }
+
+    /**
+     * Explicit DeleteEnvironment tears down through {@code stopEnvironment}. The shutdown
+     * retention option is decided by {@link MwaaService#shutdown()} and must not turn a Delete
+     * into metadata removal that leaves the containers running.
+     */
+    @Test
+    void stopEnvironmentRemovesContainersEvenWhenShutdownRetentionIsEnabled() {
+        when(mwaaConfig.keepRunningOnShutdown()).thenReturn(true);
+        Environment environment = new Environment();
+        environment.setName("deleted-env");
+        environment.setAirflowContainerId("airflow-container-id");
+        environment.setDbContainerId("db-container-id");
+
+        manager.stopEnvironment(environment);
+
+        Mockito.verify(lifecycleManager).stopAndRemove("airflow-container-id", null);
+        Mockito.verify(lifecycleManager).stopAndRemove("db-container-id", null);
     }
 }

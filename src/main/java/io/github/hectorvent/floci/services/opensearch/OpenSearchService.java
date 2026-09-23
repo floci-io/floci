@@ -76,7 +76,7 @@ public class OpenSearchService implements ResourceProvider {
     @PreDestroy
     public void shutdown() {
         poller.shutdownNow();
-        if (!config.services().opensearch().mock()) {
+        if (!config.services().opensearch().mock() && !config.services().opensearch().keepRunningOnShutdown()) {
             for (Domain domain : allDomains()) {
                 domainManager.stopDomain(domain);
             }

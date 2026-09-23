@@ -207,15 +207,9 @@ public class OpenSearchDomainManager {
         if (domain.getContainerId() == null) {
             return;
         }
-        if (config.services().opensearch().keepRunningOnShutdown()) {
-            LOG.infov("Leaving OpenSearch container for domain {0} running", domain.getDomainName());
-            return;
-        }
         lifecycleManager.stopAndRemove(domain.getContainerId(), null);
         // The container no longer holds the binding, so the reservation must go with
         // it. Repeated create/delete would otherwise exhaust the configured range.
-        // The keep-running early return above deliberately keeps the reservation:
-        // the surviving container still owns the binding.
         if (domain.getHostPort() != null) {
             portAllocator.release(domain.getHostPort());
             domain.setHostPort(null);

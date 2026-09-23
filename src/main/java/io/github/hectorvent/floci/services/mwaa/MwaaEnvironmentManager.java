@@ -319,10 +319,6 @@ public class MwaaEnvironmentManager {
 
     /** Stops and removes both containers and all three named volumes for the given environment. */
     public void stopEnvironment(Environment environment) {
-        if (config.services().mwaa().keepRunningOnShutdown()) {
-            LOG.infov("Leaving MWAA containers for environment {0} running", environment.getName());
-            return;
-        }
         String name = environment.getName();
         if (environment.getAirflowContainerId() != null) {
             lifecycleManager.stopAndRemove(environment.getAirflowContainerId(), null);
