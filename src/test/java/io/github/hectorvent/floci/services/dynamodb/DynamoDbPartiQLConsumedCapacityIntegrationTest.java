@@ -203,6 +203,50 @@ class DynamoDbPartiQLConsumedCapacityIntegrationTest {
             .body("ConsumedCapacity", nullValue());
     }
 
+    @Test
+    @Order(7)
+    void statementsRejectAnInvalidReturnConsumedCapacityBeforeRunning() {
+        String invalid = "1 validation error detected: Value 'INVALID' at 'returnConsumedCapacity' failed to "
+                + "satisfy constraint: Member must satisfy enum value set: [INDEXES, TOTAL, NONE]";
+        rejected("ExecuteStatement", """
+            {
+                "Statement": "INSERT INTO \\"%s\\" VALUE {'pk': 'cc-pq-rcc'}",
+                "ReturnConsumedCapacity": "INVALID"
+            }
+            """.formatted(TABLE))
+            .body("message", equalTo(invalid));
+        rejected("BatchExecuteStatement", """
+            {
+                "Statements": [{"Statement": "INSERT INTO \\"%s\\" VALUE {'pk': 'cc-pq-rcc-batch'}"}],
+                "ReturnConsumedCapacity": "INVALID"
+            }
+            """.formatted(TABLE))
+            .body("message", equalTo(invalid));
+
+        send("BatchExecuteStatement", """
+            {
+                "Statements": [
+                    {"Statement": "SELECT * FROM \\"%1$s\\" WHERE pk = 'cc-pq-rcc'"},
+                    {"Statement": "SELECT * FROM \\"%1$s\\" WHERE pk = 'cc-pq-rcc-batch'"}
+                ]
+            }
+            """.formatted(TABLE))
+            .body("Responses[0].Item", nullValue())
+            .body("Responses[1].Item", nullValue());
+    }
+
+    private static ValidatableResponse rejected(String operation, String body) {
+        return given()
+                .header("X-Amz-Target", "DynamoDB_20120810." + operation)
+                .contentType(CT)
+                .body(body)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
+    }
+
     private static ValidatableResponse send(String operation, String body) {
         return given()
                 .header("X-Amz-Target", "DynamoDB_20120810." + operation)

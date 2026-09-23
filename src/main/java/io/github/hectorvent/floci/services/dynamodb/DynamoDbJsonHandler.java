@@ -1776,6 +1776,12 @@ public class DynamoDbJsonHandler {
         }
     }
 
+    private static void requireValidReturnConsumedCapacity(JsonNode request) {
+        List<String> validationErrors = new ArrayList<>();
+        addReturnConsumedCapacityError(request, validationErrors);
+        throwValidationErrors(validationErrors);
+    }
+
     private static void throwValidationErrors(List<String> validationErrors) {
         if (validationErrors.isEmpty()) {
             return;
@@ -2707,6 +2713,7 @@ public class DynamoDbJsonHandler {
     }
 
     private Response handleExecuteStatement(JsonNode request, String region) {
+        requireValidReturnConsumedCapacity(request);
         String statement = request.path("Statement").asText();
         List<JsonNode> parameters = toPartiQLParams(request.path("Parameters"));
         DynamoDbPartiQLParser.Stmt stmt = DynamoDbPartiQLParser.parse(statement, parameters);
@@ -2852,6 +2859,7 @@ public class DynamoDbJsonHandler {
     }
 
     private Response handleBatchExecuteStatement(JsonNode request, String region) {
+        requireValidReturnConsumedCapacity(request);
         JsonNode stmts = request.path("Statements");
         if (stmts.isMissingNode() || !stmts.isArray() || stmts.isEmpty()) {
             throw new AwsException("ValidationException", "Statements must not be empty", 400);
