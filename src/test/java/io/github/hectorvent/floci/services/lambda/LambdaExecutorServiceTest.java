@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.lambda;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.lambda.launcher.ContainerHandle;
 import io.github.hectorvent.floci.services.lambda.model.ContainerState;
+import io.github.hectorvent.floci.services.lambda.model.FunctionEventInvokeConfig;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
@@ -11,11 +12,13 @@ import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServer;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -33,6 +36,7 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -96,7 +100,7 @@ class LambdaExecutorServiceTest {
         byte[] payload = "{}".getBytes();
         executor.invoke(fn, payload, InvocationType.Event, 0, "prod");
 
-        verify(router, timeout(5000)).route(eq(fn), eq(payload), any(InvokeResult.class), eq(0), eq("prod"));
+        verify(router, timeout(5000)).route(eq(fn), eq(payload), any(InvokeResult.class), eq(1), eq(0), eq("prod"));
     }
 
     @Test
@@ -257,14 +261,117 @@ class LambdaExecutorServiceTest {
         doAnswer(inv -> {
             routed.countDown();
             return null;
-        }).when(router).route(any(), any(), any(), anyInt(), isNull());
+        }).when(router).route(any(), any(), any(), anyInt(), anyInt(), isNull());
 
         byte[] payload = "{}".getBytes();
         InvokeResult result = routingExecutor.invoke(fn, payload, InvocationType.Event);
 
         assertEquals(202, result.getStatusCode());
         assertTrue(routed.await(5, TimeUnit.SECONDS), "destination routing never ran");
-        verify(router).route(fn, payload, expected, 0, null);
+        verify(router).route(fn, payload, expected, 1, 0, null);
+    }
+
+    @Test
+    void eventInvocation_retriesFailedInvocationUpToMaximumRetryAttempts() throws Exception {
+        AsyncInvokeDestinationRouter router = mock(AsyncInvokeDestinationRouter.class);
+        LambdaService lambdaService = mock(LambdaService.class);
+        FunctionEventInvokeConfig config = new FunctionEventInvokeConfig();
+        config.setMaximumRetryAttempts(2);
+        config.setMaximumEventAgeInSeconds(21600);
+        when(lambdaService.findEventInvokeConfig(fn, null)).thenReturn(Optional.of(config));
+
+        LambdaExecutorService retryExecutor =
+                new LambdaExecutorService(warmPool, new ObjectMapper(), concurrencyLimiter, router, lambdaService);
+        RuntimeApiServer rtas = mock(RuntimeApiServer.class);
+        ContainerHandle handle = new ContainerHandle("cid-retry", "test-fn", rtas, ContainerState.WARM);
+        when(warmPool.acquire(any())).thenReturn(handle);
+        InvokeResult failureResult = new InvokeResult(200, "Unhandled",
+                "{\"errorMessage\":\"fails\"}".getBytes(), null, "req-retry");
+        doAnswer(invocation -> {
+            PendingInvocation pendingInvocation = invocation.getArgument(0);
+            pendingInvocation.getResultFuture().complete(failureResult);
+            return pendingInvocation.getResultFuture();
+        }).when(rtas).enqueue(any(PendingInvocation.class));
+
+        CountDownLatch routed = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            routed.countDown();
+            return null;
+        }).when(router).route(any(), any(), any(), anyInt(), anyInt(), any());
+
+        byte[] payload = "{}".getBytes();
+        InvokeResult result = retryExecutor.invoke(fn, payload, InvocationType.Event);
+
+        assertEquals(202, result.getStatusCode());
+        assertTrue(routed.await(5, TimeUnit.SECONDS), "destination routing never ran");
+        verify(rtas, times(3)).enqueue(any(PendingInvocation.class));
+        verify(router).route(eq(fn), eq(payload), eq(failureResult), eq(3), eq(0), isNull());
+    }
+
+    @Test
+    void eventInvocation_stopsRetryingWhenMaxEventAgeExceeded() throws Exception {
+        AsyncInvokeDestinationRouter router = mock(AsyncInvokeDestinationRouter.class);
+        LambdaService lambdaService = mock(LambdaService.class);
+        FunctionEventInvokeConfig config = new FunctionEventInvokeConfig();
+        config.setMaximumRetryAttempts(2);
+        config.setMaximumEventAgeInSeconds(0);
+        when(lambdaService.findEventInvokeConfig(fn, null)).thenReturn(Optional.of(config));
+        LambdaExecutorService retryExecutor =
+                new LambdaExecutorService(warmPool, new ObjectMapper(), concurrencyLimiter, router, lambdaService);
+
+        CountDownLatch routed = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            routed.countDown();
+            return null;
+        }).when(router).route(any(), any(), any(), anyInt(), anyInt(), any());
+
+        byte[] payload = "{}".getBytes();
+        InvokeResult result = retryExecutor.invoke(fn, payload, InvocationType.Event);
+
+        assertEquals(202, result.getStatusCode());
+        assertTrue(routed.await(5, TimeUnit.SECONDS), "destination routing never ran");
+        verify(warmPool, never()).acquire(any());
+        verify(router).route(eq(fn), eq(payload), any(), eq(1), eq(0), isNull());
+    }
+
+    @Test
+    void eventInvocation_reportsAgeExpirationWhenAgeExpiresBetweenAttempts() throws Exception {
+        AsyncInvokeDestinationRouter router = mock(AsyncInvokeDestinationRouter.class);
+        LambdaService lambdaService = mock(LambdaService.class);
+        FunctionEventInvokeConfig config = new FunctionEventInvokeConfig();
+        config.setMaximumRetryAttempts(2);
+        config.setMaximumEventAgeInSeconds(1);
+        when(lambdaService.findEventInvokeConfig(fn, null)).thenReturn(Optional.of(config));
+        LambdaExecutorService retryExecutor =
+                new LambdaExecutorService(warmPool, new ObjectMapper(), concurrencyLimiter, router, lambdaService);
+
+        RuntimeApiServer rtas = mock(RuntimeApiServer.class);
+        ContainerHandle handle = new ContainerHandle("cid-age-after-failure", "test-fn", rtas, ContainerState.WARM);
+        when(warmPool.acquire(any())).thenReturn(handle);
+        InvokeResult failedAttempt = new InvokeResult(200, "Unhandled",
+                "{\"errorMessage\":\"fails\"}".getBytes(), null, "req-age");
+        doAnswer(invocation -> {
+            Thread.sleep(1100);
+            PendingInvocation pendingInvocation = invocation.getArgument(0);
+            pendingInvocation.getResultFuture().complete(failedAttempt);
+            return pendingInvocation.getResultFuture();
+        }).when(rtas).enqueue(any(PendingInvocation.class));
+
+        CountDownLatch routed = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            routed.countDown();
+            return null;
+        }).when(router).route(any(), any(), any(), anyInt(), anyInt(), any());
+
+        byte[] payload = "{}".getBytes();
+        InvokeResult result = retryExecutor.invoke(fn, payload, InvocationType.Event);
+
+        assertEquals(202, result.getStatusCode());
+        assertTrue(routed.await(5, TimeUnit.SECONDS), "destination routing never ran");
+        ArgumentCaptor<InvokeResult> resultCaptor = ArgumentCaptor.forClass(InvokeResult.class);
+        verify(router).route(eq(fn), eq(payload), resultCaptor.capture(), eq(1), eq(0), isNull());
+        assertTrue(new String(resultCaptor.getValue().getPayload()).contains("EventAgeExceeded"),
+                "age expiration should replace the previous invocation error");
     }
 
     @Test
