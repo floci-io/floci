@@ -858,6 +858,29 @@ class DynamoDbIntegrationTest {
 
     @Test
     @Order(10)
+    void deleteItemWithExpectedAndConditionExpressionFails() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DeleteItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "TestTable",
+                    "Key": {"pk": {"S": "user-1"}, "sk": {"S": "profile"}},
+                    "Expected": {"pk": {"Exists": false}},
+                    "ConditionExpression": "attribute_not_exists(pk)"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("Can not use both expression and non-expression parameters in the same request: "
+                    + "Non-expression parameters: {Expected} Expression parameters: {ConditionExpression}"));
+    }
+
+    @Test
+    @Order(10)
     void batchGetItemWithProjectionExpressionAndAttributesToGetFails() {
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.BatchGetItem")
