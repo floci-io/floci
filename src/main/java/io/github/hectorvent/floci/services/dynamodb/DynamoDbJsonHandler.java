@@ -1545,10 +1545,16 @@ public class DynamoDbJsonHandler {
 
     private Response handleBatchGetItem(JsonNode request, String region) {
         JsonNode requestItems = request.get("RequestItems");
-        if (requestItems == null || requestItems.isNull() || requestItems.isMissingNode()
-                || !requestItems.fields().hasNext()) {
+        if (requestItems == null || requestItems.isNull() || requestItems.isMissingNode()) {
             throw new AwsException("ValidationException",
                     "The requestItems parameter is required for BatchGetItem", 400);
+        }
+        // BatchGetItem answers an empty map from the validation framework, BatchWriteItem
+        // still answers with its own sentence.
+        if (!requestItems.fields().hasNext()) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value at 'RequestItems' failed to satisfy constraint: "
+                    + "Member must have length greater than or equal to 1", 400);
         }
         Map<String, JsonNode> items = new HashMap<>();
         Iterator<Map.Entry<String, JsonNode>> tables = requestItems.fields();

@@ -858,6 +858,41 @@ class DynamoDbIntegrationTest {
 
     @Test
     @Order(10)
+    void batchGetItemWithEmptyRequestItemsFails() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.BatchGetItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"RequestItems": {}}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("1 validation error detected: Value at 'RequestItems' failed to satisfy "
+                    + "constraint: Member must have length greater than or equal to 1"));
+    }
+
+    @Test
+    @Order(10)
+    void batchWriteItemWithEmptyRequestItemsFails() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.BatchWriteItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"RequestItems": {}}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("The requestItems parameter is required for BatchWriteItem"));
+    }
+
+    @Test
+    @Order(10)
     void deleteItemWithExpectedAndConditionExpressionFails() {
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.DeleteItem")
