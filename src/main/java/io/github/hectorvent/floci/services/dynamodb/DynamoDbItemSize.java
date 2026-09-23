@@ -153,7 +153,7 @@ final class DynamoDbItemSize {
         return 0;
     }
 
-    private static int utf8Length(String s) {
+    static int utf8Length(String s) {
         if (s == null) return 0;
         return s.getBytes(StandardCharsets.UTF_8).length;
     }

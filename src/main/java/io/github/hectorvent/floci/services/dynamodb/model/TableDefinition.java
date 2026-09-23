@@ -295,7 +295,7 @@ public class TableDefinition {
 
     @JsonIgnore
     public Optional<VectorIndex> findVectorIndex(String indexName) {
-        if (vectorIndexes == null || indexName == null) {
+        if (vectorIndexes == null || vectorIndexes.isEmpty() || indexName == null) {
             return Optional.empty();
         }
         return vectorIndexes.stream()

@@ -12,6 +12,8 @@ import java.util.List;
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class VectorIndex {
 
+    private static final String HASH = "HASH";
+
     private String indexName;
     private String vectorAttributeName;
     private List<SearchSchemaElement> searchSchema;
@@ -20,7 +22,7 @@ public class VectorIndex {
     private Long dimensions;
     private String distanceFunction;
     private String indexArn;
-    private String indexStatus;
+    private String indexStatus = "ACTIVE";
     // Set only when the index was added by UpdateTable, which reports the allocation and
     // backfilling phases; null on the CreateTable path, which reports an ACTIVE index at once.
     private Instant creationStartedAt;
@@ -28,7 +30,6 @@ public class VectorIndex {
     public VectorIndex() {
         this.searchSchema = new ArrayList<>();
         this.nonKeyAttributes = new ArrayList<>();
-        this.indexStatus = "ACTIVE";
     }
 
     public VectorIndex(String indexName, String vectorAttributeName,
@@ -40,14 +41,9 @@ public class VectorIndex {
         // Left null when the request omitted Projection, which is a required member the
         // CreateTable and UpdateTable validation rejects.
         this.projectionType = projectionType;
-        if ("INCLUDE".equals(this.projectionType) && nonKeyAttributes != null) {
-            this.nonKeyAttributes = nonKeyAttributes;
-        } else {
-            this.nonKeyAttributes = new ArrayList<>();
-        }
+        this.nonKeyAttributes = nonKeyAttributes != null ? nonKeyAttributes : new ArrayList<>();
         this.dimensions = dimensions;
         this.distanceFunction = distanceFunction;
-        this.indexStatus = "ACTIVE";
     }
 
     public String getIndexName() { return indexName; }
@@ -96,5 +92,20 @@ public class VectorIndex {
         return searchSchema.stream()
                 .map(SearchSchemaElement::getAttributeName)
                 .toList();
+    }
+
+    /**
+     * The attribute the search schema partitions on, or null when the index declares no HASH
+     * element. {@code @JsonIgnore}d for the same reason as
+     * {@link #getSearchSchemaAttributeNames()}: it is derived from {@code searchSchema}.
+     */
+    @JsonIgnore
+    public String getHashAttributeName() {
+        for (SearchSchemaElement element : searchSchema) {
+            if (HASH.equals(element.getSearchSchemaElementType())) {
+                return element.getAttributeName();
+            }
+        }
+        return null;
     }
 }

@@ -954,4 +954,28 @@ class DynamoDbVectorSearchIntegrationTest {
                 + "Member must satisfy enum value set: [INDEXES, TOTAL, NONE]");
     }
 
+    /** An empty list is a length constraint on the member, the way a GSI reports it. */
+    @Test
+    @Order(43)
+    void createTableRejectsAnEmptyNonKeyAttributesList() {
+        expectValidation("CreateTable", """
+            {
+                "TableName": "%s",
+                "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                "BillingMode": "PAY_PER_REQUEST",
+                "VectorIndexes": [
+                    {"IndexName": "vix",
+                     "VectorAttribute": {"AttributeName": "embedding"},
+                     "Projection": {"ProjectionType": "INCLUDE", "NonKeyAttributes": []},
+                     "Dimensions": 3,
+                     "DistanceFunction": "COSINE"}
+                ]
+            }
+            """.formatted(REJECTED),
+                "1 validation error detected: Value '[]' at "
+                + "'vectorIndexes.1.member.projection.nonKeyAttributes' failed to satisfy "
+                + "constraint: Member must have length greater than or equal to 1");
+    }
+
 }

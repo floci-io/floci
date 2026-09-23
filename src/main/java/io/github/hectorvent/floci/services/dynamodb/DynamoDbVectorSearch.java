@@ -1,12 +1,11 @@
 package io.github.hectorvent.floci.services.dynamodb;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
-import io.github.hectorvent.floci.services.dynamodb.model.SearchSchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.VectorIndex;
 
@@ -25,17 +24,13 @@ import java.util.Set;
  */
 final class DynamoDbVectorSearch {
 
-    private static final ObjectMapper MAPPER = new ObjectMapper();
-
-    private static final String HASH = "HASH";
-
     private DynamoDbVectorSearch() {}
 
     /** One search result: the projected item and its distance score. */
     record Hit(ObjectNode item, double score) {}
 
     /** A scored candidate, before the top-K cut decides whether it is worth projecting. */
-    private record Candidate(JsonNode item, float[] vector, double score) {}
+    private record Candidate(JsonNode item, double score) {}
 
     static List<Hit> search(TableDefinition table, VectorIndex index, List<JsonNode> items,
                             JsonNode searchVector, int topK, String searchConditionExpression,
@@ -46,8 +41,10 @@ final class DynamoDbVectorSearch {
                 exprAttrNames, exprAttrValues);
         ProjectionEvaluator.validateExpression(projectionExpression);
 
-        String hashAttribute = hashAttribute(index);
+        String hashAttribute = index.getHashAttributeName();
         String distanceFunction = index.getDistanceFunction();
+        DynamoDbVectorScoring.Scorer scorer =
+                new DynamoDbVectorScoring.Scorer(distanceFunction, query);
         List<Candidate> candidates = new ArrayList<>();
         for (JsonNode item : items) {
             if (hashAttribute != null && !item.hasNonNull(hashAttribute)) {
@@ -60,8 +57,7 @@ final class DynamoDbVectorSearch {
             if (stored == null) {
                 continue;
             }
-            candidates.add(new Candidate(item, stored,
-                    DynamoDbVectorScoring.score(distanceFunction, query, stored)));
+            candidates.add(new Candidate(item, scorer.score(stored)));
         }
 
         Comparator<Candidate> byScore = Comparator.comparingDouble(Candidate::score);
@@ -69,9 +65,17 @@ final class DynamoDbVectorSearch {
                 ? byScore.reversed() : byScore);
 
         List<Hit> hits = new ArrayList<>();
-        for (Candidate candidate : candidates.subList(0, Math.min(topK, candidates.size()))) {
-            hits.add(new Hit(projectHit(candidate.item(), candidate.vector(), table, index,
-                    projectionExpression, exprAttrNames), candidate.score()));
+        List<Candidate> top = candidates.subList(0, Math.min(topK, candidates.size()));
+        if (top.isEmpty()) {
+            return hits;
+        }
+        Set<String> projectedAttributes = projectedAttributeNames(table, index);
+        boolean rendersVector = projectionExpression != null && !projectionExpression.isBlank()
+                && ProjectionEvaluator.topLevelAttributes(projectionExpression, exprAttrNames)
+                        .contains(index.getVectorAttributeName());
+        for (Candidate candidate : top) {
+            hits.add(new Hit(projectHit(candidate.item(), index, projectedAttributes,
+                    projectionExpression, exprAttrNames, rendersVector), candidate.score()));
         }
         return hits;
     }
@@ -79,23 +83,16 @@ final class DynamoDbVectorSearch {
     // ── Search vector ──
 
     private static float[] parseSearchVector(JsonNode searchVector, VectorIndex index) {
-        int size = searchVector != null && searchVector.isArray() ? searchVector.size() : 0;
-        float[] query = new float[size];
-        for (int i = 0; i < size; i++) {
-            JsonNode number = searchVector.get(i).path("N");
-            if (!number.isValueNode()) {
-                throw invalidSearchVector();
-            }
-            try {
-                query[i] = Float.parseFloat(number.asText());
-            } catch (NumberFormatException e) {
-                throw invalidSearchVector();
-            }
+        float[] query = searchVector != null && searchVector.isArray()
+                ? toVector(searchVector)
+                : new float[0];
+        if (query == null) {
+            throw invalidSearchVector();
         }
-        long dimensions = index.getDimensions() != null ? index.getDimensions() : size;
-        if (size != dimensions) {
+        long dimensions = index.getDimensions();
+        if (query.length != dimensions) {
             throw new AwsException("ValidationException",
-                    "Input search vector dimension " + size
+                    "Input search vector dimension " + query.length
                     + " does not match vector index dimension " + dimensions, 400);
         }
         return query;
@@ -120,7 +117,7 @@ final class DynamoDbVectorSearch {
     private static ExpressionEvaluator.Expr parseSearchCondition(VectorIndex index, String expression,
                                                                  JsonNode exprAttrNames,
                                                                  JsonNode exprAttrValues) {
-        String hashAttribute = hashAttribute(index);
+        String hashAttribute = index.getHashAttributeName();
         if (expression == null || expression.isBlank()) {
             if (hashAttribute != null) {
                 throw missingHashCondition();
@@ -190,15 +187,6 @@ final class DynamoDbVectorSearch {
         return name.toString();
     }
 
-    private static String hashAttribute(VectorIndex index) {
-        for (SearchSchemaElement element : index.getSearchSchema()) {
-            if (HASH.equals(element.getSearchSchemaElementType())) {
-                return element.getAttributeName();
-            }
-        }
-        return null;
-    }
-
     private static AwsException missingHashCondition() {
         return new AwsException("ValidationException",
                 "SearchConditionExpression must be provided when SearchSchema has a HASH key", 400);
@@ -219,27 +207,32 @@ final class DynamoDbVectorSearch {
      */
     private static float[] storedVector(JsonNode item, VectorIndex index) {
         JsonNode list = item.path(index.getVectorAttributeName()).path("L");
-        if (!list.isArray()) {
+        if (!list.isArray() || list.size() != index.getDimensions()) {
             return null;
         }
-        long dimensions = index.getDimensions() != null ? index.getDimensions() : list.size();
-        if (list.size() != dimensions) {
-            return null;
-        }
-        float[] stored = new float[list.size()];
-        for (int i = 0; i < stored.length; i++) {
+        return toVector(list);
+    }
+
+    /**
+     * The list's members narrowed to f32, or null at the first member that is not a number
+     * attribute. The caller decides what that means: the search vector answers an error, a
+     * stored vector leaves its item out of the index.
+     */
+    private static float[] toVector(JsonNode list) {
+        float[] values = new float[list.size()];
+        for (int i = 0; i < values.length; i++) {
             JsonNode number = list.get(i).path("N");
             if (!number.isValueNode()) {
                 return null;
             }
             try {
-                stored[i] = Float.parseFloat(number.asText());
+                values[i] = Float.parseFloat(number.asText());
             } catch (NumberFormatException expected) {
-                // A stored value the index cannot hold is simply not in it, never a search error.
+                // Not a number the index can hold, which the caller reports its own way.
                 return null;
             }
         }
-        return stored;
+        return values;
     }
 
     // ── Projection ──
@@ -248,15 +241,18 @@ final class DynamoDbVectorSearch {
      * The attributes a hit carries. The index view is intersected with the ProjectionExpression
      * when there is one, and the vector attribute is left out unless that expression names it.
      */
-    private static ObjectNode projectHit(JsonNode item, float[] vector, TableDefinition table,
-                                         VectorIndex index, String projectionExpression,
-                                         JsonNode exprAttrNames) {
+    private static ObjectNode projectHit(JsonNode item, VectorIndex index,
+                                         Set<String> projectedAttributes,
+                                         String projectionExpression, JsonNode exprAttrNames,
+                                         boolean rendersVector) {
         ObjectNode view = "ALL".equals(index.getProjectionType())
                 ? shallowCopy((ObjectNode) item)
-                : ProjectionEvaluator.trimToAttributes((ObjectNode) item,
-                        projectedAttributeNames(table, index));
+                : ProjectionEvaluator.trimToAttributes((ObjectNode) item, projectedAttributes);
         if (projectionExpression != null && !projectionExpression.isBlank()) {
-            view.set(index.getVectorAttributeName(), renderVector(vector));
+            if (rendersVector) {
+                view.set(index.getVectorAttributeName(),
+                        renderVector(storedVector(item, index)));
+            }
             return ProjectionEvaluator.project(view, projectionExpression, exprAttrNames);
         }
         view.remove(index.getVectorAttributeName());
@@ -265,7 +261,7 @@ final class DynamoDbVectorSearch {
 
     /** A copy the projection can prune without touching the stored item. Values stay shared. */
     private static ObjectNode shallowCopy(ObjectNode item) {
-        ObjectNode copy = MAPPER.createObjectNode();
+        ObjectNode copy = JsonNodeFactory.instance.objectNode();
         copy.setAll(item);
         return copy;
     }
@@ -284,13 +280,13 @@ final class DynamoDbVectorSearch {
 
     /** The index's own f32 copy of the vector, which is what a search returns. */
     private static ObjectNode renderVector(float[] stored) {
-        ArrayNode list = MAPPER.createArrayNode();
+        ArrayNode list = JsonNodeFactory.instance.arrayNode();
         for (float value : stored) {
-            ObjectNode element = MAPPER.createObjectNode();
+            ObjectNode element = JsonNodeFactory.instance.objectNode();
             element.put("N", DynamoDbVectorScoring.render(value));
             list.add(element);
         }
-        ObjectNode wrapper = MAPPER.createObjectNode();
+        ObjectNode wrapper = JsonNodeFactory.instance.objectNode();
         wrapper.set("L", list);
         return wrapper;
     }

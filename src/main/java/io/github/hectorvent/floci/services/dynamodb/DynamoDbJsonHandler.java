@@ -192,14 +192,15 @@ public class DynamoDbJsonHandler {
             }
         }
 
-        List<VectorIndex> vectorIndexes = new ArrayList<>();
+        List<DynamoDbService.VectorIndexCreate> vectorIndexes = new ArrayList<>();
         JsonNode vectorIndexArray = request.path("VectorIndexes");
         if (vectorIndexArray.isArray()) {
             int vectorPosition = 0;
             for (JsonNode vectorIndexNode : vectorIndexArray) {
                 vectorPosition++;
-                vectorIndexes.add(parseVectorIndex(vectorIndexNode,
-                        "vectorIndexes." + vectorPosition + ".member"));
+                String memberPath = "vectorIndexes." + vectorPosition + ".member";
+                vectorIndexes.add(new DynamoDbService.VectorIndexCreate(
+                        parseVectorIndex(vectorIndexNode, memberPath), memberPath));
             }
         }
 
@@ -346,6 +347,7 @@ public class DynamoDbJsonHandler {
                 nonKeyAttributes.add(nonKeyAttr.asText());
             }
         }
+        rejectEmptyNonKeyAttributes(nonKeyAttrArray, memberPath);
         validateProjectionSpec(projectionType, nonKeyAttributes);
         Long dimensions = node.hasNonNull("Dimensions") ? node.get("Dimensions").asLong() : null;
         return new VectorIndex(
@@ -1243,7 +1245,7 @@ public class DynamoDbJsonHandler {
         requireSearchVectorsMember(request, "SearchVector");
         requireSearchVectorsMember(request, "IndexName");
         String tableName = request.path("TableName").asText();
-        String indexName = request.has("IndexName") ? request.get("IndexName").asText() : null;
+        String indexName = request.get("IndexName").asText();
         String rccSearch = request.has("ReturnConsumedCapacity")
                 ? request.get("ReturnConsumedCapacity").asText() : null;
         if (rccSearch != null && !VALID_RETURN_CONSUMED_CAPACITY.contains(rccSearch)) {
@@ -1270,7 +1272,7 @@ public class DynamoDbJsonHandler {
                     + "The value must be between 1 and " + MAX_VECTOR_SEARCH_TOP_K + " inclusive", 400);
         }
 
-        TableDefinition table = dynamoDbService.describeTable(tableName, region);
+        TableDefinition table = dynamoDbService.settledTable(tableName, region);
         VectorIndex index = requireSearchableVectorIndex(table, indexName);
 
         JsonNode exprAttrNames = request.has("ExpressionAttributeNames")
@@ -1278,7 +1280,7 @@ public class DynamoDbJsonHandler {
         JsonNode exprAttrValues = request.has("ExpressionAttributeValues")
                 ? request.get("ExpressionAttributeValues") : null;
         List<DynamoDbVectorSearch.Hit> hits = DynamoDbVectorSearch.search(table, index,
-                dynamoDbService.liveItems(tableName, region),
+                dynamoDbService.liveItems(table, region),
                 request.path("SearchVector"), topK,
                 request.has("SearchConditionExpression")
                         ? request.get("SearchConditionExpression").asText() : null,
@@ -1636,10 +1638,9 @@ public class DynamoDbJsonHandler {
                 updatePosition++;
                 JsonNode createNode = update.path("Create");
                 if (createNode.isObject()) {
+                    String memberPath = "vectorIndexUpdates." + updatePosition + ".member.create";
                     vectorCreates.add(new DynamoDbService.VectorIndexCreate(
-                            parseVectorIndex(createNode,
-                                    "vectorIndexUpdates." + updatePosition + ".member.create"),
-                            updatePosition));
+                            parseVectorIndex(createNode, memberPath), memberPath));
                 }
                 JsonNode deleteNode = update.path("Delete");
                 if (deleteNode.isObject()) {

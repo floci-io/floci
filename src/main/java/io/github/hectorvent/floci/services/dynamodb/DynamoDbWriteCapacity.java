@@ -4,7 +4,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
-import io.github.hectorvent.floci.services.dynamodb.model.SearchSchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.VectorIndex;
 
@@ -51,6 +50,11 @@ final class DynamoDbWriteCapacity {
             for (var units : gsi.values()) sum += units;
             for (var units : lsi.values()) sum += units;
             return sum;
+        }
+
+        /** The same cost with the table arm replaced, which a transaction charges at twice the rate. */
+        Cost withTable(double units) {
+            return new Cost(units, gsi, lsi, vectorBytes);
         }
 
         Cost plus(Cost other) {
@@ -117,14 +121,18 @@ final class DynamoDbWriteCapacity {
     /**
      * The stored entry's size: every projected attribute at its item size, with the vector
      * itself costing four bytes per component instead of the decimal text the item carries.
+     * The components are never read, only counted.
      */
     private static double entryBytes(VectorIndex index, JsonNode view) {
-        long dimensions = index.getDimensions() != null
-                ? index.getDimensions()
-                : view.path(index.getVectorAttributeName()).path("L").size();
-        double bytes = DynamoDbItemSize.calculateItemSize(view)
-                - DynamoDbItemSize.attributeValueSize(view.get(index.getVectorAttributeName()))
-                + VECTOR_COMPONENT_BYTES * dimensions;
+        String vectorAttribute = index.getVectorAttributeName();
+        double bytes = DynamoDbItemSize.utf8Length(vectorAttribute)
+                + VECTOR_COMPONENT_BYTES * index.getDimensions();
+        for (Map.Entry<String, JsonNode> field : view.properties()) {
+            if (!vectorAttribute.equals(field.getKey())) {
+                bytes += DynamoDbItemSize.utf8Length(field.getKey())
+                        + DynamoDbItemSize.attributeValueSize(field.getValue());
+            }
+        }
         return Math.max(VECTOR_WRITE_FLOOR_BYTES, bytes);
     }
 
@@ -137,11 +145,9 @@ final class DynamoDbWriteCapacity {
         if (item == null || !item.has(index.getVectorAttributeName())) {
             return null;
         }
-        for (SearchSchemaElement element : index.getSearchSchema()) {
-            if ("HASH".equals(element.getSearchSchemaElementType())
-                    && !item.has(element.getAttributeName())) {
-                return null;
-            }
+        String hashAttribute = index.getHashAttributeName();
+        if (hashAttribute != null && !item.has(hashAttribute)) {
+            return null;
         }
         String projectionType = index.getProjectionType();
         if (projectionType == null || "ALL".equals(projectionType)) {

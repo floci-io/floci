@@ -16,25 +16,25 @@ class DynamoDbVectorScoringTest {
     @Test
     void scoresTheIdenticalVector() {
         float[] stored = {1f, 0f, 0f};
-        assertEquals(0.0, DynamoDbVectorScoring.score("COSINE", QUERY, stored));
-        assertEquals(0.0, DynamoDbVectorScoring.score("EUCLIDEAN", QUERY, stored));
-        assertEquals(1.0, DynamoDbVectorScoring.score("DOT_PRODUCT", QUERY, stored));
+        assertEquals(0.0, score("COSINE", QUERY, stored));
+        assertEquals(0.0, score("EUCLIDEAN", QUERY, stored));
+        assertEquals(1.0, score("DOT_PRODUCT", QUERY, stored));
     }
 
     @Test
     void scoresAUnitNormMix() {
         float[] stored = {0.6f, 0.8f, 0f};
-        assertEquals(0.3999999761581421, DynamoDbVectorScoring.score("COSINE", QUERY, stored));
-        assertEquals(0.8944271802902222, DynamoDbVectorScoring.score("EUCLIDEAN", QUERY, stored));
-        assertEquals(0.6000000238418579, DynamoDbVectorScoring.score("DOT_PRODUCT", QUERY, stored));
+        assertEquals(0.3999999761581421, score("COSINE", QUERY, stored));
+        assertEquals(0.8944271802902222, score("EUCLIDEAN", QUERY, stored));
+        assertEquals(0.6000000238418579, score("DOT_PRODUCT", QUERY, stored));
     }
 
     @Test
     void scoresBeyondF32Precision() {
         float[] stored = {0.1f, 16777217f, 1.000000059604644775390625f};
-        assertEquals(1.0, DynamoDbVectorScoring.score("COSINE", QUERY, stored));
-        assertEquals(16777216.0, DynamoDbVectorScoring.score("EUCLIDEAN", QUERY, stored));
-        assertEquals(0.10000000149011612, DynamoDbVectorScoring.score("DOT_PRODUCT", QUERY, stored));
+        assertEquals(1.0, score("COSINE", QUERY, stored));
+        assertEquals(16777216.0, score("EUCLIDEAN", QUERY, stored));
+        assertEquals(0.10000000149011612, score("DOT_PRODUCT", QUERY, stored));
     }
 
     /**
@@ -47,7 +47,7 @@ class DynamoDbVectorScoringTest {
         float[] query = ones(8);
         float[] stored = ones(8);
         stored[0] = 16777216f;
-        assertEquals(16777222f, DynamoDbVectorScoring.score("DOT_PRODUCT", query, stored));
+        assertEquals(16777222f, score("DOT_PRODUCT", query, stored));
     }
 
     /** At sixteen dimensions the four-lane reduction answers 16777228 and the tree 16777230. */
@@ -56,7 +56,7 @@ class DynamoDbVectorScoringTest {
         float[] query = ones(16);
         float[] stored = ones(16);
         stored[0] = 16777216f;
-        assertEquals(16777230f, DynamoDbVectorScoring.score("DOT_PRODUCT", query, stored));
+        assertEquals(16777230f, score("DOT_PRODUCT", query, stored));
     }
 
     @Test
@@ -95,6 +95,10 @@ class DynamoDbVectorScoringTest {
         assertEquals("1.5e13", DynamoDbVectorScoring.render(1.5e13f));
         assertEquals("1e30", DynamoDbVectorScoring.render(1e30f));
         assertEquals("3.4e38", DynamoDbVectorScoring.render(3.4e38f));
+    }
+
+    private static double score(String distanceFunction, float[] query, float[] stored) {
+        return new DynamoDbVectorScoring.Scorer(distanceFunction, query).score(stored);
     }
 
     private static float[] ones(int dimensions) {

@@ -27,17 +27,58 @@ final class DynamoDbVectorScoring {
 
     private DynamoDbVectorScoring() {}
 
-    /** The score of one stored vector against the query vector, widened for JSON. */
-    static double score(String distanceFunction, float[] query, float[] stored) {
-        return switch (distanceFunction) {
-            case COSINE -> cosine(query, stored);
-            case EUCLIDEAN -> euclidean(query, stored);
-            case DOT_PRODUCT -> dotProduct(query, stored);
-            // CreateTable and UpdateTable reject an unknown value, so only a missing one reaches
-            // here: answer it rather than letting a null selector throw.
-            case null, default -> throw new AwsException("ValidationException",
-                    "Unsupported distance function: " + distanceFunction, 400);
-        };
+    /**
+     * Scores every candidate of one search against a fixed query vector.
+     *
+     * <p>Everything that depends only on the query is computed once here, and the per-dimension
+     * terms the tree sum consumes are written into a single buffer the scorer owns. A search
+     * scores its candidates one at a time, so that buffer needs no synchronization.
+     */
+    static final class Scorer {
+
+        private final String distanceFunction;
+        private final float[] query;
+        private final float[] terms;
+        private final double queryNorm;
+
+        Scorer(String distanceFunction, float[] query) {
+            this.distanceFunction = distanceFunction;
+            this.query = query;
+            this.terms = new float[query.length];
+            this.queryNorm = COSINE.equals(distanceFunction) ? Math.sqrt(selfDot(query, terms)) : 0.0;
+        }
+
+        /** The score of one stored vector against the query vector, widened for JSON. */
+        double score(float[] stored) {
+            return switch (distanceFunction) {
+                case COSINE -> cosine(stored);
+                case EUCLIDEAN -> euclidean(stored);
+                case DOT_PRODUCT -> dotProduct(query, stored, terms);
+                // CreateTable and UpdateTable reject an unknown value, so only a missing one
+                // reaches here: answer it rather than letting a null selector throw.
+                case null, default -> throw new AwsException("ValidationException",
+                        "Unsupported distance function: " + distanceFunction, 400);
+            };
+        }
+
+        private float cosine(float[] stored) {
+            float dot = dotProduct(query, stored, terms);
+            double denominator = queryNorm * Math.sqrt(selfDot(stored, terms));
+            if (denominator == 0.0) {
+                // A zero vector has no direction. Scoring it 1 keeps the response valid JSON,
+                // which the NaN of a 0/0 division would not.
+                return 1.0f;
+            }
+            return (float) (1.0 - dot / denominator);
+        }
+
+        private float euclidean(float[] stored) {
+            for (int i = 0; i < query.length; i++) {
+                float difference = query[i] - stored[i];
+                terms[i] = difference * difference;
+            }
+            return (float) Math.sqrt(treeSum(terms));
+        }
     }
 
     /** Whether the higher score is the closer match, which only DOT_PRODUCT reports. */
@@ -45,41 +86,20 @@ final class DynamoDbVectorScoring {
         return DOT_PRODUCT.equals(distanceFunction);
     }
 
-    private static float cosine(float[] query, float[] stored) {
-        float dot = dotProduct(query, stored);
-        double denominator = Math.sqrt(selfDot(query)) * Math.sqrt(selfDot(stored));
-        if (denominator == 0.0) {
-            // A zero vector has no direction. Scoring it 1 keeps the response valid JSON,
-            // which the NaN of a 0/0 division would not.
-            return 1.0f;
-        }
-        return (float) (1.0 - dot / denominator);
-    }
-
-    private static float euclidean(float[] query, float[] stored) {
-        float[] terms = new float[query.length];
-        for (int i = 0; i < query.length; i++) {
-            float difference = query[i] - stored[i];
-            terms[i] = difference * difference;
-        }
-        return (float) Math.sqrt(treeSum(terms, terms.length));
-    }
-
-    private static float dotProduct(float[] query, float[] stored) {
-        float[] terms = new float[query.length];
+    private static float dotProduct(float[] query, float[] stored, float[] terms) {
         for (int i = 0; i < query.length; i++) {
             terms[i] = query[i] * stored[i];
         }
-        return treeSum(terms, terms.length);
+        return treeSum(terms);
     }
 
-    private static float selfDot(float[] vector) {
-        return dotProduct(vector, vector);
+    private static float selfDot(float[] vector, float[] terms) {
+        return dotProduct(vector, vector, terms);
     }
 
     /** Sums the terms by repeated pairwise halving, all arithmetic in float. Mutates {@code terms}. */
-    private static float treeSum(float[] terms, int length) {
-        int n = length;
+    private static float treeSum(float[] terms) {
+        int n = terms.length;
         while (n > 1) {
             int half = (n + 1) / 2;
             for (int i = 0; i + 1 < n; i += 2) {
