@@ -62,6 +62,7 @@ public class ContainerLifecycleManager {
             Pattern.compile("join keyctl.*disk quota exceeded", Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
 
     private static final long NANO_CPUS_PER_CPU = 1_000_000_000L;
+    private static final String CONTAINER_NETWORK_MODE_PREFIX = "container:";
 
     /** Host interface a port marked loopback-only publishes on. */
     private static final String LOOPBACK_HOST_IP = "127.0.0.1";
@@ -1124,12 +1125,20 @@ public class ContainerLifecycleManager {
     }
 
     private static boolean isContainerNetworkMode(String networkMode) {
-        return networkMode != null && networkMode.startsWith("container:");
+        return networkMode != null && networkMode.startsWith(CONTAINER_NETWORK_MODE_PREFIX);
     }
 
     private static boolean isHostNetworkMode(InspectContainerResponse inspect) {
         HostConfig hostConfig = inspect.getHostConfig();
         return hostConfig != null && "host".equals(hostConfig.getNetworkMode());
+    }
+
+    private static String networkNamespaceOwner(InspectContainerResponse inspect) {
+        HostConfig hostConfig = inspect.getHostConfig();
+        String networkMode = hostConfig == null ? null : hostConfig.getNetworkMode();
+        return isContainerNetworkMode(networkMode)
+                ? networkMode.substring(CONTAINER_NETWORK_MODE_PREFIX.length())
+                : null;
     }
 
     private Map<Integer, EndpointInfo> resolveEndpoints(String containerId, ContainerSpec spec) {
@@ -1164,16 +1173,19 @@ public class ContainerLifecycleManager {
             // Fallback to container port
             return new EndpointInfo("localhost", containerPort);
         } else {
-            if (isHostNetworkMode(inspect)) {
-                return new EndpointInfo("localhost", containerPort);
-            }
-            // Container mode: use container IP on the docker network.
-            // Prefer the configured network's IP — the container may be on multiple
-            // networks (bridge + the configured network) when connectToNetworkCmd()
-            // is used instead of withNetworkMode() during creation.
-            String containerIp = resolveContainerIp(inspect, preferredNetwork);
-            return new EndpointInfo(containerIp, containerPort);
+            return new EndpointInfo(resolveReachableHost(inspect, preferredNetwork), containerPort);
         }
+    }
+
+    private String resolveReachableHost(InspectContainerResponse inspect, String preferredNetwork) {
+        if (isHostNetworkMode(inspect)) {
+            return "localhost";
+        }
+        String owner = networkNamespaceOwner(inspect);
+        if (owner != null) {
+            return resolveReachableHost(dockerClient.inspectContainerCmd(owner).exec(), preferredNetwork);
+        }
+        return resolveContainerIp(inspect, preferredNetwork);
     }
 
     private String resolveContainerIp(InspectContainerResponse inspect, String preferredNetwork) {

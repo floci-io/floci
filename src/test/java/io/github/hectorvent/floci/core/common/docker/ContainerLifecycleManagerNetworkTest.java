@@ -197,15 +197,50 @@ class ContainerLifecycleManagerNetworkTest {
     void endpointsOfHostNetworkContainersPointAtLocalhostWhenFlociRunsInDocker() {
         when(containerDetector.isRunningInContainer()).thenReturn(true);
         when(dockerClient.startContainerCmd("container-id")).thenReturn(mock(StartContainerCmd.class));
-        InspectContainerCmd inspectCmd = mock(InspectContainerCmd.class, RETURNS_SELF);
-        InspectContainerResponse inspect = mock(InspectContainerResponse.class);
-        when(dockerClient.inspectContainerCmd("container-id")).thenReturn(inspectCmd);
-        when(inspectCmd.exec()).thenReturn(inspect);
-        when(inspect.getHostConfig()).thenReturn(HostConfig.newHostConfig().withNetworkMode("host"));
+        when(inspectOf("container-id").getHostConfig()).thenReturn(HostConfig.newHostConfig().withNetworkMode("host"));
 
         ContainerInfo info = manager().createAndStart(spec("host", Map.of(9200, 9400), List.of(9200)));
 
         assertEquals(new EndpointInfo("localhost", 9200), info.getEndpoint(9200));
+    }
+
+    @Test
+    void endpointsOfNamespaceSharingContainersPointAtTheOwningContainerWhenFlociRunsInDocker() {
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        when(dockerClient.startContainerCmd("container-id")).thenReturn(mock(StartContainerCmd.class));
+        when(inspectOf("container-id").getHostConfig())
+                .thenReturn(HostConfig.newHostConfig().withNetworkMode("container:sibling-id"));
+        InspectContainerResponse owner = inspectOf("sibling-id");
+        NetworkSettings ownerNetworks = mock(NetworkSettings.class);
+        when(owner.getHostConfig()).thenReturn(HostConfig.newHostConfig().withNetworkMode("bridge"));
+        when(owner.getNetworkSettings()).thenReturn(ownerNetworks);
+        when(ownerNetworks.getNetworks())
+                .thenReturn(Map.of("bridge", new ContainerNetwork().withIpv4Address("172.17.0.7")));
+
+        ContainerInfo info = manager().createAndStart(spec("container:sibling", Map.of(9200, 9400), List.of(9200)));
+
+        assertEquals(new EndpointInfo("172.17.0.7", 9200), info.getEndpoint(9200));
+    }
+
+    @Test
+    void endpointsOfContainersJoiningAHostNetworkContainerPointAtLocalhostWhenFlociRunsInDocker() {
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        when(dockerClient.startContainerCmd("container-id")).thenReturn(mock(StartContainerCmd.class));
+        when(inspectOf("container-id").getHostConfig())
+                .thenReturn(HostConfig.newHostConfig().withNetworkMode("container:sibling-id"));
+        when(inspectOf("sibling-id").getHostConfig()).thenReturn(HostConfig.newHostConfig().withNetworkMode("host"));
+
+        ContainerInfo info = manager().createAndStart(spec("container:sibling", Map.of(9200, 9400), List.of(9200)));
+
+        assertEquals(new EndpointInfo("localhost", 9200), info.getEndpoint(9200));
+    }
+
+    private InspectContainerResponse inspectOf(String containerId) {
+        InspectContainerCmd inspectCmd = mock(InspectContainerCmd.class, RETURNS_SELF);
+        InspectContainerResponse inspect = mock(InspectContainerResponse.class);
+        when(dockerClient.inspectContainerCmd(containerId)).thenReturn(inspectCmd);
+        when(inspectCmd.exec()).thenReturn(inspect);
+        return inspect;
     }
 
     private HostConfig createdHostConfig() {
