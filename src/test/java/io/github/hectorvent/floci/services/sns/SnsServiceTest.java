@@ -7,6 +7,8 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.firehose.FirehoseService;
 import io.github.hectorvent.floci.services.firehose.model.Record;
+import io.github.hectorvent.floci.services.lambda.LambdaService;
+import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.sns.model.Subscription;
 import io.github.hectorvent.floci.services.sns.model.Topic;
 import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
@@ -501,37 +503,6 @@ class SnsServiceTest {
                 "arn:aws:sns:us-east-1:000000000000:ghost-topic", REGION));
     }
 
-
-    /**
-     * A Lambda subscription endpoint may be a qualified ARN. Taking the segment after the last
-     * colon read the alias as the function name, so a subscription to
-     * {@code ...:function:order-processor:PROD} invoked a function called {@code PROD}: the
-     * message was accepted, reported as published, and delivered nowhere.
-     */
-    @Test
-    void extractFunctionNameIgnoresTheQualifier() {
-        String base = "arn:aws:lambda:us-east-1:000000000000:function:order-processor";
-
-        assertEquals("order-processor", SnsService.extractFunctionName(base));
-        assertEquals("order-processor", SnsService.extractFunctionName(base + ":PROD"));
-        assertEquals("order-processor", SnsService.extractFunctionName(base + ":42"));
-        assertEquals("order-processor", SnsService.extractFunctionName(base + ":$LATEST"));
-    }
-
-    /** Other partitions carry the same resource grammar. */
-    @Test
-    void extractFunctionNameWorksInAnyPartition() {
-        assertEquals("order-processor", SnsService.extractFunctionName(
-                "arn:aws-us-gov:lambda:us-gov-west-1:000000000000:function:order-processor:PROD"));
-    }
-
-    /** A bare function name is a legal endpoint too and passes through unchanged. */
-    @Test
-    void extractFunctionNameLeavesABareNameAlone() {
-        assertEquals("order-processor", SnsService.extractFunctionName("order-processor"));
-        assertNull(SnsService.extractFunctionName(null));
-    }
-
     private static Map<String, MessageAttributeValue> attr(String name, String value, String dataType) {
         return Map.of(name, new MessageAttributeValue(value, dataType));
     }
@@ -729,6 +700,25 @@ class SnsServiceTest {
                 "{\"detail\":{\"$or\":[{\"a\":[\"1\"]},{\"b\":[\"2\"]}]}}", "MessageBody");
         assertTrue(snsService.matchesFilterPolicy(nested, body("{\"detail\":{\"b\":\"2\"}}"), null));
         assertFalse(snsService.matchesFilterPolicy(nested, body("{\"detail\":{\"b\":\"3\"}}"), null));
+    }
+
+    @Test
+    void publish_invokesTheQualifiedLambdaSubscriptionEndpoint() {
+        LambdaService lambdaService = mock(LambdaService.class);
+        SnsService service = new SnsService(
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new RegionResolver(REGION, ACCOUNT),
+                null,
+                lambdaService
+        );
+        Topic topic = service.createTopic("lambda-topic", null, null, REGION);
+        String aliasArn = "arn:aws:lambda:us-east-1:000000000000:function:order-processor:PROD";
+        service.subscribe(topic.getTopicArn(), "lambda", aliasArn, REGION, Map.of());
+
+        service.publish(topic.getTopicArn(), null, "hello", null, REGION);
+
+        verify(lambdaService).invoke(eq(REGION), eq(aliasArn), any(byte[].class), eq(InvocationType.Event));
     }
 
     @Test

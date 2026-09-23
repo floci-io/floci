@@ -1681,11 +1681,10 @@ public class SnsService implements Resettable, ResourceProvider {
                     LOG.debugv("Delivered SNS message to SQS: {0} ({1}) raw={2}", sub.getEndpoint(), queueUrl, rawDelivery);
                 }
                 case "lambda" -> {
-                    String fnName = extractFunctionName(sub.getEndpoint());
                     String region = extractRegionFromArn(sub.getEndpoint());
                     String eventJson = buildSnsLambdaEvent(topicArn, messageId, protocolMessage,
                             subject, messageAttributes, sub.getSubscriptionArn());
-                    lambdaService.invoke(region, fnName, eventJson.getBytes(), InvocationType.Event);
+                    lambdaService.invoke(region, sub.getEndpoint(), eventJson.getBytes(), InvocationType.Event);
                     LOG.debugv("Delivered SNS message to Lambda: {0}", sub.getEndpoint());
                 }
                 case "http", "https" -> {
@@ -1836,30 +1835,6 @@ public class SnsService implements Resettable, ResourceProvider {
         } catch (Exception e) {
             return "{\"Records\":[]}";
         }
-    }
-
-    private static final String FUNCTION_MARKER = ":function:";
-
-    /**
-     * Function name out of a Lambda ARN, which may carry a qualifier:
-     * {@code arn:aws:lambda:<region>:<account>:function:<name>[:<alias-or-version>]}.
-     *
-     * <p>Taking the segment after the last colon reads the qualifier as the function name, so a
-     * subscription to {@code ...:function:order-processor:PROD} invoked a function called
-     * {@code PROD} and the message went nowhere. Cut after {@code :function:} instead, matching
-     * what S3 and Step Functions already do for the same ARN.
-     */
-    static String extractFunctionName(String functionArn) {
-        if (functionArn == null) {
-            return null;
-        }
-        int functionMarker = functionArn.indexOf(FUNCTION_MARKER);
-        if (functionMarker < 0) {
-            return functionArn;
-        }
-        String suffix = functionArn.substring(functionMarker + FUNCTION_MARKER.length());
-        int qualifierSeparator = suffix.indexOf(':');
-        return qualifierSeparator >= 0 ? suffix.substring(0, qualifierSeparator) : suffix;
     }
 
     private static String extractRegionFromArn(String arn) {
