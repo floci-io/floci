@@ -20,6 +20,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -4119,6 +4120,42 @@ class DynamoDbServiceTest {
                     .thenAnswer(invocation -> new ByteArrayInputStream(object.getData()));
         }
         return s3;
+    }
+
+    /** DescribeTable names the missing table, an item call does not. */
+    @Test
+    void itemCalls_missingTable_returnResourceNotFoundWithoutTableName() {
+        DynamoDbService svc = serviceWithS3(mock(S3Service.class), new InMemoryStorage<>());
+        String region = "us-east-1";
+        ObjectNode key = item("userId", "u1");
+        ObjectNode keys = mapper.createObjectNode();
+        keys.set("Keys", mapper.createArrayNode().add(key));
+        ObjectNode putRequest = mapper.createObjectNode();
+        putRequest.putObject("PutRequest").set("Item", key);
+        ObjectNode transactPut = mapper.createObjectNode();
+        transactPut.putObject("Put").put("TableName", "Users").set("Item", key);
+        ObjectNode transactGet = mapper.createObjectNode();
+        transactGet.putObject("Get").put("TableName", "Users").set("Key", key);
+
+        List<Executable> itemCalls = List.of(
+                () -> svc.getItem("Users", key, region),
+                () -> svc.putItem("Users", key, null, null, null, region, "NONE"),
+                () -> svc.updateItem("Users", key, null, "SET x = :v", null, item("v", "1"), "NONE", region),
+                () -> svc.deleteItem("Users", key, region),
+                () -> svc.query("Users", null, item("pk", "u1"), "userId = :pk", null, null, region),
+                () -> svc.scan("Users", null, null, null, null, null, null, null, region),
+                () -> svc.batchGetItem(Map.of("Users", keys), region),
+                () -> svc.batchWriteItem(Map.of("Users", List.of(putRequest)), region),
+                () -> svc.transactWriteItems(List.of(transactPut), region, null, null),
+                () -> svc.transactGetItems(List.of(transactGet), region));
+        for (Executable call : itemCalls) {
+            AwsException e = assertThrows(AwsException.class, call);
+            assertEquals("ResourceNotFoundException", e.getErrorCode());
+            assertEquals("Requested resource not found", e.getMessage());
+        }
+
+        AwsException describe = assertThrows(AwsException.class, () -> svc.describeTable("Users", region));
+        assertEquals("Requested resource not found: Table: Users not found", describe.getMessage());
     }
 
     /** Checked against real DynamoDB: every item call on a CREATING table fails this way, DescribeTable still works. */
