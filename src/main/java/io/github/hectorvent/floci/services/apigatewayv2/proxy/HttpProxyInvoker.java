@@ -56,6 +56,9 @@ import java.util.StringJoiner;
 public class HttpProxyInvoker {
     private static final Logger LOG = Logger.getLogger(HttpProxyInvoker.class);
 
+    /** API Gateway's integration payload quota: 10 MB, not adjustable. */
+    private static final int MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
+
     /** RFC 7230 hop-by-hop headers that must not be forwarded across proxies. */
     private static final Set<String> HOP_BY_HOP = Set.of(
             "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -329,6 +332,8 @@ public class HttpProxyInvoker {
         if (finalUrl.startsWith("http://") && (hasHeader(builder, "Host") || isNamedHost(finalUrl))) {
             try {
                 return invokeHttpPinned(finalUrl, method, builder, options.timeout());
+            } catch (ResponseTooLargeException ignored) {
+                return tooLargeResult();
             } catch (Exception e) {
                 LOG.warnv("HTTP_PROXY backend call failed: {0}", e.getMessage());
                 return errorResult("Bad Gateway: " + e.getMessage());
@@ -365,14 +370,20 @@ public class HttpProxyInvoker {
 
         try {
             resolveNonMetadataTarget(hrb.build().uri().getHost());
-            HttpResponse<byte[]> resp =
-                    clientFor(options).send(hrb.build(), HttpResponse.BodyHandlers.ofByteArray());
+            HttpResponse<InputStream> resp =
+                    clientFor(options).send(hrb.build(), HttpResponse.BodyHandlers.ofInputStream());
+            byte[] body;
+            try (InputStream in = resp.body()) {
+                body = readBounded(in);
+            }
             Map<String, List<String>> respHeaders = new LinkedHashMap<>();
             for (Map.Entry<String, List<String>> e : resp.headers().map().entrySet()) {
                 if (HOP_BY_HOP.contains(e.getKey().toLowerCase())) continue;
                 respHeaders.put(e.getKey(), List.copyOf(e.getValue()));
             }
-            return new ProxyResult(resp.statusCode(), respHeaders, resp.body());
+            return new ProxyResult(resp.statusCode(), respHeaders, body);
+        } catch (ResponseTooLargeException ignored) {
+            return tooLargeResult();
         } catch (Exception e) {
             LOG.warnv("HTTP_PROXY backend call failed: {0}", e.getMessage());
             return errorResult("Bad Gateway: " + e.getMessage());
@@ -479,7 +490,7 @@ public class HttpProxyInvoker {
         int statusCode = Integer.parseInt(status[1]);
         Map<String, List<String>> headers = new LinkedHashMap<>();
         String transferEncoding = null;
-        int contentLength = -1;
+        long contentLength = -1;
         for (int i = 1; i < lines.length; i++) {
             int separator = lines[i].indexOf(':');
             if (separator <= 0) {
@@ -491,7 +502,7 @@ public class HttpProxyInvoker {
                 transferEncoding = value;
             }
             if (name.equalsIgnoreCase("Content-Length")) {
-                contentLength = Integer.parseInt(value);
+                contentLength = Long.parseLong(value);
             }
             if (!HOP_BY_HOP.contains(name.toLowerCase(Locale.ROOT))) {
                 // Repeated header lines (Set-Cookie) accumulate rather than overwrite.
@@ -504,7 +515,7 @@ public class HttpProxyInvoker {
                 ? new byte[0]
                 : transferEncoding != null && transferEncoding.toLowerCase(Locale.ROOT).contains("chunked")
                 ? readChunkedBody(input)
-                : contentLength >= 0 ? input.readNBytes(contentLength) : input.readAllBytes();
+                : contentLength >= 0 ? readContentLength(input, contentLength) : readBounded(input);
         return new ProxyResult(statusCode, headers, body);
     }
 
@@ -525,8 +536,33 @@ public class HttpProxyInvoker {
                     }
                 }
             }
+            if (size < 0 || size > MAX_RESPONSE_BYTES - body.size()) {
+                throw new ResponseTooLargeException();
+            }
             body.write(input.readNBytes(size));
             expectCrlf(input);
+        }
+    }
+
+    private static byte[] readContentLength(InputStream input, long contentLength) throws IOException {
+        if (contentLength > MAX_RESPONSE_BYTES) {
+            throw new ResponseTooLargeException();
+        }
+        return input.readNBytes((int) contentLength);
+    }
+
+    /** Reads to end of stream, failing once more than the payload quota has arrived. */
+    private static byte[] readBounded(InputStream input) throws IOException {
+        byte[] body = input.readNBytes(MAX_RESPONSE_BYTES + 1);
+        if (body.length > MAX_RESPONSE_BYTES) {
+            throw new ResponseTooLargeException();
+        }
+        return body;
+    }
+
+    private static final class ResponseTooLargeException extends IOException {
+        ResponseTooLargeException() {
+            super("integration response exceeds " + MAX_RESPONSE_BYTES + " bytes");
         }
     }
 
@@ -576,6 +612,13 @@ public class HttpProxyInvoker {
         }
         String base = builder.url().split("\\?")[0];
         return base + "?" + sj;
+    }
+
+    private static ProxyResult tooLargeResult() {
+        LOG.warnv("HTTP_PROXY backend response exceeds the {0}-byte payload quota", MAX_RESPONSE_BYTES);
+        return ProxyResult.withSingleValueHeaders(413,
+                Map.of("Content-Type", "application/json"),
+                "{\"message\":\"Request Entity Too Large\"}".getBytes(StandardCharsets.UTF_8));
     }
 
     private static ProxyResult errorResult(String message) {
