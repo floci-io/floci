@@ -8,6 +8,7 @@ import java.util.regex.Pattern;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -39,7 +40,9 @@ class CloudFormationEc2InstanceIntegrationTest {
                     }
                   },
                   "Outputs": {
-                    "InstanceId": {"Value": {"Ref": "Server"}}
+                    "InstanceId": {"Value": {"Ref": "Server"}},
+                    "StateName": {"Value": {"Fn::GetAtt": ["Server", "State.Name"]}},
+                    "StateCode": {"Value": {"Fn::GetAtt": "Server.State.Code"}}
                   }
                 }
                 """;
@@ -73,7 +76,7 @@ class CloudFormationEc2InstanceIntegrationTest {
         String instanceId = m.group(1);
 
         // The instance really exists in EC2.
-        given()
+        String describeInstances = given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", EC2_AUTH)
             .formParam("Action", "DescribeInstances")
@@ -82,7 +85,24 @@ class CloudFormationEc2InstanceIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body(containsString(instanceId));
+            .body(containsString(instanceId))
+            .extract().asString();
+
+        // The schema's State is a nested object, so Fn::GetAtt exposes State.Code and State.Name:
+        // the state the launch settled to, as DescribeInstances reports it, in both GetAtt forms.
+        Matcher state = Pattern.compile("<instanceState>\\s*<code>(\\d+)</code>\\s*<name>([a-z-]+)</name>")
+                .matcher(describeInstances);
+        assertTrue(state.find(), "expected an instance state in DescribeInstances");
+        assertEquals("running", state.group(2));
+        assertEquals(state.group(2), output(describeStacks, "StateName"));
+        assertEquals(state.group(1), output(describeStacks, "StateCode"));
+    }
+
+    private static String output(String describeStacks, String key) {
+        Matcher m = Pattern.compile("<OutputKey>" + key + "</OutputKey>\\s*<OutputValue>([^<]*)</OutputValue>")
+                .matcher(describeStacks);
+        assertTrue(m.find(), "expected output " + key + " in " + describeStacks);
+        return m.group(1);
     }
 
     @Test

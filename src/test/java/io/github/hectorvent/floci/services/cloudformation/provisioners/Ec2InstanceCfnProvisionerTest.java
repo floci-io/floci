@@ -63,6 +63,7 @@ class Ec2InstanceCfnProvisionerTest {
         instance.setPublicDnsName("ec2-54-0-0-5.compute-1.amazonaws.com");
         instance.setPlacement(new Placement("us-east-1a"));
         instance.setVpcId("vpc-1");
+        instance.setState(InstanceState.running());
         stubLaunch(instance);
         StackResource r = resource("Server");
 
@@ -70,11 +71,46 @@ class Ec2InstanceCfnProvisionerTest {
 
         assertEquals("i-1", r.getPhysicalId());
         assertEquals(Set.of("InstanceId", "PrivateIp", "PublicIp", "PrivateDnsName", "PublicDnsName",
-                "AvailabilityZone", "VpcId"), r.getAttributes().keySet());
+                "AvailabilityZone", "VpcId", "State.Code", "State.Name"), r.getAttributes().keySet());
         assertEquals("10.0.0.5", r.getAttributes().get("PrivateIp"));
         assertEquals("us-east-1a", r.getAttributes().get("AvailabilityZone"));
         assertEquals("vpc-1", r.getAttributes().get("VpcId"));
+        assertEquals("16", r.getAttributes().get("State.Code"));
+        assertEquals("running", r.getAttributes().get("State.Name"));
         verify(ec2).awaitContainerLaunch(instance);
+    }
+
+    @Test
+    void launchPublishesTheStateTheLaunchSettledTo() throws Exception {
+        Instance pending = new Instance();
+        pending.setInstanceId("i-1");
+        pending.setState(InstanceState.pending());
+        stubLaunch(pending);
+        Instance running = new Instance();
+        running.setInstanceId("i-1");
+        running.setState(InstanceState.running());
+        when(ec2.describeInstances("us-east-1", List.of("i-1"), null))
+                .thenReturn(List.of(reservationOf(running)));
+        StackResource r = resource("Server");
+
+        provisioner.provision(r, props("{\"ImageId\": \"ami-1\"}"), ctx());
+
+        assertEquals("16", r.getAttributes().get("State.Code"));
+        assertEquals("running", r.getAttributes().get("State.Name"));
+    }
+
+    @Test
+    void anInstanceWithoutAStateExposesNoStateAttributes() throws Exception {
+        Instance instance = new Instance();
+        instance.setInstanceId("i-stateless");
+        stubLaunch(instance);
+        StackResource r = resource("Server");
+        r.getAttributes().put("State.Code", "80");
+        r.getAttributes().put("State.Name", "stopped");
+
+        provisioner.provision(r, props("{\"ImageId\": \"ami-1\"}"), ctx());
+
+        assertEquals(Set.of("InstanceId"), r.getAttributes().keySet());
     }
 
     @Test

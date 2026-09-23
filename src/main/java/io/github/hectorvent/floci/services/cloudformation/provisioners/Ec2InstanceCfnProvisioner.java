@@ -147,7 +147,10 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
         ec2Service.awaitContainerLaunch(instance);
         r.getAttributes().remove(CfnRollback.ROLLBACK_OWNED_ATTR);
-        publishInstanceAttributes(r, instance);
+        // Re-read once the launch settles, as CloudFormation's own stabilization does, so the
+        // published State is the settled instance's rather than the pending one RunInstances returned.
+        Instance launched = findInstance(region, instance.getInstanceId());
+        publishInstanceAttributes(r, launched != null ? launched : instance);
         storeDeclaredCreateOnly(r, privateIpAddress, availabilityZone);
         // A createOnly change that landed a new instance id replaced the prior one: record it so
         // the stack cleans the displaced instance up after the update commits.
@@ -305,6 +308,16 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
             r.getAttributes().put("VpcId", instance.getVpcId());
         } else {
             r.getAttributes().remove("VpcId");
+        }
+        // The schema's State is a nested object, so Fn::GetAtt exposes its members in dotted form
+        // (State.Code, State.Name), the same shape as an RDS Endpoint; there is no bare State.
+        InstanceState state = instance.getState();
+        if (state != null && state.getName() != null) {
+            r.getAttributes().put("State.Code", String.valueOf(state.getCode()));
+            r.getAttributes().put("State.Name", state.getName());
+        } else {
+            r.getAttributes().remove("State.Code");
+            r.getAttributes().remove("State.Name");
         }
     }
 
