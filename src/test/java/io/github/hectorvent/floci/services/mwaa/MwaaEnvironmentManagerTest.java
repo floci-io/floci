@@ -317,9 +317,9 @@ class MwaaEnvironmentManagerTest {
         environment.setAccountId("000000000000");
         environment.setArn("arn:aws:airflow:us-east-1:000000000000:environment/my-env");
 
-        assertEquals("floci-ns1-mwaa-000000000000.us-east-1.my-env-db",
+        assertEquals("floci-aws-ns1-mwaa-000000000000.us-east-1.my-env-db",
                 MwaaEnvironmentManager.dbContainerName(namespacedConfig, environment));
-        assertEquals("floci-ns1-mwaa-000000000000.us-east-1.my-env-airflow",
+        assertEquals("floci-aws-ns1-mwaa-000000000000.us-east-1.my-env-airflow",
                 MwaaEnvironmentManager.airflowContainerName(namespacedConfig, environment));
     }
 

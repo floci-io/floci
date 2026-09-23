@@ -145,7 +145,7 @@ class EcsContainerManagerEfsIsolationDockerIntegrationTest {
         EcsTask task = new EcsTask();
         task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/efs-isolation/" + suffix);
 
-        volumesToCleanUp.add(EcsContainerManager.efsVolumeName(fileSystemId, accessPointId, rootDirectory));
+        volumesToCleanUp.add("floci-aws-" + EcsContainerManager.efsVolumeToken(fileSystemId, accessPointId, rootDirectory));
 
         EcsTaskHandle handle = containerManager.startTask(task, taskDef, List.of(), "us-east-1");
         String dockerId = handle.getContainerIds().get("app");

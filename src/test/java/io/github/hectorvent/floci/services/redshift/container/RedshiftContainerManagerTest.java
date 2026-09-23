@@ -309,7 +309,7 @@ class RedshiftContainerManagerTest {
 
         manager.stop(ACCOUNT_ID, "test-cluster");
         assertTrue(manager.getContainer(ACCOUNT_ID, "test-cluster").isEmpty());
-        verify(lifecycleManager).removeIfExists("floci-redshift-" + ACCOUNT_ID + "-test-cluster");
+        verify(lifecycleManager).removeIfExists("floci-aws-redshift-" + ACCOUNT_ID + "-test-cluster");
     }
 
     @Test
@@ -333,7 +333,7 @@ class RedshiftContainerManagerTest {
 
     @Test
     void adoptOrStartAdoptsExistingContainerInsteadOfRecreatingIt() {
-        String containerName = "floci-redshift-" + ACCOUNT_ID + "-test-cluster";
+        String containerName = "floci-aws-redshift-" + ACCOUNT_ID + "-test-cluster";
         Container existing = mock(Container.class);
         when(existing.getId()).thenReturn("cont-existing");
         when(lifecycleManager.findByName(containerName)).thenReturn(Optional.of(existing));
@@ -352,7 +352,7 @@ class RedshiftContainerManagerTest {
 
     @Test
     void adoptOrStartFallsBackToStartWhenNoExistingContainer() {
-        String containerName = "floci-redshift-" + ACCOUNT_ID + "-test-cluster";
+        String containerName = "floci-aws-redshift-" + ACCOUNT_ID + "-test-cluster";
         when(lifecycleManager.findByName(containerName)).thenReturn(Optional.empty());
         ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
@@ -523,7 +523,7 @@ class RedshiftContainerManagerTest {
 
     @Test
     void adoptOrStartAttachesLogStreamerAndToleratesFailure() throws Exception {
-        String containerName = "floci-redshift-" + ACCOUNT_ID + "-test-cluster";
+        String containerName = "floci-aws-redshift-" + ACCOUNT_ID + "-test-cluster";
         Container existing = mock(Container.class);
         when(existing.getId()).thenReturn("cont-adopt-stream");
         when(lifecycleManager.findByName(containerName)).thenReturn(Optional.of(existing));

@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.C
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.EndpointInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
+import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -162,8 +163,8 @@ public class RedshiftContainerManager {
         return accountId + "/" + clusterIdentifier;
     }
 
-    private static String containerName(String accountId, String clusterIdentifier) {
-        return "floci-redshift-" + accountId + "-" + clusterIdentifier;
+    private String containerName(String accountId, String clusterIdentifier) {
+        return ContainerStorageHelper.dockerName(config, "redshift-" + accountId + "-" + clusterIdentifier);
     }
 
     public void takeSnapshot(String accountId, String clusterIdentifier, String username, String dbname, Path outputFile) {

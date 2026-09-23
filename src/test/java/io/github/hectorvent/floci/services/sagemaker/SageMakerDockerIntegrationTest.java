@@ -122,7 +122,7 @@ class SageMakerDockerIntegrationTest {
                 """.formatted(job, bucket)).then().statusCode(200);
         // Wait for the container to actually be running, blocked on an empty pipe, so the stop
         // races a real running container rather than one still being staged.
-        awaitContainerRunning("floci-sagemaker-training-" + job);
+        awaitContainerRunning("floci-aws-sagemaker-training-" + job);
         post("SageMaker.StopTrainingJob", "{\"TrainingJobName\":\"%s\"}".formatted(job)).then().statusCode(200);
         post("SageMaker.DescribeTrainingJob", "{\"TrainingJobName\":\"%s\"}".formatted(job))
                 .then().statusCode(200).body("TrainingJobStatus", equalTo("Stopped"));
@@ -154,7 +154,7 @@ class SageMakerDockerIntegrationTest {
         // rather than polling for the container means a container that is created and discarded
         // between two polls is still seen: events are queued and replayed from the watch's start.
         try (ContainerDestroyWatch discarded =
-                new ContainerDestroyWatch(dockerClient, "floci-sagemaker-endpoint-" + endpoint)) {
+                new ContainerDestroyWatch(dockerClient, "floci-aws-sagemaker-endpoint-" + endpoint)) {
             post("SageMaker.CreateEndpoint", "{\"EndpointName\":\"%s\",\"EndpointConfigName\":\"%s\"}".formatted(endpoint, cfg))
                     .then().statusCode(200);
             post("SageMaker.DeleteEndpoint", "{\"EndpointName\":\"%s\"}".formatted(endpoint)).then().statusCode(200);

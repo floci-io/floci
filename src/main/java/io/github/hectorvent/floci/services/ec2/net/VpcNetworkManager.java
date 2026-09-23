@@ -858,7 +858,7 @@ public class VpcNetworkManager {
 
     String networkName(String region, String vpcId) {
         return ContainerStorageHelper.dockerName(config,
-                "floci-vpc-" + config.port() + "-" + region + "-" + vpcId);
+                "vpc-" + config.port() + "-" + region + "-" + vpcId);
     }
 
     private SubnetBinding subnetBinding(String region, String subnetId) {

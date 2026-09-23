@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
+import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.IpPermission;
@@ -156,8 +157,13 @@ public class Ec2PortForwardManager {
             int appPort = entry.getKey();
             int hostPort = entry.getValue();
             portAllocator.markReserved(hostPort);
-            String name = forwardContainerName(instance.getInstanceId(), appPort);
-            if (lifecycleManager.findByName(name).isEmpty()) {
+            // A surviving sidecar is adopted by name, so check the pre-migration name too:
+            // otherwise a forward created before the rename is recreated while the old container
+            // still holds its host port, and the new one cannot bind.
+            String name = forwardContainerName(config, instance.getInstanceId(), appPort);
+            if (lifecycleManager.findByName(name).isEmpty()
+                    && lifecycleManager.findByName(legacyForwardContainerName(
+                            config, instance.getInstanceId(), appPort)).isEmpty()) {
                 LOG.infov("Recreating missing port-forward sidecar for EC2 instance {0} app port {1}",
                         instance.getInstanceId(), appPort);
                 if (!publishOn(instance, appPort, hostPort)) {
@@ -193,8 +199,8 @@ public class Ec2PortForwardManager {
                 return false;
             }
 
-            String name = forwardContainerName(instanceId, appPort);
-            lifecycleManager.removeIfExists(name);
+            String name = forwardContainerName(config, instanceId, appPort);
+            ContainerStorageHelper.removeStaleContainer(config, lifecycleManager, name);
 
             ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(config.services().ec2().socatImage())
                     .withName(name)
@@ -224,8 +230,8 @@ public class Ec2PortForwardManager {
     }
 
     void unpublish(Instance instance, int appPort) {
-        String name = forwardContainerName(instance.getInstanceId(), appPort);
-        lifecycleManager.removeIfExists(name);
+        String name = forwardContainerName(config, instance.getInstanceId(), appPort);
+        ContainerStorageHelper.removeStaleContainer(config, lifecycleManager, name);
         Integer hostPort = instance.getPublishedPorts().remove(appPort);
         if (hostPort != null) {
             portAllocator.release(hostPort);
@@ -247,8 +253,18 @@ public class Ec2PortForwardManager {
         }
     }
 
-    static String forwardContainerName(String instanceId, int appPort) {
-        return "floci-ec2-fwd-" + instanceId + "-" + appPort;
+    /** The unprefixed name token for a forward sidecar. */
+    static String forwardContainerToken(String instanceId, int appPort) {
+        return "ec2-fwd-" + instanceId + "-" + appPort;
+    }
+
+    static String forwardContainerName(EmulatorConfig config, String instanceId, int appPort) {
+        return ContainerStorageHelper.dockerName(config, forwardContainerToken(instanceId, appPort));
+    }
+
+    /** The name a pre-migration version gave the sidecar; only for finding or clearing survivors. */
+    static String legacyForwardContainerName(EmulatorConfig config, String instanceId, int appPort) {
+        return ContainerStorageHelper.legacyDockerName(config, forwardContainerToken(instanceId, appPort));
     }
 
     private NetworkTarget resolveInstanceTarget(Instance instance) {

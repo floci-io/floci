@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.opensearch;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -130,6 +131,10 @@ public class OpenSearchService implements ResourceProvider {
         domain.setEndpoint("");
         domain.setCreatedAt(Instant.now());
         domain.setVolumeId(String.format("%06x", new SecureRandom().nextInt(0xFFFFFF)));
+        // Stamp the volume name now, with the current prefix, so it is persisted rather than
+        // recomputed later. Only records predating this field fall back to the legacy name.
+        domain.setDockerVolumeName(ContainerStorageHelper.resourceName(
+                config, "opensearch", domain.getVolumeId(), domain.getDomainName()));
 
         if (clusterConfig != null) {
             domain.setClusterConfig(clusterConfig);

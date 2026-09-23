@@ -46,7 +46,7 @@ class NeptuneContainerManagerTest {
         // Rollback must still fall back to the deterministic name so nothing is orphaned.
         manager.stopByClusterId("my-cluster");
 
-        verify(lifecycleManager).removeIfExists("floci-neptune-my-cluster");
+        verify(lifecycleManager).removeIfExists("floci-aws-neptune-my-cluster");
     }
 
     @Test
@@ -169,7 +169,7 @@ class NeptuneContainerManagerTest {
                     "io.floci.resource-id", "cluster1",
                     "io.floci.account", "111111111111",
                     "io.floci.region", "eu-west-1"));
-            verify(builder).withName("floci-neptune-111111111111-eu-west-1-cluster1");
+            verify(builder).withName("floci-aws-neptune-111111111111-eu-west-1-cluster1");
         }
     }
 

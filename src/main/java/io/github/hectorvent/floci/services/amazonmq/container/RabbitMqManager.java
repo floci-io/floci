@@ -82,8 +82,8 @@ public class RabbitMqManager {
     }
 
     /** Deterministic container name for a broker, stable across emulator restarts. */
-    private static String containerName(String brokerId) {
-        return "floci-amazonmq-" + brokerId;
+    private String containerName(String brokerId) {
+        return ContainerStorageHelper.dockerName(config, "amazonmq-" + brokerId);
     }
 
     public void startContainer(Broker broker) {
@@ -93,7 +93,7 @@ public class RabbitMqManager {
                 broker.getBrokerName(), image);
 
         // Remove any stale container with the same name (e.g. leftover from a crash).
-        lifecycleManager.removeIfExists(containerName);
+        ContainerStorageHelper.removeStaleContainer(config, lifecycleManager, containerName);
 
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                 .withName(containerName)
@@ -135,9 +135,8 @@ public class RabbitMqManager {
         ContainerInfo info;
         try {
             if (ContainerStorageHelper.isNamedVolumeMode(config)) {
-                ContainerStorageHelper.applyStorage(specBuilder, lifecycleManager, config,
-                        "amazonmq", broker.getVolumeId(), broker.getBrokerId(),
-                        "/var/lib/rabbitmq");
+                ContainerStorageHelper.applyNamedVolume(specBuilder, lifecycleManager,
+                        resolveVolumeName(broker), "/var/lib/rabbitmq");
             } else {
                 String hostDataPath = ContainerStorageHelper.hostResourcePath(config, "amazonmq", broker.getBrokerId())
                         .toAbsolutePath().toString();
@@ -234,7 +233,7 @@ public class RabbitMqManager {
             // restart (it is intentionally not persisted; see Broker). Fall back to
             // the deterministic container name so an explicit DeleteBroker still
             // removes a container left running from a previous run.
-            lifecycleManager.removeIfExists(containerName(broker.getBrokerId()));
+            ContainerStorageHelper.removeStaleContainer(config, lifecycleManager, containerName(broker.getBrokerId()));
         }
     }
 
@@ -280,7 +279,21 @@ public class RabbitMqManager {
     }
 
     public void removeBrokerStorage(Broker broker) {
-        ContainerStorageHelper.removeStorage(config, lifecycleManager,
-                "amazonmq", broker.getVolumeId(), broker.getBrokerId());
+        ContainerStorageHelper.removeNamedVolume(config, lifecycleManager, resolveVolumeName(broker));
     }
+
+    /**
+     * The broker's Docker volume name, backfilled once for records written before the field existed:
+     * those predate the {@code floci-aws-} migration, so their data is in the legacy-named volume
+     * and must keep resolving there. Never use the live helper here, which would strand that data
+     * under a freshly created volume.
+     */
+    private String resolveVolumeName(Broker broker) {
+        if (broker.getDockerVolumeName() == null || broker.getDockerVolumeName().isBlank()) {
+            broker.setDockerVolumeName(ContainerStorageHelper.legacyResourceName(
+                    config, "amazonmq", broker.getVolumeId(), broker.getBrokerId()));
+        }
+        return broker.getDockerVolumeName();
+    }
+
 }

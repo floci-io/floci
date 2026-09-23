@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.lambda.launcher;
 
+import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -39,8 +40,8 @@ class ContainerLauncherVolumeNamingTest {
         String name = ContainerLauncher.codeVolumeName(
                 fnWithSha("my-fn", "AbC123+/xyz=deadbeefcafebabe0123456789"));
 
-        assertTrue(name.startsWith("floci-code-my-fn-"),
-                "should be floci-code-<functionName>-<hash> shaped, was: " + name);
+        assertTrue(name.startsWith("floci-aws-code-my-fn-"),
+                "should be floci-aws-code-<functionName>-<hash> shaped, was: " + name);
         assertTrue(DOCKER_VOLUME_NAME.matcher(name).matches(),
                 "must be a docker-volume-safe name, was: " + name);
     }
@@ -105,12 +106,15 @@ class ContainerLauncherVolumeNamingTest {
         String arn = "arn:aws:elasticfilesystem:us-east-1:000000000000:"
                 + "access-point/fsap-0123456789abcdef0";
 
-        String volumeName = ContainerLauncher.efsVolumeName(arn);
+        String token = ContainerLauncher.efsVolumeToken(arn);
 
-        assertEquals("floci-efs-fsap-0123456789abcdef0-"
+        assertEquals("efs-fsap-0123456789abcdef0-"
                         + "9d6eafd2aec94d4518a004f005725b4b3c673c1506436bb7368cfd5450fc0810",
-                volumeName);
-        assertEquals(volumeName, ContainerLauncher.efsVolumeName(arn));
+                token);
+        assertEquals(token, ContainerLauncher.efsVolumeToken(arn));
+        String volumeName = ContainerStorageHelper.dockerName(null, token);
+        assertTrue(volumeName.startsWith("floci-aws-efs-"),
+                "a new EFS volume takes this emulator's prefix, was: " + volumeName);
         assertTrue(DOCKER_VOLUME_NAME.matcher(volumeName).matches(),
                 "EFS volume name must be Docker-safe, was: " + volumeName);
     }
@@ -122,8 +126,8 @@ class ContainerLauncherVolumeNamingTest {
         String westArn = "arn:aws:elasticfilesystem:us-west-2:111111111111:"
                 + "access-point/fsap-0123456789abcdef0";
 
-        assertNotEquals(ContainerLauncher.efsVolumeName(eastArn),
-                ContainerLauncher.efsVolumeName(westArn),
+        assertNotEquals(ContainerLauncher.efsVolumeToken(eastArn),
+                ContainerLauncher.efsVolumeToken(westArn),
                 "the complete ARN must participate in volume identity");
     }
 

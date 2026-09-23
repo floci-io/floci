@@ -292,7 +292,7 @@ public class EksClusterManager {
         cluster.setHostPort(hostPort);
 
         // Remove any stale container
-        lifecycleManager.removeIfExists(containerName);
+        ContainerStorageHelper.removeStaleContainer(config, lifecycleManager, containerName);
 
         // k3s v1.34+ removed support for --kube-apiserver-arg=storage-backend and
         // --kube-apiserver-arg=etcd-servers. k3s now manages kine (embedded SQLite)
@@ -791,9 +791,23 @@ public class EksClusterManager {
      */
     private String resolveRestoredDockerName(Cluster cluster) {
         String qualified = accountQualifiedName(cluster);
-        String legacy = ContainerStorageHelper.resourceName(config, "eks", null, cluster.getName());
-        if (legacy.equals(qualified)) {
-            return legacy; // default account: the names never diverged
+
+        // A cluster created after account qualification but before the floci-aws- rename lives
+        // under the qualified name with the old prefix. Nothing else about it changed, so adopt
+        // it outright rather than putting it through the ownership check below.
+        String prefixLegacyQualified = ContainerStorageHelper.legacyDockerName(config, qualified);
+        if (!prefixLegacyQualified.equals(qualified)
+                && lifecycleManager.findByName(prefixLegacyQualified).isPresent()) {
+            LOG.infov("EKS cluster {0} keeps its pre-rename Docker name {1}",
+                    cluster.getName(), prefixLegacyQualified);
+            return prefixLegacyQualified;
+        }
+
+        // Clusters predating account qualification used the unqualified name, which also predates
+        // the rename, so it is resolved with the frozen legacy prefix.
+        String legacy = ContainerStorageHelper.legacyResourceName(config, "eks", null, cluster.getName());
+        if (legacy.equals(ContainerStorageHelper.legacyDockerName(config, qualified))) {
+            return qualified; // default account: the names never diverged
         }
         var legacySurvivor = lifecycleManager.findByName(legacy);
         if (legacySurvivor.isPresent()) {

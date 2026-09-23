@@ -105,6 +105,13 @@ public class MskCluster {
     @JsonProperty("volumeId")
     private String volumeId;
 
+    /**
+     * The Docker volume name. Stamped at creation with the current prefix; null on records
+     * written before this field existed, which are backfilled with the frozen legacy name so
+     * their data stays reachable.
+     */
+    private String dockerVolumeName;
+
     public MskCluster() {}
 
     public MskCluster(String clusterArn, String clusterName, String kafkaVersion) {
@@ -189,4 +196,8 @@ public class MskCluster {
 
     public String getVolumeId() { return volumeId; }
     public void setVolumeId(String volumeId) { this.volumeId = volumeId; }
+
+    public String getDockerVolumeName() { return dockerVolumeName; }
+
+    public void setDockerVolumeName(String dockerVolumeName) { this.dockerVolumeName = dockerVolumeName; }
 }

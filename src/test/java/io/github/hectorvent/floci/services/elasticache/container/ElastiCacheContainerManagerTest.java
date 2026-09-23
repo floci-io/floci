@@ -41,7 +41,7 @@ class ElastiCacheContainerManagerTest {
         // Rollback must still fall back to the deterministic name so nothing is orphaned.
         manager.stopByGroupId("my-group");
 
-        verify(lifecycleManager).removeIfExists("floci-valkey-my-group");
+        verify(lifecycleManager).removeIfExists("floci-aws-valkey-my-group");
     }
 
     @Test

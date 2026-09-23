@@ -180,7 +180,14 @@ public class FlociUiManager {
             this.profile = resolveProfile(image);
             String name = ContainerStorageHelper.dockerName(config, config.services().ui().containerName());
 
+            // The UI container survives shutdown by design and is adopted BY NAME, so look up the
+            // pre-migration name too. Otherwise an upgraded emulator orphans the old container
+            // while it still holds the fixed UI host port, and the new one cannot bind.
             Optional<Container> existing = lifecycleManager.findByName(name);
+            if (existing.isEmpty()) {
+                existing = lifecycleManager.findByName(ContainerStorageHelper.legacyDockerName(
+                        config, config.services().ui().containerName()));
+            }
             if (existing.isPresent()
                     && !replaceIfNotRunning(existing.get())
                     && !replaceIfEndpointDrifted(existing.get())) {

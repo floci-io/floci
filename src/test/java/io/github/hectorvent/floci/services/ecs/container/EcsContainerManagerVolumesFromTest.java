@@ -130,7 +130,7 @@ class EcsContainerManagerVolumesFromTest {
         when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
         InspectVolumeCmd inspectVolumeCmd = mock(InspectVolumeCmd.class);
         InspectVolumeResponse volume = mock(InspectVolumeResponse.class);
-        when(dockerClient.inspectVolumeCmd("floci-ecs-firelens-volumesfrom1")).thenReturn(inspectVolumeCmd);
+        when(dockerClient.inspectVolumeCmd("floci-aws-ecs-firelens-volumesfrom1")).thenReturn(inspectVolumeCmd);
         when(inspectVolumeCmd.exec()).thenReturn(volume);
         when(volume.getMountpoint()).thenReturn("/var/lib/docker/volumes/floci-ecs-firelens-volumesfrom1/_data");
         CopyArchiveToContainerCmd copyCmd = mock(CopyArchiveToContainerCmd.class, RETURNS_SELF);
@@ -160,8 +160,8 @@ class EcsContainerManagerVolumesFromTest {
         lifecycleOrder.verify(lifecycleManager).createAndStart(any(ContainerSpec.class));
         verify(routerBuilder).withVolumesFrom("source-id", false);
         verify(appBuilder).withVolumesFrom("source-id", true);
-        verify(lifecycleManager).ensureVolume("floci-ecs-firelens-volumesfrom1");
-        verify(routerBuilder).withNamedVolume("floci-ecs-firelens-volumesfrom1", "/var/run");
+        verify(lifecycleManager).ensureVolume("floci-aws-ecs-firelens-volumesfrom1");
+        verify(routerBuilder).withNamedVolume("floci-aws-ecs-firelens-volumesfrom1", "/var/run");
         verify(copyCmd).withRemotePath("/fluent-bit/etc");
         verify(routerBuilder, never()).withLoopbackPortBinding(anyInt(), anyInt());
         verify(appBuilder, never()).withNetworkMode(anyString());
@@ -178,7 +178,7 @@ class EcsContainerManagerVolumesFromTest {
         verify(logStreamer, never()).attach(eq("app-id"), any(), any(), any(), any());
         verify(logStreamer).attach(eq("source-id"), any(), any(), eq("us-east-1"), any());
         verify(logStreamer).attach(eq("router-id"), any(), any(), eq("us-east-1"), any());
-        assertEquals("floci-ecs-firelens-volumesfrom1", handle.getFirelensVolumeName());
+        assertEquals("floci-aws-ecs-firelens-volumesfrom1", handle.getFirelensVolumeName());
         assertEquals(List.of("source", "router", "app"), handle.getContainerIds().keySet().stream().toList());
         assertEquals(List.of("app", "router", "source"),
                 ecsTask.getContainers().stream().map(Container::getName).toList());

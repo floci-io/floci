@@ -51,12 +51,18 @@ public class EcrRegistryManager {
     private static final int CONTAINER_INTERNAL_PORT = 5000;
     private static final int REPOSITORY_DELETION_TIMEOUT_SECONDS = 10;
     private static final int REPOSITORY_DELETION_KILL_GRACE_SECONDS = 1;
-    private static final String NAMED_VOLUME = "floci-ecr-registry-data";
+    private static final String NAMED_VOLUME = "ecr-registry-data";
     private static final String REPOSITORIES_PATH = "/var/lib/registry/docker/registry/v2/repositories/";
 
     /** Matches an AWS-shaped ECR image URI: {@code <account>.dkr.ecr.<region>.amazonaws.com/<repo>[:tag]}. */
     private static final java.util.regex.Pattern AWS_ECR_URI =
             java.util.regex.Pattern.compile("^([0-9]{12})\\.dkr\\.ecr\\.([a-z0-9-]+)\\.amazonaws\\.com/(.+)$");
+
+    /**
+     * The container name actually in use. Differs from {@link #registryContainerName()} only when
+     * a legacy-named container surviving a pre-migration version was adopted.
+     */
+    private volatile String activeContainerName;
 
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
@@ -196,7 +202,10 @@ public class EcrRegistryManager {
      * the container name plus the container-internal port (not the published host port).
      */
     public String internalEndpoint() {
-        return "http://" + registryContainerName() + ":" + CONTAINER_INTERNAL_PORT;
+        // In-network clients reach the registry by container name, so this must be the name the
+        // container actually has: a legacy-named survivor keeps resolving through its own name.
+        String name = activeContainerName != null ? activeContainerName : registryContainerName();
+        return "http://" + name + ":" + CONTAINER_INTERNAL_PORT;
     }
 
     /** Returns a {@link RegistryHttpClient} bound to the current registry endpoint. */
@@ -266,17 +275,27 @@ public class EcrRegistryManager {
         }
         String name = registryContainerName();
 
-        // Check for existing container to adopt
+        // Check for existing container to adopt. The registry survives shutdown by design and is
+        // adopted BY NAME, so look up the pre-migration name too: otherwise an upgraded emulator
+        // orphans the old container while it still holds the registry host port and its data.
         var existing = lifecycleManager.findByName(name);
+        String adoptedName = name;
+        if (existing.isEmpty()) {
+            adoptedName = legacyRegistryContainerName();
+            existing = lifecycleManager.findByName(adoptedName);
+        }
         if (existing.isPresent()) {
             if (hasLoopbackBinding(existing.get())) {
+                this.activeContainerName = adoptedName;
                 adoptExisting(existing.get());
                 runReconcileOnce();
                 return;
             }
-            LOG.infov("Recreating ECR backing registry {0} with a loopback-only port binding", name);
+            // Recreated under the current name; the data volume is resolved by its own probe.
+            LOG.infov("Recreating ECR backing registry {0} with a loopback-only port binding", adoptedName);
             lifecycleManager.stopAndRemove(existing.get().getId(), null);
         }
+        this.activeContainerName = name;
 
         // Allocate port
         int chosenPort = portAllocator.allocate(
@@ -332,9 +351,27 @@ public class EcrRegistryManager {
         return ContainerStorageHelper.dockerName(config, config.services().ecr().registryContainerName());
     }
 
+    /** The name a pre-migration version gave this container; only for finding a survivor. */
+    private String legacyRegistryContainerName() {
+        return ContainerStorageHelper.legacyDockerName(config, config.services().ecr().registryContainerName());
+    }
+
+    /**
+     * The registry's data volume. It is a singleton with no persisted-name record, so probe: one
+     * created before the {@code floci-aws-} migration keeps its legacy name, and every image
+     * pushed into it, forever. Only when no legacy volume exists is the current name used.
+     */
+    private String registryVolumeName() {
+        String legacyName = ContainerStorageHelper.legacyDockerName(config, NAMED_VOLUME);
+        if (lifecycleManager.volumeExists(legacyName)) {
+            return legacyName;
+        }
+        return ContainerStorageHelper.dockerName(config, NAMED_VOLUME);
+    }
+
     private void addPersistenceMounts(ContainerBuilder.Builder specBuilder, List<String> env) {
         if (ContainerStorageHelper.isNamedVolumeMode(config)) {
-            String volumeName = ContainerStorageHelper.dockerName(config, NAMED_VOLUME);
+            String volumeName = registryVolumeName();
             lifecycleManager.ensureVolume(volumeName);
             specBuilder.withNamedVolume(volumeName, "/var/lib/registry");
             return;
@@ -565,8 +602,7 @@ public class EcrRegistryManager {
         if (!shouldPruneStorage() || !ContainerStorageHelper.isNamedVolumeMode(config)) {
             return;
         }
-        ContainerStorageHelper.removeNamedVolume(
-                config, lifecycleManager, ContainerStorageHelper.dockerName(config, NAMED_VOLUME));
+        ContainerStorageHelper.removeNamedVolume(config, lifecycleManager, registryVolumeName());
     }
 
     private boolean shouldPruneStorage() {

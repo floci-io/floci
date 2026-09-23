@@ -33,6 +33,7 @@ class TimestreamInfluxDbContainerManagerTest {
     private ContainerBuilder.Builder builder;
     private PortAllocator portAllocator;
     private TimestreamInfluxDbContainerManager manager;
+    private EmulatorConfig.StorageConfig storage;
 
     @BeforeEach
     void setUp() {
@@ -47,7 +48,7 @@ class TimestreamInfluxDbContainerManagerTest {
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
         EmulatorConfig.TimestreamInfluxDbServiceConfig influx = mock(EmulatorConfig.TimestreamInfluxDbServiceConfig.class);
-        EmulatorConfig.StorageConfig storage = mock(EmulatorConfig.StorageConfig.class);
+        storage = mock(EmulatorConfig.StorageConfig.class);
         when(config.services()).thenReturn(services);
         when(config.storage()).thenReturn(storage);
         when(services.timestreamInfluxdb()).thenReturn(influx);
@@ -65,7 +66,7 @@ class TimestreamInfluxDbContainerManagerTest {
         when(lifecycleManager.createAndStart(any())).thenReturn(new ContainerInfo("container-id",
                 Map.of(8086, new EndpointInfo("localhost", 8090))));
 
-        InfluxDbEndpoint endpoint = manager.start("abc1234567", "000000000000", "us-east-1",
+        InfluxDbEndpoint endpoint = manager.start("abc1234567", "floci-aws-timestream-influxdb-abc1234567", "000000000000", "us-east-1",
                 new InfluxDbSetup("admin", "password123", "acme", "metrics"), Map.of("INFLUXD_LOG_LEVEL", "debug"));
 
         assertEquals(new InfluxDbEndpoint("container-id", "localhost", 8090), endpoint);
@@ -76,8 +77,8 @@ class TimestreamInfluxDbContainerManagerTest {
         verify(builder).withEnv("DOCKER_INFLUXDB_INIT_BUCKET", "metrics");
         verify(builder).withEnv("INFLUXD_LOG_LEVEL", "debug");
         verify(builder).withPortBinding(8086, 8090);
-        verify(builder).withNamedVolume("floci-timestream-influxdb-abc1234567", "/var/lib/influxdb2");
-        verify(builder).withNamedVolume("floci-timestream-influxdb-abc1234567-config", "/etc/influxdb2");
+        verify(builder).withNamedVolume("floci-aws-timestream-influxdb-abc1234567", "/var/lib/influxdb2");
+        verify(builder).withNamedVolume("floci-aws-timestream-influxdb-abc1234567-config", "/etc/influxdb2");
         verify(builder).withLabels(Map.of(
                 "io.floci", "aws",
                 "io.floci.service", "timestream-influxdb",
@@ -91,7 +92,7 @@ class TimestreamInfluxDbContainerManagerTest {
         when(lifecycleManager.createAndStart(any())).thenReturn(new ContainerInfo("container-id",
                 Map.of(8086, new EndpointInfo("localhost", 8090))));
 
-        manager.start("abc1234567", "000000000000", "us-east-1", null, Map.of());
+        manager.start("abc1234567", "floci-aws-timestream-influxdb-abc1234567", "000000000000", "us-east-1", null, Map.of());
 
         verify(builder, never()).withEnv("DOCKER_INFLUXDB_INIT_MODE", "setup");
     }
@@ -100,18 +101,47 @@ class TimestreamInfluxDbContainerManagerTest {
     void failedStartRemovesTheContainerAndReleasesThePort() {
         when(lifecycleManager.createAndStart(any())).thenThrow(new RuntimeException("port already allocated"));
 
-        assertThrows(RuntimeException.class, () -> manager.start("abc1234567", "000000000000", "us-east-1",
+        assertThrows(RuntimeException.class, () -> manager.start("abc1234567", "floci-aws-timestream-influxdb-abc1234567", "000000000000", "us-east-1",
                 new InfluxDbSetup("admin", "password123", "acme", "metrics"), Map.of()));
 
         verify(portAllocator).release(8090);
-        verify(lifecycleManager, Mockito.times(2)).removeIfExists("floci-timestream-influxdb-abc1234567");
+        verify(lifecycleManager, Mockito.times(2)).removeIfExists("floci-aws-timestream-influxdb-abc1234567");
+    }
+
+    @Test
+    void volumeNamesCarryTheCurrentAndTheLegacyPrefix() {
+        assertEquals("floci-aws-timestream-influxdb-abc1234567", manager.volumeName("abc1234567"));
+        assertEquals("floci-timestream-influxdb-abc1234567", manager.legacyVolumeName("abc1234567"));
+    }
+
+    /** A record from before the migration keeps mounting the legacy-named volumes it was created with. */
+    @Test
+    void startMountsThePersistedVolumeNameRatherThanRecomputingIt() {
+        when(lifecycleManager.createAndStart(any())).thenReturn(new ContainerInfo("container-id",
+                Map.of(8086, new EndpointInfo("localhost", 8090))));
+
+        manager.start("abc1234567", "floci-timestream-influxdb-abc1234567", "000000000000", "us-east-1", null, Map.of());
+
+        verify(builder).withNamedVolume("floci-timestream-influxdb-abc1234567", "/var/lib/influxdb2");
+        verify(builder).withNamedVolume("floci-timestream-influxdb-abc1234567-config", "/etc/influxdb2");
+        verify(builder).withName("floci-aws-timestream-influxdb-abc1234567");
+    }
+
+    @Test
+    void removeStorageRemovesTheDataAndConfigVolumesByTheirPersistedName() {
+        when(storage.mode()).thenReturn("memory");
+
+        manager.removeStorage("floci-timestream-influxdb-abc1234567");
+
+        verify(lifecycleManager).removeVolume("floci-timestream-influxdb-abc1234567");
+        verify(lifecycleManager).removeVolume("floci-timestream-influxdb-abc1234567-config");
     }
 
     @Test
     void stopReleasesThePublishedPort() {
         when(lifecycleManager.createAndStart(any())).thenReturn(new ContainerInfo("container-id",
                 Map.of(8086, new EndpointInfo("localhost", 8090))));
-        manager.start("abc1234567", "000000000000", "us-east-1", null, Map.of());
+        manager.start("abc1234567", "floci-aws-timestream-influxdb-abc1234567", "000000000000", "us-east-1", null, Map.of());
 
         manager.stop("abc1234567", "container-id");
 

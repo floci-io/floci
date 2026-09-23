@@ -23,9 +23,9 @@ class ContainerLauncherNamePrefixTest {
     private static final Pattern DOCKER_NAME = Pattern.compile("^[a-zA-Z0-9][a-zA-Z0-9_.-]*$");
 
     @Test
-    void fallsBackToFlociWhenPrefixUnsetOrBlank() {
-        assertEquals("floci", ContainerLauncher.resolveContainerNamePrefix(config(null)));
-        assertEquals("floci", ContainerLauncher.resolveContainerNamePrefix(config("   ")));
+    void fallsBackToThisEmulatorsPrefixWhenUnsetOrBlank() {
+        assertEquals("floci-aws", ContainerLauncher.resolveContainerNamePrefix(config(null)));
+        assertEquals("floci-aws", ContainerLauncher.resolveContainerNamePrefix(config("   ")));
     }
 
     @Test
@@ -35,11 +35,11 @@ class ContainerLauncherNamePrefixTest {
     }
 
     @Test
-    void fallsBackToFlociWhenPrefixIsNotDockerSafe() {
+    void fallsBackToThisEmulatorsPrefixWhenNotDockerSafe() {
         // Docker names must start alphanumeric and allow only [A-Za-z0-9_.-] after that.
-        assertEquals("floci", ContainerLauncher.resolveContainerNamePrefix(config("-leading-dash")));
-        assertEquals("floci", ContainerLauncher.resolveContainerNamePrefix(config("has space")));
-        assertEquals("floci", ContainerLauncher.resolveContainerNamePrefix(config("has:colon")));
+        assertEquals("floci-aws", ContainerLauncher.resolveContainerNamePrefix(config("-leading-dash")));
+        assertEquals("floci-aws", ContainerLauncher.resolveContainerNamePrefix(config("has space")));
+        assertEquals("floci-aws", ContainerLauncher.resolveContainerNamePrefix(config("has:colon")));
     }
 
     @Test
@@ -56,7 +56,7 @@ class ContainerLauncherNamePrefixTest {
                 "must be a docker-volume-safe name, was: " + name);
         // The one-arg overload stays on the default prefix (used by pre-existing callers/tests).
         assertEquals(ContainerLauncher.codeVolumeName(fn),
-                ContainerLauncher.codeVolumeName("floci", fn));
+                ContainerLauncher.codeVolumeName(ContainerLauncher.DEFAULT_NAME_PREFIX, fn));
     }
 
     private static EmulatorConfig config(String prefix) {

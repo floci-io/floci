@@ -377,14 +377,14 @@ public class MwaaEnvironmentManager {
     /** Routed through {@link ContainerStorageHelper} so multiple Floci instances sharing one Docker
      *  daemon (via {@code FLOCI_DOCKER_RESOURCE_NAMESPACE}) don't collide, same as every other
      *  Docker-backed service (EKS, RDS, ...). {@code config} may be {@code null} — the helper treats
-     *  that as "no namespace configured" and returns the base name unchanged. */
+     *  that as "no namespace configured" and applies only the {@code floci-aws-} prefix. */
     static String dbContainerName(EmulatorConfig config, Environment environment) {
-        return ContainerStorageHelper.dockerName(config, "floci-mwaa-" + environmentIdentity(environment) + "-db");
+        return ContainerStorageHelper.dockerName(config, "mwaa-" + environmentIdentity(environment) + "-db");
     }
 
     static String airflowContainerName(EmulatorConfig config, Environment environment) {
         return ContainerStorageHelper.dockerName(config,
-                "floci-mwaa-" + environmentIdentity(environment) + "-airflow");
+                "mwaa-" + environmentIdentity(environment) + "-airflow");
     }
 
     private static String environmentIdentity(Environment environment) {

@@ -160,7 +160,11 @@ public class RdsContainerManager implements RdsBackendGate, Resettable {
             if (isDockerReachable()) {
                 throw e;
             }
-            discardNeverCreatedIdentity(effectiveRuntimeId, dockerVolumeName);
+            // The retained identity names the container, which is the normalised form of the
+            // volume name: a pre-migration volume keeps its legacy name while its container takes
+            // the current prefix, so the two are no longer the same string.
+            discardNeverCreatedIdentity(effectiveRuntimeId,
+                    ContainerStorageHelper.dockerName(config, dockerVolumeName));
             if (!dockerUnavailableLogged) {
                 dockerUnavailableLogged = true;
                 LOG.warnv("No Docker daemon is reachable from Floci ({0}). RDS metadata operations "
@@ -222,7 +226,10 @@ public class RdsContainerManager implements RdsBackendGate, Resettable {
         String exactVolumeName = requireSafeStorageComponent(
                 dockerVolumeName, "Docker volume name");
         int enginePort = engine.defaultPort();
-        String containerName = exactVolumeName;
+        // The volume keeps whatever name it was persisted under, including a legacy one, because
+        // it holds the data. The container is disposable, so it always takes the current prefix;
+        // dockerName normalises an already-prefixed input, which is what makes that possible.
+        String containerName = ContainerStorageHelper.dockerName(config, exactVolumeName);
         String storageKey = storageKey(storageResourceId, exactVolumeName);
         String containerKey = "container:" + containerName;
         if (!claimedRuntimes.add(effectiveRuntimeId)) {
@@ -245,8 +252,15 @@ public class RdsContainerManager implements RdsBackendGate, Resettable {
         String cleanupContainerId = containerName;
         RdsContainerHandle handle = null;
         try {
-            // Remove any stale container with the same name only after storage ownership is secured.
+            // Remove any stale container with the same name only after storage ownership is
+            // secured. The legacy-named twin must go too: a container left by a pre-migration
+            // version still holds this volume's engine lock, and failing to clear it must abort
+            // the start rather than surface later as a corrupt-looking database.
             lifecycleManager.removeIfExistsStrict(containerName);
+            String legacyContainerName = ContainerStorageHelper.legacyDockerName(config, exactVolumeName);
+            if (!legacyContainerName.equals(containerName)) {
+                lifecycleManager.removeIfExistsStrict(legacyContainerName);
+            }
             cleanupContainerId = null;
 
             // Build environment variables

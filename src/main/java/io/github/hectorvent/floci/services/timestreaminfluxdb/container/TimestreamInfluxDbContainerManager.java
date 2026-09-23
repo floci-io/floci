@@ -94,7 +94,23 @@ public class TimestreamInfluxDbContainerManager implements ContainerTeardown {
         }
     }
 
-    public InfluxDbEndpoint start(String resourceId, String accountId, String region,
+    /**
+     * The data volume name a newly created resource is stamped with: the current prefix, so the
+     * name is persisted on the record rather than recomputed later.
+     */
+    public String volumeName(String resourceId) {
+        return ContainerStorageHelper.resourceName(config, SERVICE, null, resourceId);
+    }
+
+    /**
+     * The data volume name as it was before the {@code floci-aws-} migration, for records that
+     * predate the persisted field: their data lives under this name and must keep resolving there.
+     */
+    public String legacyVolumeName(String resourceId) {
+        return ContainerStorageHelper.legacyResourceName(config, SERVICE, null, resourceId);
+    }
+
+    public InfluxDbEndpoint start(String resourceId, String dataVolumeName, String accountId, String region,
                                   InfluxDbSetup setup, Map<String, String> engineEnvironment) {
         EmulatorConfig.TimestreamInfluxDbServiceConfig serviceConfig = config.services().timestreamInfluxdb();
         String containerName = containerName(resourceId);
@@ -125,7 +141,7 @@ public class TimestreamInfluxDbContainerManager implements ContainerTeardown {
 
         ContainerInfo info;
         try {
-            applyVolumes(builder, resourceId);
+            applyVolumes(builder, resourceId, dataVolumeName);
             info = lifecycleManager.createAndStart(builder.build());
         } catch (RuntimeException e) {
             lifecycleManager.removeIfExists(containerName);
@@ -193,10 +209,11 @@ public class TimestreamInfluxDbContainerManager implements ContainerTeardown {
         }
     }
 
-    public void removeStorage(String resourceId) {
+    /** Removes the persisted data volume and its {@code -config} sibling according to storage policy. */
+    public void removeStorage(String dataVolumeName) {
         if (ContainerStorageHelper.isNamedVolumeMode(config)) {
-            ContainerStorageHelper.removeStorage(config, lifecycleManager, SERVICE, null, resourceId);
-            ContainerStorageHelper.removeStorage(config, lifecycleManager, SERVICE, null, resourceId + "-config");
+            ContainerStorageHelper.removeNamedVolume(config, lifecycleManager, dataVolumeName);
+            ContainerStorageHelper.removeNamedVolume(config, lifecycleManager, dataVolumeName + "-config");
         }
     }
 
@@ -304,11 +321,10 @@ public class TimestreamInfluxDbContainerManager implements ContainerTeardown {
         }
     }
 
-    private void applyVolumes(ContainerBuilder.Builder builder, String resourceId) {
+    private void applyVolumes(ContainerBuilder.Builder builder, String resourceId, String dataVolumeName) {
         if (ContainerStorageHelper.isNamedVolumeMode(config)) {
-            ContainerStorageHelper.applyStorage(builder, lifecycleManager, config, SERVICE, null, resourceId, DATA_PATH);
-            ContainerStorageHelper.applyStorage(builder, lifecycleManager, config, SERVICE, null,
-                    resourceId + "-config", CONFIG_PATH);
+            ContainerStorageHelper.applyNamedVolume(builder, lifecycleManager, dataVolumeName, DATA_PATH);
+            ContainerStorageHelper.applyNamedVolume(builder, lifecycleManager, dataVolumeName + "-config", CONFIG_PATH);
             return;
         }
         Path base = ContainerStorageHelper.hostResourcePath(config, SERVICE, resourceId);

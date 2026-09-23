@@ -472,7 +472,7 @@ class EksClusterManagerTest {
             manager.stopCluster(cluster);
 
             verify(lifecycleManager).stopAndRemove("cid-1", null);
-            verify(lifecycleManager).removeVolume("floci-eks-demo");
+            verify(lifecycleManager).removeVolume("floci-aws-eks-demo");
         }
 
         @Test
@@ -501,7 +501,7 @@ class EksClusterManagerTest {
             Cluster cluster = cluster();
             cluster.setAccountId("000000000000");
 
-            assertEquals("floci-eks-demo", manager.clusterResourceName(cluster));
+            assertEquals("floci-aws-eks-demo", manager.clusterResourceName(cluster));
         }
 
         @Test
@@ -539,7 +539,7 @@ class EksClusterManagerTest {
             cluster.setAccountId("999999999999");
             manager.restoreCluster(cluster);
 
-            assertEquals("floci-eks-999999999999.demo", cluster.getDockerName());
+            assertEquals("floci-aws-eks-999999999999.demo", cluster.getDockerName());
             assertEquals("cid-new", cluster.getContainerId());
             verify(lifecycleManager, never()).adopt(anyString(), any());
             verify(lifecycleManager, never()).removeIfExists("floci-eks-demo");
@@ -560,7 +560,7 @@ class EksClusterManagerTest {
             cluster.setAccountId("999999999999");
             manager.restoreCluster(cluster);
 
-            assertEquals("floci-eks-999999999999.demo", cluster.getDockerName());
+            assertEquals("floci-aws-eks-999999999999.demo", cluster.getDockerName());
             verify(lifecycleManager, never()).adopt(anyString(), any());
             verify(lifecycleManager, never()).removeIfExists("floci-eks-demo");
         }
@@ -581,7 +581,7 @@ class EksClusterManagerTest {
             cluster.setAccountId("999999999999");
             manager.restoreCluster(cluster);
 
-            assertEquals("floci-eks-999999999999.demo", cluster.getDockerName());
+            assertEquals("floci-aws-eks-999999999999.demo", cluster.getDockerName());
             assertEquals("cid-new", cluster.getContainerId());
             verify(inspectVolumeCmd).exec();
         }
@@ -595,8 +595,8 @@ class EksClusterManagerTest {
             cluster.setAccountId("999999999999");
             manager.startCluster(cluster);
 
-            assertEquals("floci-eks-999999999999.demo", cluster.getDockerName());
-            verify(lifecycleManager).removeIfExists("floci-eks-999999999999.demo");
+            assertEquals("floci-aws-eks-999999999999.demo", cluster.getDockerName());
+            verify(lifecycleManager).removeIfExists("floci-aws-eks-999999999999.demo");
         }
     }
 
@@ -1644,7 +1644,7 @@ class EksClusterManagerTest {
             cluster.setVersion("1.30");
 
             assertThrows(RuntimeException.class, () -> manager.startCluster(cluster));
-            verify(lifecycleManager, Mockito.times(2)).removeIfExists("floci-eks-fail-cluster");
+            verify(lifecycleManager, Mockito.times(2)).removeIfExists("floci-aws-eks-fail-cluster");
         }
     }
 

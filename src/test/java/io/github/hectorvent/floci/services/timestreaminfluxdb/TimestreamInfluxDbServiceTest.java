@@ -41,6 +41,9 @@ class TimestreamInfluxDbServiceTest {
 
     private static final String ACCOUNT = "000000000000";
     private static final String REGION = "us-east-1";
+    private static final String CURRENT_PREFIX = "floci-aws-timestream-influxdb-";
+    private static final String LEGACY_PREFIX = "floci-timestream-influxdb-";
+    private final AccountAwareStorageBackend<DbInstance> instances = AccountAwareStorageBackend.inMemory(ACCOUNT);
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private TimestreamInfluxDbContainerManager containerManager;
@@ -50,7 +53,9 @@ class TimestreamInfluxDbServiceTest {
     void setUp() {
         containerManager = mock(TimestreamInfluxDbContainerManager.class);
         when(containerManager.isDockerReachable()).thenReturn(true);
-        when(containerManager.start(anyString(), anyString(), anyString(), any(), anyMap()))
+        when(containerManager.volumeName(anyString())).thenAnswer(inv -> CURRENT_PREFIX + inv.getArgument(0));
+        when(containerManager.legacyVolumeName(anyString())).thenAnswer(inv -> LEGACY_PREFIX + inv.getArgument(0));
+        when(containerManager.start(anyString(), anyString(), anyString(), anyString(), any(), anyMap()))
                 .thenReturn(new InfluxDbEndpoint("container-1", "localhost", 18086));
         SecretsManagerService secrets = mock(SecretsManagerService.class);
         Secret secret = mock(Secret.class);
@@ -58,7 +63,7 @@ class TimestreamInfluxDbServiceTest {
         when(secrets.createSecret(anyString(), anyString(), isNull(), anyString(), isNull(), isNull(), eq(REGION)))
                 .thenReturn(secret);
         service = new TimestreamInfluxDbService(
-                AccountAwareStorageBackend.<DbInstance>inMemory(ACCOUNT),
+                instances,
                 AccountAwareStorageBackend.<DbCluster>inMemory(ACCOUNT),
                 AccountAwareStorageBackend.<DbParameterGroup>inMemory(ACCOUNT),
                 AccountAwareStorageBackend.<DbBackup>inMemory(ACCOUNT),
@@ -74,7 +79,8 @@ class TimestreamInfluxDbServiceTest {
                 """), REGION).resource();
 
         ArgumentCaptor<InfluxDbSetup> setup = ArgumentCaptor.forClass(InfluxDbSetup.class);
-        verify(containerManager).start(eq(created.getId()), eq(ACCOUNT), eq(REGION), setup.capture(), eq(Map.of()));
+        verify(containerManager).start(eq(created.getId()), eq(CURRENT_PREFIX + created.getId()), eq(ACCOUNT), eq(REGION),
+                setup.capture(), eq(Map.of()));
         assertEquals(new InfluxDbSetup("operator", "password123", "acme", "metrics"), setup.getValue());
 
         DbInstance stored = service.getDbInstance(json("{\"identifier\":\"" + created.getId() + "\"}"), REGION);
@@ -102,7 +108,7 @@ class TimestreamInfluxDbServiceTest {
         DbInstance stored = service.getDbInstance(json("{\"identifier\":\"" + id + "\"}"), REGION);
         assertEquals("AVAILABLE", stored.getStatus());
         assertNull(stored.getContainerId());
-        verify(containerManager, never()).start(anyString(), anyString(), anyString(), any(), anyMap());
+        verify(containerManager, never()).start(anyString(), anyString(), anyString(), anyString(), any(), anyMap());
     }
 
     @Test
@@ -114,7 +120,7 @@ class TimestreamInfluxDbServiceTest {
 
         createInstance("tuned-db", groupId);
 
-        verify(containerManager).start(anyString(), eq(ACCOUNT), eq(REGION), any(),
+        verify(containerManager).start(anyString(), anyString(), eq(ACCOUNT), eq(REGION), any(),
                 eq(Map.of("INFLUXD_LOG_LEVEL", "debug", "INFLUXD_HTTP_IDLE_TIMEOUT", "5m")));
     }
 
@@ -128,7 +134,8 @@ class TimestreamInfluxDbServiceTest {
         service.updateDbInstance(json("{\"identifier\":\"" + id + "\",\"dbParameterGroupIdentifier\":\"" + groupId + "\"}"),
                 REGION);
 
-        verify(containerManager).start(eq(id), eq(ACCOUNT), eq(REGION), isNull(), eq(Map.of("INFLUXD_UI_DISABLED", "true")));
+        verify(containerManager).start(eq(id), eq(CURRENT_PREFIX + id), eq(ACCOUNT), eq(REGION), isNull(),
+                eq(Map.of("INFLUXD_UI_DISABLED", "true")));
         assertEquals("AVAILABLE", service.getDbInstance(json("{\"identifier\":\"" + id + "\"}"), REGION).getStatus());
     }
 
@@ -142,7 +149,7 @@ class TimestreamInfluxDbServiceTest {
 
         service.deleteDbInstance(json("{\"identifier\":\"" + id + "\"}"), REGION);
         verify(containerManager).stop(id, "container-1");
-        verify(containerManager).removeStorage(id);
+        verify(containerManager).removeStorage(CURRENT_PREFIX + id);
     }
 
     @Test
@@ -166,7 +173,7 @@ class TimestreamInfluxDbServiceTest {
         assertEquals("COMPLETED", stored.getStatus());
         assertTrue(stored.isDataCaptured());
 
-        when(containerManager.start(anyString(), anyString(), anyString(), any(), anyMap()))
+        when(containerManager.start(anyString(), anyString(), anyString(), anyString(), any(), anyMap()))
                 .thenReturn(new InfluxDbEndpoint("container-2", "localhost", 18087));
         RestoreResult result = service.restoreFromDbBackup(
                 json("{\"name\":\"restored\",\"dbBackupId\":\"" + backup.getId() + "\"}"), REGION);
@@ -202,7 +209,7 @@ class TimestreamInfluxDbServiceTest {
                  "vpcSubnetIds":["subnet-abc"],"vpcSecurityGroupIds":["sg-abc"]}
                 """), REGION).resource().getId();
 
-        verify(containerManager).start(eq(clusterId), eq(ACCOUNT), eq(REGION), any(), anyMap());
+        verify(containerManager).start(eq(clusterId), eq(CURRENT_PREFIX + clusterId), eq(ACCOUNT), eq(REGION), any(), anyMap());
         DbCluster cluster = service.getDbCluster(json("{\"dbClusterId\":\"" + clusterId + "\"}"), REGION);
         assertEquals("AVAILABLE", cluster.getStatus());
         List<DbInstance> members = service.listDbInstancesForCluster(
@@ -224,7 +231,7 @@ class TimestreamInfluxDbServiceTest {
                  "vpcSubnetIds":["subnet-abc"],"vpcSecurityGroupIds":["sg-abc"]}
                 """.formatted(groupId)), REGION).resource().getId();
 
-        verify(containerManager, never()).start(anyString(), anyString(), anyString(), any(), anyMap());
+        verify(containerManager, never()).start(anyString(), anyString(), anyString(), anyString(), any(), anyMap());
         DbCluster cluster = service.getDbCluster(json("{\"dbClusterId\":\"" + clusterId + "\"}"), REGION);
         assertEquals("AVAILABLE", cluster.getStatus());
         assertEquals(8181, cluster.getPort());
@@ -288,6 +295,24 @@ class TimestreamInfluxDbServiceTest {
                  "dbStorageType":"InfluxIOIncludedT2","vpcSubnetIds":["subnet-abc"],"vpcSecurityGroupIds":["sg-abc"]}
                 """), REGION));
         assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    /**
+     * The upgrade path: a record persisted before the volume name was stamped is backfilled with
+     * the legacy name, so deleting it removes the volumes its data lives in, not freshly named
+     * empty ones.
+     */
+    @Test
+    void recordsWithoutAPersistedVolumeNameKeepTheirLegacyVolumes() throws Exception {
+        String id = createInstance("legacy-db", null).getId();
+        DbInstance stored = instances.getForAccount(ACCOUNT, REGION + ":" + id).orElseThrow();
+        stored.setDockerVolumeName(null);
+        instances.putForAccount(ACCOUNT, REGION + ":" + id, stored);
+
+        service.deleteDbInstance(json("{\"identifier\":\"" + id + "\"}"), REGION);
+
+        verify(containerManager).removeStorage(LEGACY_PREFIX + id);
+        assertEquals(LEGACY_PREFIX + id, stored.getDockerVolumeName());
     }
 
     private DbInstance createInstance(String name, String parameterGroupId) throws Exception {

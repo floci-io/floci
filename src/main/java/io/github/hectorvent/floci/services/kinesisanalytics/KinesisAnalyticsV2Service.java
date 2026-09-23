@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.kinesisanalytics;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -186,6 +187,10 @@ public class KinesisAnalyticsV2Service {
         FlinkApplication app = new FlinkApplication(applicationName, arn, runtimeEnvironment,
                 serviceExecutionRole, mode);
         app.setAccountId(accountId);
+        // Stamp the savepoints volume name now, with the current prefix, so it is persisted
+        // rather than recomputed later. Only records predating this field fall back to the
+        // legacy name.
+        app.setDockerVolumeName(containerManager.savepointsVolumeName(app));
         app.setApplicationDescription(applicationDescription);
         // AWS-faithful: a freshly created application is READY (not RUNNING); no container yet.
         app.setApplicationStatus(ApplicationStatus.READY);

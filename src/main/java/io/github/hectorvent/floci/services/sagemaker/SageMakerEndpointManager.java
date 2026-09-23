@@ -82,7 +82,7 @@ public class SageMakerEndpointManager implements ContainerTeardown, Resettable {
             if (image == null) {
                 throw new IllegalArgumentException("PrimaryContainer.Image is required");
             }
-            String name = ContainerStorageHelper.dockerName(config, "floci-sagemaker-endpoint-" + endpoint.endpointName);
+            String name = ContainerStorageHelper.dockerName(config, "sagemaker-endpoint-" + endpoint.endpointName);
             lifecycleManager.removeIfExists(name);
             ContainerBuilder.Builder builder = containerBuilder.newContainer(image)
                     .withName(name)

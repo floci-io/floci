@@ -24,6 +24,17 @@ public class FlinkApplication {
     @JsonProperty("ApplicationName")
     private String applicationName;
 
+    /**
+     * The savepoints Docker volume name. Stamped at creation with the current prefix; null on
+     * records written before this field existed, which are backfilled with the frozen legacy
+     * name so their existing savepoints stay reachable.
+     */
+    private String dockerVolumeName;
+
+    public String getDockerVolumeName() { return dockerVolumeName; }
+
+    public void setDockerVolumeName(String dockerVolumeName) { this.dockerVolumeName = dockerVolumeName; }
+
     @JsonProperty("ApplicationARN")
     private String applicationArn;
 

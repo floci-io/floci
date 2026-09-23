@@ -57,7 +57,7 @@ class EcrRegistryManagerTest {
 
     private static final int BASE_PORT = 6100;
     private static final int MAX_PORT = 6101; // pool of exactly two ports
-    private static final String REGISTRY_NAME = "floci-test-ecr-registry";
+    private static final String REGISTRY_NAME = "floci-aws-test-ecr-registry";
     private static final String AWS_ECR_IMAGE = "123456789012.dkr.ecr.us-east-1.amazonaws.com/backend-user:1";
 
     private PortAllocator portAllocator;
@@ -343,7 +343,7 @@ class EcrRegistryManagerTest {
         when(containerDetector.isRunningInContainer()).thenReturn(true);
         when(docker.resourceNamespace()).thenReturn(Optional.of("run/one"));
 
-        assertEquals("http://floci-run-one-test-ecr-registry:5000", manager.httpClient().baseUrl());
+        assertEquals("http://floci-aws-run-one-test-ecr-registry:5000", manager.httpClient().baseUrl());
     }
 
     @Test
@@ -532,7 +532,7 @@ class EcrRegistryManagerTest {
         manager.pruneStorage();
 
         verify(lifecycleManager).stopAndRemove(Mockito.eq("container-id"), Mockito.isNull());
-        verify(lifecycleManager).removeVolume("floci-ecr-registry-data");
+        verify(lifecycleManager).removeVolume("floci-aws-ecr-registry-data");
     }
 
     @Test
@@ -557,7 +557,7 @@ class EcrRegistryManagerTest {
         manager.shutdown();
 
         verify(lifecycleManager).stopAndRemove(Mockito.eq("container-id"), Mockito.isNull());
-        verify(lifecycleManager).removeVolume("floci-ecr-registry-data");
+        verify(lifecycleManager).removeVolume("floci-aws-ecr-registry-data");
     }
 
     @Test

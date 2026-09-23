@@ -41,6 +41,13 @@ public class DbCluster {
     private String region;
     private String containerId;
 
+    /**
+     * The data Docker volume name (the config volume is this plus {@code -config}). Stamped at
+     * creation with the current prefix; null on records written before this field existed,
+     * which are backfilled with the frozen legacy name so their data stays reachable.
+     */
+    private String dockerVolumeName;
+
     public DbCluster() {
     }
 
@@ -50,6 +57,8 @@ public class DbCluster {
     public void setRegion(String region) { this.region = region; }
     public String getContainerId() { return containerId; }
     public void setContainerId(String containerId) { this.containerId = containerId; }
+    public String getDockerVolumeName() { return dockerVolumeName; }
+    public void setDockerVolumeName(String dockerVolumeName) { this.dockerVolumeName = dockerVolumeName; }
 
     public String getId() { return id; }
     public void setId(String id) { this.id = id; }

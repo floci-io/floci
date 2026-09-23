@@ -88,7 +88,7 @@ public class SageMakerTrainingRunner implements ContainerTeardown, Resettable {
         Closeable logs = null;
         try {
             String image = SageMakerEndpointManager.string(job.algorithmSpecification.get("TrainingImage"));
-            String name = ContainerStorageHelper.dockerName(config, "floci-sagemaker-training-" + job.trainingJobName);
+            String name = ContainerStorageHelper.dockerName(config, "sagemaker-training-" + job.trainingJobName);
             lifecycleManager.removeIfExists(name);
             ContainerBuilder.Builder builder = containerBuilder.newContainer(image)
                     .withName(name)

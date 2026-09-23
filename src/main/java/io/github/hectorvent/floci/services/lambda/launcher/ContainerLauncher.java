@@ -71,8 +71,12 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
     private static final String TASK_DIR = "/var/task";
     private static final String RUNTIME_DIR = "/var/runtime";
 
-    /** Default base prefix for the containers and code volumes Lambda spawns. */
-    static final String DEFAULT_NAME_PREFIX = "floci";
+    /**
+     * Default base prefix for the containers and code volumes Lambda spawns: the prefix this
+     * emulator owns, so it cannot collide with a sibling Floci emulator on the same daemon.
+     * A user-configured prefix still replaces it wholesale.
+     */
+    static final String DEFAULT_NAME_PREFIX = ContainerStorageHelper.NAME_PREFIX;
     /** A prefix must be a legal Docker name on its own: names must start alphanumeric. */
     private static final java.util.regex.Pattern SAFE_NAME_PREFIX =
             java.util.regex.Pattern.compile("^[A-Za-z0-9][A-Za-z0-9_.-]*$");
@@ -80,7 +84,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
     /**
      * The base name prefix for Lambda containers and code volumes:
      * {@code floci.services.lambda.container-name-prefix} when set and Docker-safe,
-     * otherwise the default {@code floci}.
+     * otherwise {@link #DEFAULT_NAME_PREFIX}.
      */
     static String resolveContainerNamePrefix(EmulatorConfig config) {
         String configured = config.services().lambda().containerNamePrefix()
@@ -1133,13 +1137,33 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         return namePrefix + "-code-" + fname + "-" + h;
     }
 
-    static String efsVolumeName(String accessPointArn) {
+    /**
+     * The unprefixed name token for an access point's volume. Includes a hash of the whole ARN so
+     * two access points sharing a resource id in different accounts or Regions stay distinct.
+     */
+    static String efsVolumeToken(String accessPointArn) {
         int separator = Math.max(accessPointArn.lastIndexOf('/'), accessPointArn.lastIndexOf(':'));
         String resourceId = separator >= 0 ? accessPointArn.substring(separator + 1) : accessPointArn;
         if (resourceId.isBlank()) {
             throw new IllegalArgumentException("File system access point ARN must include a resource id");
         }
-        return "floci-efs-" + resourceId + "-" + sha256Hex(accessPointArn);
+        return "efs-" + resourceId + "-" + sha256Hex(accessPointArn);
+    }
+
+    /**
+     * The Docker volume backing an access point. EFS volumes hold user data but carry no
+     * persisted-name record, so probe: one created before the {@code floci-aws-} migration keeps
+     * its legacy name, and its data, forever. Only when no legacy volume exists is the current
+     * name used. The probe stays indefinitely; it is what makes upgrades across several versions
+     * safe.
+     */
+    private String efsVolumeName(String accessPointArn) {
+        String token = efsVolumeToken(accessPointArn);
+        String legacyName = ContainerStorageHelper.legacyDockerName(config, token);
+        if (lifecycleManager.volumeExists(legacyName)) {
+            return legacyName;
+        }
+        return ContainerStorageHelper.dockerName(config, token);
     }
 
     private static String sha256Hex(String value) {

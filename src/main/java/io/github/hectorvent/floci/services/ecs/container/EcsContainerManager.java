@@ -236,7 +236,7 @@ public class EcsContainerManager {
         if (firelensRouter != null) {
             firelensConfig = firelensConfig(task, taskDef, firelensRouter, firelensLogOptions);
             firelensExternalConfig = s3ExternalConfig(firelensRouter);
-            firelensVolumeName = ContainerStorageHelper.dockerName(config, "floci-ecs-firelens-" + taskId);
+            firelensVolumeName = ContainerStorageHelper.dockerName(config, "ecs-firelens-" + taskId);
             lifecycleManager.ensureVolume(firelensVolumeName);
             firelensSocketAddress = unixSocketAddress(firelensVolumeName);
         }
@@ -249,7 +249,7 @@ public class EcsContainerManager {
         try {
             for (ContainerDefinition def : launchOrder) {
                 awaitDependencies(def, containerIds);
-                String containerName = ContainerStorageHelper.dockerName(config, "floci-ecs-" + taskId + "-" + def.getName());
+                String containerName = ContainerStorageHelper.dockerName(config, "ecs-" + taskId + "-" + def.getName());
 
                 // RunTask containerOverrides matched by container name: command replaces
                 // the task-def command; environment is merged over the task-def environment.
@@ -1767,7 +1767,7 @@ public class EcsContainerManager {
 
     /**
      * Materialises an EFS-configured task volume as a shared local Docker named volume scoped to
-     * both the file system and the mount's effective root (see {@link #efsVolumeName}), then
+     * both the file system and the mount's effective root (see {@link #efsVolumeToken}), then
      * initialises the volume root's POSIX ownership to emulate the EFS access point's
      * RootDirectory.CreationInfo (no-op unless {@code floci.storage.efs} configures owner/permissions)
      * and applies the configured PosixUser emulation (uid[:gid] and/or supplementary group) so a
@@ -1799,15 +1799,31 @@ public class EcsContainerManager {
      * AWS an access point's own root directory takes precedence over any {@code rootDirectory}
      * on the volume.
      */
-    static String efsVolumeName(String fileSystemId, String accessPointId, String rootDirectory) {
+    static String efsVolumeToken(String fileSystemId, String accessPointId, String rootDirectory) {
         if (accessPointId != null && !accessPointId.isBlank()) {
-            return "floci-efs-" + fileSystemId + "-" + sha256Hex("accessPoint:" + accessPointId);
+            return "efs-" + fileSystemId + "-" + sha256Hex("accessPoint:" + accessPointId);
         }
         String normalizedRoot = normalizeRootDirectory(rootDirectory);
         if ("/".equals(normalizedRoot)) {
-            return "floci-efs-" + fileSystemId;
+            return "efs-" + fileSystemId;
         }
-        return "floci-efs-" + fileSystemId + "-" + sha256Hex(normalizedRoot);
+        return "efs-" + fileSystemId + "-" + sha256Hex(normalizedRoot);
+    }
+
+    /**
+     * The volume name for {@link #efsVolumeToken}. EFS volumes hold user data but carry no
+     * persisted-name record, so probe: one created before the {@code floci-aws-} migration keeps
+     * its legacy name, and its data, forever. Only when no legacy volume exists is the current
+     * name used. The probe stays indefinitely; it is what makes upgrades across several versions
+     * safe.
+     */
+    private String efsVolumeName(String fileSystemId, String accessPointId, String rootDirectory) {
+        String token = efsVolumeToken(fileSystemId, accessPointId, rootDirectory);
+        String legacyName = ContainerStorageHelper.legacyDockerName(config, token);
+        if (lifecycleManager.volumeExists(legacyName)) {
+            return legacyName;
+        }
+        return ContainerStorageHelper.dockerName(config, token);
     }
 
     /**

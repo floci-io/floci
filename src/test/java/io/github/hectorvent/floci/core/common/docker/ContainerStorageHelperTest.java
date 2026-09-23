@@ -14,21 +14,49 @@ import static org.mockito.Mockito.when;
 class ContainerStorageHelperTest {
 
     @Test
-    void resourceNamesStayUnchangedWithoutNamespace() {
-        assertEquals("floci-rds-db1", ContainerStorageHelper.resourceName("rds", null, "db1"));
-        assertEquals("floci-rds-vol1", ContainerStorageHelper.resourceName(config(""), "rds", "vol1", "db1"));
-        assertEquals("floci-opensearch-domain1", ContainerStorageHelper.resourceName(config(""), "opensearch", null, "domain1"));
-        assertEquals("floci-ec2-i-123", ContainerStorageHelper.dockerName(config(""), "floci-ec2-i-123"));
+    void resourceNamesCarryThisEmulatorsPrefix() {
+        assertEquals("floci-aws-rds-db1", ContainerStorageHelper.resourceName("rds", null, "db1"));
+        assertEquals("floci-aws-rds-vol1", ContainerStorageHelper.resourceName(config(""), "rds", "vol1", "db1"));
+        assertEquals("floci-aws-opensearch-domain1",
+                ContainerStorageHelper.resourceName(config(""), "opensearch", null, "domain1"));
+        assertEquals("floci-aws-ec2-i-123", ContainerStorageHelper.dockerName(config(""), "ec2-i-123"));
+    }
+
+    @Test
+    void alreadyPrefixedNamesAreNormalisedNotPrefixedTwice() {
+        // A persisted name is fed straight back in when a container is named after the volume it
+        // mounts, so prefixing has to be idempotent in both directions.
+        assertEquals("floci-aws-ec2-i-123", ContainerStorageHelper.dockerName(config(""), "floci-ec2-i-123"));
+        assertEquals("floci-aws-ec2-i-123", ContainerStorageHelper.dockerName(config(""), "floci-aws-ec2-i-123"));
+        assertEquals("floci-aws-ui", ContainerStorageHelper.dockerName(config(""), "floci-ui"));
+    }
+
+    @Test
+    void legacyNamesKeepTheFrozenPreMigrationShape() {
+        // Frozen forever: this is the name a pre-migration volume's data actually lives under.
+        assertEquals("floci-rds-vol1",
+                ContainerStorageHelper.legacyResourceName(config(""), "rds", "vol1", "db1"));
+        assertEquals("floci-rds-db1",
+                ContainerStorageHelper.legacyResourceName(config(""), "rds", null, "db1"));
+        assertEquals("floci-run-one-rds-vol1",
+                ContainerStorageHelper.legacyResourceName(config(" run/one "), "rds", "vol1", "db1"));
+        // Round-trips back from a current name, which is how a container derives its legacy twin.
+        assertEquals("floci-rds-vol1",
+                ContainerStorageHelper.legacyDockerName(config(""), "floci-aws-rds-vol1"));
     }
 
     @Test
     void resourceNamesIncludeSanitizedNamespaceWhenConfigured() {
         EmulatorConfig config = config(" run/one ");
 
-        assertEquals("floci-run-one-rds-db1", ContainerStorageHelper.resourceName(config, "rds", null, "db1"));
-        assertEquals("floci-run-one-rds-vol1", ContainerStorageHelper.resourceName(config, "rds", "vol1", "db1"));
-        assertEquals("floci-run-one-ec2-i-123", ContainerStorageHelper.dockerName(config, "floci-ec2-i-123"));
-        assertEquals("floci-run-one-ui", ContainerStorageHelper.dockerName(config, "floci-ui"));
+        // The namespace lands after the cloud token, never before it.
+        assertEquals("floci-aws-run-one-rds-db1", ContainerStorageHelper.resourceName(config, "rds", null, "db1"));
+        assertEquals("floci-aws-run-one-rds-vol1", ContainerStorageHelper.resourceName(config, "rds", "vol1", "db1"));
+        assertEquals("floci-aws-run-one-ec2-i-123", ContainerStorageHelper.dockerName(config, "floci-ec2-i-123"));
+        assertEquals("floci-aws-run-one-ui", ContainerStorageHelper.dockerName(config, "floci-ui"));
+        // Re-normalising either shape is a no-op.
+        assertEquals("floci-aws-run-one-ec2-i-123",
+                ContainerStorageHelper.dockerName(config, "floci-aws-run-one-ec2-i-123"));
     }
 
     @Test
@@ -43,7 +71,7 @@ class ContainerStorageHelperTest {
         EmulatorConfig config = config("..");
 
         assertEquals(Path.of("/tmp/floci/rds/db1"), ContainerStorageHelper.hostResourcePath(config, "rds", "db1"));
-        assertEquals("floci-rds-db1", ContainerStorageHelper.resourceName(config, "rds", null, "db1"));
+        assertEquals("floci-aws-rds-db1", ContainerStorageHelper.resourceName(config, "rds", null, "db1"));
         assertEquals(
                 Map.of("floci", "true", "floci_emulator", "floci-aws"),
                 ContainerStorageHelper.defaultLabels(config));
@@ -68,9 +96,10 @@ class ContainerStorageHelperTest {
                 ContainerStorageHelper.prefixedDockerName(config(""), "acme", "my-fn-abc123"));
         assertEquals("acme-run-one-my-fn-abc123",
                 ContainerStorageHelper.prefixedDockerName(config(" run/one "), "acme", "my-fn-abc123"));
-        // The default prefix through this path matches what dockerName produces.
-        assertEquals(ContainerStorageHelper.dockerName(config("run-one"), "floci-my-fn-abc123"),
-                ContainerStorageHelper.prefixedDockerName(config("run-one"), "floci", "my-fn-abc123"));
+        // This emulator's own prefix through this path matches what dockerName produces.
+        assertEquals(ContainerStorageHelper.dockerName(config("run-one"), "my-fn-abc123"),
+                ContainerStorageHelper.prefixedDockerName(
+                        config("run-one"), ContainerStorageHelper.NAME_PREFIX, "my-fn-abc123"));
     }
 
     @Test

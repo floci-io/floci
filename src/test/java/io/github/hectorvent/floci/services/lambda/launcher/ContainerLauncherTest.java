@@ -484,7 +484,7 @@ class ContainerLauncherTest {
 
         launcher.launch(fn);
 
-        String expectedVolumeName = "floci-efs-fsap-0123456789abcdef0-"
+        String expectedVolumeName = "floci-aws-efs-fsap-0123456789abcdef0-"
                 + "9d6eafd2aec94d4518a004f005725b4b3c673c1506436bb7368cfd5450fc0810";
         verify(lifecycleManager).ensureSharedVolume(expectedVolumeName,
                 OptionalInt.empty(), OptionalInt.empty(), Optional.empty(), "busybox:stable");

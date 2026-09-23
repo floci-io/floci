@@ -695,7 +695,9 @@ public class RdsService implements Resettable, ResourceProvider {
                 // bogus volume name that a later non-mock restore could try to reference.
                 instanceDockerVolumeName = cluster.getDockerVolumeName() != null
                         ? cluster.getDockerVolumeName()
-                        : volumeName(cluster.getVolumeId(),
+                        // No persisted name means a record written before that field, so its
+                        // data is under the legacy-prefixed volume.
+                        : legacyVolumeName(cluster.getVolumeId(),
                         resolvedClusterStorageResourceId(cluster));
             }
             instanceStorageResourceId = resolvedClusterStorageResourceId(cluster);
@@ -8329,8 +8331,29 @@ public class RdsService implements Resettable, ResourceProvider {
         return subnets.stream().map(Subnet::getSubnetId).toList();
     }
 
+    /** Volume name for a newly created resource: always the current {@code floci-aws-} prefix. */
     private String volumeName(String volumeId, String fallbackId) {
         return ContainerStorageHelper.resourceName(config, "rds", volumeId, fallbackId);
+    }
+
+    /**
+     * Volume name a pre-migration version would have produced, using the frozen legacy prefix.
+     *
+     * <p>Only for backfilling {@code dockerVolumeName} on records persisted before that field, or
+     * before the {@code floci-aws-} migration: their data lives in the legacy-named volume. Never
+     * use the live helper for a backfill, which would silently orphan that data under a freshly
+     * created volume. This backfill stays in the code indefinitely; it is what makes upgrading
+     * across several versions safe.
+     */
+    private String legacyVolumeName(String volumeId, String fallbackId) {
+        return ContainerStorageHelper.legacyResourceName(config, "rds", volumeId, fallbackId);
+    }
+
+    /** {@link #newVolumeName} in its pre-migration shape, for the same backfill reason. */
+    private String legacyNewVolumeName(String volumeId, String storageResourceId) {
+        String qualifiedVolumeId = volumeId == null || volumeId.isBlank()
+                ? null : storageResourceId + "-" + volumeId;
+        return legacyVolumeName(qualifiedVolumeId, storageResourceId);
     }
 
     private String newVolumeName(String volumeId, String storageResourceId) {
@@ -8352,10 +8375,10 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         if (instance.getContainerStorageResourceId() != null
                 && !instance.getContainerStorageResourceId().isBlank()) {
-            return newVolumeName(
+            return legacyNewVolumeName(
                     instance.getVolumeId(), instance.getContainerStorageResourceId());
         }
-        return volumeName(instance.getVolumeId(), instance.getDbInstanceIdentifier());
+        return legacyVolumeName(instance.getVolumeId(), instance.getDbInstanceIdentifier());
     }
 
     private String resolvedClusterStorageResourceId(DbCluster cluster) {
@@ -8371,10 +8394,10 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         if (cluster.getContainerStorageResourceId() != null
                 && !cluster.getContainerStorageResourceId().isBlank()) {
-            return newVolumeName(
+            return legacyNewVolumeName(
                     cluster.getVolumeId(), cluster.getContainerStorageResourceId());
         }
-        return volumeName(cluster.getVolumeId(), cluster.getDbClusterIdentifier());
+        return legacyVolumeName(cluster.getVolumeId(), cluster.getDbClusterIdentifier());
     }
 
     private static String firstNonBlank(String value, String fallback) {

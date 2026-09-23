@@ -45,7 +45,7 @@ class MemoryDbContainerManagerTest {
         // Rollback must still fall back to the deterministic name so nothing is orphaned.
         manager.stopByClusterName("my-cluster");
 
-        verify(lifecycleManager).removeIfExists("floci-memorydb-my-cluster");
+        verify(lifecycleManager).removeIfExists("floci-aws-memorydb-my-cluster");
     }
 
     @Test

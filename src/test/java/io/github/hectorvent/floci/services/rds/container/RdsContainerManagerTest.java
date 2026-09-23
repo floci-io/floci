@@ -356,7 +356,7 @@ class RdsContainerManagerTest {
         var spec = org.mockito.ArgumentCaptor.forClass(ContainerSpec.class);
         verify(lifecycleManager).create(spec.capture());
         assertEquals(dbPath.toString(), spec.getValue().binds().getFirst().getPath());
-        assertEquals("floci-rds-db1", spec.getValue().name());
+        assertEquals("floci-aws-rds-db1", spec.getValue().name());
         verify(logStreamer).attachForAccount(
                 "222222222222", "container-id", "/aws/rds/instance/db1/error",
                 "log-stream", "us-west-2", "rds:" + runtimeId);
@@ -912,7 +912,7 @@ class RdsContainerManagerTest {
                 runtimeId, "legacy", "legacy", "floci-rds-legacy-volume",
                 DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db"));
 
-        assertEquals("floci-rds-legacy-volume",
+        assertEquals("floci-aws-rds-legacy-volume",
                 manager.getActiveHandle(runtimeId).getContainerId());
         verify(lifecycleManager, never()).create(any());
         assertThrows(IllegalStateException.class, () -> manager.start(
@@ -1095,7 +1095,44 @@ class RdsContainerManagerTest {
         var spec = org.mockito.ArgumentCaptor.forClass(ContainerSpec.class);
         verify(lifecycleManager).removeIfExistsStrict("floci-rds-volume-a");
         verify(lifecycleManager).create(spec.capture());
-        assertEquals("floci-rds-volume-a", spec.getValue().name());
+        assertEquals("floci-aws-rds-volume-a", spec.getValue().name());
+    }
+
+    @Test
+    void aLegacyVolumeIsMountedAsIsWhileItsContainerTakesTheCurrentName() {
+        // The central asymmetry of the prefix migration. The volume holds the data, so it keeps
+        // whatever name it was persisted under; the container is disposable, so it is always
+        // normalised. Mounting the current name here would start an empty database.
+        EmulatorConfig config = config(Path.of("data"));
+        ContainerDetector containerDetector = mock(ContainerDetector.class);
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        stubStarts(lifecycleManager, new ContainerLifecycleManager.ContainerInfo(
+                "container-id", Map.of(3306, new ContainerLifecycleManager.EndpointInfo("db1", 3306))));
+        ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
+        lenient().when(logStreamer.generateLogStreamName(any())).thenReturn("log-stream");
+
+        RdsContainerManager manager = new RdsContainerManager(
+                new ContainerBuilder(config, mock(DockerHostResolver.class), mock(EmbeddedDnsServer.class)),
+                lifecycleManager,
+                logStreamer,
+                containerDetector,
+                config,
+                new RegionResolver("us-east-1", "000000000000"),
+                mock(ServiceConfigAccess.class));
+
+        manager.start(null, "db1", "db1", "floci-rds-db1",
+                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db");
+
+        var spec = org.mockito.ArgumentCaptor.forClass(ContainerSpec.class);
+        verify(lifecycleManager).create(spec.capture());
+        assertEquals("floci-aws-rds-db1", spec.getValue().name(),
+                "the container is renamed to the current prefix");
+        verify(lifecycleManager).ensureVolume("floci-rds-db1");
+        verify(lifecycleManager, org.mockito.Mockito.never()).ensureVolume("floci-aws-rds-db1");
+        // A pre-migration container under the old name holds the volume's engine lock, so it is
+        // cleared too before the new one starts.
+        verify(lifecycleManager).removeIfExistsStrict("floci-rds-db1");
+        verify(lifecycleManager).removeIfExistsStrict("floci-aws-rds-db1");
     }
 
     @Test
@@ -1124,7 +1161,7 @@ class RdsContainerManagerTest {
         var spec = org.mockito.ArgumentCaptor.forClass(ContainerSpec.class);
         verify(lifecycleManager).removeIfExistsStrict("floci-rds-db1");
         verify(lifecycleManager).create(spec.capture());
-        assertEquals("floci-rds-db1", spec.getValue().name());
+        assertEquals("floci-aws-rds-db1", spec.getValue().name());
         assertEquals("db1", handle.getRuntimeId());
         manager.stop(handle);
         verify(lifecycleManager).stopAndRemoveStrict(

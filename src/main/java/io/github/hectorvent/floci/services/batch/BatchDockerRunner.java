@@ -61,7 +61,7 @@ public class BatchDockerRunner implements ContainerTeardown {
     public BatchRunResult run(BatchJob job, int attemptNumber) {
         String logStreamName = logStreamer.generateLogStreamName(
                 job.getJobDefinitionName() + "/default/" + job.getJobId());
-        String containerName = ContainerStorageHelper.dockerName(config, "floci-batch-" + job.getJobId() + "-" + attemptNumber);
+        String containerName = ContainerStorageHelper.dockerName(config, "batch-" + job.getJobId() + "-" + attemptNumber);
         return runContainer(job, job.getJobId(), containerName, logStreamName,
                 "batch:" + job.getJobName() + ":" + job.getJobId(),
                 job.getContainerImage(), "Job definition container image is missing",
@@ -73,7 +73,7 @@ public class BatchDockerRunner implements ContainerTeardown {
         String logStreamName = logStreamer.generateLogStreamName(
                 job.getJobDefinitionName() + "/default/" + job.getJobId() + "/" + node.getNodeIndex());
         String containerName = ContainerStorageHelper.dockerName(config,
-                "floci-batch-" + job.getJobId() + "-" + attemptNumber + "-node" + node.getNodeIndex());
+                "batch-" + job.getJobId() + "-" + attemptNumber + "-node" + node.getNodeIndex());
         String inFlightKey = job.getJobId() + "#node" + node.getNodeIndex();
         return runContainer(job, inFlightKey, containerName, logStreamName,
                 "batch:" + job.getJobName() + ":" + job.getJobId() + ":node" + node.getNodeIndex(),

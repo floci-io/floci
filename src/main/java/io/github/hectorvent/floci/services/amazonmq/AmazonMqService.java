@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.amazonmq;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -128,6 +129,10 @@ public class AmazonMqService implements ResourceProvider {
                 engineVersion, deploymentMode, params.hostInstanceType());
         broker.setAccountId(accountId);
         broker.setVolumeId(String.format("%06x", new SecureRandom().nextInt(0xFFFFFF)));
+        // Stamp the volume name now, with the current prefix, so it is persisted rather than
+        // recomputed later. Only records predating this field fall back to the legacy name.
+        broker.setDockerVolumeName(ContainerStorageHelper.resourceName(
+                config, "amazonmq", broker.getVolumeId(), broker.getBrokerId()));
         broker.setPubliclyAccessible(params.publiclyAccessible());
         broker.setAutoMinorVersionUpgrade(params.autoMinorVersionUpgrade());
         if (params.users() != null) {

@@ -178,9 +178,8 @@ public class FlinkContainerManager {
         // Stop/StartApplication cycle — stopCluster() removes the JobManager container, but this
         // volume is only removed on DeleteApplication (removeSavepointsVolume), mirroring how other
         // Docker-backed services keep persistent data outside the container lifecycle.
-        ContainerStorageHelper.applyStorage(jmSpec, lifecycleManager, config, "kinesisanalytics",
-                runtimeKey(app) + "-savepoints", runtimeKey(app) + "-savepoints",
-                SAVEPOINTS_MOUNT);
+        ContainerStorageHelper.applyNamedVolume(jmSpec, lifecycleManager,
+                resolveVolumeName(app), SAVEPOINTS_MOUNT);
         if (!containerDetector.isRunningInContainer()) {
             jmSpec.withDynamicPort(JOBMANAGER_REST_PORT);
         } else {
@@ -580,8 +579,35 @@ public class FlinkContainerManager {
     /** Removes the persistent savepoints volume. Called only on DeleteApplication, never on a plain
      *  StopApplication (stopCluster), so snapshots survive a stop/restart cycle. */
     public void removeSavepointsVolume(FlinkApplication app) {
-        ContainerStorageHelper.removeStorage(config, lifecycleManager, "kinesisanalytics",
-                runtimeKey(app) + "-savepoints", runtimeKey(app) + "-savepoints");
+        ContainerStorageHelper.removeNamedVolume(config, lifecycleManager, resolveVolumeName(app));
+    }
+
+    /**
+     * The savepoints volume name a newly created application is stamped with: the current
+     * prefix over the account-and-region scoped runtime key, so the name is persisted rather
+     * than recomputed later.
+     */
+    public String savepointsVolumeName(FlinkApplication app) {
+        return ContainerStorageHelper.dockerName(config, savepointsVolumeToken(app));
+    }
+
+    /** The savepoints volume token; the name is this with a prefix applied. */
+    private String savepointsVolumeToken(FlinkApplication app) {
+        return "kinesisanalytics-" + runtimeKey(app) + "-savepoints";
+    }
+
+    /**
+     * The savepoints volume name, backfilled once for applications created before the field
+     * existed: those predate the {@code floci-aws-} migration, so their savepoints are in the
+     * legacy-named volume and must keep resolving there. Never use the live helper here, which
+     * would strand them under a freshly created volume.
+     */
+    private String resolveVolumeName(FlinkApplication app) {
+        if (app.getDockerVolumeName() == null || app.getDockerVolumeName().isBlank()) {
+            app.setDockerVolumeName(
+                    ContainerStorageHelper.legacyDockerName(config, savepointsVolumeToken(app)));
+        }
+        return app.getDockerVolumeName();
     }
 
     /**

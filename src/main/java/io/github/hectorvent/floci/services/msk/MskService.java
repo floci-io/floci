@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.msk;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Pagination;
@@ -134,6 +135,10 @@ public class MskService implements ResourceProvider {
         cluster.setAccountId(accountId);
         cluster.setResourceRegion(regionResolver.getRegion());
         cluster.setVolumeId(String.format("%06x", new SecureRandom().nextInt(0xFFFFFF)));
+        // Stamp the volume name now, with the current prefix, so it is persisted rather than
+        // recomputed later. Only records predating this field fall back to the legacy name.
+        cluster.setDockerVolumeName(ContainerStorageHelper.resourceName(
+                config, "msk", cluster.getVolumeId(), cluster.getClusterName()));
 
         if (request.getNumberOfBrokerNodes() != null) {
             cluster.setNumberOfBrokerNodes(request.getNumberOfBrokerNodes());
@@ -345,6 +350,10 @@ public class MskService implements ResourceProvider {
         cluster.setAccountId(accountId);
         cluster.setResourceRegion(regionResolver.getRegion());
         cluster.setVolumeId(String.format("%06x", new SecureRandom().nextInt(0xFFFFFF)));
+        // Stamp the volume name now, with the current prefix, so it is persisted rather than
+        // recomputed later. Only records predating this field fall back to the legacy name.
+        cluster.setDockerVolumeName(ContainerStorageHelper.resourceName(
+                config, "msk", cluster.getVolumeId(), cluster.getClusterName()));
 
         // Provisioned-only members must not surface on a serverless cluster.
         cluster.setNumberOfBrokerNodes(0);

@@ -39,6 +39,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
@@ -111,6 +112,51 @@ class RedpandaManagerTest {
         if (adminServer != null) {
             adminServer.stop(0);
         }
+    }
+
+    @Test
+    void aPersistedVolumeNameIsMountedVerbatim() {
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerInfo("container-1", Map.of(KAFKA_PORT, new EndpointInfo("h", KAFKA_PORT))));
+        when(config.storage().hostPersistentPath()).thenReturn("");
+        MskCluster cluster = newCluster();
+        cluster.setDockerVolumeName("floci-aws-msk-abc123");
+
+        manager.startContainer(cluster);
+
+        verify(lifecycleManager).ensureVolume("floci-aws-msk-abc123");
+        assertEquals("floci-aws-msk-abc123", cluster.getDockerVolumeName(),
+                "a persisted volume name must never be rewritten");
+    }
+
+    @Test
+    void aPreUpgradeClusterMountsItsLegacyVolumeAndKeepsThatName() {
+        // No persisted name means a record written before the field existed, so the cluster's
+        // data lives in the legacy-prefixed volume. Mounting the current name would silently
+        // start an empty broker and strand every topic.
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerInfo("container-2", Map.of(KAFKA_PORT, new EndpointInfo("h", KAFKA_PORT))));
+        when(config.storage().hostPersistentPath()).thenReturn("");
+        MskCluster cluster = newCluster();
+        cluster.setDockerVolumeName(null);
+
+        manager.startContainer(cluster);
+
+        verify(lifecycleManager).ensureVolume("floci-msk-abc123");
+        verify(lifecycleManager, never()).ensureVolume("floci-aws-msk-abc123");
+        assertEquals("floci-msk-abc123", cluster.getDockerVolumeName(),
+                "the legacy name must be backfilled onto the record, not recomputed each start");
+    }
+
+    @Test
+    void deletingAPreUpgradeClusterRemovesItsLegacyVolume() {
+        when(config.storage().mode()).thenReturn("memory");
+        MskCluster cluster = newCluster();
+        cluster.setDockerVolumeName(null);
+
+        manager.removeClusterStorage(cluster);
+
+        verify(lifecycleManager).removeVolume("floci-msk-abc123");
     }
 
     private MskCluster newCluster() {
@@ -199,7 +245,7 @@ class RedpandaManagerTest {
 
         int flagIndex = spec.cmd().indexOf("--advertise-kafka-addr");
         assertTrue(flagIndex >= 0, "cmd should contain --advertise-kafka-addr");
-        assertEquals("floci-msk-abc123:9092", spec.cmd().get(flagIndex + 1));
+        assertEquals("floci-aws-msk-abc123:9092", spec.cmd().get(flagIndex + 1));
 
         assertFalse(spec.portBindings().containsKey(KAFKA_PORT), "container mode should not publish ports to host");
         assertTrue(spec.exposedPorts().contains(KAFKA_PORT));
