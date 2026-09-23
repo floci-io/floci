@@ -3372,38 +3372,50 @@ public class S3Service implements Resettable, ResourceProvider {
     /**
      * Copies the parts, in order, into one array sized to the total upload. Disk parts are read
      * straight into their slot, so assembly never holds a second full-size copy of the object.
+     * In-memory parts are copied from the arrays that were measured, so their sizes cannot change
+     * in between.
      */
     private byte[] concatenateParts(String uploadId, List<Integer> partNumbers) throws IOException {
         Path partsDir = dataRoot.resolve(".multipart").resolve(uploadId);
         Map<Integer, byte[]> memoryParts = inMemory ? memoryMultipartStore.get(uploadId) : null;
+        byte[][] memoryData = inMemory ? new byte[partNumbers.size()][] : null;
         long[] partSizes = new long[partNumbers.size()];
         long totalSize = 0;
         for (int i = 0; i < partNumbers.size(); i++) {
             int num = partNumbers.get(i);
-            partSizes[i] = inMemory ? memoryParts.get(num).length : Files.size(partsDir.resolve(String.valueOf(num)));
+            if (inMemory) {
+                memoryData[i] = memoryParts.get(num);
+                partSizes[i] = memoryData[i].length;
+            } else {
+                partSizes[i] = Files.size(partsDir.resolve(String.valueOf(num)));
+            }
             totalSize += partSizes[i];
         }
         byte[] allData = new byte[Math.toIntExact(totalSize)];
         int offset = 0;
         for (int i = 0; i < partNumbers.size(); i++) {
-            int num = partNumbers.get(i);
             int size = (int) partSizes[i];
-            int copied;
             if (inMemory) {
-                byte[] partData = memoryParts.get(num);
-                copied = Math.min(partData.length, size);
-                System.arraycopy(partData, 0, allData, offset, copied);
+                System.arraycopy(memoryData[i], 0, allData, offset, size);
             } else {
+                int num = partNumbers.get(i);
                 try (InputStream in = Files.newInputStream(partsDir.resolve(String.valueOf(num)))) {
-                    copied = in.readNBytes(allData, offset, size);
+                    readPart(in, allData, offset, size, num);
                 }
-            }
-            if (copied != size) {
-                throw new IOException("Part " + num + " changed size during assembly");
             }
             offset += size;
         }
         return allData;
+    }
+
+    /**
+     * Reads exactly {@code size} bytes of part {@code partNumber} into {@code dest} at {@code offset},
+     * failing if the part holds a different number of bytes than was measured before assembly.
+     */
+    static void readPart(InputStream in, byte[] dest, int offset, int size, int partNumber) throws IOException {
+        if (in.readNBytes(dest, offset, size) != size || in.read() != -1) {
+            throw new IOException("Part " + partNumber + " changed size during assembly");
+        }
     }
 
     private boolean etagsMatch(String storedETag, String submittedETag) {

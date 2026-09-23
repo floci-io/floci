@@ -10,6 +10,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -135,6 +137,31 @@ class S3MultipartDiskAssemblyTest {
 
         assertThrows(AwsException.class,
                 () -> s3Service.getObject("test-bucket", "vanished.bin"));
+    }
+
+    @Test
+    void partReadCopiesExactlyTheMeasuredBytes() throws IOException {
+        byte[] dest = new byte[7];
+
+        S3Service.readPart(new ByteArrayInputStream("abcde".getBytes(StandardCharsets.UTF_8)), dest, 1, 5, 1);
+
+        assertArrayEquals(new byte[] {0, 'a', 'b', 'c', 'd', 'e', 0}, dest);
+    }
+
+    @Test
+    void partThatGrewAfterBeingMeasuredFailsAssembly() {
+        byte[] dest = new byte[5];
+
+        assertThrows(IOException.class, () -> S3Service.readPart(
+                new ByteArrayInputStream("abcdef".getBytes(StandardCharsets.UTF_8)), dest, 0, 5, 1));
+    }
+
+    @Test
+    void partThatShrankAfterBeingMeasuredFailsAssembly() {
+        byte[] dest = new byte[5];
+
+        assertThrows(IOException.class, () -> S3Service.readPart(
+                new ByteArrayInputStream("abcd".getBytes(StandardCharsets.UTF_8)), dest, 0, 5, 1));
     }
 
     private static byte[] repeatingBytes(byte value, int length) {
