@@ -59,11 +59,12 @@ public record ProvisionContext(CloudFormationTemplateEngine engine, String regio
     }
 
     /**
-     * Resolves a CloudFormation {@code [{Key, Value}]} tag list to a map, preserving template
-     * order. The whole node is resolved first so an {@code Fn::If} wrapping the list works, not
-     * just intrinsics inside each entry. Entries whose key resolves blank are skipped and a
-     * missing value becomes {@code ""}; an absent or non-array property yields an empty map, never
-     * null.
+     * Resolves a CloudFormation tag property to a map, preserving template order. Both registry
+     * shapes are read: the {@code [{Key, Value}]} list most types declare, and the
+     * {@code {key: value}} object types such as {@code AWS::Batch::*} declare. The whole node is
+     * resolved first so an {@code Fn::If} wrapping it works, not just intrinsics inside each entry.
+     * Entries whose key resolves blank are skipped and a missing value becomes {@code ""}; an
+     * absent property, or one of any other shape, yields an empty map, never null.
      *
      * <p>Deliberately does not validate. Callers needing AWS's tag rules (the 50-tag cap, the
      * reserved {@code aws:} prefix) keep their own validating parse, and callers using null to mean
@@ -75,7 +76,17 @@ public record ProvisionContext(CloudFormationTemplateEngine engine, String regio
             return tags;
         }
         JsonNode resolved = engine.resolveNode(props.get(name));
-        if (resolved == null || !resolved.isArray()) {
+        if (resolved == null) {
+            return tags;
+        }
+        if (resolved.isObject()) {
+            resolved.fields().forEachRemaining(entry -> {
+                String value = engine.resolve(entry.getValue());
+                tags.put(entry.getKey(), value == null ? "" : value);
+            });
+            return tags;
+        }
+        if (!resolved.isArray()) {
             return tags;
         }
         for (JsonNode tag : resolved) {

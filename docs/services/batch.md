@@ -25,6 +25,9 @@ Floci Batch implements the AWS Batch control plane for local integration tests. 
 | `TerminateJob` | `POST /v1/terminatejob` | Terminate a nonterminal job and stop its running container or nodes |
 | `DescribeJobs` | `POST /v1/describejobs` | Describe jobs by job ID |
 | `ListJobs` | `POST /v1/listjobs` | List jobs by queue, status, AWS `filters`, and pagination |
+| `ListTagsForResource` | `GET /v1/tags/{resourceArn}` | List the tags of a compute environment, job queue, job definition, or job |
+| `TagResource` | `POST /v1/tags/{resourceArn}` | Add or overwrite tags on a resource; tags the request omits are kept |
+| `UntagResource` | `DELETE /v1/tags/{resourceArn}?tagKeys=...` | Remove the named tag keys from a resource |
 
 ## Runner Modes
 

@@ -129,6 +129,21 @@ class ProvisionContextTest {
     }
 
     @Test
+    void resolveTagsReadsTheMapShapeSomeTypesDeclare() {
+        // AWS::Batch::* declare Tags as {key: value} rather than [{Key, Value}]; the map form
+        // resolves each value and keeps template order too.
+        Map<String, String> tags = context(null).resolveTags(
+                props("""
+                        {"Tags": {"zeta": "z", "alpha": "a", "empty": ""}}
+                        """),
+                "Tags");
+
+        assertEquals(List.of("zeta", "alpha", "empty"), List.copyOf(tags.keySet()));
+        assertEquals("z", tags.get("zeta"));
+        assertEquals("", tags.get("empty"));
+    }
+
+    @Test
     void resolveTagsSkipsBlankKeysAndNeverReturnsNull() {
         Map<String, String> blankKeys = context(null).resolveTags(
                 props("""

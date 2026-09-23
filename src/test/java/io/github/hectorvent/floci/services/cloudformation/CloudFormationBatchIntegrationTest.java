@@ -218,6 +218,7 @@ class CloudFormationBatchIntegrationTest {
                       "Properties": {
                         "JobQueueName": "%s",
                         "Priority": %d,
+                        "Tags": {"env": "%s"},
                         "ComputeEnvironmentOrder": [{
                           "Order": 1,
                           "ComputeEnvironment": {"Ref": "Compute"}
@@ -236,7 +237,7 @@ class CloudFormationBatchIntegrationTest {
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "CreateStack")
             .formParam("StackName", stackName)
-            .formParam("TemplateBody", template.formatted(computeName, 4, queueName, 1))
+            .formParam("TemplateBody", template.formatted(computeName, 4, queueName, 1, "green"))
         .when()
             .post("/")
         .then()
@@ -248,7 +249,7 @@ class CloudFormationBatchIntegrationTest {
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "UpdateStack")
             .formParam("StackName", stackName)
-            .formParam("TemplateBody", template.formatted(computeName, 8, queueName, 5))
+            .formParam("TemplateBody", template.formatted(computeName, 8, queueName, 5, "blue"))
         .when()
             .post("/")
         .then()
@@ -272,7 +273,12 @@ class CloudFormationBatchIntegrationTest {
         .then()
             .statusCode(200)
             .body("jobQueues", hasSize(1))
-            .body("jobQueues[0].priority", equalTo(5));
+            .body("jobQueues[0].priority", equalTo(5))
+            // Tags are tag-updatable on a queue: the kept queue carries the template's new value.
+            .body("jobQueues[0].tags.env", equalTo("blue"))
+            // Both entities are still ENABLED (AWS's default), which is what the delete below
+            // has to disable first: a delete that only works on DISABLED ones proves nothing.
+            .body("jobQueues[0].state", equalTo("ENABLED"));
 
         given()
             .contentType("application/x-www-form-urlencoded")

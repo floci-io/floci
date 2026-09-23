@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Function;
@@ -163,7 +164,7 @@ public class BatchCfnProvisioner implements CfnResourceProvisioner {
                 // deregistering the revision this update registered and naming the prior one again.
                 String registered = resource.getPhysicalId();
                 if (registered != null && !registered.equals(priorId)) {
-                    deregisterJobDefinition(registered);
+                    batchService.teardownJobDefinition(registered);
                 }
                 resource.setPhysicalId(priorId);
                 resource.getAttributes().put("Arn", priorId);
@@ -235,6 +236,10 @@ public class BatchCfnProvisioner implements CfnResourceProvisioner {
      * step from throwing on a resource someone removed out of band. {@code EcsCfnProvisioner} does
      * tolerate a blanket {@code ClientException} for its task-definition arm, so the divergence
      * here is deliberate rather than an oversight.
+     *
+     * <p>The look-up, the disable and the delete run under one hold of the service lock
+     * ({@code BatchService.teardown*}), so a resource removed out of band between them counts as
+     * gone rather than failing the disable, and a queue attached in between is still refused.
      */
     @Override
     public void delete(String resourceType, String physicalId, String region) {
@@ -242,60 +247,13 @@ public class BatchCfnProvisioner implements CfnResourceProvisioner {
             return;
         }
         switch (resourceType) {
-            case "AWS::Batch::ComputeEnvironment" -> deleteComputeEnvironment(physicalId);
-            case "AWS::Batch::JobQueue" -> deleteJobQueue(physicalId);
-            case "AWS::Batch::JobDefinition" -> deregisterJobDefinition(physicalId);
+            case "AWS::Batch::ComputeEnvironment" -> batchService.teardownComputeEnvironment(physicalId);
+            case "AWS::Batch::JobQueue" -> batchService.teardownJobQueue(physicalId);
+            case "AWS::Batch::JobDefinition" -> batchService.teardownJobDefinition(physicalId);
             default -> {
                 // no other type reaches this provisioner
             }
         }
-    }
-
-    private void deleteComputeEnvironment(String physicalId) {
-        if (!exists("computeEnvironments", physicalId,
-                req -> batchService.describeComputeEnvironments(req))) {
-            return;
-        }
-        ObjectNode disable = JsonNodeFactory.instance.objectNode();
-        disable.put("computeEnvironment", physicalId);
-        disable.put("state", "DISABLED");
-        batchService.updateComputeEnvironment(disable);
-
-        ObjectNode req = JsonNodeFactory.instance.objectNode();
-        req.put("computeEnvironment", physicalId);
-        batchService.deleteComputeEnvironment(req);
-    }
-
-    private void deleteJobQueue(String physicalId) {
-        if (!exists("jobQueues", physicalId, req -> batchService.describeJobQueues(req))) {
-            return;
-        }
-        ObjectNode disable = JsonNodeFactory.instance.objectNode();
-        disable.put("jobQueue", physicalId);
-        disable.put("state", "DISABLED");
-        batchService.updateJobQueue(disable);
-
-        ObjectNode req = JsonNodeFactory.instance.objectNode();
-        req.put("jobQueue", physicalId);
-        batchService.deleteJobQueue(req);
-    }
-
-    private void deregisterJobDefinition(String physicalId) {
-        // Unlike the other two, deregister throws when the definition is gone, so the existence
-        // check is what makes a repeated stack delete idempotent.
-        if (!exists("jobDefinitions", physicalId, req -> batchService.describeJobDefinitions(req))) {
-            return;
-        }
-        ObjectNode req = JsonNodeFactory.instance.objectNode();
-        req.put("jobDefinition", physicalId);
-        batchService.deregisterJobDefinition(req);
-    }
-
-    private boolean exists(String requestKey, String physicalId,
-                           Function<ObjectNode, ObjectNode> describe) {
-        ObjectNode req = JsonNodeFactory.instance.objectNode();
-        req.putArray(requestKey).add(physicalId);
-        return !describe.apply(req).path(requestKey).isEmpty();
     }
 
     private void provisionComputeEnvironment(StackResource r, JsonNode props, ProvisionContext ctx,
@@ -359,6 +317,11 @@ public class BatchCfnProvisioner implements CfnResourceProvisioner {
             update.set("computeEnvironmentOrder", computeEnvironmentOrder(props, ctx));
             batchService.updateJobQueue(update);
             arn = ctx.priorPhysicalId();
+            // Tags are tag-updatable on a job queue (unlike a compute environment, where they are
+            // createOnly), so a declared set is driven to the template's through the tag actions.
+            if (props != null && props.has("Tags")) {
+                reconcileTags(arn, ctx.resolveTags(props, "Tags"));
+            }
         } else {
             ObjectNode req = JsonNodeFactory.instance.objectNode();
             req.put("jobQueueName", name);
@@ -581,6 +544,21 @@ public class BatchCfnProvisioner implements CfnResourceProvisioner {
             retry.set("evaluateOnExit", resolved.get("EvaluateOnExit"));
         }
         return retry;
+    }
+
+    /** Drives a resource's tags to the template's: a dropped key is untagged, an unchanged set is left alone. */
+    private void reconcileTags(String arn, Map<String, String> desired) {
+        Map<String, String> current = batchService.listTagsForResource(arn);
+        if (desired.equals(current)) {
+            return;
+        }
+        List<String> stale = ProvisionContext.staleTagKeys(current, desired);
+        if (!stale.isEmpty()) {
+            batchService.untagResource(arn, stale);
+        }
+        if (!desired.isEmpty()) {
+            batchService.tagResource(arn, desired);
+        }
     }
 
     private void putTags(ObjectNode req, JsonNode props, ProvisionContext ctx) {

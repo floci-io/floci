@@ -46,6 +46,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Consumer;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
@@ -303,6 +304,146 @@ public class BatchService {
         }
         jobQueueStore.delete(queue.get().getJobQueueArn());
         return objectMapper.createObjectNode();
+    }
+
+    /**
+     * A stack delete needs look-up, disable and delete as one step. The three public calls each
+     * take the lock on their own, so between them a resource removed out of band would fail the
+     * disable instead of counting as already gone, and a queue attached after the disable would
+     * be seen only by the delete. Held once here, the sequence sees one state throughout; the
+     * refusals the delete raises (still attached to a queue) still propagate.
+     *
+     * @return whether the environment existed; a repeated stack delete gets {@code false}
+     */
+    public synchronized boolean teardownComputeEnvironment(String ref) {
+        Optional<BatchComputeEnvironment> env = resolveComputeEnvironmentOptional(ref);
+        if (env.isEmpty()) {
+            return false;
+        }
+        String arn = env.get().getComputeEnvironmentArn();
+        ObjectNode disable = objectMapper.createObjectNode();
+        disable.put("computeEnvironment", arn);
+        disable.put("state", "DISABLED");
+        updateComputeEnvironment(disable);
+        ObjectNode delete = objectMapper.createObjectNode();
+        delete.put("computeEnvironment", arn);
+        deleteComputeEnvironment(delete);
+        return true;
+    }
+
+    /** The job queue twin of {@link #teardownComputeEnvironment}. */
+    public synchronized boolean teardownJobQueue(String ref) {
+        Optional<BatchJobQueue> queue = resolveJobQueueOptional(ref);
+        if (queue.isEmpty()) {
+            return false;
+        }
+        String arn = queue.get().getJobQueueArn();
+        ObjectNode disable = objectMapper.createObjectNode();
+        disable.put("jobQueue", arn);
+        disable.put("state", "DISABLED");
+        updateJobQueue(disable);
+        ObjectNode delete = objectMapper.createObjectNode();
+        delete.put("jobQueue", arn);
+        deleteJobQueue(delete);
+        return true;
+    }
+
+    /**
+     * Look-up and deregister under one hold: deregister throws on a missing definition, so the
+     * look-up is what keeps a repeated stack delete idempotent, and it has to see the same state.
+     * A revision already INACTIVE counts as gone.
+     */
+    public synchronized boolean teardownJobDefinition(String ref) {
+        Optional<BatchJobDefinition> def = resolveJobDefinitionOptional(ref, false);
+        if (def.isEmpty()) {
+            return false;
+        }
+        ObjectNode deregister = objectMapper.createObjectNode();
+        deregister.put("jobDefinition", def.get().getJobDefinitionArn());
+        deregisterJobDefinition(deregister);
+        return true;
+    }
+
+    // ── tags ─────────────────────────────────────────────────────────────────
+
+    public synchronized Map<String, String> listTagsForResource(String resourceArn) {
+        return new LinkedHashMap<>(taggable(resourceArn).tags());
+    }
+
+    /**
+     * TagResource merges: tags already on the resource that the request omits are kept, as on
+     * AWS. The request map obeys the same rules as create-time tags (reserved {@code aws:} keys,
+     * key and value lengths, at most 50 entries), and so does the merged result: a request that
+     * fits on its own can still push a resource past 50, and nothing is stored when it does.
+     */
+    public synchronized void tagResource(String resourceArn, Map<String, String> tags) {
+        if (tags == null || tags.isEmpty()) {
+            throw client("tags must contain between 1 and 50 entries");
+        }
+        validateTags(tags);
+        Taggable target = taggable(resourceArn);
+        Map<String, String> merged = new LinkedHashMap<>(target.tags());
+        merged.putAll(tags);
+        validateTags(merged);
+        target.store().accept(merged);
+    }
+
+    public synchronized void untagResource(String resourceArn, List<String> tagKeys) {
+        if (tagKeys == null || tagKeys.isEmpty() || tagKeys.size() > MAX_TAGS) {
+            throw client("tagKeys must contain between 1 and 50 entries");
+        }
+        Taggable target = taggable(resourceArn);
+        Map<String, String> remaining = new LinkedHashMap<>(target.tags());
+        tagKeys.forEach(remaining::remove);
+        target.store().accept(remaining);
+    }
+
+    /** A resource's current tags and how to write them back, so the three tag actions share one look-up. */
+    private record Taggable(Map<String, String> tags, Consumer<Map<String, String>> store) {
+    }
+
+    private Taggable taggable(String resourceArn) {
+        String resource;
+        try {
+            resource = AwsArnUtils.parse(resourceArn).resource();
+        } catch (IllegalArgumentException e) {
+            throw client("Invalid resource ARN: " + resourceArn);
+        }
+        if (resource.startsWith("compute-environment/")) {
+            BatchComputeEnvironment env = resolveComputeEnvironment(resourceArn);
+            return new Taggable(tagsOf(env.getTags()), tags -> {
+                env.setTags(tags);
+                computeEnvironmentStore.put(env.getComputeEnvironmentArn(), env);
+            });
+        }
+        if (resource.startsWith("job-queue/")) {
+            BatchJobQueue queue = resolveJobQueueOptional(resourceArn)
+                    .orElseThrow(() -> client("Job queue not found: " + resourceArn));
+            return new Taggable(tagsOf(queue.getTags()), tags -> {
+                queue.setTags(tags);
+                jobQueueStore.put(queue.getJobQueueArn(), queue);
+            });
+        }
+        if (resource.startsWith("job-definition/")) {
+            BatchJobDefinition def = resolveJobDefinition(resourceArn, true);
+            return new Taggable(tagsOf(def.getTags()), tags -> {
+                def.setTags(tags);
+                putJobDefinition(def);
+            });
+        }
+        if (resource.startsWith("job/")) {
+            String jobId = resource.substring("job/".length());
+            BatchJob job = jobStore.get(jobId).orElseThrow(() -> client("Job not found: " + resourceArn));
+            return new Taggable(tagsOf(job.getTags()), tags -> {
+                job.setTags(tags);
+                jobStore.put(job.getJobId(), job);
+            });
+        }
+        throw client("Resource not found: " + resourceArn);
+    }
+
+    private static Map<String, String> tagsOf(Map<String, String> tags) {
+        return tags == null ? Map.of() : tags;
     }
 
     public ObjectNode describeJobQueues(JsonNode request) {

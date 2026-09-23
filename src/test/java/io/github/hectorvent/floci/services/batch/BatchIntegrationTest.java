@@ -755,6 +755,58 @@ class BatchIntegrationTest {
             .body("jobs", hasSize(0));
     }
 
+    @Test
+    void tagRoutesTagListAndUntagAResource() {
+        String suffix = uniqueSuffix();
+        String computeArn = createComputeEnvironment("batch-tags-ce-" + suffix);
+
+        givenJson("{\"tags\":{\"team\":\"a\",\"tier\":\"gold\"}}")
+        .when()
+            .post("/v1/tags/" + computeArn)
+        .then()
+            .statusCode(200);
+        givenJson("{\"tags\":{\"env\":\"blue\"}}")
+        .when()
+            .post("/v1/tags/" + computeArn)
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .get("/v1/tags/" + computeArn)
+        .then()
+            .statusCode(200)
+            .body("tags.team", equalTo("a"))
+            .body("tags.tier", equalTo("gold"))
+            .body("tags.env", equalTo("blue"));
+
+        given()
+            .header("Authorization", AUTH)
+            .queryParam("tagKeys", "tier", "env")
+        .when()
+            .delete("/v1/tags/" + computeArn)
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .get("/v1/tags/" + computeArn)
+        .then()
+            .statusCode(200)
+            .body("tags.team", equalTo("a"))
+            .body("tags.size()", equalTo(1));
+
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .get("/v1/tags/arn:aws:batch:us-east-1:000000000000:job-queue/never-" + suffix)
+        .then()
+            .statusCode(400)
+            .header("X-Amzn-Errortype", "ClientException");
+    }
+
     private static io.restassured.specification.RequestSpecification givenJson(String body) {
         return given()
                 .header("Authorization", AUTH)

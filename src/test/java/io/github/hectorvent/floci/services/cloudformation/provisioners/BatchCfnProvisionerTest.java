@@ -12,6 +12,8 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
 import java.util.HashMap;
+import java.util.Map;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -169,6 +171,39 @@ class BatchCfnProvisionerTest {
     }
 
     @Test
+    void updatingAJobQueueReconcilesItsDeclaredTags() {
+        // JobQueue tags are tag-updatable, so a kept queue is driven to the template's set: the
+        // dropped key is untagged, the rest tagged, through the same tag actions the API serves.
+        when(batch.listTagsForResource(JQ_ARN)).thenReturn(Map.of("team", "a", "stale", "x"));
+        StackResource r = resource("AWS::Batch::JobQueue", "Queue");
+        r.getAttributes().put("JobQueueName", "queue");
+        ObjectNode props = mapper.createObjectNode();
+        props.put("JobQueueName", "queue");
+        props.put("Priority", "9");
+        props.putObject("Tags").put("team", "a").put("tier", "gold");
+
+        provisioner.provision(r, props, updateCtx(JQ_ARN));
+
+        verify(batch).untagResource(JQ_ARN, List.of("stale"));
+        verify(batch).tagResource(JQ_ARN, Map.of("team", "a", "tier", "gold"));
+    }
+
+    @Test
+    void updatingAJobQueueWithoutDeclaredTagsLeavesItsTagsAlone() {
+        StackResource r = resource("AWS::Batch::JobQueue", "Queue");
+        r.getAttributes().put("JobQueueName", "queue");
+        ObjectNode props = mapper.createObjectNode();
+        props.put("JobQueueName", "queue");
+        props.put("Priority", "9");
+
+        provisioner.provision(r, props, updateCtx(JQ_ARN));
+
+        verify(batch, never()).listTagsForResource(anyString());
+        verify(batch, never()).untagResource(anyString(), any());
+        verify(batch, never()).tagResource(anyString(), any());
+    }
+
+    @Test
     void updatingAJobQueueUpdatesInPlace() {
         StackResource r = resource("AWS::Batch::JobQueue", "Queue");
         r.getAttributes().put("JobQueueName", "queue");
@@ -308,58 +343,18 @@ class BatchCfnProvisionerTest {
     // ── delete ───────────────────────────────────────────────────────────────
 
     @Test
-    void deletingAJobQueueDisablesItFirst() {
-        // DeleteJobQueue refuses an ENABLED queue, as on AWS, so the disable has to come first
-        // and in this order.
-        when(batch.describeJobQueues(any())).thenReturn(describeWith("jobQueues", JQ_ARN));
-
-        provisioner.delete("AWS::Batch::JobQueue", JQ_ARN, "us-east-1");
-
-        InOrder order = inOrder(batch);
-        ArgumentCaptor<JsonNode> disable = ArgumentCaptor.forClass(JsonNode.class);
-        order.verify(batch).updateJobQueue(disable.capture());
-        order.verify(batch).deleteJobQueue(any());
-        assertEquals("DISABLED", disable.getValue().path("state").asText());
-        assertEquals(JQ_ARN, disable.getValue().path("jobQueue").asText());
-    }
-
-    @Test
-    void deletingAComputeEnvironmentDisablesItFirst() {
-        when(batch.describeComputeEnvironments(any()))
-                .thenReturn(describeWith("computeEnvironments", CE_ARN));
-
-        provisioner.delete("AWS::Batch::ComputeEnvironment", CE_ARN, "us-east-1");
-
-        InOrder order = inOrder(batch);
-        ArgumentCaptor<JsonNode> disable = ArgumentCaptor.forClass(JsonNode.class);
-        order.verify(batch).updateComputeEnvironment(disable.capture());
-        order.verify(batch).deleteComputeEnvironment(any());
-        assertEquals("DISABLED", disable.getValue().path("state").asText());
-    }
-
-    @Test
-    void deletingAJobDefinitionDeregistersIt() {
-        when(batch.describeJobDefinitions(any())).thenReturn(describeWith("jobDefinitions", JD_ARN));
-
-        provisioner.delete("AWS::Batch::JobDefinition", JD_ARN, "us-east-1");
-
-        ArgumentCaptor<JsonNode> req = ArgumentCaptor.forClass(JsonNode.class);
-        verify(batch).deregisterJobDefinition(req.capture());
-        assertEquals(JD_ARN, req.getValue().path("jobDefinition").asText());
-    }
-
-    @Test
-    void deletingAnEntityThatIsAlreadyGoneDoesNothing() {
-        // A repeated stack delete must be idempotent. It matters most for the job definition:
-        // deregister throws when the definition is missing, so the existence check is the guard.
-        when(batch.describeComputeEnvironments(any())).thenReturn(describeEmpty("computeEnvironments"));
-        when(batch.describeJobQueues(any())).thenReturn(describeEmpty("jobQueues"));
-        when(batch.describeJobDefinitions(any())).thenReturn(describeEmpty("jobDefinitions"));
-
+    void deletingTearsEachTypeDownThroughTheServiceInOneStep() {
+        // The disable-before-delete order and the already-gone guard live in BatchService's
+        // teardown methods, under one hold of its lock (BatchServiceTest pins them); the
+        // provisioner must not re-implement them as separately locked calls.
         provisioner.delete("AWS::Batch::ComputeEnvironment", CE_ARN, "us-east-1");
         provisioner.delete("AWS::Batch::JobQueue", JQ_ARN, "us-east-1");
         provisioner.delete("AWS::Batch::JobDefinition", JD_ARN, "us-east-1");
 
+        verify(batch).teardownComputeEnvironment(CE_ARN);
+        verify(batch).teardownJobQueue(JQ_ARN);
+        verify(batch).teardownJobDefinition(JD_ARN);
+        verify(batch, never()).describeComputeEnvironments(any());
         verify(batch, never()).updateComputeEnvironment(any());
         verify(batch, never()).deleteComputeEnvironment(any());
         verify(batch, never()).updateJobQueue(any());
@@ -371,9 +366,7 @@ class BatchCfnProvisionerTest {
     void aRefusedDeletePropagatesInsteadOfBeingSwallowed() {
         // The failure that must not be tolerated: a compute environment still attached to a queue.
         // Swallowing it would report a green stack delete over a resource that is still there.
-        when(batch.describeComputeEnvironments(any()))
-                .thenReturn(describeWith("computeEnvironments", CE_ARN));
-        when(batch.deleteComputeEnvironment(any())).thenThrow(new AwsException("ClientException",
+        when(batch.teardownComputeEnvironment(CE_ARN)).thenThrow(new AwsException("ClientException",
                 "Cannot delete compute environment still associated with a job queue: envy", 400));
 
         AwsException thrown = assertThrows(AwsException.class,
@@ -386,8 +379,7 @@ class BatchCfnProvisionerTest {
         provisioner.delete("AWS::Batch::JobQueue", null, "us-east-1");
         provisioner.delete("AWS::Batch::JobQueue", "", "us-east-1");
 
-        verify(batch, never()).describeJobQueues(any());
-        verify(batch, never()).deleteJobQueue(any());
+        verify(batch, never()).teardownJobQueue(any());
     }
 
     // ── replacement cleanup ──────────────────────────────────────────────────
@@ -441,9 +433,7 @@ class BatchCfnProvisionerTest {
 
         assertTrue(result.applicable());
         assertTrue(result.complete(), "the displaced environment was deleted");
-        ArgumentCaptor<JsonNode> deleted = ArgumentCaptor.forClass(JsonNode.class);
-        verify(batch).deleteComputeEnvironment(deleted.capture());
-        assertEquals(CE_ARN, deleted.getValue().path("computeEnvironment").asText());
+        verify(batch).teardownComputeEnvironment(CE_ARN);
     }
 
     @Test
@@ -599,10 +589,8 @@ class BatchCfnProvisionerTest {
 
         assertTrue(provisioner.rollbackUpdate(r));
 
-        ArgumentCaptor<JsonNode> deregistered = ArgumentCaptor.forClass(JsonNode.class);
-        verify(batch).deregisterJobDefinition(deregistered.capture());
-        assertEquals(JD_ARN + "-r2", deregistered.getValue().path("jobDefinition").asText(),
-                "the revision the failed update registered, not the one it started from");
+        verify(batch).teardownJobDefinition(JD_ARN + "-r2");
+        verify(batch, never()).teardownJobDefinition(JD_ARN);
         assertEquals(JD_ARN, r.getPhysicalId(), "the resource names the prior revision again");
     }
 
