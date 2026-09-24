@@ -256,7 +256,8 @@ the rewritten query is sent to PostgreSQL. The temporary table is not visible to
 connection. Under the Extended Query protocol, the temporary table is dropped eagerly once
 the cursor is exhausted or closed. Under the Simple Query protocol, the table remains
 session-scoped and is cleaned up when the connection terminates, avoiding race conditions
-with the streaming backend-to-client pump.
+with the streaming backend-to-client pump. Each query materializes its own table, so a
+long-lived or pooled connection holds one copy per query until it closes.
 
 `IAM_ROLE` is parsed and retained in the external schema metadata. Phase 1 does not yet assume
 the role or evaluate its IAM policy for Spectrum reads. S3 authorization therefore follows the

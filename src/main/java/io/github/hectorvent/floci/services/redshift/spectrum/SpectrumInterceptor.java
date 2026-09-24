@@ -84,6 +84,8 @@ public final class SpectrumInterceptor {
      * as the Extended Query path in {@code ExtendedSpectrumExchange}. Under the Simple Query protocol,
      * the temp table is session-scoped (via PostgreSQL {@code CREATE TEMP TABLE}) and cleaned up when
      * the connection terminates, avoiding race conditions with the streaming backend-to-client pump.
+     * Each query materializes its own table, so a long-lived or pooled connection holds one copy per
+     * query until it closes.
      */
     public void cleanup(Socket backend, SpectrumMaterializer.Materialization materialization) {
         materializer.cleanup(backend, materialization);
