@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.kms;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -38,6 +39,9 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 class KmsIntegrationTest {
 
     private static final String KMS_CONTENT_TYPE = "application/x-amz-json-1.1";
+
+    @Inject
+    KmsService kmsService;
 
     @BeforeAll
     static void configureRestAssured() {
@@ -137,6 +141,34 @@ class KmsIntegrationTest {
             .statusCode(200)
             .body("KeyMetadata.Description", equalTo(""))
             .extract().path("KeyMetadata.KeyId");
+
+        given()
+            .header("X-Amz-Target", "TrentService.DescribeKey")
+            .contentType(KMS_CONTENT_TYPE)
+            .body("""
+                {
+                    "KeyId": "%s"
+                }
+                """.formatted(keyId))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("KeyMetadata.Description", equalTo(""));
+    }
+
+    @Test
+    void describeKeyReturnsEmptyDescriptionForStoredKeyWithoutOne() {
+        String keyId = given()
+            .header("X-Amz-Target", "TrentService.CreateKey")
+            .contentType(KMS_CONTENT_TYPE)
+            .body("{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("KeyMetadata.KeyId");
+        kmsService.describeKey(keyId, "us-east-1").setDescription(null);
 
         given()
             .header("X-Amz-Target", "TrentService.DescribeKey")
