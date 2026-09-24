@@ -9,10 +9,12 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.net.URI;
 import java.util.Base64;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * In-tree control-plane integration test for ECR. Does not require Docker —
@@ -29,6 +31,9 @@ class EcrIntegrationTest {
     private static final String REPO = "floci-it/integration";
     private static final String CACHE_PREFIX = "docker-hub";
     private static final String SECOND_CACHE_PREFIX = "kubernetes";
+    private static final String WEST_REGION = "us-west-2";
+    private static final String WEST_CREDENTIAL =
+            "AWS4-HMAC-SHA256 Credential=000000000000/20260923/" + WEST_REGION + "/ecr/aws4_request";
 
     @BeforeAll
     static void configureRestAssured() {
@@ -205,8 +210,61 @@ class EcrIntegrationTest {
             .body("__type", equalTo("RepositoryNotFoundException"));
     }
 
+    /**
+     * An ECR registry is regional: the proxyEndpoint a client is told to docker login to must
+     * name the same host the repositoryUri pushes to, so both have to carry the region of the
+     * call rather than the emulator's configured default.
+     */
     @Test
     @Order(10)
+    void getAuthorizationToken_nonDefaultRegionRequest_returnsProxyEndpointForThatRegion() {
+        String repository = "floci-it/region-scoped";
+        String repositoryUri = given()
+            .header("X-Amz-Target", PREFIX + "CreateRepository")
+            .header("Authorization", WEST_CREDENTIAL)
+            .contentType(CT)
+            .body("""
+                { "repositoryName": "%s" }
+                """.formatted(repository))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("repository.repositoryUri", containsString(".dkr.ecr." + WEST_REGION + "."))
+            .extract().jsonPath().getString("repository.repositoryUri");
+
+        String proxyEndpoint = given()
+            .header("X-Amz-Target", PREFIX + "GetAuthorizationToken")
+            .header("Authorization", WEST_CREDENTIAL)
+            .contentType(CT)
+            .body("{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("authorizationData[0].proxyEndpoint", containsString(".dkr.ecr." + WEST_REGION + "."))
+            .extract().jsonPath().getString("authorizationData[0].proxyEndpoint");
+
+        assertEquals(
+                repositoryUri.substring(0, repositoryUri.indexOf('/')),
+                URI.create(proxyEndpoint).getAuthority(),
+                "docker login target must be the registry host the repository URI pushes to");
+
+        given()
+            .header("X-Amz-Target", PREFIX + "DeleteRepository")
+            .header("Authorization", WEST_CREDENTIAL)
+            .contentType(CT)
+            .body("""
+                { "repositoryName": "%s", "force": true }
+                """.formatted(repository))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(11)
     void createPullThroughCacheRule() {
         given()
             .header("X-Amz-Target", PREFIX + "CreatePullThroughCacheRule")
@@ -248,7 +306,7 @@ class EcrIntegrationTest {
     }
 
     @Test
-    @Order(11)
+    @Order(12)
     void describePullThroughCacheRulesFiltersAndPaginates() {
         String nextToken = given()
             .header("X-Amz-Target", PREFIX + "DescribePullThroughCacheRules")
@@ -291,7 +349,7 @@ class EcrIntegrationTest {
     }
 
     @Test
-    @Order(12)
+    @Order(13)
     void createPullThroughCacheRuleDuplicateFails() {
         given()
             .header("X-Amz-Target", PREFIX + "CreatePullThroughCacheRule")
@@ -320,7 +378,7 @@ class EcrIntegrationTest {
     }
 
     @Test
-    @Order(13)
+    @Order(14)
     void deletePullThroughCacheRules() {
         for (String prefix : new String[] {CACHE_PREFIX, SECOND_CACHE_PREFIX}) {
             given()

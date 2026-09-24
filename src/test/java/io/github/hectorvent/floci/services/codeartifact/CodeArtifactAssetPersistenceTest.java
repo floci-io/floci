@@ -111,7 +111,7 @@ class CodeArtifactAssetPersistenceTest {
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
 
         return new CodeArtifactService(domainStore, repoStore, packageVersionStore, regionResolver, config,
-                false, dir.resolve("codeartifact-assets"));
+                false, dir.resolve("codeartifact-assets"), new CodeArtifactSidecarRegistry(List.of()));
     }
 
     private <V> AccountAwareStorageBackend<V> accountAware(Path dir, String fileName, TypeReference<Map<String, V>> type) {

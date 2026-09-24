@@ -20,6 +20,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.zip.GZIPInputStream;
@@ -203,7 +204,7 @@ class S3CopySimulatorTest {
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
                 "t", List.of(), "b", "k", "|", 0, false, false, null, ROLE_ARN);
         IamService iamService = mock(IamService.class);
-        when(iamService.findRole(any(), any())).thenReturn(java.util.Optional.empty());
+        when(iamService.findRole(any(), any())).thenReturn(Optional.empty());
 
         S3CopySimulator.S3TransferException error = assertThrows(
                 S3CopySimulator.S3TransferException.class,
@@ -252,7 +253,7 @@ class S3CopySimulatorTest {
         IamService iamService = mock(IamService.class);
         IamRole role = mock(IamRole.class);
         when(iamService.findRole("000000000000", "CopyRole"))
-                .thenReturn(java.util.Optional.of(role));
+                .thenReturn(Optional.of(role));
         when(role.getAssumeRolePolicyDocument()).thenReturn(""
                 + "{\"Statement\":[{\"Effect\":\"Allow\","
                 + "\"Principal\":{\"Service\":\"lambda.amazonaws.com\"},"
@@ -274,7 +275,7 @@ class S3CopySimulatorTest {
                 "t", List.of(), "b", "k", "|", 0, false, false, null, ROLE_ARN);
         IamService iamService = mock(IamService.class);
         when(iamService.findRole(any(), any()))
-                .thenReturn(java.util.Optional.of(mock(io.github.hectorvent.floci.services.iam.model.IamRole.class)));
+                .thenReturn(Optional.of(mock(IamRole.class)));
 
         S3CopySimulator.CopyInput input = S3CopySimulator.prepareCopy(spec, s3, iamService);
 
@@ -296,7 +297,7 @@ class S3CopySimulatorTest {
                 "t", List.of(), "b", "k", "|", 0, false, false, null, ROLE_ARN);
         IamService iamService = mock(IamService.class);
         when(iamService.findRole(any(), any()))
-                .thenReturn(java.util.Optional.of(mock(io.github.hectorvent.floci.services.iam.model.IamRole.class)));
+                .thenReturn(Optional.of(mock(IamRole.class)));
 
         S3CopySimulator.CopyInput input = S3CopySimulator.prepareCopy(spec, s3, iamService);
         S3CopySimulator.streamCopyInput(input, new ByteArrayOutputStream());
@@ -1415,7 +1416,7 @@ class S3CopySimulatorTest {
 
         String ndjson = "{\"id\": 1, \"name\": \"Alice\"}\n";
         ByteArrayOutputStream gzippedOut = new ByteArrayOutputStream();
-        try (java.util.zip.GZIPOutputStream gzip = new java.util.zip.GZIPOutputStream(gzippedOut)) {
+        try (GZIPOutputStream gzip = new GZIPOutputStream(gzippedOut)) {
             gzip.write(ndjson.getBytes(StandardCharsets.UTF_8));
         }
 
@@ -1537,7 +1538,7 @@ class S3CopySimulatorTest {
         IamRole role = mock(IamRole.class);
         when(role.getAssumeRolePolicyDocument()).thenReturn(
                 "{\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"redshift.amazonaws.com\"}}]}");
-        when(iamService.findRole("000000000000", "Role")).thenReturn(java.util.Optional.of(role));
+        when(iamService.findRole("000000000000", "Role")).thenReturn(Optional.of(role));
 
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
                 "missing_table", List.of(), "wh", "data.json", null, 0, false, false, null,

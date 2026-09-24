@@ -1,0 +1,34 @@
+name: PR Draft Gate
+
+# Reusable gate for the expensive PR workflows (CI, Compatibility Tests). Callers
+# make their jobs `needs:` the `gate` job: when it is skipped, every job that needs
+# it is skipped too, so a draft PR spends no runner time on the heavy suites.
+#
+# A reusable workflow sees the caller's `github` context, so the condition below
+# evaluates against the caller's event. Non-PR events (push to main) always pass.
+# `closed` and `edited` are excluded as well, so a caller can widen its trigger
+# types without this gate letting those events through.
+#
+# Callers must list `ready_for_review` in their pull_request types: it is not a
+# default type, and without it marking a draft ready would not start the run the
+# draft skipped.
+
+on:
+  workflow_call:
+
+permissions: {}
+
+jobs:
+  gate:
+    name: Skip draft PRs
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    if: >-
+      github.event_name != 'pull_request' || (
+        github.event.pull_request.draft == false &&
+        github.event.pull_request.state != 'closed' &&
+        github.event.action != 'edited'
+      )
+    steps:
+      - name: Not a draft
+        run: echo "Not a draft PR, running the suite."

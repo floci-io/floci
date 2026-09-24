@@ -49,7 +49,7 @@ public class RedshiftOperationsTest {
 
     @Test
     @Order(1)
-    void testParameterGroupLifecycle() {
+    void parameterGroupLifecycle() {
         // 1. CreateClusterParameterGroup
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -125,7 +125,7 @@ public class RedshiftOperationsTest {
 
     @Test
     @Order(2)
-    void testClusterAndSnapshotLifecycle() {
+    void clusterAndSnapshotLifecycle() {
         when(containerManager.start(any(), eq("cluster-src"), any(), any()))
                 .thenReturn(new RedshiftContainerHandle("c1", "cluster-src", "localhost", 5439));
         doAnswer(invocation -> {
@@ -155,7 +155,7 @@ public class RedshiftOperationsTest {
             .body(containsString("<ClusterAvailabilityStatus>Available</ClusterAvailabilityStatus>"))
             .body(containsString("<AvailabilityZoneRelocationStatus>disabled</AvailabilityZoneRelocationStatus>"));
 
-        // 1b. RebootCluster — must preserve data (no Docker volume backs this container)
+        // 1b. RebootCluster: must preserve data (no Docker volume backs this container)
         when(containerManager.getContainer(any(), eq("cluster-src")))
                 .thenReturn(Optional.of(new RedshiftContainerHandle("c1", "cluster-src", "localhost", 5439)));
         given()
@@ -320,7 +320,7 @@ public class RedshiftOperationsTest {
 
     @Test
     @Order(4)
-    void testClusterSubnetGroupLifecycle() {
+    void clusterSubnetGroupLifecycle() {
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", AUTH_HEADER)
@@ -636,7 +636,7 @@ public class RedshiftOperationsTest {
 
     @Test
     @Order(3)
-    void testTagLifecycle() {
+    void tagLifecycle() {
         when(containerManager.start(any(), eq("cluster-tags"), any(), any()))
                 .thenReturn(new RedshiftContainerHandle("c3", "cluster-tags", "localhost", 5441));
 

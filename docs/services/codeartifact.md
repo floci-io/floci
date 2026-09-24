@@ -87,7 +87,10 @@ on first use and reuses for every CodeArtifact repository; a CodeArtifact reposi
 own Reposilite repository, provisioned automatically the first time it is published to or fetched
 from, and identified internally by a fresh id generated at `CreateRepository` time rather than a
 name derived from the domain/repository, so a repository deleted and recreated under the same name
-never inherits the previous one's artifacts. Two config knobs,
+never inherits the previous one's artifacts. `DeleteRepository` also releases that storage:
+Reposilite has no bulk-delete endpoint, so this deletes each of the repository's top-level entries
+(DELETE recursively removes everything under a path in one call) before removing it from the
+shared settings list. Two config knobs,
 `FLOCI_SERVICES_CODEARTIFACT_MAVEN_IMAGE` and `FLOCI_SERVICES_CODEARTIFACT_MAVEN_URL`, pin the
 image version or point at an already-running instance and skip container management, matching the
 pattern used elsewhere in Floci for sidecars.
@@ -132,16 +135,11 @@ state.
   runs. The rejection (`ServiceQuotaExceededException` from `PublishPackageVersion`, HTTP 413 from
   the Maven endpoint) is correct for anything that does fit in memory; it is not itself a streaming
   size limit.
-- **Deleting a CodeArtifact repository does not remove its Maven artifacts.** The backing
-  Reposilite repository and everything published to it are left behind (though never reused: see
-  above); only the CodeArtifact-side metadata is deleted. This wastes storage inside the sidecar
-  container over a long-running Floci process but is otherwise inert, since a deleted repository's
-  endpoint already returns 404 through the proxy regardless of what Reposilite still holds.
 - **Maven artifacts do not survive a Floci restart, even under persistent storage.** The Reposilite
   sidecar container has no volume attached and is removed on shutdown along with everything
-  published to it. CodeArtifact repository/domain metadata (including the stored
-  `mavenRepositoryId`) survives a restart the same way any other Floci state does under persistent
-  storage mode; the artifacts themselves do not, so the first Maven request after a restart
+  published to it. CodeArtifact repository/domain metadata (including the stored sidecar container
+  id) survives a restart the same way any other Floci state does under persistent storage mode;
+  the artifacts themselves do not, so the first Maven request after a restart
   re-provisions an empty Reposilite repository and returns 404 for anything published before the
   restart.
 - **`GetAuthorizationToken` tokens are not revocable and are not tied to any IAM identity.** Real

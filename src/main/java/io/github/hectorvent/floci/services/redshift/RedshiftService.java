@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.redshift;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
@@ -14,15 +15,11 @@ import io.github.hectorvent.floci.services.dynamodb.DynamoDbStreamService;
 import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerHandle;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerManager;
-import io.github.hectorvent.floci.services.redshift.model.Integration;
-import java.time.Instant;
-import java.time.format.DateTimeFormatter;
-import java.util.UUID;
-import java.util.regex.Pattern;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.redshift.model.ClusterParameterGroup;
 import io.github.hectorvent.floci.services.redshift.model.ClusterSubnetGroup;
 import io.github.hectorvent.floci.services.redshift.model.Endpoint;
+import io.github.hectorvent.floci.services.redshift.model.Integration;
 import io.github.hectorvent.floci.services.redshift.model.Parameter;
 import io.github.hectorvent.floci.services.redshift.model.Snapshot;
 import io.github.hectorvent.floci.services.redshift.model.SnapshotCopyGrant;
@@ -30,28 +27,31 @@ import io.github.hectorvent.floci.services.redshift.proxy.RedshiftProxyManager;
 import io.github.hectorvent.floci.services.secretsmanager.RandomPasswordGenerator;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
+import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
-import com.fasterxml.jackson.core.type.TypeReference;
-import io.quarkus.runtime.StartupEvent;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.Instant;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
+import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class RedshiftService {
@@ -637,7 +637,7 @@ public class RedshiftService {
                 .orElseThrow(() -> new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404));
 
         // alterUserPassword runs before any mutation of the cluster object (a live reference
-        // from HybridStorage, not a copy) — if it throws, no metadata has been changed yet.
+        // from HybridStorage, not a copy); if it throws, no metadata has been changed yet.
         if (masterUserPassword != null && !masterUserPassword.isBlank()) {
             containerManager.alterUserPassword(clusters.accountId(), clusterIdentifier,
                     cluster.getMasterUsername(), masterUserPassword);
@@ -648,9 +648,9 @@ public class RedshiftService {
             updateManagedMasterSecret(cluster, masterUserPassword);
         }
 
-        // NodeType only updates metadata — it does not resize the underlying Postgres container
+        // NodeType only updates metadata: it does not resize the underlying Postgres container
         // (Redshift node-count has no equivalent here). NumberOfNodes is accepted for API-shape
-        // compatibility but is not modelled or stored anywhere — known gap, see plan Task 9.
+        // compatibility but is not modelled or stored anywhere: known gap, see plan Task 9.
         if (nodeType != null && !nodeType.isBlank()) {
             cluster.setNodeType(nodeType);
         }
@@ -767,7 +767,7 @@ public class RedshiftService {
 
         // The container backing a cluster has no persistent volume (see RedshiftContainerManager),
         // so a plain stop+recreate would silently drop the cluster's data. Dump before stopping and
-        // restore immediately after starting, using a throwaway temp file — no Snapshot resource is
+        // restore immediately after starting, using a throwaway temp file, so no Snapshot resource is
         // created or exposed to the caller.
         Path tempDump;
         try {
@@ -835,13 +835,14 @@ public class RedshiftService {
             } else {
                 if (originalTornDown) {
                     // Once the original container is torn down it holds no volume, so this dump can
-                    // be the only surviving copy of the cluster's data — keep it for manual recovery.
+                    // be the only surviving copy of the cluster's data, so keep it for manual recovery.
                     LOG.warnv("Reboot of cluster {0} did not complete; retained pre-reboot data dump at {1}",
                             clusterIdentifier, tempDump);
                 } else {
                     try {
                         Files.deleteIfExists(tempDump);
-                    } catch (IOException ignored) {
+                    } catch (IOException ex) {
+                        LOG.warnv(ex, "Failed to clean up temporary dump file {0} after aborted reboot of cluster {1}", tempDump, clusterIdentifier);
                     }
                 }
             }
@@ -972,7 +973,7 @@ public class RedshiftService {
             try {
                 Files.deleteIfExists(Paths.get(snapshot.getSqlDump()));
             } catch (IOException e) {
-                // ignore
+                LOG.warnv(e, "Could not delete the dump file of snapshot {0}", snapshotIdentifier);
             }
         }
         snapshot.setStatus("deleted");
@@ -1411,7 +1412,7 @@ public class RedshiftService {
      * where {@code <type>} is one of {@code cluster}, {@code snapshot} (id shape
      * {@code <clusterId>/<snapshotId>}), {@code parametergroup}, {@code subnetgroup} or
      * {@code snapshotcopygrant}. Unlike RDS's tag
-     * resolution, there is no bare-name fallback — Redshift tagging is new, so there is no
+     * resolution, there is no bare-name fallback: Redshift tagging is new, so there is no
      * existing caller to stay backward compatible with.
      */
     private TagHandle resolveTagHandle(String resourceName) {
@@ -1533,7 +1534,7 @@ public class RedshiftService {
      * the original proxy + container were stopped, so the original data-bearing container
      * is still running and nothing must be touched. Once it is true the original is gone:
      * tear down the (replacement's) proxy and return its port, and remove any container
-     * running under the cluster's name — {@code containerManager.stop} works by name, so
+     * running under the cluster's name: {@code containerManager.stop} works by name, so
      * this also cleans a replacement that {@code containerManager.start} created before
      * throwing (e.g. its readiness check timed out). The pre-reboot data dump is kept by
      * the caller.

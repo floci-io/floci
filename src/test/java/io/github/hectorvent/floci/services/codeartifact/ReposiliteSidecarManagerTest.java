@@ -18,8 +18,10 @@ import java.util.Optional;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -80,6 +82,28 @@ class ReposiliteSidecarManagerTest {
         verify(lifecycleManager).stopAndRemove("stale-reposilite", null);
         assertNull(getField(manager, "containerId"));
         verifyNoInteractions(containerBuilder);
+    }
+
+    @Test
+    void isStartedIsFalseForAManagedContainerThatWasNeverStartedAndNeverStartsOneItself() {
+        when(codeArtifact.mavenUrl()).thenReturn(Optional.empty());
+        ReposiliteSidecarManager manager = manager();
+
+        assertFalse(manager.isStarted());
+        verifyNoInteractions(containerBuilder, lifecycleManager);
+    }
+
+    @Test
+    void isStartedIsTrueForAConfiguredUrlEvenBeforeThisProcessEverResolvesIt() {
+        // A managed container keeps no volume, so "never started" really does mean "nothing to
+        // release." An external, pre-configured instance's lifecycle is independent of this
+        // process: it may already hold real data from an earlier Floci run, so this process not
+        // having resolved it yet must not be read the same way.
+        when(codeArtifact.mavenUrl()).thenReturn(Optional.of("http://reposilite.internal:8080"));
+        ReposiliteSidecarManager manager = manager();
+
+        assertTrue(manager.isStarted());
+        verifyNoInteractions(containerBuilder, lifecycleManager);
     }
 
     private ReposiliteSidecarManager manager() {

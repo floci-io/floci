@@ -21,10 +21,14 @@ import java.util.Optional;
 /**
  * HTTP client for the shared Reposilite sidecar. A CodeArtifact repository maps to a named
  * Reposilite repository ({@link #ensureRepository}), provisioned lazily via Reposilite's
- * {@code maven} settings domain, which hot-reloads without a restart.
+ * {@code maven} settings domain, which hot-reloads without a restart. Implements
+ * {@link RepositorySidecarManager} so {@code CodeArtifactService} can release a deleted
+ * repository's Maven storage the same generic way it releases any other format's.
  */
 @ApplicationScoped
-public class ReposiliteSidecarClient {
+public class ReposiliteSidecarClient implements RepositorySidecarManager {
+
+    private static final String FORMAT = "maven";
     private static final Logger LOG = Logger.getLogger(ReposiliteSidecarClient.class);
     private static final String MAVEN_SETTINGS_PATH = "/api/settings/domain/maven";
     private static final int REPOSITORY_READY_POLL_MAX_MS = 3_000;
@@ -52,6 +56,26 @@ public class ReposiliteSidecarClient {
         this.manager = manager;
         this.mapper = mapper;
         this.httpClient = httpClient;
+    }
+
+    @Override
+    public String format() {
+        return FORMAT;
+    }
+
+    /**
+     * {@code publicUrl} is unused: unlike npm's package metadata, Maven's wire protocol has no
+     * self-referential URLs to rewrite, so there is nothing here for it to do.
+     */
+    @Override
+    public String ensureReady(String repositoryContainerId, String publicUrl) {
+        ensureRepository(repositoryContainerId);
+        return manager.ensureReady();
+    }
+
+    @Override
+    public void release(String repositoryContainerId) {
+        releaseRepository(repositoryContainerId);
     }
 
     /** Ensures a Reposilite repository named {@code repoId} exists, creating it if not. */
@@ -122,6 +146,91 @@ public class ReposiliteSidecarClient {
         }
         String message = readTree(response.body()).path("message").asText("");
         return !message.startsWith("Repository ");
+    }
+
+    /**
+     * Deletes every file {@code repoId} holds, then removes it from the shared settings list.
+     * Reposilite has no bulk-delete endpoint (checked against its documented REST API); DELETE on
+     * a path recursively removes everything under it in one call, though, so this only needs one
+     * DELETE per top-level entry (a repository's group-id first segments, typically a handful)
+     * rather than walking the whole artifact tree. A repository never used through Maven has
+     * nothing registered on the Reposilite side at all; that is a no-op here, not an error.
+     *
+     * <p>Order matters: the repository must still be registered while its files are deleted,
+     * since Reposilite 404s every path, including DELETE, for a repository ID absent from its
+     * settings (confirmed against a live instance). Removing it from settings first would leave
+     * its files permanently unreachable instead of actually freeing the storage.
+     *
+     * <p>Checks {@link ReposiliteSidecarManager#isStarted()} first: every CodeArtifact repository
+     * gets a Maven sidecar id at creation regardless of whether it is ever actually used through
+     * Maven, so without this check, deleting any repository at all would start the shared
+     * container just to look for content that was never there. Reposilite keeps no volume, so a
+     * sidecar that was never started could not possibly hold anything for {@code repoId} to
+     * release.
+     */
+    public void releaseRepository(String repoId) {
+        if (!manager.isStarted()) {
+            return;
+        }
+        String baseUrl = manager.ensureReady();
+        synchronized (provisioningLock) {
+            for (JsonNode entry : topLevelEntries(baseUrl, repoId)) {
+                deleteEntry(baseUrl, repoId, entry.path("name").asText());
+            }
+            ArrayNode repositories = currentRepositories(baseUrl);
+            ArrayNode remaining = mapper.createArrayNode();
+            for (JsonNode repository : repositories) {
+                if (!repoId.equals(repository.path("id").asText())) {
+                    remaining.add(repository);
+                }
+            }
+            if (remaining.size() != repositories.size()) {
+                putMavenSettings(baseUrl, remaining);
+                LOG.infov("Released Reposilite repository {0}", repoId);
+            }
+        }
+    }
+
+    private ArrayNode topLevelEntries(String baseUrl, String repoId) {
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/api/maven/details/" + repoId))
+                .timeout(Duration.ofSeconds(10))
+                .header("Authorization", manager.basicAuthHeader())
+                .GET()
+                .build();
+        HttpResponse<String> response = send(request, BodyHandlers.ofString());
+        if (response.statusCode() == 404) {
+            // Never provisioned (no Maven use before this CodeArtifact repository was deleted):
+            // nothing on the Reposilite side to clean up.
+            return mapper.createArrayNode();
+        }
+        if (response.statusCode() != 200) {
+            // Anything other than a clean 404 means the repository's actual state here is
+            // unknown, not "nothing to clean up": proceeding to remove the settings entry anyway
+            // would orphan whatever this call never got to see, unreachable through the API
+            // afterward the same way the 404-ordering bug this method exists to avoid would.
+            // Propagating lets the caller's best-effort handling decide, rather than silently
+            // treating an error as an empty repository.
+            throw new IllegalStateException("Failed to list " + repoId + " on Reposilite before release: HTTP "
+                    + response.statusCode());
+        }
+        JsonNode details = readTree(response.body());
+        return details.path("files").isArray() ? ((ArrayNode) details.path("files")).deepCopy()
+                : mapper.createArrayNode();
+    }
+
+    private void deleteEntry(String baseUrl, String repoId, String entryName) {
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/" + repoId + "/" + entryName))
+                .timeout(Duration.ofSeconds(30))
+                .header("Authorization", manager.basicAuthHeader())
+                .DELETE()
+                .build();
+        HttpResponse<Void> response = send(request, BodyHandlers.discarding());
+        if (response.statusCode() != 200) {
+            throw new IllegalStateException("Failed to delete " + repoId + "/" + entryName
+                    + " from Reposilite: HTTP " + response.statusCode());
+        }
     }
 
     /** Deploys {@code content} to {@code repoId}'s {@code gav} path, returning the HTTP status. */

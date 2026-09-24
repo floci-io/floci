@@ -25,12 +25,13 @@ class S3BucketNameTraversalIntegrationTest {
     private static final String ATTACKER =
             "AWS4-HMAC-SHA256 Credential=000000000012/20260215/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=abc";
 
-    @Test
-    void createBucketRefusesTheAccountStorageRoot() {
+    @ParameterizedTest
+    @ValueSource(strings = {".accounts", ".versions", ".annotations"})
+    void createBucketRefusesReservedStorageRoots(String bucketName) {
         given()
                 .header("Authorization", ATTACKER)
         .when()
-                .put("/.accounts")
+                .put("/" + bucketName)
         .then()
                 .statusCode(400)
                 .body(containsString("InvalidBucketName"));

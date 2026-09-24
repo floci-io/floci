@@ -110,7 +110,7 @@ class RedshiftContainerManagerTest {
     private static final String ACCOUNT_ID = "111111111111";
 
     @Test
-    void testTakeSnapshotContainerNotFound() {
+    void takeSnapshotContainerNotFound() {
         AwsException ex = assertThrows(AwsException.class, () ->
                 manager.takeSnapshot(ACCOUNT_ID, "non-existent-cluster", "admin", "dev", Path.of("dummy.sql")));
         assertEquals("ClusterNotFound", ex.getErrorCode());
@@ -118,7 +118,7 @@ class RedshiftContainerManagerTest {
     }
 
     @Test
-    void testRestoreSnapshotContainerNotFound() {
+    void restoreSnapshotContainerNotFound() {
         AwsException ex = assertThrows(AwsException.class, () ->
                 manager.restoreSnapshot(ACCOUNT_ID, "non-existent-cluster", "admin", "dev", Path.of("dummy.sql")));
         assertEquals("ClusterNotFound", ex.getErrorCode());
@@ -126,7 +126,7 @@ class RedshiftContainerManagerTest {
     }
 
     @Test
-    void testCreateSnapshotNullCluster() {
+    void createSnapshotNullCluster() {
         AwsException ex = assertThrows(AwsException.class, () ->
                 manager.createSnapshot(ACCOUNT_ID, null, Path.of("dummy.sql")));
         assertEquals("InvalidParameterValue", ex.getErrorCode());
@@ -134,7 +134,7 @@ class RedshiftContainerManagerTest {
     }
 
     @Test
-    void testRestoreSnapshotNullCluster() {
+    void restoreSnapshotNullCluster() {
         AwsException ex = assertThrows(AwsException.class, () ->
                 manager.restoreSnapshot(ACCOUNT_ID, (Cluster) null, Path.of("dummy.sql")));
         assertEquals("InvalidParameterValue", ex.getErrorCode());
@@ -142,7 +142,7 @@ class RedshiftContainerManagerTest {
     }
 
     @Test
-    void testTakeSnapshotSuccess() throws Exception {
+    void takeSnapshotSuccess() throws Exception {
         ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
         ContainerInfo info = new ContainerInfo("cont-123", Map.of(5432, new EndpointInfo("localhost", 5432)));
@@ -201,7 +201,7 @@ class RedshiftContainerManagerTest {
     }
 
     @Test
-    void testTakeSnapshotFailureExitCode() throws Exception {
+    void takeSnapshotFailureExitCode() throws Exception {
         ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
         ContainerInfo info = new ContainerInfo("cont-123", Map.of(5432, new EndpointInfo("localhost", 5432)));
@@ -239,7 +239,7 @@ class RedshiftContainerManagerTest {
     }
 
     @Test
-    void testRestoreSnapshotEmptyDump() {
+    void restoreSnapshotEmptyDump() {
         ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
         ContainerInfo info = new ContainerInfo("cont-123", Map.of(5432, new EndpointInfo("localhost", 5432)));
@@ -253,7 +253,7 @@ class RedshiftContainerManagerTest {
     }
 
     @Test
-    void testRestoreSnapshotSuccess() throws Exception {
+    void restoreSnapshotSuccess() throws Exception {
         ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
         ContainerInfo info = new ContainerInfo("cont-123", Map.of(5432, new EndpointInfo("localhost", 5432)));
@@ -298,7 +298,7 @@ class RedshiftContainerManagerTest {
     }
 
     @Test
-    void testStopRemovesContainer() {
+    void stopRemovesContainer() {
         ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
         ContainerInfo info = new ContainerInfo("cont-123", Map.of(5432, new EndpointInfo("localhost", 5432)));
@@ -313,7 +313,7 @@ class RedshiftContainerManagerTest {
     }
 
     @Test
-    void testSameClusterIdentifierAcrossAccountsDoesNotCollide() {
+    void sameClusterIdentifierAcrossAccountsDoesNotCollide() {
         ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
         ContainerInfo infoA = new ContainerInfo("cont-account-a", Map.of(5432, new EndpointInfo("localhost", 5432)));
@@ -332,7 +332,7 @@ class RedshiftContainerManagerTest {
     }
 
     @Test
-    void testAdoptOrStartAdoptsExistingContainerInsteadOfRecreatingIt() {
+    void adoptOrStartAdoptsExistingContainerInsteadOfRecreatingIt() {
         String containerName = "floci-redshift-" + ACCOUNT_ID + "-test-cluster";
         Container existing = mock(Container.class);
         when(existing.getId()).thenReturn("cont-existing");
@@ -345,13 +345,13 @@ class RedshiftContainerManagerTest {
         assertEquals("cont-existing", handle.getContainerId());
         assertEquals(6000, handle.getPort());
         assertTrue(manager.getContainer(ACCOUNT_ID, "test-cluster").isPresent());
-        // Data lives only in the container's writable layer (no volume) — recreating it
+        // Data lives only in the container's writable layer (no volume): recreating it
         // would silently discard it, so a container found by name must never be recreated.
         verify(lifecycleManager, never()).createAndStart(any());
     }
 
     @Test
-    void testAdoptOrStartFallsBackToStartWhenNoExistingContainer() {
+    void adoptOrStartFallsBackToStartWhenNoExistingContainer() {
         String containerName = "floci-redshift-" + ACCOUNT_ID + "-test-cluster";
         when(lifecycleManager.findByName(containerName)).thenReturn(Optional.empty());
         ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
@@ -366,7 +366,7 @@ class RedshiftContainerManagerTest {
     }
 
     @Test
-    void testAlterUserPasswordSuccess() throws Exception {
+    void alterUserPasswordSuccess() throws Exception {
         ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
         ContainerInfo info = new ContainerInfo("cont-123", Map.of(5432, new EndpointInfo("localhost", 5432)));
@@ -400,7 +400,7 @@ class RedshiftContainerManagerTest {
     }
 
     @Test
-    void testAlterUserPasswordContainerNotFound() {
+    void alterUserPasswordContainerNotFound() {
         AwsException ex = assertThrows(AwsException.class, () ->
                 manager.alterUserPassword(ACCOUNT_ID, "non-existent-cluster", "admin", "new-secret"));
         assertEquals("ClusterNotFound", ex.getErrorCode());
@@ -408,7 +408,7 @@ class RedshiftContainerManagerTest {
     }
 
     @Test
-    void testAlterUserPasswordInvalidUsername() throws Exception {
+    void alterUserPasswordInvalidUsername() throws Exception {
         ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
         ContainerInfo info = new ContainerInfo("cont-123", Map.of(5432, new EndpointInfo("localhost", 5432)));
@@ -429,7 +429,7 @@ class RedshiftContainerManagerTest {
     }
 
     @Test
-    void testAlterUserPasswordInvalidPassword() throws Exception {
+    void alterUserPasswordInvalidPassword() throws Exception {
         ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
         ContainerInfo info = new ContainerInfo("cont-123", Map.of(5432, new EndpointInfo("localhost", 5432)));
@@ -462,7 +462,7 @@ class RedshiftContainerManagerTest {
     }
 
     @Test
-    void testAlterUserPasswordExecFailure() throws Exception {
+    void alterUserPasswordExecFailure() throws Exception {
         ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
         ContainerInfo info = new ContainerInfo("cont-123", Map.of(5432, new EndpointInfo("localhost", 5432)));
@@ -499,7 +499,7 @@ class RedshiftContainerManagerTest {
     }
 
     @Test
-    void testStartAttachesLogStreamerAndToleratesFailure() throws Exception {
+    void startAttachesLogStreamerAndToleratesFailure() throws Exception {
         ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
         ContainerInfo info = new ContainerInfo("cont-stream", Map.of(5432, new EndpointInfo("localhost", 5432)));
@@ -522,7 +522,7 @@ class RedshiftContainerManagerTest {
     }
 
     @Test
-    void testAdoptOrStartAttachesLogStreamerAndToleratesFailure() throws Exception {
+    void adoptOrStartAttachesLogStreamerAndToleratesFailure() throws Exception {
         String containerName = "floci-redshift-" + ACCOUNT_ID + "-test-cluster";
         Container existing = mock(Container.class);
         when(existing.getId()).thenReturn("cont-adopt-stream");
@@ -547,7 +547,7 @@ class RedshiftContainerManagerTest {
     }
 
     @Test
-    void testBootstrapCatalogSuccess() {
+    void bootstrapCatalogSuccess() {
         CopyArchiveToContainerCmd copyCmd = mock(CopyArchiveToContainerCmd.class, org.mockito.Mockito.RETURNS_SELF);
         when(dockerClient.copyArchiveToContainerCmd("cont-bootstrap")).thenReturn(copyCmd);
 
@@ -570,7 +570,7 @@ class RedshiftContainerManagerTest {
     }
 
     @Test
-    void testBootstrapCatalogFailureDoesNotThrow() {
+    void bootstrapCatalogFailureDoesNotThrow() {
         CopyArchiveToContainerCmd copyCmd = mock(CopyArchiveToContainerCmd.class, org.mockito.Mockito.RETURNS_SELF);
         when(copyCmd.exec()).thenThrow(new RuntimeException("Docker copy error"));
         when(dockerClient.copyArchiveToContainerCmd("cont-bootstrap-fail")).thenReturn(copyCmd);

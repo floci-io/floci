@@ -30,6 +30,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -53,6 +54,40 @@ class LambdaExecutorServiceTest {
         fn.setTimeout(1);
 
         when(concurrencyLimiter.acquire(any())).thenReturn(() -> {});
+    }
+
+    @Test
+    void asyncInvocationPastTheChainBound_isDroppedWithoutRunningTheFunction() {
+        // AWS stops the next invocation in a chain of requests once the same originating event has
+        // caused about this many, which is what keeps a destination cycle from running forever.
+        InvokeResult result = executor.invoke(fn, "{}".getBytes(), InvocationType.Event,
+                LambdaInvocationChain.MAX_DEPTH);
+
+        assertEquals(202, result.getStatusCode());
+        assertNotNull(result.getRequestId());
+        verify(concurrencyLimiter, never()).acquire(any());
+        verify(warmPool, never()).acquire(any());
+    }
+
+    @Test
+    void asyncInvocationShortOfTheChainBound_stillRuns() {
+        executor.invoke(fn, "{}".getBytes(), InvocationType.Event, LambdaInvocationChain.MAX_DEPTH - 1);
+
+        verify(warmPool, timeout(5000)).acquire(fn);
+    }
+
+    @Test
+    void syncInvocationPastTheChainBound_isNotAffected() {
+        // Only the asynchronous path can be re-entered by a destination chain, and refusing a
+        // RequestResponse invoke would need an error shape AWS does not define here.
+        RuntimeApiServer rtas = mock(RuntimeApiServer.class);
+        ContainerHandle handle = new ContainerHandle("cid-bound", "test-fn", rtas, ContainerState.WARM);
+        when(warmPool.acquire(any())).thenReturn(handle);
+        when(rtas.enqueue(any())).thenReturn(new CompletableFuture<>());
+
+        executor.invoke(fn, "{}".getBytes(), InvocationType.RequestResponse, LambdaInvocationChain.MAX_DEPTH);
+
+        verify(warmPool).acquire(fn);
     }
 
     @Test

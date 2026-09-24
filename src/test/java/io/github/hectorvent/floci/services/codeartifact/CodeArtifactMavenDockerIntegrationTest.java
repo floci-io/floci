@@ -1,14 +1,20 @@
 package io.github.hectorvent.floci.services.codeartifact;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.concurrent.CountDownLatch;
@@ -282,4 +288,44 @@ class CodeArtifactMavenDockerIntegrationTest {
                 .extract().asByteArray();
         assertEquals(new String(content, StandardCharsets.UTF_8), new String(fetched, StandardCharsets.UTF_8));
     }
+
+    @Test
+    @Order(9)
+    void deletingARepositoryReleasesItsStorageFromTheSharedReposiliteInstance() throws Exception {
+        given().contentType("application/json").header("Authorization", AUTH).body("{}")
+                .post("/v1/repository?domain=" + DOMAIN + "&repository=released-repo")
+                .then().statusCode(200);
+        given().header("Authorization", "Bearer " + bearerToken).body("to-be-released".getBytes(StandardCharsets.UTF_8))
+                .put("/codeartifact/maven/" + DOMAIN + "/released-repo/" + GAV)
+                .then().statusCode(200);
+        int repositoryCountBeforeDelete = reposiliteSettingsRepositoryCount();
+
+        given().header("Authorization", AUTH)
+                .delete("/v1/repository?domain=" + DOMAIN + "&repository=released-repo")
+                .then().statusCode(200);
+
+        // The mavenRepositoryId is internal (never in the API response), so identity isn't
+        // checkable directly; a count drop of exactly one is enough to confirm this repository's
+        // entry, specifically, is what disappeared from the real shared instance's own settings
+        // list, not just that Floci stopped tracking the CodeArtifact-side metadata.
+        assertEquals(repositoryCountBeforeDelete - 1, reposiliteSettingsRepositoryCount());
+    }
+
+    /**
+     * Reads the real Reposilite instance's own {@code maven} settings domain directly (the same
+     * shared container {@link ReposiliteSidecarManager} started for every test in this class).
+     */
+    private int reposiliteSettingsRepositoryCount() throws Exception {
+        HttpClient httpClient = HttpClient.newHttpClient();
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(reposiliteManager.ensureReady() + "/api/settings/domain/maven"))
+                .header("Authorization", reposiliteManager.basicAuthHeader())
+                .GET()
+                .build();
+        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+        return new ObjectMapper().readTree(response.body()).path("repositories").size();
+    }
+
+    @Inject
+    ReposiliteSidecarManager reposiliteManager;
 }

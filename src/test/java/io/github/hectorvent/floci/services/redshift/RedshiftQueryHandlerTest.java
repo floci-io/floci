@@ -60,7 +60,7 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
-    void testCreateClusterAction() {
+    void createClusterAction() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("ClusterIdentifier", "test-cluster");
         params.putSingle("NodeType", "dc2.large");
@@ -135,7 +135,7 @@ class RedshiftQueryHandlerTest {
     }
     
     @Test
-    void testDescribeClusters() {
+    void describeClusters() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("ClusterIdentifier", "test-cluster");
 
@@ -151,7 +151,7 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
-    void testDescribeClustersIncludesAvailabilityStatuses() {
+    void describeClustersIncludesAvailabilityStatuses() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("ClusterIdentifier", "test-cluster");
 
@@ -167,7 +167,7 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
-    void testClusterAvailabilityStatusMapsTransientStatesToModifying() {
+    void clusterAvailabilityStatusMapsTransientStatesToModifying() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("ClusterIdentifier", "test-cluster");
 
@@ -182,7 +182,7 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
-    void testClusterAvailabilityStatusMapsFailed() {
+    void clusterAvailabilityStatusMapsFailed() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("ClusterIdentifier", "test-cluster");
 
@@ -197,7 +197,7 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
-    void testDeleteCluster() {
+    void deleteCluster() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("ClusterIdentifier", "test-cluster");
 
@@ -214,7 +214,7 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
-    void testCreateClusterSnapshot() {
+    void createClusterSnapshot() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("SnapshotIdentifier", "test-snapshot");
         params.putSingle("ClusterIdentifier", "test-cluster");
@@ -238,7 +238,7 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
-    void testDescribeClusterSnapshots() {
+    void describeClusterSnapshots() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("SnapshotIdentifier", "test-snapshot");
         params.putSingle("ClusterIdentifier", "test-cluster");
@@ -260,7 +260,7 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
-    void testDeleteClusterSnapshot() {
+    void deleteClusterSnapshot() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("SnapshotIdentifier", "test-snapshot");
 
@@ -275,7 +275,7 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
-    void testRestoreFromClusterSnapshot() {
+    void restoreFromClusterSnapshot() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("ClusterIdentifier", "restored-cluster");
         params.putSingle("SnapshotIdentifier", "test-snapshot");
@@ -299,7 +299,7 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
-    void testRestoreFromClusterSnapshotBySnapshotArn() {
+    void restoreFromClusterSnapshotBySnapshotArn() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("ClusterIdentifier", "restored-cluster");
         params.putSingle("SnapshotArn", "arn:aws:redshift:us-east-1:acc:snapshot:src/my-snap");
@@ -312,7 +312,7 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
-    void testRestoreFromClusterSnapshotMalformedArnIs400() {
+    void restoreFromClusterSnapshotMalformedArnIs400() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("ClusterIdentifier", "restored-cluster");
         params.putSingle("SnapshotArn", "not-an-arn");
@@ -324,7 +324,7 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
-    void testRestoreFromClusterSnapshotWithoutSnapshotIs400() {
+    void restoreFromClusterSnapshotWithoutSnapshotIs400() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("ClusterIdentifier", "restored-cluster");
 
@@ -334,7 +334,7 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
-    void testRestoreFromClusterSnapshotForeignAccountArnNotFound() {
+    void restoreFromClusterSnapshotForeignAccountArnNotFound() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("ClusterIdentifier", "restored-cluster");
         params.putSingle("SnapshotArn", "arn:aws:redshift:us-east-1:999999999999:snapshot:src/my-snap");
@@ -346,7 +346,7 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
-    void testClusterXmlCarriesDefaultParameterGroupAndMultiAZ() {
+    void clusterXmlCarriesDefaultParameterGroupAndMultiAZ() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("ClusterIdentifier", "c1");
         when(service.describeClusters("c1")).thenReturn(List.of(availableCluster("c1")));
@@ -357,7 +357,7 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
-    void testCreateClusterParameterGroup() {
+    void createClusterParameterGroup() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("ParameterGroupName", "test-pg");
         params.putSingle("ParameterGroupFamily", "redshift-1.0");
@@ -375,7 +375,7 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
-    void testDescribeClusterParameterGroups() {
+    void describeClusterParameterGroups() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("ParameterGroupName", "test-pg");
 
@@ -391,7 +391,7 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
-    void testDescribeClusterParameters() {
+    void describeClusterParameters() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("ParameterGroupName", "test-pg");
 
@@ -406,7 +406,7 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
-    void testDeleteClusterParameterGroup() {
+    void deleteClusterParameterGroup() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("ParameterGroupName", "test-pg");
 
@@ -420,7 +420,7 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
-    void testCreateTagsAcceptsNamedMemberForm() {
+    void createTagsAcceptsNamedMemberForm() {
         // Real Redshift SDK sends "Tags.Tag.N.Key/.Value", không phải "Tags.member.N...".
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("ResourceName", "arn:aws:redshift:us-east-1:000000000000:cluster:test-cluster");
@@ -437,7 +437,7 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
-    void testCreateClusterSubnetGroupAcceptsNamedMemberForm() {
+    void createClusterSubnetGroupAcceptsNamedMemberForm() {
         // Real Redshift SDK sends "SubnetIds.SubnetIdentifier.N", không phải "SubnetIds.member.N".
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("ClusterSubnetGroupName", "test-sng");
@@ -458,7 +458,7 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
-    void testModifyClusterParameterGroupAcceptsNamedMemberForm() {
+    void modifyClusterParameterGroupAcceptsNamedMemberForm() {
         // Real Redshift SDK sends "Parameters.Parameter.N.ParameterName/.ParameterValue".
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("ParameterGroupName", "test-pg");
@@ -477,7 +477,7 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
-    void testCreateClusterSubnetGroupRequiresName() {
+    void createClusterSubnetGroupRequiresName() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("Description", "desc");
 
@@ -488,7 +488,7 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
-    void testModifyClusterRequiresClusterIdentifier() {
+    void modifyClusterRequiresClusterIdentifier() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("NodeType", "dc2.large");
 
@@ -622,7 +622,7 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
-    void testDescribeLoggingStatus() {
+    void describeLoggingStatus() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("ClusterIdentifier", "test-cluster");
 
@@ -637,7 +637,7 @@ class RedshiftQueryHandlerTest {
         assertEquals(200, response.getStatus());
         String xml = (String) response.getEntity();
         // The real AWS wire format wraps the fields in a *Result element matching the
-        // operation name — verified against the SDK's own deserializer, not guessed.
+        // operation name, verified against the SDK's own deserializer, not guessed.
         assertTrue(xml.contains("<DescribeLoggingStatusResult>"));
         assertTrue(xml.contains("<LoggingEnabled>true</LoggingEnabled>"));
         assertTrue(xml.contains("<BucketName>my-bucket</BucketName>"));
@@ -645,7 +645,7 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
-    void testDescribeLoggingStatusRequiresClusterIdentifier() {
+    void describeLoggingStatusRequiresClusterIdentifier() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
 
         AwsException ex = assertThrows(
@@ -655,7 +655,7 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
-    void testEnableLogging() {
+    void enableLogging() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("ClusterIdentifier", "test-cluster");
         params.putSingle("BucketName", "my-bucket");
@@ -676,7 +676,7 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
-    void testDisableLogging() {
+    void disableLogging() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("ClusterIdentifier", "test-cluster");
 
@@ -798,7 +798,7 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
-    void testBuildClusterXmlIncludesParameterGroupAndTags() {
+    void buildClusterXmlIncludesParameterGroupAndTags() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("ClusterIdentifier", "test-cluster");
 
@@ -871,8 +871,8 @@ class RedshiftQueryHandlerTest {
 
         handler.handle("GetClusterCredentials", params);
 
-        java.time.Instant expiresAt = credentialBroker.resolve("acc", "c1", "IAM:analyst").orElseThrow().expiresAt();
-        assertTrue(expiresAt.isAfter(java.time.Instant.now().plusSeconds(800)),
+        Instant expiresAt = credentialBroker.resolve("acc", "c1", "IAM:analyst").orElseThrow().expiresAt();
+        assertTrue(expiresAt.isAfter(Instant.now().plusSeconds(800)),
                 "an out-of-range config default must fall back to the AWS minimum, not be used as-is");
     }
 

@@ -205,7 +205,9 @@ class S3ServiceTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"..", ".", "../", "a/b", "../victim", ".accounts", "a\\b", "   "})
+    @ValueSource(strings = {
+            "..", ".", "../", "a/b", "../victim", ".accounts", ".versions", ".annotations", "a\\b", "   "
+    })
     void createBucketRejectsANameThatWouldNotStayInsideTheAccountDirectory(String bucketName) {
         AwsException ex = assertThrows(AwsException.class,
                 () -> s3Service.createBucket(bucketName, "us-east-1"), bucketName);
@@ -226,6 +228,31 @@ class S3ServiceTest {
                 "text/plain", null));
 
         assertEquals("InvalidBucketName", put.getErrorCode());
+    }
+
+    @Test
+    void persistedReservedBucketCannotOverwriteAnotherBucketsVersion() {
+        InMemoryStorage<String, Bucket> bucketStore = new InMemoryStorage<>();
+        InMemoryStorage<String, S3Object> objectStore = new InMemoryStorage<>();
+        Path dataRoot = tempDir.resolve("reserved-s3");
+        S3Service service = new S3Service(bucketStore, objectStore, dataRoot, false);
+        byte[] original = "original".getBytes(StandardCharsets.UTF_8);
+
+        service.createBucket("victim-bucket", "us-east-1");
+        service.putBucketVersioning("victim-bucket", "Enabled");
+        S3Object version = service.putObject(
+                "victim-bucket", "document.txt", original, "text/plain", null);
+
+        // Simulate a bucket record persisted before reserved names were rejected.
+        bucketStore.put(".versions", new Bucket(".versions"));
+        String collidingKey = "victim-bucket/document.txt/" + version.getVersionId();
+
+        AwsException put = assertThrows(AwsException.class, () -> service.putObject(
+                ".versions", collidingKey, "tampered".getBytes(StandardCharsets.UTF_8), "text/plain", null));
+
+        assertEquals("InvalidBucketName", put.getErrorCode());
+        assertArrayEquals(original,
+                service.getObject("victim-bucket", "document.txt", version.getVersionId()).getData());
     }
 
     @Test
@@ -1278,4 +1305,3 @@ class S3ServiceTest {
         assertDoesNotThrow(() -> s3Service.authorizeSignedDeleteObject("ASIAFAKEKEY00000001", "sessiontoken", "signed-del-bucket", "some/key"));
     }
 }
-

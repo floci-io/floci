@@ -24,6 +24,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -35,7 +36,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class CodeArtifactServiceTest {
@@ -46,6 +49,7 @@ class CodeArtifactServiceTest {
     private CodeArtifactService service;
     private RegionResolver regionResolver;
     private AccountAwareStorageBackend<CodeArtifactRepository> repoStore;
+    private ReposiliteSidecarClient reposiliteClient;
 
     @BeforeEach
     void setUp() {
@@ -63,8 +67,10 @@ class CodeArtifactServiceTest {
         EmulatorConfig config = mock(EmulatorConfig.class);
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
 
+        reposiliteClient = mock(ReposiliteSidecarClient.class);
+        when(reposiliteClient.format()).thenReturn("maven");
         service = new CodeArtifactService(domainStore, repoStore, packageVersionStore, regionResolver, config,
-                true, null);
+                true, null, new CodeArtifactSidecarRegistry(List.of(reposiliteClient)));
     }
 
     // -------------------------------------------------------------- domains
@@ -287,49 +293,86 @@ class CodeArtifactServiceTest {
     }
 
     @Test
-    void createRepositoryAssignsAFreshMavenRepositoryIdEvenAfterDeleteAndRecreate() {
+    void createRepositoryAssignsFreshContainerIdsForEveryContainerBackedFormat() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        assertEquals(Set.of("maven"), created.getSidecarContainerIds().keySet());
+        created.getSidecarContainerIds().values()
+                .forEach(id -> assertTrue(id != null && !id.isBlank()));
+    }
+
+    @Test
+    void createRepositoryAssignsFreshContainerIdsEvenAfterDeleteAndRecreate() {
         service.createDomain(REGION, "dom", null, Map.of());
         CodeArtifactRepository first = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
-        assertTrue(first.getMavenRepositoryId() != null && !first.getMavenRepositoryId().isBlank());
 
         service.deleteRepository(REGION, "dom", null, "repo");
         CodeArtifactRepository recreated = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
 
-        assertTrue(!first.getMavenRepositoryId().equals(recreated.getMavenRepositoryId()),
-                "a recreated repository must never reuse the previous one's Maven repository id, "
+        assertTrue(!first.getSidecarContainerIds().get("maven").equals(recreated.getSidecarContainerIds().get("maven")),
+                "a recreated repository must never reuse the previous one's container id for a format, "
                         + "or it would inherit its leftover artifacts");
     }
 
     @Test
-    void ensureMavenRepositoryIdBackfillsALegacyRepositoryMissingOne() {
+    void ensureFormatContainerIdBackfillsALegacyRepositoryMissingOneFormat() {
         service.createDomain(REGION, "dom", null, Map.of());
         CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
-        // Simulates a repository persisted before mavenRepositoryId existed: Jackson would
-        // deserialize the missing field as null exactly like this.
-        created.setMavenRepositoryId(null);
+        // Simulates a repository persisted before the maven format's proxy existed: Jackson would
+        // deserialize a missing map entry exactly like this.
+        created.setSidecarContainerIds(new HashMap<>());
         repoStore.putForAccount(ACCOUNT_ID, REGION + "::dom::repo", created);
 
-        String backfilled = service.ensureMavenRepositoryId(REGION, "dom", null, "repo");
+        String backfilled = service.ensureFormatContainerId("maven", REGION, "dom", null, "repo");
 
         assertTrue(backfilled != null && !backfilled.isBlank());
-        assertEquals(backfilled, service.describeRepository(REGION, "dom", null, "repo").getMavenRepositoryId());
+        assertEquals(backfilled,
+                service.describeRepository(REGION, "dom", null, "repo").getSidecarContainerIds().get("maven"));
     }
 
     @Test
-    void ensureMavenRepositoryIdIsIdempotentForAnAlreadyAssignedRepository() {
+    void ensureFormatContainerIdIsIdempotentForAnAlreadyAssignedFormat() {
         service.createDomain(REGION, "dom", null, Map.of());
         CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
 
-        String result = service.ensureMavenRepositoryId(REGION, "dom", null, "repo");
+        String result = service.ensureFormatContainerId("maven", REGION, "dom", null, "repo");
 
-        assertEquals(created.getMavenRepositoryId(), result);
+        assertEquals(created.getSidecarContainerIds().get("maven"), result);
     }
 
     @Test
-    void ensureMavenRepositoryIdRequiresExistingRepository() {
+    void ensureFormatContainerIdRequiresExistingRepository() {
         service.createDomain(REGION, "dom", null, Map.of());
         AwsException e = assertThrows(AwsException.class,
-                () -> service.ensureMavenRepositoryId(REGION, "dom", null, "missing-repo"));
+                () -> service.ensureFormatContainerId("maven", REGION, "dom", null, "missing-repo"));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    @Test
+    void deleteRepositoryReleasesEveryFormatsSidecarStorage() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        service.deleteRepository(REGION, "dom", null, "repo");
+
+        verify(reposiliteClient).release(created.getSidecarContainerIds().get("maven"));
+    }
+
+    @Test
+    void deleteRepositorySucceedsEvenWhenSidecarReleaseFails() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        doThrow(new IllegalStateException("Reposilite unreachable")).when(reposiliteClient).release(anyString());
+
+        // The metadata delete already committed; a sidecar failure must not turn that into a
+        // caller-visible error, and must not leave the caller unable to ever get a clean response
+        // for this repository (a retry would just 404, since the record is already gone).
+        CodeArtifactRepository deleted = service.deleteRepository(REGION, "dom", null, "repo");
+
+        assertEquals("repo", deleted.getName());
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.describeRepository(REGION, "dom", null, "repo"));
         assertEquals("ResourceNotFoundException", e.getErrorCode());
     }
 
