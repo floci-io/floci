@@ -8,8 +8,9 @@ import java.nio.charset.StandardCharsets;
 
 /**
  * Accumulates UTF-8 bytes into a character buffer bounded to a maximum number of characters.
- * Bytes received after the cap is reached are decoded and discarded rather than retained, so
- * memory stays proportional to {@code maxChars} regardless of how much input is fed in.
+ * Once the cap is reached, later {@link #write(byte[])} calls return without decoding their
+ * bytes, so memory stays proportional to {@code maxChars} regardless of how much input is fed
+ * in. Callers can keep writing after the cap to drain their source stream.
  *
  * <p>Handles a multi-byte UTF-8 character split across separate {@link #write(byte[])} calls
  * (e.g. Docker exec stream frames) by carrying any undecoded trailing bytes over to the next
