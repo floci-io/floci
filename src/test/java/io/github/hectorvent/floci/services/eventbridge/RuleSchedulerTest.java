@@ -5,111 +5,93 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.eventbridge.model.Rule;
 import io.github.hectorvent.floci.services.eventbridge.model.RuleState;
 import io.github.hectorvent.floci.services.eventbridge.model.Target;
+import io.vertx.core.Handler;
 import io.vertx.core.Vertx;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.time.Clock;
-import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
-import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
  * Covers the race between an in-flight cron tick and a concurrent DeleteRule/DisableRule:
  * the tick's self-rescheduling must not resurrect a timer for a rule that stopped
  * scheduling (deleted or disabled) while target delivery was still in progress.
+ * The timer is driven by hand through a mocked Vertx, so no real time passes.
  */
 class RuleSchedulerTest {
 
-    private static final String REGION = "us-east-1";
     private static final String ACCOUNT = "000000000000";
     private static final String RULE_ARN = "arn:aws:events:us-east-1:000000000000:rule/default/timer-stop-rule";
     private static final String EVERY_MINUTE_CRON = "cron(0/1 * * * ? *)";
-
-    // Parked one second before a minute boundary so ScheduleExpressionParser.millisUntilNextFire
-    // computes its documented 1-second floor, keeping the cron fire fast and deterministic
-    // instead of depending on where real wall-clock time happens to sit in the current minute.
     private static final Instant JUST_BEFORE_MINUTE_BOUNDARY = Instant.parse("2026-06-15T12:00:59.000Z");
 
-    private Vertx vertx;
-
-    @BeforeEach
-    void setUp() {
-        vertx = Vertx.vertx();
-    }
-
-    @AfterEach
-    void tearDown() {
-        vertx.close();
-    }
-
     @Test
-    void deletedRuleDoesNotResurrectCronTimerDuringInFlightTick() throws InterruptedException {
-        CountDownLatch invocationStarted = new CountDownLatch(1);
-        CountDownLatch releaseInvocation = new CountDownLatch(1);
-        BlockingInvoker invoker = new BlockingInvoker(invocationStarted, releaseInvocation);
-        RuleScheduler scheduler = newScheduler(invoker);
+    void deletedRuleDoesNotResurrectCronTimerDuringInFlightTick() {
+        Vertx vertx = mock(Vertx.class);
+        ArgumentCaptor<Handler<Long>> fire = timerHandlerCaptor();
+        when(vertx.setTimer(anyLong(), fire.capture())).thenReturn(1L, 2L);
 
         AtomicReference<Rule> currentRule = new AtomicReference<>(enabledRule());
-        scheduler.startScheduler(RULE_ARN, EVERY_MINUTE_CRON, () -> toScheduleData(currentRule.get()));
-
-        assertTrue(invocationStarted.await(10, TimeUnit.SECONDS),
-                "expected the cron timer to invoke the blocked target");
-
-        // AWS DeleteRule: the rule is gone. EventBridgeService.deleteRule always calls
+        AtomicReference<RuleScheduler> schedulerRef = new AtomicReference<>();
+        // AWS DeleteRule lands mid-delivery. EventBridgeService.deleteRule always calls
         // RuleScheduler.stopScheduler before removing the rule; mirror that ordering here.
-        currentRule.set(null);
-        scheduler.stopScheduler(RULE_ARN);
-
-        releaseInvocation.countDown();
-
-        // The clock sits one second before a cron fire, so a re-armed timer would deliver again
-        // within about a second. Hold the check past that window.
-        await().during(Duration.ofSeconds(2)).atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
-            assertFalse(scheduler.isRunning(RULE_ARN), "deleted rule must not have its cron timer re-armed");
-            assertEquals(1, invoker.invocationCount(), "target must not be invoked again after deletion");
+        StoppingInvoker invoker = new StoppingInvoker(() -> {
+            schedulerRef.get().stopScheduler(RULE_ARN);
+            currentRule.set(null);
         });
+        RuleScheduler scheduler = newScheduler(vertx, invoker);
+        schedulerRef.set(scheduler);
+        scheduler.startScheduler(RULE_ARN, EVERY_MINUTE_CRON, () -> toScheduleData(currentRule.get()));
+
+        fire.getValue().handle(1L);
+
+        assertEquals(1, invoker.invocationCount());
+        verify(vertx, times(1)).setTimer(anyLong(), any());
+        assertFalse(scheduler.isRunning(RULE_ARN), "deleted rule must not have its cron timer re-armed");
     }
 
     @Test
-    void disabledRuleDoesNotResurrectCronTimerDuringInFlightTick() throws InterruptedException {
-        CountDownLatch invocationStarted = new CountDownLatch(1);
-        CountDownLatch releaseInvocation = new CountDownLatch(1);
-        BlockingInvoker invoker = new BlockingInvoker(invocationStarted, releaseInvocation);
-        RuleScheduler scheduler = newScheduler(invoker);
+    void disabledRuleDoesNotResurrectCronTimerDuringInFlightTick() {
+        Vertx vertx = mock(Vertx.class);
+        ArgumentCaptor<Handler<Long>> fire = timerHandlerCaptor();
+        when(vertx.setTimer(anyLong(), fire.capture())).thenReturn(1L, 2L);
 
-        AtomicReference<Rule> currentRule = new AtomicReference<>(enabledRule());
-        scheduler.startScheduler(RULE_ARN, EVERY_MINUTE_CRON, () -> toScheduleData(currentRule.get()));
-
-        assertTrue(invocationStarted.await(10, TimeUnit.SECONDS),
-                "expected the cron timer to invoke the blocked target");
-
-        // AWS DisableRule: the rule stays but flips to DISABLED. EventBridgeService.disableRule
-        // always calls RuleScheduler.stopScheduler; mirror that ordering here.
-        currentRule.get().setState(RuleState.DISABLED);
-        scheduler.stopScheduler(RULE_ARN);
-
-        releaseInvocation.countDown();
-
-        // The clock sits one second before a cron fire, so a re-armed timer would deliver again
-        // within about a second. Hold the check past that window.
-        await().during(Duration.ofSeconds(2)).atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
-            assertFalse(scheduler.isRunning(RULE_ARN), "disabled rule must not have its cron timer re-armed");
-            assertEquals(1, invoker.invocationCount(), "target must not be invoked again after disabling");
+        Rule rule = enabledRule();
+        AtomicReference<RuleScheduler> schedulerRef = new AtomicReference<>();
+        // AWS DisableRule lands mid-delivery: the rule stays but flips to DISABLED.
+        // EventBridgeService.disableRule always calls RuleScheduler.stopScheduler.
+        StoppingInvoker invoker = new StoppingInvoker(() -> {
+            rule.setState(RuleState.DISABLED);
+            schedulerRef.get().stopScheduler(RULE_ARN);
         });
+        RuleScheduler scheduler = newScheduler(vertx, invoker);
+        schedulerRef.set(scheduler);
+        scheduler.startScheduler(RULE_ARN, EVERY_MINUTE_CRON, () -> toScheduleData(rule));
+
+        fire.getValue().handle(1L);
+
+        assertEquals(1, invoker.invocationCount());
+        verify(vertx, times(1)).setTimer(anyLong(), any());
+        assertFalse(scheduler.isRunning(RULE_ARN), "disabled rule must not have its cron timer re-armed");
+    }
+
+    @SuppressWarnings("unchecked")
+    private static ArgumentCaptor<Handler<Long>> timerHandlerCaptor() {
+        return ArgumentCaptor.forClass(Handler.class);
     }
 
     private static RuleScheduler.ScheduleData toScheduleData(Rule rule) {
@@ -134,39 +116,29 @@ class RuleSchedulerTest {
         return new Target("target-1", "arn:aws:lambda:us-east-1:000000000000:function:test-fn", null, null);
     }
 
-    private RuleScheduler newScheduler(EventBridgeInvoker invoker) {
+    private static RuleScheduler newScheduler(Vertx vertx, EventBridgeInvoker invoker) {
         return new RuleScheduler(vertx, testConfig(), new ObjectMapper(), invoker,
                 Clock.fixed(JUST_BEFORE_MINUTE_BOUNDARY, ZoneOffset.UTC));
     }
 
     /**
-     * Blocks inside invokeTarget until released, simulating a target delivery that is
-     * still in progress when a concurrent DeleteRule/DisableRule runs.
+     * Runs a stop action from inside target delivery, putting a DeleteRule/DisableRule
+     * exactly while the tick is still delivering.
      */
-    private static final class BlockingInvoker extends EventBridgeInvoker {
+    private static final class StoppingInvoker extends EventBridgeInvoker {
 
-        private final CountDownLatch invocationStarted;
-        private final CountDownLatch releaseInvocation;
+        private final Runnable onDelivery;
         private final AtomicInteger invocationCount = new AtomicInteger();
 
-        BlockingInvoker(CountDownLatch invocationStarted, CountDownLatch releaseInvocation) {
+        StoppingInvoker(Runnable onDelivery) {
             super(null, null, null, new ObjectMapper(), testConfig());
-            this.invocationStarted = invocationStarted;
-            this.releaseInvocation = releaseInvocation;
+            this.onDelivery = onDelivery;
         }
 
         @Override
         public void invokeTarget(Target target, String eventJson, String region) {
             invocationCount.incrementAndGet();
-            invocationStarted.countDown();
-            try {
-                if (!releaseInvocation.await(10, TimeUnit.SECONDS)) {
-                    throw new IllegalStateException("Test target delivery was not released in time");
-                }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new IllegalStateException(e);
-            }
+            onDelivery.run();
         }
 
         int invocationCount() {
