@@ -33,6 +33,9 @@ import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.nio.charset.StandardCharsets;
@@ -43,7 +46,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -1277,6 +1284,339 @@ class DynamoDbStreamsEventSourcePollerTest {
         verify(sqsService, timeout(2000)).sendMessage(anyString(), bodyCaptor.capture(), anyInt(), anyString());
         JsonNode payload = OBJECT_MAPPER.readTree(bodyCaptor.getValue());
         assertEquals("MaximumRecordAgeExceeded", payload.path("requestContext").path("condition").asText());
+    }
+
+    // ──────────────────── BisectBatchOnFunctionError and refused destinations ────────────────────
+
+    /**
+     * Serves the listed sequences as the stream and returns it for trimming or appending. The iterator
+     * is the sequence to read after, or empty for the trim horizon; a checkpoint missing from the stream
+     * behaves as trimmed.
+     */
+    private List<DynamoDbStreamRecord> stubStream(String... sequences) {
+        List<DynamoDbStreamRecord> stream = new CopyOnWriteArrayList<>();
+        for (String seq : sequences) {
+            stream.add(ddbRecord(seq, "INSERT", "{}"));
+        }
+        when(streamService.getShardIterator(eq(STREAM_ARN), eq(DynamoDbStreamService.SHARD_ID), anyString(), any()))
+                .thenAnswer(inv -> "TRIM_HORIZON".equals(inv.getArgument(2)) ? "" : inv.getArgument(3));
+        when(streamService.getRecords(anyString(), anyInt())).thenAnswer(inv -> {
+            String after = inv.getArgument(0);
+            List<DynamoDbStreamRecord> snapshot = new ArrayList<>(stream);
+            int from = after.isEmpty() ? 0
+                    : snapshot.stream().map(DynamoDbStreamRecord::getSequenceNumber).toList().indexOf(after) + 1;
+            if (!after.isEmpty() && from == 0) {
+                throw new AwsException("TrimmedDataAccessException", "trimmed", 400);
+            }
+            int limit = inv.getArgument(1);
+            return new DynamoDbStreamService.GetRecordsResult(
+                    new ArrayList<>(snapshot.subList(from, Math.min(from + limit, snapshot.size()))), "unused");
+        });
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("fn");
+        when(functionStore.getForAccount(ACCOUNT_ID, "us-east-1", "fn")).thenReturn(Optional.of(fn));
+        return stream;
+    }
+
+    /** Records the sequences of every delivered batch and answers each with {@code respond}. */
+    private List<List<String>> recordInvocations(Function<List<String>, InvokeResult> respond) {
+        List<List<String>> invocations = new CopyOnWriteArrayList<>();
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse))).thenAnswer(inv -> {
+            List<String> seqs = new ArrayList<>();
+            readRecords(inv.getArgument(1)).forEach(r -> seqs.add(r.path("dynamodb").path("SequenceNumber").asText()));
+            invocations.add(seqs);
+            return respond.apply(seqs);
+        });
+        return invocations;
+    }
+
+    private List<List<String>> failInvocationsContaining(String poison) {
+        return recordInvocations(seqs -> {
+            InvokeResult result = new InvokeResult();
+            if (seqs.contains(poison)) {
+                result.setFunctionError("Unhandled");
+            }
+            return result;
+        });
+    }
+
+    private static InvokeResult partialFailure(String sequence) {
+        InvokeResult result = new InvokeResult();
+        result.setPayload(("{\"batchItemFailures\":[{\"itemIdentifier\":\"" + sequence + "\"}]}").getBytes());
+        return result;
+    }
+
+    /** Refuses the first {@code refusals} SQS sends and returns the bodies of the accepted ones. */
+    private List<String> refuseSqsSends(int refusals) {
+        List<String> delivered = new CopyOnWriteArrayList<>();
+        AtomicInteger attempts = new AtomicInteger();
+        when(sqsService.sendMessage(anyString(), anyString(), anyInt(), anyString())).thenAnswer(inv -> {
+            if (attempts.getAndIncrement() < refusals) {
+                throw new AwsException("AWS.SimpleQueueService.NonExistentQueue", "The specified queue does not exist.", 400);
+            }
+            delivered.add(inv.getArgument(1));
+            return null;
+        });
+        return delivered;
+    }
+
+    private EventSourceMapping esmWithDlq(int maximumRetryAttempts) {
+        EventSourceMapping esm = filterEsm();
+        esm.setMaximumRetryAttempts(maximumRetryAttempts);
+        EventSourceMapping.OnFailure onFailure = new EventSourceMapping.OnFailure();
+        onFailure.setDestination("arn:aws:sqs:us-east-1:000000000000:my-dlq");
+        EventSourceMapping.DestinationConfig destinationConfig = new EventSourceMapping.DestinationConfig();
+        destinationConfig.setOnFailure(onFailure);
+        esm.setDestinationConfig(destinationConfig);
+        return esm;
+    }
+
+    private void pollOnce(DynamoDbStreamsEventSourcePoller p, EventSourceMapping esm) throws InterruptedException {
+        p.pollAndInvoke(esm);
+        awaitPollCompleted(p);
+    }
+
+    private String checkpoint(EventSourceMapping esm) {
+        return esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID);
+    }
+
+    private JsonNode batchInfo(String body) throws Exception {
+        return OBJECT_MAPPER.readTree(body).path("DDBStreamBatchInfo");
+    }
+
+    /** Also covers a trimmed checkpoint, where each poll refetches from the trim horizon. */
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = STALE_CHECKPOINT)
+    void bisectIsolatesThePoisonRecordAndDeliversTheRest(String startingCheckpoint) throws Exception {
+        stubStream("s1", "s2", "s3", "s4");
+        List<List<String>> invocations = failInvocationsContaining("s3");
+        EventSourceMapping esm = esmWithDlq(0);
+        esm.setBisectBatchOnFunctionError(true);
+        if (startingCheckpoint != null) {
+            esm.getShardSequenceNumbers().put(DynamoDbStreamService.SHARD_ID, startingCheckpoint);
+        }
+        DynamoDbStreamsEventSourcePoller p = pollerWith(mock(EsmStore.class));
+
+        for (int i = 0; i < 6; i++) {
+            pollOnce(p, esm);
+        }
+
+        assertEquals(List.of(List.of("s1", "s2", "s3", "s4"), List.of("s1", "s2"), List.of("s3", "s4"),
+                List.of("s3"), List.of("s4")), invocations);
+        ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
+        verify(sqsService).sendMessage(anyString(), body.capture(), anyInt(), anyString());
+        assertEquals("s3", batchInfo(body.getValue()).path("startSequenceNumber").asText());
+        assertEquals("s3", batchInfo(body.getValue()).path("endSequenceNumber").asText());
+        assertEquals(1, batchInfo(body.getValue()).path("batchSize").asInt());
+        assertEquals("s4", checkpoint(esm));
+    }
+
+    @Test
+    void bisectSplitsDoNotConsumeRetryAttempts() throws Exception {
+        stubStream("s1", "s2", "s3", "s4");
+        List<List<String>> invocations = failInvocationsContaining("s3");
+        EventSourceMapping esm = esmWithDlq(1);
+        esm.setBisectBatchOnFunctionError(true);
+        DynamoDbStreamsEventSourcePoller p = pollerWith(mock(EsmStore.class));
+
+        for (int i = 0; i < 4; i++) {
+            pollOnce(p, esm);
+        }
+        assertEquals(List.of(List.of("s1", "s2", "s3", "s4"), List.of("s1", "s2"), List.of("s3", "s4"),
+                List.of("s3")), invocations);
+        verify(sqsService, never()).sendMessage(anyString(), anyString(), anyInt(), anyString());
+
+        advancePastRetry(p);
+        pollOnce(p, esm);
+
+        assertEquals(List.of("s3"), invocations.get(4));
+        ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
+        verify(sqsService).sendMessage(anyString(), body.capture(), anyInt(), anyString());
+        assertEquals(2, OBJECT_MAPPER.readTree(body.getValue())
+                .path("requestContext").path("approximateInvokeCount").asInt());
+    }
+
+    @Test
+    void halvedWindowFullyFilteredOutDoesNotLeakItsLimitIntoALaterHorizonRefetch() throws Exception {
+        List<DynamoDbStreamRecord> stream = stubStream("s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8");
+        stream.subList(0, 4).forEach(r -> r.setEventName("MODIFY"));
+        List<List<String>> invocations = failInvocationsContaining("s5");
+        EventSourceMapping esm = filterEsm("{\"eventName\":[\"INSERT\"]}");
+        esm.setBisectBatchOnFunctionError(true);
+        DynamoDbStreamsEventSourcePoller p = pollerWith(mock(EsmStore.class));
+
+        pollOnce(p, esm);
+        pollOnce(p, esm);
+        assertEquals("s4", checkpoint(esm), "the halved window [s1..s4] is fully filtered out");
+        stream.removeIf(r -> "MODIFY".equals(r.getEventName()));
+        stream.add(ddbRecord("s9", "INSERT", "{}"));
+        pollOnce(p, esm);
+
+        assertEquals(List.of("s5", "s6", "s7", "s8", "s9"), invocations.get(1),
+                "the trimmed checkpoint refetches the horizon at the full BatchSize");
+    }
+
+    @Test
+    void bisectLimitNeverExceedsALaterSmallerBatchSize() throws Exception {
+        stubStream("s1", "s2", "s3", "s4");
+        List<List<String>> invocations = failInvocationsContaining("s1");
+        EventSourceMapping esm = filterEsm();
+        esm.setBisectBatchOnFunctionError(true);
+        DynamoDbStreamsEventSourcePoller p = pollerWith(mock(EsmStore.class));
+
+        pollOnce(p, esm);
+        esm.setBatchSize(1);
+        pollOnce(p, esm);
+
+        assertEquals(List.of(List.of("s1", "s2", "s3", "s4"), List.of("s1")), invocations);
+    }
+
+    @Test
+    void turningBisectOffMidSplitRestoresTheFullBatchSize() throws Exception {
+        stubStream("s1", "s2", "s3", "s4");
+        List<List<String>> invocations = failInvocationsContaining("s1");
+        EventSourceMapping esm = filterEsm();
+        esm.setBisectBatchOnFunctionError(true);
+        DynamoDbStreamsEventSourcePoller p = pollerWith(mock(EsmStore.class));
+
+        pollOnce(p, esm);
+        esm.setBisectBatchOnFunctionError(false);
+        advancePastRetry(p);
+        pollOnce(p, esm);
+
+        assertEquals(List.of(List.of("s1", "s2", "s3", "s4"), List.of("s1", "s2", "s3", "s4")), invocations);
+    }
+
+    @Test
+    void bisectSplitsOnFunctionErrorEvenWithReportBatchItemFailures() throws Exception {
+        stubStream("s1", "s2", "s3", "s4");
+        List<List<String>> invocations = failInvocationsContaining("s3");
+        EventSourceMapping esm = esmWithDlq(0);
+        esm.setBisectBatchOnFunctionError(true);
+        esm.setFunctionResponseTypes(List.of("ReportBatchItemFailures"));
+        DynamoDbStreamsEventSourcePoller p = pollerWith(mock(EsmStore.class));
+
+        pollOnce(p, esm);
+        pollOnce(p, esm);
+
+        assertEquals(List.of(List.of("s1", "s2", "s3", "s4"), List.of("s1", "s2")), invocations);
+        assertEquals("s2", checkpoint(esm));
+    }
+
+    @Test
+    void partialBatchResponseWithBisectRetriesFromTheFailedRecordWithoutSplitting() throws Exception {
+        stubStream("s1", "s2", "s3", "s4");
+        List<List<String>> invocations = recordInvocations(
+                seqs -> seqs.contains("s3") ? partialFailure("s3") : new InvokeResult());
+        EventSourceMapping esm = filterEsm();
+        esm.setBisectBatchOnFunctionError(true);
+        esm.setFunctionResponseTypes(List.of("ReportBatchItemFailures"));
+        DynamoDbStreamsEventSourcePoller p = pollerWith(mock(EsmStore.class));
+
+        pollOnce(p, esm);
+        assertEquals("s2", checkpoint(esm));
+        advancePastRetry(p);
+        pollOnce(p, esm);
+
+        assertEquals(List.of(List.of("s1", "s2", "s3", "s4"), List.of("s3", "s4")), invocations);
+    }
+
+    @Test
+    void throttledBatchIsNotBisected() throws Exception {
+        stubStream("s1", "s2", "s3", "s4");
+        AtomicBoolean throttled = new AtomicBoolean();
+        List<List<String>> invocations = recordInvocations(seqs -> {
+            if (throttled.compareAndSet(false, true)) {
+                throw new AwsException("TooManyRequestsException", "throttled", 429);
+            }
+            return new InvokeResult();
+        });
+        EventSourceMapping esm = filterEsm();
+        esm.setBisectBatchOnFunctionError(true);
+        DynamoDbStreamsEventSourcePoller p = pollerWith(mock(EsmStore.class));
+
+        pollOnce(p, esm);
+        pollOnce(p, esm);
+
+        assertEquals(List.of(List.of("s1", "s2", "s3", "s4"), List.of("s1", "s2", "s3", "s4")), invocations);
+        assertEquals("s4", checkpoint(esm));
+    }
+
+    @Test
+    void refusedOnFailureDestinationKeepsTheBatchAndRetriesTheSend() throws Exception {
+        stubStream("s1");
+        List<List<String>> invocations = failInvocationsContaining("s1");
+        List<String> delivered = refuseSqsSends(1);
+        EventSourceMapping esm = esmWithDlq(0);
+        DynamoDbStreamsEventSourcePoller p = pollerWith(mock(EsmStore.class));
+
+        pollOnce(p, esm);
+        assertNull(checkpoint(esm), "a refused send must not checkpoint the discarded batch");
+        pollOnce(p, esm);
+        verify(sqsService, times(1)).sendMessage(anyString(), anyString(), anyInt(), anyString());
+
+        advancePastRetry(p);
+        pollOnce(p, esm);
+
+        assertEquals(List.of(List.of("s1")), invocations, "the parked batch is re-sent, not re-invoked");
+        assertEquals(1, delivered.size());
+        assertEquals("s1", batchInfo(delivered.get(0)).path("startSequenceNumber").asText());
+        assertEquals("s1", batchInfo(delivered.get(0)).path("endSequenceNumber").asText());
+        assertEquals("s1", checkpoint(esm));
+    }
+
+    @Test
+    void parkedFailureIsResentAfterTheFunctionStopsResolving() throws Exception {
+        stubStream("s1");
+        failInvocationsContaining("s1");
+        List<String> delivered = refuseSqsSends(1);
+        EventSourceMapping esm = esmWithDlq(0);
+        DynamoDbStreamsEventSourcePoller p = pollerWith(mock(EsmStore.class));
+
+        pollOnce(p, esm);
+        assertNull(checkpoint(esm));
+        when(functionStore.getForAccount(ACCOUNT_ID, "us-east-1", "fn")).thenReturn(Optional.empty());
+        advancePastRetry(p);
+        pollOnce(p, esm);
+
+        assertEquals(1, delivered.size(), "the resend does not need the function");
+        assertEquals("s1", checkpoint(esm));
+    }
+
+    @Test
+    void refusedOnFailureDestinationAfterPartialSuccessKeepsTheAcknowledgedPrefix() throws Exception {
+        stubStream("s1", "s2", "s3");
+        List<List<String>> invocations = recordInvocations(seqs -> partialFailure("s2"));
+        List<String> delivered = refuseSqsSends(1);
+        EventSourceMapping esm = esmWithDlq(0);
+        esm.setFunctionResponseTypes(List.of("ReportBatchItemFailures"));
+        DynamoDbStreamsEventSourcePoller p = pollerWith(mock(EsmStore.class));
+
+        pollOnce(p, esm);
+        assertEquals("s1", checkpoint(esm));
+
+        advancePastRetry(p);
+        pollOnce(p, esm);
+
+        assertEquals(1, invocations.size());
+        assertEquals(1, delivered.size());
+        assertEquals("s2", batchInfo(delivered.get(0)).path("startSequenceNumber").asText());
+        assertEquals("s3", batchInfo(delivered.get(0)).path("endSequenceNumber").asText());
+        assertEquals("s3", checkpoint(esm));
+    }
+
+    @Test
+    void exhaustedBatchWithoutOnFailureDestinationIsDiscarded() throws Exception {
+        stubStream("s1");
+        failInvocationsContaining("s1");
+        EventSourceMapping esm = filterEsm();
+        esm.setMaximumRetryAttempts(0);
+        DynamoDbStreamsEventSourcePoller p = pollerWith(mock(EsmStore.class));
+
+        pollOnce(p, esm);
+
+        assertEquals("s1", checkpoint(esm));
     }
 
     private void awaitPollCompleted(DynamoDbStreamsEventSourcePoller poller) throws InterruptedException {
