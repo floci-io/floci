@@ -2087,6 +2087,14 @@ public interface EmulatorConfig {
          */
         @WithDefault("51679")
         int port();
+
+        /**
+         * Image for the per-network credentials proxy, reusing the same minimal helper image as
+         * security-group enforcement: it already carries {@code socat}, and one more single-purpose
+         * use of an image Floci already builds and pulls is simpler than shipping a second one.
+         */
+        @WithDefault("floci/network-helper:local")
+        String proxyImage();
     }
 
     interface ResourceGroupsTaggingServiceConfig {

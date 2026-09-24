@@ -577,6 +577,7 @@ floci:
         enabled: false
         ttl-seconds: 21600
         port: 51679
+        proxy-image: floci/network-helper:local
     appconfig:
       enabled: true
     appconfigdata:

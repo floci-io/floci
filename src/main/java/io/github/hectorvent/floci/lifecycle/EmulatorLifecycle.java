@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.lifecycle.inithook.InitializationHook;
 import io.github.hectorvent.floci.lifecycle.inithook.InitializationHooksRunner;
 import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
+import io.github.hectorvent.floci.services.ecs.container.EcsTaskRoleCredentialsServer;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.floci.ui.FlociUiManager;
 import io.github.hectorvent.floci.services.amazonmq.container.RabbitMqManager;
@@ -97,6 +98,7 @@ public class EmulatorLifecycle {
     private final DynamoDbStreamsEventSourcePoller dynamodbStreamsPoller;
     private final PipesService pipesService;
     private final Ec2MetadataServer ec2MetadataServer;
+    private final EcsTaskRoleCredentialsServer ecsTaskRoleCredentialsServer;
     private final EcrRegistryManager ecrRegistryManager;
     private final FlociUiManager flociUiManager;
     private final InitLifecycleState initLifecycleState;
@@ -133,6 +135,7 @@ public class EmulatorLifecycle {
                              DynamoDbStreamsEventSourcePoller dynamodbStreamsPoller,
                              PipesService pipesService,
                              Ec2MetadataServer ec2MetadataServer,
+                             EcsTaskRoleCredentialsServer ecsTaskRoleCredentialsServer,
                              EcrRegistryManager ecrRegistryManager,
                              FlociUiManager flociUiManager,
                              InitLifecycleState initLifecycleState,
@@ -168,6 +171,7 @@ public class EmulatorLifecycle {
         this.dynamodbStreamsPoller = dynamodbStreamsPoller;
         this.pipesService = pipesService;
         this.ec2MetadataServer = ec2MetadataServer;
+        this.ecsTaskRoleCredentialsServer = ecsTaskRoleCredentialsServer;
         this.ecrRegistryManager = ecrRegistryManager;
         this.flociUiManager = flociUiManager;
         this.initLifecycleState = initLifecycleState;
@@ -212,6 +216,10 @@ public class EmulatorLifecycle {
         if (sweptEc2Sessions > 0) {
             LOG.infov("Removed {0} orphaned EC2 instance session(s)", sweptEc2Sessions);
         }
+        int sweptEcsTaskRoleSessions = iamService.sweepOrphanedEcsTaskRoleSessions();
+        if (sweptEcsTaskRoleSessions > 0) {
+            LOG.infov("Removed {0} orphaned ECS task-role session(s)", sweptEcsTaskRoleSessions);
+        }
         schemaCreationWorker.recoverOrphans();
         schemaCreationWorker.rehydrateSchemas();
         stepFunctionsService.abortAbandonedExecutions();
@@ -244,6 +252,12 @@ public class EmulatorLifecycle {
         if (isMetadataServerNeeded()) {
             ec2MetadataServer.start().exceptionally(ex -> {
                 LOG.warnv("EC2 IMDS server failed to start: {0}", ex.getMessage());
+                return null;
+            });
+        }
+        if (config.services().ecs().taskRoleCredentials().enabled()) {
+            ecsTaskRoleCredentialsServer.start().exceptionally(ex -> {
+                LOG.warnv("ECS task-role credentials server failed to start: {0}", ex.getMessage());
                 return null;
             });
         }
@@ -333,6 +347,11 @@ public class EmulatorLifecycle {
         runCleanup("EC2 metadata server", () -> {
             if (isMetadataServerNeeded()) {
                 ec2MetadataServer.stop();
+            }
+        });
+        runCleanup("ECS task-role credentials server", () -> {
+            if (config.services().ecs().taskRoleCredentials().enabled()) {
+                ecsTaskRoleCredentialsServer.stop();
             }
         });
         runCleanup("ElastiCache proxy", elastiCacheProxyManager::stopAll);
