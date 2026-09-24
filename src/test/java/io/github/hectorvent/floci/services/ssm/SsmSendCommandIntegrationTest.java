@@ -43,6 +43,8 @@ class SsmSendCommandIntegrationTest {
     @BeforeEach
     void resetDirectExecution() {
         reset(directCommandExecutor);
+        when(directCommandExecutor.executeIfSupported(any(), anyString(), anyString(), any(), anyInt()))
+                .thenReturn(Optional.empty());
         when(directCommandExecutor.executeIfSupported(anyString(), anyString(), any(), anyInt()))
                 .thenReturn(Optional.empty());
     }
@@ -408,9 +410,10 @@ class SsmSendCommandIntegrationTest {
     void sendCommandDirectlyExecutesForContainerBackedInstance() {
         Instant start = Instant.parse("2026-06-07T00:00:00Z");
         Instant end = Instant.parse("2026-06-07T00:00:01Z");
-        when(directCommandExecutor.supports(eq("i-direct-container"), eq("AWS-RunShellScript")))
+        when(directCommandExecutor.supports(any(), eq("i-direct-container"), eq("AWS-RunShellScript")))
                 .thenReturn(true);
         when(directCommandExecutor.executeIfSupported(
+                any(),
                 eq("i-direct-container"),
                 eq("AWS-RunShellScript"),
                 any(),

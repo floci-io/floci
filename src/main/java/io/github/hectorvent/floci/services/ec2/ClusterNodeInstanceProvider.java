@@ -17,7 +17,7 @@ public interface ClusterNodeInstanceProvider {
     /**
      * Finds an external cluster node instance by account, region, and instance ID.
      *
-     * @param accountId the AWS account ID (or {@code null} to match any account)
+     * @param accountId the AWS account ID (must not be {@code null})
      * @param region the AWS region (or {@code null} to match any region)
      * @param instanceId the EC2 instance ID
      * @return the matching instance, or empty if not found
@@ -27,7 +27,7 @@ public interface ClusterNodeInstanceProvider {
     /**
      * Lists external cluster node instances for the given account and region.
      *
-     * @param accountId the AWS account ID (or {@code null} for all accounts)
+     * @param accountId the AWS account ID (must not be {@code null})
      * @param region the AWS region (or {@code null} for all regions)
      * @return list of cluster node instances
      */

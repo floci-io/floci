@@ -1787,11 +1787,11 @@ public class EksClusterManager implements ClusterNodeInstanceProvider {
 
     @Override
     public Optional<Instance> findInstance(String accountId, String region, String instanceId) {
-        if (instanceId == null || instanceId.isBlank()) {
+        if (accountId == null || accountId.isBlank() || instanceId == null || instanceId.isBlank()) {
             return Optional.empty();
         }
         return clusterNodeInstances.values().stream()
-                .filter(rec -> accountId == null || accountId.equals(rec.accountId()))
+                .filter(rec -> accountId.equals(rec.accountId()))
                 .filter(rec -> region == null || region.equals(rec.region()))
                 .map(ClusterNodeRecord::instance)
                 .filter(i -> instanceId.equals(i.getInstanceId()))
@@ -1800,8 +1800,11 @@ public class EksClusterManager implements ClusterNodeInstanceProvider {
 
     @Override
     public List<Instance> listInstances(String accountId, String region) {
+        if (accountId == null || accountId.isBlank()) {
+            return List.of();
+        }
         return clusterNodeInstances.values().stream()
-                .filter(rec -> accountId == null || accountId.equals(rec.accountId()))
+                .filter(rec -> accountId.equals(rec.accountId()))
                 .filter(rec -> region == null || region.equals(rec.region()))
                 .map(ClusterNodeRecord::instance)
                 .toList();
