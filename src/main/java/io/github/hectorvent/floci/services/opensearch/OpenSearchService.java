@@ -164,14 +164,15 @@ public class OpenSearchService implements ResourceProvider {
     }
 
     /**
-     * The endpoint reported for a domain with no container behind it, either because the service is
-     * mocked or because the container could not be started.
+     * The endpoint reported for a domain with no container behind it. Two cases reach this: the
+     * service is mocked, and no Docker daemon is reachable, which is the only condition under which
+     * {@link OpenSearchDomainManager#tryStartDomain} returns false rather than rethrowing.
      *
-     * <p>A domain that reports {@code Processing false} with a blank endpoint is a domain the AWS
-     * SDK waiters never finish waiting on: they poll until the domain is active AND names an
-     * endpoint, so an empty one leaves a create hanging until the caller's own deadline. The shape
-     * is AWS's, {@code search-<domain>-<suffix>.<region>.es.amazonaws.com}, and the suffix is
-     * derived from the name so it survives a restart.
+     * <p>It reports an AWS-shaped endpoint in place of a blank one,
+     * {@code search-<domain>-<suffix>.<region>.es.amazonaws.com}, with the suffix derived from the
+     * domain name so it survives a restart. A domain reporting {@code Processing false} alongside
+     * {@code Endpoint ""} describes a state AWS never returns, and a client that reads the endpoint
+     * to address the domain gets an empty string to connect to.
      */
     private static String synthesizedEndpoint(String domainName, String region) {
         String suffix = Integer.toHexString(domainName.hashCode() & 0x7fffffff);

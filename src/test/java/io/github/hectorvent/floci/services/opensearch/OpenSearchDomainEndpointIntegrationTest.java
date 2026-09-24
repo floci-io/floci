@@ -14,9 +14,9 @@ import static org.hamcrest.Matchers.startsWith;
 /**
  * A domain that reports itself no longer processing also reports an endpoint.
  *
- * <p>An SDK waiter polls DescribeDomain until the domain is active and names an endpoint. A blank
- * one with {@code Processing false} satisfies neither exit, so a create hangs until the caller's
- * own deadline rather than failing.
+ * <p>Covers the two cases with no container behind the domain: the service is mocked, and no Docker
+ * daemon is reachable. Both once reported {@code Processing false} alongside {@code Endpoint ""},
+ * which AWS never returns, leaving a client that reads the endpoint with an empty string to address.
  */
 @QuarkusTest
 class OpenSearchDomainEndpointIntegrationTest {
