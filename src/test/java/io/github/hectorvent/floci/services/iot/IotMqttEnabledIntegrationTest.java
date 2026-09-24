@@ -218,6 +218,41 @@ class IotMqttEnabledIntegrationTest {
     }
 
     @Test
+    void mqtt5PublishAtTheAwsPropertyAndPayloadMaximumsIsDelivered() throws Exception {
+        String topic = "phase6/mqtt5-limit/" + System.nanoTime();
+        byte[] payload = randomPayload(AWS_MAX_PAYLOAD);
+
+        try (Mqtt5TestClient subscriber = connectMqtt5("mqtt5-limit-sub")) {
+            subscriber.subscribe(topic);
+            try (Mqtt5TestClient publisher = connectMqtt5("mqtt5-limit-pub")) {
+                publisher.publish(topic, payload, 1, awsMaximumProperties(8 * 1024));
+            }
+            assertArrayEquals(payload, subscriber.takePublish().payload());
+        }
+    }
+
+    @Test
+    void mqtt5PublishAboveTheAwsPacketMaximumDisconnectsWithoutAck() throws Exception {
+        String topic = "phase6/mqtt5-over-limit/" + System.nanoTime();
+
+        try (Mqtt5TestClient publisher = connectMqtt5("mqtt5-over-limit-pub")) {
+            org.eclipse.paho.mqttv5.common.MqttException thrown = assertThrows(
+                    org.eclipse.paho.mqttv5.common.MqttException.class,
+                    () -> publisher.publish(topic, randomPayload(AWS_MAX_PAYLOAD), 1, awsMaximumProperties(16 * 1024)));
+            assertEquals(org.eclipse.paho.mqttv5.client.MqttClientException.REASON_CODE_CONNECTION_LOST, thrown.getReasonCode());
+        }
+    }
+
+    /** 8 KB correlation data plus user properties of the given key and value size, as AWS counts them. */
+    private static org.eclipse.paho.mqttv5.common.packet.MqttProperties awsMaximumProperties(int userPropertiesSize) {
+        org.eclipse.paho.mqttv5.common.packet.MqttProperties properties = new org.eclipse.paho.mqttv5.common.packet.MqttProperties();
+        properties.setCorrelationData(randomPayload(8 * 1024));
+        properties.setUserProperties(java.util.List.of(
+                new org.eclipse.paho.mqttv5.common.packet.UserProperty("k", "v".repeat(userPropertiesSize - 1))));
+        return properties;
+    }
+
+    @Test
     void shadowUpdateTopicPublishesAcceptedResponse() throws Exception {
         try (MqttTestClient subscriber = connectMqtt("phase7-update-sub")) {
             subscriber.subscribe("$aws/things/phase7Thing/shadow/update/accepted");
@@ -601,6 +636,7 @@ class IotMqttEnabledIntegrationTest {
                 public void authPacketArrived(int reasonCode, org.eclipse.paho.mqttv5.common.packet.MqttProperties properties) {
                 }
             });
+            client.setTimeToWait(10_000);
             client.connect(connectOptions());
             return testClient;
         }
@@ -614,8 +650,14 @@ class IotMqttEnabledIntegrationTest {
         }
 
         void publish(String topic, byte[] payload) throws org.eclipse.paho.mqttv5.common.MqttException {
+            publish(topic, payload, 0, new org.eclipse.paho.mqttv5.common.packet.MqttProperties());
+        }
+
+        void publish(String topic, byte[] payload, int qos, org.eclipse.paho.mqttv5.common.packet.MqttProperties properties)
+                throws org.eclipse.paho.mqttv5.common.MqttException {
             org.eclipse.paho.mqttv5.common.MqttMessage message = new org.eclipse.paho.mqttv5.common.MqttMessage(payload);
-            message.setQos(0);
+            message.setQos(qos);
+            message.setProperties(properties);
             client.publish(topic, message);
         }
 
