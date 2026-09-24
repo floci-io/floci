@@ -124,15 +124,7 @@ final class ProjectionEvaluator {
     }
 
     private static boolean covers(List<PathSegment> outer, List<PathSegment> inner) {
-        if (outer.size() > inner.size()) {
-            return false;
-        }
-        for (int i = 0; i < outer.size(); i++) {
-            if (!outer.get(i).equals(inner.get(i))) {
-                return false;
-            }
-        }
-        return true;
+        return outer.size() <= inner.size() && inner.subList(0, outer.size()).equals(outer);
     }
 
     // DynamoDB prints a document path as its elements inside brackets, with a list
