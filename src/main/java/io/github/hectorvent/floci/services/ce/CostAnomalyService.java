@@ -36,7 +36,7 @@ public class CostAnomalyService implements Resettable {
     private static final Pattern EMAIL = Pattern.compile(
             "^[a-zA-Z0-9.!#$%&'*+=?^_`{|}~-]+@[a-zA-Z0-9_-]+(\\.[a-zA-Z0-9_-]+)+$");
     private static final Pattern SNS = Pattern.compile(
-            "^arn:aws[a-zA-Z-]*:sns:[a-zA-Z0-9-]+:[0-9]{12}:[a-zA-Z0-9_-]+(\\.fifo)?$");
+            "^arn:" + AwsArnUtils.PARTITION_REGEX + ":sns:[a-zA-Z0-9-]+:[0-9]{12}:[a-zA-Z0-9_-]+(\\.fifo)?$");
 
     private final AccountAwareStorageBackend<ObjectNode> monitors;
     private final AccountAwareStorageBackend<ObjectNode> subscriptions;

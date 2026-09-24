@@ -47,7 +47,7 @@ public class EcrService implements ResourceProvider {
                     + "(?:(?:\\.|_|__|-+)[a-z0-9]+)*)*/?|ROOT)");
     private static final Pattern REGISTRY_ID = Pattern.compile("[0-9]{12}");
     private static final Pattern CREDENTIAL_ARN = Pattern.compile(
-            "arn:aws(?:-\\w+)*:secretsmanager:[a-zA-Z0-9-:]+:secret:ecr-pullthroughcache/"
+            "arn:" + AwsArnUtils.PARTITION_REGEX + ":secretsmanager:[a-zA-Z0-9-:]+:secret:ecr-pullthroughcache/"
                     + "[a-zA-Z0-9/_+=.@-]+");
     private static final Set<String> UPSTREAM_REGISTRIES = Set.of(
             "ecr", "ecr-public", "quay", "k8s", "docker-hub",
@@ -954,7 +954,7 @@ public class EcrService implements ResourceProvider {
         if (host.equals("registry-1.docker.io")) {
             return "docker-hub";
         }
-        if (host.equals("public.ecr.aws")) {
+        if (host.equals("public.ecr.aws")) { // partition-literal: ECR Public's fixed registry host; the service exists only in the commercial partition
             return "ecr-public";
         }
         if (host.equals("quay.io")) {

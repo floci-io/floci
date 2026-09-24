@@ -2959,7 +2959,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     private String rootAccountReportRow() {
-        String arn = "arn:aws:iam::" + regionResolver.getAccountId() + ":root";
+        String arn = AwsArnUtils.Arn.of("iam", "", regionResolver.getAccountId(), "root").toString();
         return String.join(",",
                 "<root_account>", arn, "N/A",
                 "FALSE", "N/A", "N/A", "not_supported",
