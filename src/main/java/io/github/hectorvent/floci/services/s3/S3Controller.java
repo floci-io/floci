@@ -838,7 +838,7 @@ public class S3Controller {
 
             if (copySource != null && !copySource.isEmpty()) {
                 s3Service.authorizeObjectWrite(bucket, key, "s3:PutObject", authorization);
-                return handleCopyObject(copySource, bucket, key, contentType, httpHeaders, authorization);
+                return handleCopyObject(copySource, bucket, key, contentType, httpHeaders, uriInfo, authorization);
             }
 
             Map<String, String> inlineTags = parseInlineTaggingHeader(resolveInlineTaggingSource(tagging, uriInfo));
@@ -2636,6 +2636,7 @@ public class S3Controller {
 
     private Response handleCopyObject(String copySource, String destBucket, String destKey,
                                       String contentType, HttpHeaders httpHeaders,
+                                      UriInfo uriInfo,
                                       S3Service.RequestAuthorization authorization) {
         CopySourceRef sourceObject = parseCopySource(copySource);
         String sourceBucket = sourceObject.bucket();
@@ -2684,7 +2685,7 @@ public class S3Controller {
                         .withCopySourceSseCustomerAlgorithm(httpHeaders.getHeaderString("x-amz-copy-source-server-side-encryption-customer-algorithm"))
                         .withCopySourceSseCustomerKey(httpHeaders.getHeaderString("x-amz-copy-source-server-side-encryption-customer-key"))
                         .withCopySourceSseCustomerKeyMd5(httpHeaders.getHeaderString("x-amz-copy-source-server-side-encryption-customer-key-MD5"))
-                        .withChecksumAlgorithm(getChecksumAlgorithm(httpHeaders))
+                        .withChecksumAlgorithm(getChecksumAlgorithm(httpHeaders, uriInfo))
                         .withAnnotationDirective(annotationDirective)
                         .withAcl(cannedAcl)
                         .withGrantRead(httpHeaders.getHeaderString("x-amz-grant-read"))
@@ -2916,10 +2917,6 @@ public class S3Controller {
         return null;
     }
 
-    private S3Checksum extractChecksum(HttpHeaders httpHeaders) {
-        return extractChecksum(httpHeaders, null);
-    }
-
     private S3Checksum extractChecksum(HttpHeaders httpHeaders, UriInfo uriInfo) {
         String crc32 = resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-crc32");
         String crc32c = resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-crc32c");
@@ -2937,10 +2934,6 @@ public class S3Controller {
         checksum.setChecksumSHA256(sha256);
         checksum.setChecksumType(ChecksumType.FULL_OBJECT);
         return checksum;
-    }
-
-    private String getChecksumAlgorithm(HttpHeaders httpHeaders) {
-        return getChecksumAlgorithm(httpHeaders, null);
     }
 
     private String getChecksumAlgorithm(HttpHeaders httpHeaders, UriInfo uriInfo) {

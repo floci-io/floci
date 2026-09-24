@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.s3;
 
 import io.github.hectorvent.floci.services.s3.model.S3Checksum;
+import io.github.hectorvent.floci.testing.S3EnforceAuthProfile;
 import io.github.hectorvent.floci.testutil.S3RequestSigner;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -24,7 +25,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
 
 @QuarkusTest
-@TestProfile(S3AuthEnforcementIntegrationTest.S3AuthProfile.class)
+@TestProfile(S3EnforceAuthProfile.class)
 class S3PresignedChecksumIntegrationTest {
 
     private static final String BUCKET = "presigned-checksum-bucket";
@@ -170,6 +171,45 @@ class S3PresignedChecksumIntegrationTest {
             .statusCode(400)
             .body(containsString("BadDigest"))
             .body(containsString("The CRC32 checksum you specified did not match the payload."));
+    }
+
+    @Test
+    void presignedCopyObjectWithChecksumAlgorithmInQueryComputesAndStoresChecksum() throws Exception {
+        createBucket();
+        String sourcePath = "/" + BUCKET + "/copy-source.txt";
+        byte[] body = "copy source content for checksum test".getBytes(StandardCharsets.UTF_8);
+        given()
+            .filter(LOCAL_SIGNER)
+            .body(body)
+        .when()
+            .put(sourcePath)
+        .then()
+            .statusCode(200);
+
+        String destPath = "/" + BUCKET + "/copy-dest.txt";
+        String expectedSha256 = S3Checksum.sha256Base64(body);
+        String copyUrl = presign("PUT", destPath,
+                Map.of("x-amz-checksum-algorithm", "SHA256"),
+                Map.of("x-amz-copy-source", "/" + BUCKET + "/copy-source.txt"));
+
+        given()
+            .urlEncodingEnabled(false)
+            .header("x-amz-copy-source", "/" + BUCKET + "/copy-source.txt")
+        .when()
+            .put(copyUrl)
+        .then()
+            .statusCode(200)
+            .body(containsString("CopyObjectResult"))
+            .body(containsString("<ChecksumSHA256>" + expectedSha256 + "</ChecksumSHA256>"));
+
+        given()
+            .filter(LOCAL_SIGNER)
+            .header("x-amz-checksum-mode", "ENABLED")
+        .when()
+            .head(destPath)
+        .then()
+            .statusCode(200)
+            .header("x-amz-checksum-sha256", equalTo(expectedSha256));
     }
 
     private static void createBucket() {
