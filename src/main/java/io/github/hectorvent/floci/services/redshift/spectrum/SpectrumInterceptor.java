@@ -98,6 +98,10 @@ public class SpectrumInterceptor {
         service.forgetCluster(accountId, clusterKey);
     }
 
+    public void cleanup(BackendSql backend, SpectrumMaterializer.Materialization materialization) {
+        spectrumMaterializer.cleanup(backend, materialization);
+    }
+
     private Optional<ExternalStatement> parseStatement(String sql) {
         try {
             Optional<SpectrumStatement> legacy = legacyParser.parse(sql);

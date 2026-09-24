@@ -25,7 +25,9 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -124,8 +126,13 @@ class RedshiftSpectrumIntegrationTest {
         descriptor.setColumns(List.of(id, name));
         descriptor.setLocation("s3://" + bucket + "/" + tableName + "/");
         descriptor.setInputFormat("org.apache.hadoop.mapred.TextInputFormat");
+        StorageDescriptor.SerDeInfo serde = new StorageDescriptor.SerDeInfo();
+        serde.setSerializationLibrary("org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe");
+        descriptor.setSerdeInfo(serde);
         Table table = new Table();
         table.setName(tableName);
+        table.setTableType("EXTERNAL_TABLE");
+        table.setParameters(Map.of("skip.header.line.count", "1"));
         table.setStorageDescriptor(descriptor);
         glueService.createTable(glueDatabase, table);
     }
@@ -207,6 +214,28 @@ class RedshiftSpectrumIntegrationTest {
                     () -> statement.execute("INSERT INTO analytics.events VALUES (9, 'no')"));
             assertEquals("0A000", write.getSQLState());
             statement.execute("DROP TABLE analytics.more");
+        }
+    }
+
+    @Test
+    @Timeout(120)
+    void pagesGlueSpectrumRowsAcrossMultipleExecutesWhenFetchSizeIsSet() throws SQLException {
+        seedCsvTable("events", "id,name\n1,Alice\n2,Bob\n3,Carol\n4,Dave\n5,Eve\n");
+        Cluster cluster = newCluster("fetch-size");
+        try (Connection connection = connect(cluster); Statement setup = connection.createStatement()) {
+            setup.execute(createSchemaSql("analytics"));
+            connection.setAutoCommit(false);
+            try (PreparedStatement prepared = connection.prepareStatement("SELECT id, name FROM analytics.events")) {
+                prepared.setFetchSize(2);
+                List<Integer> ids = new ArrayList<>();
+                try (ResultSet rows = prepared.executeQuery()) {
+                    while (rows.next()) {
+                        ids.add(rows.getInt("id"));
+                    }
+                }
+                assertEquals(List.of(1, 2, 3, 4, 5), ids);
+            }
+            connection.commit();
         }
     }
 }

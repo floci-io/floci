@@ -1,6 +1,14 @@
 package io.github.hectorvent.floci.services.redshift.proxy;
 
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.redshift.spectrum.BackendSql;
+import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumColumn;
+import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumExternalSchema;
+import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumExternalTable;
+import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumGlueCsvAdapter;
+import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumInterceptor;
+import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumMaterializer;
+import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumQuery;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.jboss.logging.Logger;
@@ -39,6 +47,10 @@ class RedshiftInterceptingBridgeTest {
     private S3Service s3Stub;
 
     private void startBridge() throws IOException {
+        startBridge(null);
+    }
+
+    private void startBridge(SpectrumInterceptor spectrumInterceptor) throws IOException {
         clientListener = new ServerSocket(0);
         testClientEnd = new Socket("localhost", clientListener.getLocalPort());
         bridgeClientEnd = clientListener.accept();
@@ -49,7 +61,9 @@ class RedshiftInterceptingBridgeTest {
 
         s3Stub = Mockito.mock(S3Service.class);
         RedshiftInterceptingBridge bridge = new RedshiftInterceptingBridge(
-                bridgeClientEnd, bridgeBackendEnd, s3Stub, Mockito.mock(IamService.class));
+                bridgeClientEnd, bridgeBackendEnd, s3Stub, Mockito.mock(IamService.class),
+                spectrumInterceptor == null ? null : "000000000000", List.of(), spectrumInterceptor,
+                spectrumInterceptor == null ? null : "000000000000:cluster", "dev");
         bridgeThread = Thread.ofVirtual().name("bridge-under-test").start(bridge::run);
     }
 
@@ -106,6 +120,121 @@ class RedshiftInterceptingBridgeTest {
         testClientEnd.getOutputStream().flush();
 
         assertArrayEquals(packet, nextForwarded().toPacketBytes());
+    }
+
+    @Test
+    void forwardsRewrittenSpectrumSimpleQueryToPostgres() throws Exception {
+        SpectrumInterceptor interceptor = Mockito.mock(SpectrumInterceptor.class);
+        SpectrumMaterializer.Materialization materialization = new SpectrumMaterializer.Materialization("tmp", List.of());
+        Mockito.when(interceptor.intercept(Mockito.eq("SELECT id FROM analytics.events"), Mockito.any(), Mockito.any()))
+                .thenReturn(new SpectrumInterceptor.Decision.Rewritten("SELECT id FROM \"tmp\"", materialization));
+        startBridge(interceptor);
+
+        testClientEnd.getOutputStream().write(PostgresWireDecoder.encodeQuery("SELECT id FROM analytics.events"));
+        testClientEnd.getOutputStream().flush();
+
+        PostgresWireDecoder.FrontendMessage forwarded = nextForwarded();
+        assertEquals('Q', forwarded.type());
+        assertEquals("SELECT id FROM \"tmp\"", forwarded.getSql());
+    }
+
+    @Test
+    void describesPhaseOneProjectionFromGlueColumnMetadata() throws Exception {
+        SpectrumInterceptor interceptor = Mockito.mock(SpectrumInterceptor.class);
+        SpectrumInterceptor.Plan plan = phaseOnePlan();
+        Mockito.when(interceptor.plan(Mockito.eq("SELECT id FROM analytics.events"), Mockito.any())).thenReturn(plan);
+        startBridge(interceptor);
+
+        testClientEnd.getOutputStream().write(PostgresWireDecoder.encodeParse(new PostgresWireDecoder.ParseMessage(
+                "s", "SELECT id FROM analytics.events", List.of()), "SELECT id FROM analytics.events"));
+        testClientEnd.getOutputStream().flush();
+        PostgresWireDecoder clientDecoder = new PostgresWireDecoder(testClientEnd.getInputStream());
+        assertEquals('1', clientDecoder.nextMessage().type());
+
+        testClientEnd.getOutputStream().write(frame('D', concat(new byte[]{'S'}, cString("s"))));
+        testClientEnd.getOutputStream().flush();
+        assertEquals('t', clientDecoder.nextMessage().type());
+        PostgresWireDecoder.FrontendMessage description = clientDecoder.nextMessage();
+        assertEquals('T', description.type());
+        assertEquals(1, (description.body()[0] & 0xff) << 8 | description.body()[1] & 0xff);
+    }
+
+    @Test
+    @Timeout(10)
+    void closingSuspendedSpectrumPortalCleansItsTemporaryTable() throws Exception {
+        SpectrumInterceptor interceptor = Mockito.mock(SpectrumInterceptor.class);
+        SpectrumInterceptor.Plan plan = phaseOnePlan();
+        SpectrumMaterializer.Materialization materialization = new SpectrumMaterializer.Materialization("tmp", List.of());
+        Mockito.when(interceptor.plan(Mockito.eq("SELECT id FROM analytics.events"), Mockito.any())).thenReturn(plan);
+        Mockito.when(interceptor.execute(Mockito.eq(plan), Mockito.any(), Mockito.any()))
+                .thenReturn(new SpectrumInterceptor.Decision.Rewritten("SELECT id FROM \"tmp\"", materialization));
+        Mockito.doAnswer(invocation -> {
+            BackendSql backendSql = invocation.getArgument(0);
+            backendSql.execute("DROP TABLE IF EXISTS \"tmp\"");
+            return null;
+        }).when(interceptor).cleanup(Mockito.any(), Mockito.eq(materialization));
+        startBridge(interceptor);
+
+        AtomicReference<Throwable> backendFailure = new AtomicReference<>();
+        Thread backend = Thread.ofVirtual().start(() -> {
+            try {
+                PostgresWireDecoder decoder = new PostgresWireDecoder(testBackendEnd.getInputStream());
+                assertEquals("SELECT id FROM \"tmp\"", decoder.nextMessage().getSql());
+                testBackendEnd.getOutputStream().write(frame('T', new byte[0]));
+                testBackendEnd.getOutputStream().write(frame('D', dataRow("1")));
+                testBackendEnd.getOutputStream().write(frame('D', dataRow("2")));
+                testBackendEnd.getOutputStream().write(frame('C', cString("SELECT 2")));
+                testBackendEnd.getOutputStream().write(frame('Z', new byte[]{'I'}));
+                testBackendEnd.getOutputStream().flush();
+                assertTrue(decoder.nextMessage().getSql().contains("DROP TABLE IF EXISTS"));
+                testBackendEnd.getOutputStream().write(frame('C', cString("DROP TABLE")));
+                testBackendEnd.getOutputStream().write(frame('Z', new byte[]{'I'}));
+                testBackendEnd.getOutputStream().flush();
+            } catch (Throwable failure) {
+                backendFailure.set(failure);
+            }
+        });
+
+        PostgresWireDecoder clientDecoder = new PostgresWireDecoder(testClientEnd.getInputStream());
+        testClientEnd.getOutputStream().write(PostgresWireDecoder.encodeParse(new PostgresWireDecoder.ParseMessage(
+                "s", "SELECT id FROM analytics.events", List.of()), "SELECT id FROM analytics.events"));
+        testClientEnd.getOutputStream().flush();
+        assertEquals('1', clientDecoder.nextMessage().type());
+
+        testClientEnd.getOutputStream().write(frame('B', concat(cString("p"), cString("s"), new byte[6])));
+        testClientEnd.getOutputStream().flush();
+        assertEquals('2', clientDecoder.nextMessage().type());
+
+        testClientEnd.getOutputStream().write(frame('E', concat(cString("p"), new byte[]{0, 0, 0, 1})));
+        testClientEnd.getOutputStream().flush();
+        assertEquals('D', clientDecoder.nextMessage().type());
+        assertEquals('s', clientDecoder.nextMessage().type());
+
+        testClientEnd.getOutputStream().write(frame('C', concat(new byte[]{'P'}, cString("p"))));
+        testClientEnd.getOutputStream().flush();
+        assertEquals('3', clientDecoder.nextMessage().type());
+        backend.join();
+        assertEquals(null, backendFailure.get());
+        Mockito.verify(interceptor).cleanup(Mockito.any(), Mockito.eq(materialization));
+    }
+
+    private static SpectrumInterceptor.Plan phaseOnePlan() {
+        SpectrumExternalSchema schema = new SpectrumExternalSchema("000000000000", "dev", "analytics",
+                "s3://bucket/events/", "arn:aws:iam::000000000000:role/Spectrum");
+        SpectrumExternalTable table = new SpectrumExternalTable("000000000000", "dev", "analytics", "events",
+                List.of(new SpectrumColumn("id", SpectrumColumn.Type.INTEGER)), "s3://bucket/events/",
+                ',', '"', '\\', "\\N", 1);
+        return new SpectrumInterceptor.Plan.PhaseOneQuery(new SpectrumQuery("analytics", "events", "id", null, false),
+                new SpectrumGlueCsvAdapter.CsvTable(schema, table), "spectrum_tmp_test");
+    }
+
+    private static byte[] dataRow(String value) {
+        byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
+        byte[] body = new byte[6 + bytes.length];
+        body[1] = 1;
+        body[5] = (byte) bytes.length;
+        System.arraycopy(bytes, 0, body, 6, bytes.length);
+        return body;
     }
 
     @Test
