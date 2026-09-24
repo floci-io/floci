@@ -31,6 +31,7 @@ import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.sqs.SqsQueryHandler;
+import io.github.hectorvent.floci.services.cognito.CognitoService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -96,6 +97,7 @@ public class ApiGatewayExecuteController {
             "application/graphql");
 
     private final ApiGatewayService apiGatewayService;
+    private final CognitoService cognitoService;
     private final ApiGatewayV2Service apiGatewayV2Service;
     private final LambdaService lambdaService;
     private final RegionResolver regionResolver;
@@ -111,7 +113,8 @@ public class ApiGatewayExecuteController {
     private final ExecuteApiSigV4Authorizer sigV4Authorizer;
 
     @Inject
-    public ApiGatewayExecuteController(ApiGatewayService apiGatewayService, ApiGatewayV2Service apiGatewayV2Service,
+    public ApiGatewayExecuteController(ApiGatewayService apiGatewayService, CognitoService cognitoService,
+                                       ApiGatewayV2Service apiGatewayV2Service,
                                        LambdaService lambdaService, RegionResolver regionResolver,
                                        ObjectMapper objectMapper, VtlTemplateEngine vtlEngine,
                                        AwsServiceRouter serviceRouter,
@@ -123,6 +126,7 @@ public class ApiGatewayExecuteController {
                                        RequestContext requestContext,
                                        ExecuteApiSigV4Authorizer sigV4Authorizer) {
         this.apiGatewayService = apiGatewayService;
+        this.cognitoService = cognitoService;
         this.apiGatewayV2Service = apiGatewayV2Service;
         this.lambdaService = lambdaService;
         this.regionResolver = regionResolver;
@@ -136,6 +140,23 @@ public class ApiGatewayExecuteController {
         this.jwtSignatureVerifier = jwtSignatureVerifier;
         this.requestContext = requestContext;
         this.sigV4Authorizer = sigV4Authorizer;
+    }
+
+    /** Compatibility constructor for focused unit tests that do not exercise Cognito REST auth. */
+    public ApiGatewayExecuteController(ApiGatewayService apiGatewayService, ApiGatewayV2Service apiGatewayV2Service,
+                                       LambdaService lambdaService, RegionResolver regionResolver,
+                                       ObjectMapper objectMapper, VtlTemplateEngine vtlEngine,
+                                       AwsServiceRouter serviceRouter,
+                                       WebSocketConnectionManager webSocketConnectionManager,
+                                       ElbV2Service elbV2Service,
+                                       SqsQueryHandler sqsQueryHandler,
+                                       ApiGatewayExecuteRouteContext routeContext,
+                                       JwtSignatureVerifier jwtSignatureVerifier,
+                                       RequestContext requestContext,
+                                       ExecuteApiSigV4Authorizer sigV4Authorizer) {
+        this(apiGatewayService, null, apiGatewayV2Service, lambdaService, regionResolver, objectMapper, vtlEngine,
+                serviceRouter, webSocketConnectionManager, elbV2Service, sqsQueryHandler, routeContext,
+                jwtSignatureVerifier, requestContext, sigV4Authorizer);
     }
 
     /** Matches an ELBv2 listener ARN (ALB {@code app/} or NLB {@code net/}); group 1 = region. */
@@ -964,6 +985,9 @@ public class ApiGatewayExecuteController {
                                               Stage stage,
                                               MethodConfig method,
                                               HttpHeaders headers, UriInfo uriInfo, ResolvedApiKey resolvedApiKey) {
+        if ("COGNITO_USER_POOLS".equalsIgnoreCase(method.getAuthorizationType())) {
+            return invokeCognitoAuthorizer(scope, region, apiId, method, headers);
+        }
         if ("CUSTOM".equals(method.getAuthorizationType())) {
             String authorizerId = method.getAuthorizerId();
             if (authorizerId == null) {
@@ -1003,6 +1027,46 @@ public class ApiGatewayExecuteController {
             }
         }
         return new AuthorizerResult(null, null, null);
+    }
+
+    private AuthorizerResult invokeCognitoAuthorizer(GatewayResponseScope scope, String region, String apiId,
+                                                      MethodConfig method, HttpHeaders headers) {
+        if (cognitoService == null || method.getAuthorizerId() == null) {
+            return new AuthorizerResult(gatewayResponse(scope, GatewayResponseType.UNAUTHORIZED, 401, "Unauthorized"), null, null);
+        }
+        String authorization = headers.getHeaderString(HttpHeaders.AUTHORIZATION);
+        if (authorization == null || authorization.isBlank()) {
+            return new AuthorizerResult(gatewayResponse(scope, GatewayResponseType.UNAUTHORIZED, 401, "Unauthorized"), null, null);
+        }
+        String token = authorization.regionMatches(true, 0, "Bearer ", 0, 7)
+                ? authorization.substring(7).trim() : authorization.trim();
+        try {
+            io.github.hectorvent.floci.services.apigateway.model.Authorizer authorizer =
+                    apiGatewayService.getAuthorizer(region, apiId, method.getAuthorizerId());
+            CognitoService.VerifiedApiGatewayToken verified = cognitoService.verifyApiGatewayToken(token);
+            if (authorizer.getProviderARNs() != null && !authorizer.getProviderARNs().isEmpty()
+                    && authorizer.getProviderARNs().stream().noneMatch(arn -> arn.endsWith("/" + verified.poolId()))) {
+                return new AuthorizerResult(gatewayResponse(scope, GatewayResponseType.UNAUTHORIZED, 401, "Unauthorized"), null, null);
+            }
+            List<String> requiredScopes = method.getAuthorizationScopes();
+            if (requiredScopes != null && !requiredScopes.isEmpty()) {
+                if (!"access".equals(verified.tokenUse())) {
+                    return new AuthorizerResult(gatewayResponse(scope, GatewayResponseType.ACCESS_DENIED, 403,
+                            "User is not authorized to access this resource"), null, null);
+                }
+                Set<String> granted = new HashSet<>();
+                Object scopeClaim = verified.claims().get("scope");
+                if (scopeClaim instanceof String value) granted.addAll(Arrays.asList(value.trim().split("\\s+")));
+                if (requiredScopes.stream().noneMatch(granted::contains)) {
+                    return new AuthorizerResult(gatewayResponse(scope, GatewayResponseType.ACCESS_DENIED, 403,
+                            "User is not authorized to access this resource"), null, null);
+                }
+            }
+            String principalId = String.valueOf(verified.claims().getOrDefault("sub", "unknown"));
+            return new AuthorizerResult(null, principalId, verified.claims());
+        } catch (AwsException e) {
+            return new AuthorizerResult(gatewayResponse(scope, GatewayResponseType.UNAUTHORIZED, 401, "Unauthorized"), null, null);
+        }
     }
 
     private Response validateRequest(GatewayResponseScope scope, String region, String apiId, MethodConfig method,

@@ -2176,6 +2176,9 @@ public class ApiGatewayController {
         node.put("authorizationType", m.getAuthorizationType());
         node.put("apiKeyRequired", m.isApiKeyRequired());
         if (m.getAuthorizerId() != null) node.put("authorizerId", m.getAuthorizerId());
+        if (m.getAuthorizationScopes() != null && !m.getAuthorizationScopes().isEmpty()) {
+            node.set("authorizationScopes", objectMapper.valueToTree(m.getAuthorizationScopes()));
+        }
         if (m.getRequestValidatorId() != null) node.put("requestValidatorId", m.getRequestValidatorId());
         if (m.getRequestParameters() != null && !m.getRequestParameters().isEmpty()) {
             ObjectNode params = node.putObject("requestParameters");

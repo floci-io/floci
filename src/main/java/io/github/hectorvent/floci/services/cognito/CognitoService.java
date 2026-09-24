@@ -4020,6 +4020,63 @@ public class CognitoService implements ResourceProvider {
 
     record VerifiedAccessToken(String username, String poolId, String subject) {}
 
+    /** Verified JWT details for services that enforce Cognito user-pool authorizers. */
+    public record VerifiedApiGatewayToken(String poolId, String tokenUse, Map<String, Object> claims) {}
+
+    /**
+     * Verifies an access or ID token using the persisted user-pool signing key. This deliberately
+     * does not fetch keys over the network because the emulator owns the pool and its key pair.
+     */
+    public VerifiedApiGatewayToken verifyApiGatewayToken(String token) {
+        try {
+            if (token == null || token.isBlank()) throw new IllegalArgumentException("missing token");
+            String[] parts = token.split("\\.", -1);
+            if (parts.length != 3 || Arrays.stream(parts).anyMatch(String::isEmpty)) {
+                throw new IllegalArgumentException("malformed JWT");
+            }
+            JsonNode header = MAPPER.readTree(Base64.getUrlDecoder().decode(parts[0]));
+            JsonNode claims = MAPPER.readTree(Base64.getUrlDecoder().decode(parts[1]));
+            if (!"RS256".equals(header.path("alg").asText())
+                    || !"JWT".equalsIgnoreCase(header.path("typ").asText())) {
+                throw new IllegalArgumentException("unsupported JWT algorithm");
+            }
+            String issuer = textClaim(claims, "iss");
+            String poolId = issuer != null && issuer.startsWith(baseUrl + "/")
+                    ? issuer.substring((baseUrl + "/").length()) : null;
+            UserPool pool = poolId == null ? null : poolStore.get(poolId).orElse(null);
+            if (pool == null || !getIssuer(poolId).equals(issuer)
+                    || !getSigningKeyId(pool).equals(textClaim(header, "kid"))) {
+                throw new IllegalArgumentException("invalid issuer or key");
+            }
+            Signature verifier = Signature.getInstance("SHA256withRSA");
+            verifier.initVerify(getSigningPublicKey(pool));
+            verifier.update((parts[0] + "." + parts[1]).getBytes(StandardCharsets.UTF_8));
+            if (!verifier.verify(Base64.getUrlDecoder().decode(parts[2]))) {
+                throw new IllegalArgumentException("invalid signature");
+            }
+            String tokenUse = textClaim(claims, "token_use");
+            long expiresAt = requiredNumericClaim(claims, "exp");
+            String subject = textClaim(claims, "sub");
+            if (!("access".equals(tokenUse) || "id".equals(tokenUse))
+                    || subject == null || expiresAt <= System.currentTimeMillis() / 1000L) {
+                throw new IllegalArgumentException("invalid token claims");
+            }
+            String clientId = "access".equals(tokenUse)
+                    ? textClaim(claims, "client_id") : textClaim(claims, "aud");
+            if (clientId == null || clientStore.get(clientId)
+                    .filter(c -> poolId.equals(c.getUserPoolId())).isEmpty()) {
+                throw new IllegalArgumentException("invalid client");
+            }
+            Map<String, Object> mapped = MAPPER.convertValue(claims, new TypeReference<Map<String, Object>>() {});
+            return new VerifiedApiGatewayToken(poolId, tokenUse, Map.copyOf(mapped));
+        } catch (AwsException e) {
+            throw e;
+        } catch (Exception e) {
+            LOG.debug("API Gateway Cognito token verification failed", e);
+            throw new AwsException("NotAuthorizedException", INVALID_ACCESS_TOKEN_MESSAGE, 400);
+        }
+    }
+
     /**
      * Verifies the Cognito access-token contract before any self-service operation uses its claims.
      * The pool's persisted public key is the trust anchor; claims are never trusted before the

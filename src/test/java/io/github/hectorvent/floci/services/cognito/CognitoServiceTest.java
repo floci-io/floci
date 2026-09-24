@@ -2928,6 +2928,28 @@ class CognitoServiceTest {
                 "IdToken should not contain client_id claim");
     }
 
+    @Test
+    @SuppressWarnings("unchecked")
+    void verifyApiGatewayTokenAcceptsAccessAndIdTokens() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
+        Map<String, Object> authResult = service.initiateAuth(
+                client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"));
+        Map<String, Object> auth = (Map<String, Object>) authResult.get("AuthenticationResult");
+
+        CognitoService.VerifiedApiGatewayToken access =
+                service.verifyApiGatewayToken((String) auth.get("AccessToken"));
+        CognitoService.VerifiedApiGatewayToken id =
+                service.verifyApiGatewayToken((String) auth.get("IdToken"));
+
+        assertEquals(pool.getId(), access.poolId());
+        assertEquals("access", access.tokenUse());
+        assertEquals("id", id.tokenUse());
+        assertEquals(client.getClientId(), access.claims().get("client_id"));
+        assertEquals(client.getClientId(), id.claims().get("aud"));
+    }
+
     // =========================================================================
     // AdminGetUser resolves configured identifiers
     // =========================================================================

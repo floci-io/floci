@@ -21,6 +21,7 @@ import io.github.hectorvent.floci.services.apigateway.model.EndpointType;
 import org.jboss.logging.Logger;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.TlsCertificateManager;
@@ -60,6 +61,8 @@ import jakarta.inject.Inject;
 
 @ApplicationScoped
 public class ApiGatewayService {
+
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     /** Documented default page size for GetUsage. */
     private static final int DEFAULT_USAGE_LIMIT = 25;
@@ -463,6 +466,10 @@ public class ApiGatewayService {
         method.setHttpMethod(httpMethod.toUpperCase());
         method.setAuthorizationType((String) request.getOrDefault("authorizationType", "NONE"));
         method.setAuthorizerId((String) request.get("authorizerId"));
+        Object authorizationScopes = request.get("authorizationScopes");
+        if (authorizationScopes instanceof List<?> scopes) {
+            method.setAuthorizationScopes(scopes.stream().map(String::valueOf).toList());
+        }
         method.setRequestValidatorId((String) request.get("requestValidatorId"));
         method.setApiKeyRequired(Boolean.TRUE.equals(request.get("apiKeyRequired")));
 
@@ -2485,6 +2492,14 @@ public class ApiGatewayService {
                 if (!"replace".equals(opType)) continue;
                 if ("/authorizationType".equals(path)) method.setAuthorizationType(value);
                 else if ("/authorizerId".equals(path)) method.setAuthorizerId(value);
+                else if ("/authorizationScopes".equals(path)) {
+                    try {
+                        method.setAuthorizationScopes(value == null || value.isBlank()
+                                ? List.of() : JSON.readValue(value, new TypeReference<List<String>>() {}));
+                    } catch (Exception e) {
+                        throw new AwsException("BadRequestException", "Invalid authorizationScopes", 400);
+                    }
+                }
                 else if ("/apiKeyRequired".equals(path)) method.setApiKeyRequired(Boolean.parseBoolean(value));
                 else if ("/requestValidatorId".equals(path)) {
                     method.setRequestValidatorId(value == null || value.isEmpty() ? null : value);
@@ -3032,6 +3047,7 @@ public class ApiGatewayService {
                 ? operation.getSecurity() : openAPI.getSecurity();
         String authType = "NONE";
         String authorizerId = null;
+        List<String> authorizationScopes = List.of();
         if (secReqs != null) {
             // AWS resolves the OR-list of security requirements to the first declared
             // authorizer scheme (a method has exactly one authorizer), so stop at the first match.
@@ -3044,6 +3060,8 @@ public class ApiGatewayService {
                     }
                     authType = mapped;
                     authorizerId = schemeToAuthorizerId.get(schemeName);
+                    List<String> requestedScopes = secReq.get(schemeName);
+                    if (requestedScopes != null) authorizationScopes = requestedScopes;
                     break resolveAuth;
                 }
             }
@@ -3051,6 +3069,9 @@ public class ApiGatewayService {
         methodRequest.put("authorizationType", authType);
         if (authorizerId != null) {
             methodRequest.put("authorizerId", authorizerId);
+        }
+        if (!authorizationScopes.isEmpty()) {
+            methodRequest.put("authorizationScopes", authorizationScopes);
         }
 
         // Link request models from operation requestBody

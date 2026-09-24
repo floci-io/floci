@@ -1463,7 +1463,7 @@ class ApiGatewayOpenApiImportTest {
                   "paths": {
                     "/cog": {
                       "get": {
-                        "security": [{"CognitoAuth": []}],
+                        "security": [{"CognitoAuth": ["orders/read"]}],
                         "x-amazon-apigateway-integration": {
                           "type": "MOCK",
                           "requestTemplates": {"application/json": "{\\"statusCode\\": 200}"},
@@ -1502,6 +1502,19 @@ class ApiGatewayOpenApiImportTest {
                 .body("item.find { it.name == 'BearerAuth' }.type", equalTo("TOKEN"))
                 .body("item.find { it.name == 'BearerAuth' }.identitySource",
                         equalTo("method.request.header.Authorization"));
+
+        String resources = given().when().get("/restapis/" + apiId + "/resources")
+                .then().statusCode(200).extract().body().asString();
+        String cogResourceId = null;
+        for (JsonNode resource : mapper.readTree(resources).get("item")) {
+            if ("/cog".equals(resource.path("path").asText())) {
+                cogResourceId = resource.path("id").asText();
+            }
+        }
+        assertNotNull(cogResourceId);
+        given().when().get("/restapis/" + apiId + "/resources/" + cogResourceId + "/methods/GET")
+                .then().statusCode(200)
+                .body("authorizationScopes", hasItem("orders/read"));
 
         given().delete("/restapis/" + apiId);
     }
