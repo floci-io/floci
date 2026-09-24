@@ -31,6 +31,28 @@ class OpenSearchDomainEndpointIntegrationTest {
             .when().delete("/2021-01-01/opensearch/domain/" + DOMAIN);
     }
 
+    /** The DNS suffix comes from the region's partition, so a China region must not report .com. */
+    @Test
+    void theEndpointTakesItsDnsSuffixFromThePartition() {
+        String domain = "endpoint-cn-probe";
+        try {
+            given()
+                .header("Authorization",
+                        "AWS4-HMAC-SHA256 Credential=AKID/20260101/cn-north-1/es/aws4_request")
+                .contentType("application/json")
+                .body("{\"DomainName\":\"" + domain + "\",\"EngineVersion\":\"OpenSearch_2.11\"}")
+            .when()
+                .post("/2021-01-01/opensearch/domain")
+            .then()
+                .statusCode(200)
+                .body("DomainStatus.Endpoint", endsWith(".cn-north-1.es.amazonaws.com.cn"));
+        } finally {
+            given().header("Authorization",
+                            "AWS4-HMAC-SHA256 Credential=AKID/20260101/cn-north-1/es/aws4_request")
+                .when().delete("/2021-01-01/opensearch/domain/" + domain);
+        }
+    }
+
     @Test
     void createAndDescribeReportAnEndpointBesideProcessingFalse() {
         given()

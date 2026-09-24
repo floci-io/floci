@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -169,14 +170,16 @@ public class OpenSearchService implements ResourceProvider {
      * {@link OpenSearchDomainManager#tryStartDomain} returns false rather than rethrowing.
      *
      * <p>It reports an AWS-shaped endpoint in place of a blank one,
-     * {@code search-<domain>-<suffix>.<region>.es.amazonaws.com}, with the suffix derived from the
+     * {@code search-<domain>-<suffix>.<region>.es.<dnsSuffix>}, taking the DNS suffix from the
+     * region's partition rather than assuming the commercial one, with the name suffix derived from the
      * domain name so it survives a restart. A domain reporting {@code Processing false} alongside
      * {@code Endpoint ""} describes a state AWS never returns, and a client that reads the endpoint
      * to address the domain gets an empty string to connect to.
      */
     private static String synthesizedEndpoint(String domainName, String region) {
         String suffix = Integer.toHexString(domainName.hashCode() & 0x7fffffff);
-        return "search-" + domainName + "-" + suffix + "." + region + ".es.amazonaws.com";
+        return "search-" + domainName + "-" + suffix + "." + region + ".es."
+                + AwsRegions.dnsSuffixFor(region);
     }
 
     public Domain describeDomain(String domainName) {
