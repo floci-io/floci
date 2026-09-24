@@ -82,9 +82,14 @@ public class EcrService implements ResourceProvider {
 
     // ── Pull through cache rules ────────────────────────────────────────────
 
-    /** The model's upstream registry enum, and the URL AWS documents for each. */
+    /**
+     * The model's upstream registry enum, and the URL AWS documents for each. These are the exact
+     * strings CreatePullThroughCacheRule's documentation lists, not hosts derived from a partition,
+     * and every one but ECR Public belongs to a third party. ECR Public itself has a single global
+     * endpoint with no partition-scoped form.
+     */
     private static final Map<String, String> UPSTREAM_REGISTRY_URLS = Map.of(
-            "ecr-public", "public.ecr.aws",
+            "ecr-public", "public.ecr.aws", // partition-literal: ECR Public's one global endpoint
             "docker-hub", "registry-1.docker.io",
             "github-container-registry", "ghcr.io",
             "gitlab-container-registry", "registry.gitlab.com",
