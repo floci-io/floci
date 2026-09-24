@@ -108,10 +108,7 @@ public class IamActionRegistry {
         // AWS SDKs send Query-protocol calls (IAM, STS, EC2, SQS, SNS, ...) as
         // POST with Action=... in the application/x-www-form-urlencoded body,
         // not the URL query string — so we look in both places.
-        String queryAction = ctx.getUriInfo().getQueryParameters().getFirst("Action");
-        if (queryAction == null || queryAction.isBlank()) {
-            queryAction = readFormAction(ctx);
-        }
+        String queryAction = queryAction(ctx);
         if (queryAction != null && !queryAction.isBlank()) {
             return credentialScope + ":" + queryAction;
         }
@@ -150,6 +147,19 @@ public class IamActionRegistry {
 
         LOG.debugv("No action mapping for {0} {1} {2} — defaulting to ALLOW", credentialScope, method, path);
         return null;
+    }
+
+    /**
+     * Returns the Query-protocol action from the URL or form body while preserving the entity
+     * stream for the controller. Exposed so IAM enforcement can ask the shared Query dispatcher
+     * which service will actually handle the request.
+     */
+    public String queryAction(ContainerRequestContext ctx) {
+        String queryAction = ctx.getUriInfo().getQueryParameters().getFirst("Action");
+        if (queryAction == null || queryAction.isBlank()) {
+            queryAction = readFormAction(ctx);
+        }
+        return queryAction;
     }
 
     /** One bucket sub-resource operation: the query parameter that selects it, and the IAM action. */

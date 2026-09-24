@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.core.common;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.services.apigateway.ApiGatewayController;
 import io.github.hectorvent.floci.services.appconfig.AppConfigController;
 import io.github.hectorvent.floci.services.backup.BackupController;
 import io.github.hectorvent.floci.services.resourceexplorer2.ResourceExplorer2Controller;
@@ -73,6 +74,7 @@ import io.github.hectorvent.floci.services.marketplace.MarketplaceDeploymentCont
 import io.github.hectorvent.floci.services.marketplace.MarketplaceDiscoveryController;
 import io.github.hectorvent.floci.services.marketplace.MarketplaceReportingController;
 import io.github.hectorvent.floci.services.sagemaker.SageMakerRuntimeController;
+import io.github.hectorvent.floci.services.s3.S3Controller;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -118,7 +120,7 @@ public class ResolvedServiceCatalog {
                         5000L, AwsNamespaces.S3, ServiceProtocol.REST_XML,
                         protocols(ServiceProtocol.REST_XML),
                         // s3express: directory-bucket (S3 Express One Zone) clients sign with it
-                        Set.of(), Set.of("s3", "s3express"), Set.of(), Set.of()),
+                        Set.of(), Set.of("s3", "s3express"), Set.of(), Set.of(S3Controller.class)),
                 descriptor("dynamodb", "dynamodb", config.services().dynamodb().enabled(), true,
                         "dynamodb", storageMode(config.storage().services().dynamodb().mode(), config.storage().mode()),
                         config.storage().services().dynamodb().flushIntervalMs(), null, ServiceProtocol.JSON,
@@ -141,7 +143,8 @@ public class ResolvedServiceCatalog {
                 descriptor("apigateway", "apigateway", config.services().apigateway().enabled(), true,
                         "apigateway", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
-                        Set.of(), Set.of("apigateway", "execute-api"), Set.of(), Set.of()),
+                        Set.of(), Set.of("apigateway", "execute-api"), Set.of(),
+                        Set.of(ApiGatewayController.class)),
                 descriptor("iam", "iam", config.services().iam().enabled(), true,
                         "iam", config.storage().mode(), 5000L, AwsNamespaces.IAM, ServiceProtocol.QUERY,
                         protocols(ServiceProtocol.QUERY),
