@@ -135,6 +135,20 @@ class RdsEventSubscriptionIntegrationTest {
     }
 
     @Test
+    void anOutOfRangeMaxRecordsIsRefusedEvenWhenASubscriptionIsNamed() {
+        String subscription = name("named");
+        rds("CreateEventSubscription", "SubscriptionName", subscription, "SnsTopicArn", TOPIC)
+            .statusCode(200);
+
+        // The named-subscription read used to return before the page size was looked at.
+        rds("DescribeEventSubscriptions", "SubscriptionName", subscription, "MaxRecords", "0")
+            .statusCode(400)
+            .body(containsString("InvalidParameterValue"));
+        rds("DescribeEventSubscriptions", "SubscriptionName", subscription, "MaxRecords", "20")
+            .statusCode(200);
+    }
+
+    @Test
     void aMarkerWhoseSubscriptionIsGoneDoesNotRestartTheWalk() {
         String prefix = "gone-" + Long.toString(System.nanoTime(), 36);
         for (int i = 0; i < 21; i++) {

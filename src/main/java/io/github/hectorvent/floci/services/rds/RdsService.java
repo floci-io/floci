@@ -8600,13 +8600,16 @@ public class RdsService implements Resettable, ResourceProvider {
 
     public synchronized EventSubscriptionPage describeEventSubscriptions(
             String region, String subscriptionName, Integer maxRecords, String marker) {
-        if (subscriptionName != null && !subscriptionName.isBlank()) {
-            return new EventSubscriptionPage(
-                    List.of(requireEventSubscription(region, subscriptionName)), null);
-        }
+        // Ahead of the named-subscription shortcut, so a bad page size is rejected whether or not
+        // the request also names a subscription. Request validation does not depend on which branch
+        // serves the read.
         if (maxRecords != null && (maxRecords < MIN_MAX_RECORDS || maxRecords > MAX_MAX_RECORDS)) {
             throw new AwsException("InvalidParameterValue",
                     "MaxRecords must be between " + MIN_MAX_RECORDS + " and " + MAX_MAX_RECORDS + ".", 400);
+        }
+        if (subscriptionName != null && !subscriptionName.isBlank()) {
+            return new EventSubscriptionPage(
+                    List.of(requireEventSubscription(region, subscriptionName)), null);
         }
         String prefix = eventSubscriptionKey(region, "");
         List<EventSubscription> all = eventSubscriptions.scan(k -> k.startsWith(prefix)).stream()
