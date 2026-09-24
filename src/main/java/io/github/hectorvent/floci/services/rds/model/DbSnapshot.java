@@ -32,6 +32,7 @@ public class DbSnapshot {
     private String dbName;
     private String dbInstanceClass;
     private String optionGroupName;
+    private Boolean storageEncrypted;
     private String kmsKeyId;
     private Map<String, String> tags = new LinkedHashMap<>();
     /** Account IDs authorized to copy/restore this snapshot; the "restore" DBSnapshotAttribute. */
@@ -133,6 +134,14 @@ public class DbSnapshot {
 
     public String getOptionGroupName() { return optionGroupName; }
     public void setOptionGroupName(String optionGroupName) { this.optionGroupName = optionGroupName; }
+
+    public boolean isStorageEncrypted() {
+        if (storageEncrypted != null) {
+            return storageEncrypted;
+        }
+        return kmsKeyId != null && !kmsKeyId.isBlank();
+    }
+    public void setStorageEncrypted(boolean storageEncrypted) { this.storageEncrypted = storageEncrypted; }
 
     public String getKmsKeyId() { return kmsKeyId; }
     public void setKmsKeyId(String kmsKeyId) { this.kmsKeyId = kmsKeyId; }

@@ -3294,6 +3294,32 @@ class RdsServiceTest {
     }
 
     @Test
+    void createCopyAndRestoreDbSnapshotPreserveEncryptionWithoutExplicitKmsKey() {
+        DbInstance sourceInstance = rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false, false, null,
+                Map.of(), List.of(), null, null, true,
+                new DbInstanceSettings(true, null, null, null, null, null));
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
+
+        DbSnapshot snapshot = rdsService.createDbSnapshot("mysnap", "mydb");
+        DbSnapshot copy = rdsService.copyDbSnapshot(
+                "mysnap", "copy", false, Map.of(), null, null, "us-east-1");
+        DbInstance restored = rdsService.restoreDbInstanceFromDbSnapshot(
+                "restored", "copy", "db.t3.micro", null, false,
+                null, null, Map.of(), "us-east-1");
+
+        assertTrue(sourceInstance.isStorageEncrypted());
+        assertNull(sourceInstance.getKmsKeyId());
+        assertTrue(snapshot.isStorageEncrypted());
+        assertNull(snapshot.getKmsKeyId());
+        assertTrue(copy.isStorageEncrypted());
+        assertNull(copy.getKmsKeyId());
+        assertTrue(restored.isStorageEncrypted());
+        assertNull(restored.getKmsKeyId());
+    }
+
+    @Test
     void deleteDbSnapshotReturnsDeletedSnapshotAndRemovesItsData() {
         rdsService.createDbInstance("mydb", "postgres", "13",
                 "admin", "password", "dbname", "db.t3.micro",
@@ -3313,7 +3339,7 @@ class RdsServiceTest {
     }
 
     @Test
-    void copyDbSnapshotCopiesDataTagsAndSourceArn() {
+    void copyDbSnapshotCopiesDataAndTagsWithoutSameRegionSourceArn() {
         rdsService.createDbInstance("mydb", "postgres", "13",
                 "admin", "password", "dbname", "db.t3.micro",
                 20, false, null, null, null, null, false);
@@ -3328,10 +3354,11 @@ class RdsServiceTest {
 
         assertEquals("copy", copy.getDbSnapshotIdentifier());
         assertEquals("manual", copy.getSnapshotType());
-        assertEquals(source.getDbSnapshotArn(), copy.getSourceDbSnapshotIdentifier());
+        assertNull(copy.getSourceDbSnapshotIdentifier());
         assertEquals(Map.of("owner", "platform", "Name", "copy"), copy.getTags());
         assertEquals("custom-options", copy.getOptionGroupName());
         assertEquals("kms-key", copy.getKmsKeyId());
+        assertTrue(copy.isStorageEncrypted());
         assertTrue(copy.getRestoreAccountIds().isEmpty());
 
         rdsService.restoreDbInstanceFromDbSnapshot(
@@ -3359,6 +3386,37 @@ class RdsServiceTest {
                 rdsService.copyDbSnapshot("source", "other", false,
                         Map.of(), null, null, "us-east-1"));
         assertEquals("InvalidDBSnapshotState", unavailable.getErrorCode());
+    }
+
+    @Test
+    void copyDbSnapshotRequiresCrossRegionAuthorizationMetadata() {
+        rdsService.createDbInstance("source-db", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false,
+                false, null, Map.of(), "us-west-2");
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
+        DbSnapshot source = rdsService.createDbSnapshot(
+                "source", "source-db", Map.of(), "us-west-2");
+
+        AwsException missingAuthorization = assertThrows(AwsException.class, () ->
+                rdsService.copyDbSnapshot(source.getDbSnapshotArn(), "copy-missing", false,
+                        Map.of(), null, null, null, null, "us-east-1"));
+        assertEquals("InvalidParameterValue", missingAuthorization.getErrorCode());
+
+        AwsException mismatchedRegion = assertThrows(AwsException.class, () ->
+                rdsService.copyDbSnapshot(source.getDbSnapshotArn(), "copy-mismatch", false,
+                        Map.of(), null, null, "eu-west-1", null, "us-east-1"));
+        assertEquals("InvalidParameterValue", mismatchedRegion.getErrorCode());
+
+        DbSnapshot regionAuthorized = rdsService.copyDbSnapshot(
+                source.getDbSnapshotArn(), "copy-region", false, Map.of(),
+                null, null, "us-west-2", null, "us-east-1");
+        assertEquals(source.getDbSnapshotArn(), regionAuthorized.getSourceDbSnapshotIdentifier());
+
+        DbSnapshot preSigned = rdsService.copyDbSnapshot(
+                source.getDbSnapshotArn(), "copy-presigned", false, Map.of(),
+                null, null, null, "https://rds.us-west-2.amazonaws.com/", "us-east-1");
+        assertEquals(source.getDbSnapshotArn(), preSigned.getSourceDbSnapshotIdentifier());
     }
 
     @Test

@@ -1132,6 +1132,25 @@ class RdsQueryHandlerTest {
         assertTrue(body.contains("<DBInstanceIdentifier>mydb</DBInstanceIdentifier>"));
         assertTrue(body.contains("<SnapshotType>manual</SnapshotType>"));
         assertTrue(body.contains("<SourceDBSnapshotIdentifier>arn:aws:rds:us-east-1:123456789012:snapshot:source</SourceDBSnapshotIdentifier>"));
+        assertTrue(body.contains("<Encrypted>false</Encrypted>"));
+    }
+
+    @Test
+    void describeDbSnapshotsReportsEncryptionWithoutExplicitKmsKey() {
+        DbSnapshot snapshot = new DbSnapshot();
+        snapshot.setDbSnapshotIdentifier("encrypted-snapshot");
+        snapshot.setStorageEncrypted(true);
+        when(service.describeDbSnapshots(eq("encrypted-snapshot"), isNull(), isNull()))
+                .thenReturn(List.of(snapshot));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBSnapshotIdentifier", "encrypted-snapshot");
+        Response response = handler.handle("DescribeDBSnapshots", p);
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<Encrypted>true</Encrypted>"), body);
+        assertFalse(body.contains("<KmsKeyId>"), body);
     }
 
     @Test
@@ -1873,8 +1892,11 @@ class RdsQueryHandlerTest {
         snapshot.setSnapshotType("manual");
         snapshot.setSourceDbSnapshotIdentifier(
                 "arn:aws:rds:us-east-1:123456789012:snapshot:source");
+        snapshot.setStorageEncrypted(true);
+        snapshot.setKmsKeyId("kms-key");
         when(service.copyDbSnapshot(eq("source"), eq("copy"), eq(true),
-                eq(Map.of("owner", "platform")), eq("custom-options"), eq("kms-key"), isNull()))
+                eq(Map.of("owner", "platform")), eq("custom-options"), eq("kms-key"),
+                eq("us-west-2"), eq("https://rds.us-west-2.amazonaws.com/"), isNull()))
                 .thenReturn(snapshot);
 
         MultivaluedMap<String, String> p = params();
@@ -1883,6 +1905,8 @@ class RdsQueryHandlerTest {
         p.add("CopyTags", "true");
         p.add("OptionGroupName", "custom-options");
         p.add("KmsKeyId", "kms-key");
+        p.add("SourceRegion", "us-west-2");
+        p.add("PreSignedUrl", "https://rds.us-west-2.amazonaws.com/");
         p.add("Tags.Tag.1.Key", "owner");
         p.add("Tags.Tag.1.Value", "platform");
         Response response = handler.handle("CopyDBSnapshot", p);
@@ -1892,8 +1916,10 @@ class RdsQueryHandlerTest {
         assertTrue(body.contains("<CopyDBSnapshotResult>"));
         assertTrue(body.contains("<SnapshotType>manual</SnapshotType>"));
         assertTrue(body.contains("<SourceDBSnapshotIdentifier>arn:aws:rds:us-east-1:123456789012:snapshot:source</SourceDBSnapshotIdentifier>"));
+        assertTrue(body.contains("<Encrypted>true</Encrypted>"));
         verify(service).copyDbSnapshot("source", "copy", true,
-                Map.of("owner", "platform"), "custom-options", "kms-key", null);
+                Map.of("owner", "platform"), "custom-options", "kms-key",
+                "us-west-2", "https://rds.us-west-2.amazonaws.com/", null);
     }
 
     @Test

@@ -837,6 +837,7 @@ public class RdsService implements Resettable, ResourceProvider {
         snapshot.setDbName(instance.getDbName());
         snapshot.setSnapshotType("manual");
         snapshot.setOptionGroupName(instance.getOptionGroupName());
+        snapshot.setStorageEncrypted(instance.isStorageEncrypted());
         snapshot.setKmsKeyId(instance.getKmsKeyId());
         snapshot.setTags(tags != null ? new java.util.LinkedHashMap<>(tags) : new java.util.LinkedHashMap<>());
         snapshot.setDbSnapshotArn(regionResolver.buildArn("rds", effectiveRegion, "snapshot:" + snapshotId));
@@ -882,16 +883,32 @@ public class RdsService implements Resettable, ResourceProvider {
             String sourceIdentifier, String targetIdentifier, boolean copyTags,
             Map<String, String> tags, String optionGroupName, String kmsKeyId) {
         return copyDbSnapshot(sourceIdentifier, targetIdentifier, copyTags, tags,
-                optionGroupName, kmsKeyId, regionResolver.getDefaultRegion());
+                optionGroupName, kmsKeyId, null, null, regionResolver.getDefaultRegion());
+    }
+
+    public DbSnapshot copyDbSnapshot(
+            String sourceIdentifier, String targetIdentifier, boolean copyTags,
+            Map<String, String> tags, String optionGroupName, String kmsKeyId, String region) {
+        return copyDbSnapshot(sourceIdentifier, targetIdentifier, copyTags, tags,
+                optionGroupName, kmsKeyId, null, null, region);
     }
 
     public synchronized DbSnapshot copyDbSnapshot(
             String sourceIdentifier, String targetIdentifier, boolean copyTags,
-            Map<String, String> tags, String optionGroupName, String kmsKeyId, String region) {
+            Map<String, String> tags, String optionGroupName, String kmsKeyId,
+            String sourceRegion, String preSignedUrl, String region) {
         String targetRegion = effectiveRegion(region);
         String accountId = currentAccountId();
         SnapshotReference sourceReference = resolveSnapshotReference(sourceIdentifier, targetRegion);
         DbSnapshot source = sourceReference.snapshot();
+        boolean crossRegion = !Objects.equals(sourceReference.region(), targetRegion);
+        boolean hasPreSignedUrl = preSignedUrl != null && !preSignedUrl.isBlank();
+        boolean sourceRegionMatches = sourceRegion != null && !sourceRegion.isBlank()
+                && Objects.equals(sourceRegion, sourceReference.region());
+        if (crossRegion && !hasPreSignedUrl && !sourceRegionMatches) {
+            throw new AwsException("InvalidParameterValue",
+                    "SourceRegion or PreSignedUrl must identify the source Region for a cross-Region copy.", 400);
+        }
         if (!"available".equalsIgnoreCase(source.getStatus())) {
             throw new AwsException("InvalidDBSnapshotState",
                     "DBSnapshot " + source.getDbSnapshotIdentifier() + " is not in an available state.", 400);
@@ -911,9 +928,11 @@ public class RdsService implements Resettable, ResourceProvider {
         copy.setSnapshotCreateTime(Instant.now());
         copy.setStatus("available");
         copy.setSnapshotType("manual");
-        copy.setSourceDbSnapshotIdentifier(source.getDbSnapshotArn());
+        copy.setSourceDbSnapshotIdentifier(crossRegion ? source.getDbSnapshotArn() : null);
         copy.setOptionGroupName(optionGroupName != null && !optionGroupName.isBlank()
                 ? optionGroupName : source.getOptionGroupName());
+        copy.setStorageEncrypted(source.isStorageEncrypted()
+                || (kmsKeyId != null && !kmsKeyId.isBlank()));
         copy.setKmsKeyId(kmsKeyId != null && !kmsKeyId.isBlank() ? kmsKeyId : source.getKmsKeyId());
         copy.setRestoreAccountIds(new ArrayList<>());
         Map<String, String> copiedTags = new LinkedHashMap<>();
@@ -984,6 +1003,7 @@ public class RdsService implements Resettable, ResourceProvider {
         copy.setDbName(source.getDbName());
         copy.setDbInstanceClass(source.getDbInstanceClass());
         copy.setOptionGroupName(source.getOptionGroupName());
+        copy.setStorageEncrypted(source.isStorageEncrypted());
         copy.setKmsKeyId(source.getKmsKeyId());
         copy.setTags(new LinkedHashMap<>(source.getTags()));
         copy.setRestoreAccountIds(new ArrayList<>(source.getRestoreAccountIds()));
@@ -1070,10 +1090,15 @@ public class RdsService implements Resettable, ResourceProvider {
             targetClass = "db.t3.micro";
         }
         // Use the parameters from the snapshot
+        DbInstanceSettings restoreSettings = new DbInstanceSettings(
+                snapshot.isStorageEncrypted(), null, null, null, null, null);
         DbInstance instance = createDbInstance(instanceId, snapshot.getEngine().name().toLowerCase(), snapshot.getEngineVersion(),
                 snapshot.getMasterUsername(), snapshot.getMasterPassword(),
                 snapshot.getDbName(), targetClass, snapshot.getAllocatedStorage(), snapshot.isIamDatabaseAuthenticationEnabled(),
-                null, dbSubnetGroupName, null, availabilityZone, multiAz, false, null, tags, vpcSecurityGroupIds);
+                null, dbSubnetGroupName, null, availabilityZone, multiAz, false, null, tags,
+                vpcSecurityGroupIds, null, effectiveRegion, true, restoreSettings);
+        instance.setKmsKeyId(snapshot.getKmsKeyId());
+        putInstanceForScope(currentAccountId(), effectiveRegion, instanceId, instance);
 
         if (!config.services().rds().mock()) {
             try {

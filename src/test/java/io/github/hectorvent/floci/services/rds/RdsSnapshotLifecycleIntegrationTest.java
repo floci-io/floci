@@ -105,8 +105,7 @@ class RdsSnapshotLifecycleIntegrationTest {
                 .body(containsString("<DBSnapshotIdentifier>" + copy + "</DBSnapshotIdentifier>"))
                 .body(containsString("<Status>available</Status>"))
                 .body(containsString("<SnapshotType>manual</SnapshotType>"))
-                // SourceDBSnapshotIdentifier is not asserted: the reference says it "only has a
-                // value in the case of a cross-account or cross-Region copy", which this is not.
+                .body(not(containsString("<SourceDBSnapshotIdentifier>")))
                 .body(containsString("<Value>platform</Value>"))
                 .body(containsString("<Value>test</Value>"));
 
