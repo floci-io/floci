@@ -599,6 +599,42 @@ class EksClusterManagerTest {
             assertEquals("floci-aws-eks-999999999999.demo", cluster.getDockerName());
             verify(lifecycleManager).removeIfExists("floci-aws-eks-999999999999.demo");
         }
+
+        @Test
+        void startClusterRegistersNodeInstanceAndNotifiesListener() {
+            stubFreshStart("cid-new", 6440);
+            List<Instance> registered = new ArrayList<>();
+            manager.setNodeRegistrationListener(registered::add);
+
+            Cluster cluster = cluster();
+            manager.startCluster(cluster);
+
+            Instance inst = manager.getRegisteredClusterNodeInstance(cluster);
+            assertNotNull(inst);
+            assertEquals("cid-new", inst.getDockerContainerId());
+            assertEquals(1, registered.size());
+            assertEquals(inst.getInstanceId(), registered.getFirst().getInstanceId());
+        }
+
+        @Test
+        void restoreClusterRegistersNodeInstanceAndNotifiesListener() {
+            when(lifecycleManager.findByName("floci-eks-demo"))
+                    .thenReturn(Optional.of(survivingContainer("cid-1")));
+            when(lifecycleManager.adopt("cid-1", List.of(6443)))
+                    .thenReturn(new ContainerInfo("cid-1", Map.of(), Map.of(6443, 6512)));
+
+            List<Instance> registered = new ArrayList<>();
+            manager.setNodeRegistrationListener(registered::add);
+
+            Cluster cluster = cluster();
+            manager.restoreCluster(cluster);
+
+            Instance inst = manager.getRegisteredClusterNodeInstance(cluster);
+            assertNotNull(inst);
+            assertEquals("cid-1", inst.getDockerContainerId());
+            assertEquals(1, registered.size());
+            assertEquals(inst.getInstanceId(), registered.getFirst().getInstanceId());
+        }
     }
 
     /** Mirror-injection guard behavior, without a Docker daemon. */
