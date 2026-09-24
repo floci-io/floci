@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.lambda;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -63,7 +64,7 @@ public class LambdaCodeSigningConfigService {
         CodeSigningConfig config = new CodeSigningConfig();
         config.setCodeSigningConfigId(id);
         config.setCodeSigningConfigArn(
-                "arn:aws:lambda:" + region + ":" + accountId + ":code-signing-config:" + id);
+                AwsArnUtils.Arn.of("lambda", region, accountId, "code-signing-config:" + id).toString());
         config.setDescription(description);
         config.setAllowedPublishers(allowedPublishers);
         config.setCodeSigningPolicies(policies != null ? policies : defaultPolicies());
