@@ -77,8 +77,9 @@ class SecretsManagerRotationBoundsTest {
         svc.shutdown();
 
         int peak = peakConcurrentInvocations.get();
-        assertTrue(peak < secretCount,
+        assertTrue(peak <= SecretsManagerService.ROTATION_EXECUTOR_POOL_SIZE,
                 "rotation ran " + peak + " secrets concurrently out of " + secretCount
-                        + " submitted; the rotation executor must be bounded, not one thread per secret");
+                        + " submitted; the rotation executor must be bounded by its pool size of "
+                        + SecretsManagerService.ROTATION_EXECUTOR_POOL_SIZE + ", not one thread per secret");
     }
 }

@@ -23,21 +23,20 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.util.Collections;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ThreadFactory;
-import java.util.concurrent.atomic.AtomicInteger;
-
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Predicate;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
@@ -67,7 +66,7 @@ public class SecretsManagerService implements ResourceProvider {
 
     // Fixed threads with an unbounded queue: a burst of rotations is queued, not rejected,
     // because RotateSecret documents no overload error.
-    private static final int ROTATION_EXECUTOR_POOL_SIZE = Math.max(4, Runtime.getRuntime().availableProcessors());
+    static final int ROTATION_EXECUTOR_POOL_SIZE = Math.max(4, Runtime.getRuntime().availableProcessors());
     private final ExecutorService rotationExecutor =
             Executors.newFixedThreadPool(ROTATION_EXECUTOR_POOL_SIZE, new RotationThreadFactory());
 
@@ -95,7 +94,12 @@ public class SecretsManagerService implements ResourceProvider {
 
         @Override
         public Thread newThread(Runnable runnable) {
-            return new Thread(runnable, "secretsmanager-rotation-" + nextId.getAndIncrement());
+            // Set explicitly: a new thread otherwise inherits these from whichever thread grows the
+            // pool, and a daemon rotation thread could be cut off mid-rotation at JVM exit.
+            Thread thread = new Thread(runnable, "secretsmanager-rotation-" + nextId.getAndIncrement());
+            thread.setDaemon(false);
+            thread.setPriority(Thread.NORM_PRIORITY);
+            return thread;
         }
     }
 
