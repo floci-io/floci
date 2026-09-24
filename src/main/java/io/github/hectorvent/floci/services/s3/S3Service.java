@@ -4734,11 +4734,14 @@ public class S3Service implements Resettable, ResourceProvider {
     // making dataRoot/<accountId>/... indistinguishable from the legacy dataRoot/<bucket>/...
     // layout. A leading "." keeps this namespace unreachable by any real bucket name.
     private static final String ACCOUNT_STORAGE_ROOT = ".accounts";
+    private static final String VERSION_STORAGE_ROOT = ".versions";
+    private static final Set<String> RESERVED_BUCKET_NAMES = Set.of(
+            ACCOUNT_STORAGE_ROOT, VERSION_STORAGE_ROOT, ANNOTATION_STORAGE_ROOT);
 
     /**
      * Floci does not hold bucket names to AWS's DNS rules, but a name must still be one directory:
-     * on the disk-backed stores anything else climbs out of the owning account's directory, and
-     * that directory is the account boundary.
+     * on the disk-backed stores anything else climbs out of the owning account's directory or
+     * collides with Floci's reserved storage directories.
      */
     private static void requirePathSafeBucketName(String bucketName) {
         boolean pathSafe = bucketName != null
@@ -4748,7 +4751,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 && bucketName.indexOf('\0') < 0
                 && !".".equals(bucketName)
                 && !"..".equals(bucketName)
-                && !ACCOUNT_STORAGE_ROOT.equals(bucketName);
+                && !RESERVED_BUCKET_NAMES.contains(bucketName);
         if (!pathSafe) {
             throw new AwsException("InvalidBucketName", "The specified bucket is not valid.", 400);
         }
@@ -4759,6 +4762,7 @@ public class S3Service implements Resettable, ResourceProvider {
      * resolved path, not the name, so a bucket persisted before the name was refused is caught too.
      */
     private static Path bucketDirectory(Path parent, String bucketName) {
+        requirePathSafeBucketName(bucketName);
         Path resolved = parent.resolve(bucketName).normalize();
         if (!parent.normalize().equals(resolved.getParent())) {
             throw new AwsException("InvalidBucketName", "The specified bucket is not valid.", 400);
@@ -4834,7 +4838,7 @@ public class S3Service implements Resettable, ResourceProvider {
 
     private Path resolveVersionedPath(String accountId, String bucketName, String key, String versionId) {
         Path baseDir = bucketDirectory(
-                dataRoot.resolve(ACCOUNT_STORAGE_ROOT).resolve(accountId).resolve(".versions"), bucketName);
+                dataRoot.resolve(ACCOUNT_STORAGE_ROOT).resolve(accountId).resolve(VERSION_STORAGE_ROOT), bucketName);
 
         String safeKey = key;
         while (safeKey.startsWith("/")) {
@@ -4853,7 +4857,7 @@ public class S3Service implements Resettable, ResourceProvider {
         while (safeKey.startsWith("/")) {
             safeKey = safeKey.substring(1);
         }
-        return dataRoot.resolve(".versions").resolve(bucketName).normalize()
+        return dataRoot.resolve(VERSION_STORAGE_ROOT).resolve(bucketName).normalize()
                 .resolve(safeKey).resolve(versionId + DATA_SUFFIX);
     }
 
