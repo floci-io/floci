@@ -27,6 +27,13 @@ class ExternalReferenceScannerTest {
     }
 
     @Test
+    void findsQualifiedReferencesWithWhitespaceOrCommentsAroundDots() {
+        assertThat(ExternalReferenceScanner.scan(
+                "SELECT * FROM analytics /* schema */ .\n events", SCHEMAS),
+                contains(new Reference("analytics", "events")));
+    }
+
+    @Test
     void ignoresStringsAndComments() {
         assertThat(ExternalReferenceScanner.scan("SELECT 'analytics.events' -- analytics.other\n /* analytics.x */", SCHEMAS), empty());
     }

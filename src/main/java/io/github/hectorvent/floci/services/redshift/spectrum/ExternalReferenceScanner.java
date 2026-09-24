@@ -30,6 +30,14 @@ public final class ExternalReferenceScanner {
         return result;
     }
 
+    public static boolean containsIdentifierPrefix(String sql, String prefix) {
+        if (sql == null || prefix == null) {
+            return false;
+        }
+        return chains(sql).stream().flatMap(List::stream)
+                .anyMatch(word -> word.value().regionMatches(true, 0, prefix, 0, prefix.length()));
+    }
+
     public static Optional<Reference> writeTarget(String sql, Set<String> schemaNames) {
         if (sql == null) {
             return Optional.empty();
@@ -62,8 +70,12 @@ public final class ExternalReferenceScanner {
             } else if (c == '"' || Character.isLetter(c) || c == '_') {
                 List<Word> chain = new ArrayList<>();
                 i = read(sql, i, chain);
-                while (i < sql.length() && sql.charAt(i) == '.') {
-                    int next = i + 1;
+                while (true) {
+                    int separator = skipTrivia(sql, i);
+                    if (separator >= sql.length() || sql.charAt(separator) != '.') {
+                        break;
+                    }
+                    int next = skipTrivia(sql, separator + 1);
                     if (next >= sql.length() || !(sql.charAt(next) == '"' || Character.isLetter(sql.charAt(next)) || sql.charAt(next) == '_')) {
                         break;
                     }
@@ -75,6 +87,21 @@ public final class ExternalReferenceScanner {
             }
         }
         return result;
+    }
+
+    private static int skipTrivia(String sql, int start) {
+        int i = start;
+        while (i < sql.length()) {
+            if (Character.isWhitespace(sql.charAt(i))) {
+                i++;
+            } else if (sql.charAt(i) == '-' && i + 1 < sql.length() && sql.charAt(i + 1) == '-'
+                    || sql.charAt(i) == '/' && i + 1 < sql.length() && sql.charAt(i + 1) == '*') {
+                i = skip(sql, i);
+            } else {
+                break;
+            }
+        }
+        return i;
     }
 
     private static int read(String sql, int start, List<Word> chain) {

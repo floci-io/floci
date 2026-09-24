@@ -74,6 +74,20 @@ class SpectrumInterceptorTest {
     }
 
     @Test
+    void catalogViewQueryAlsoLoadsReferencedExternalTables() {
+        String sql = "SELECT * FROM svv_external_tables v JOIN analytics.events e ON true";
+        List<ExternalReferenceScanner.Reference> references = List.of(
+                new ExternalReferenceScanner.Reference("analytics", "events"));
+        when(service.touchesCatalogViews(sql)).thenReturn(true);
+        when(service.referencesIn(sql, SESSION)).thenReturn(references);
+
+        interceptor.intercept(sql, SESSION, BACKEND);
+
+        verify(service).refreshMetadata(SESSION, BACKEND);
+        verify(service).loadReferences(references, SESSION, BACKEND);
+    }
+
+    @Test
     void nativeStatementsDoNotLoadAndDisabledSpectrumForwards() {
         assertThat(interceptor.intercept("SELECT 1", SESSION, BACKEND), instanceOf(SpectrumInterceptor.Decision.Forward.class));
         verify(service, never()).loadReferences(any(), any(), any());

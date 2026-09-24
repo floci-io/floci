@@ -12,7 +12,6 @@ import io.github.hectorvent.floci.services.redshift.proxy.S3CopySimulator;
 import jakarta.enterprise.context.ApplicationScoped;
 
 import java.util.List;
-import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -73,7 +72,9 @@ public class ExternalSchemaService {
         return refs.stream().anyMatch(ref -> resolveCatalog(ref, session)
                 .filter(SpectrumCatalogResolver.Resolution.PhaseOne.class::isInstance).isPresent());
     }
-    public boolean touchesCatalogViews(String sql) { return sql != null && sql.toLowerCase(Locale.ROOT).contains("svv_external_"); }
+    public boolean touchesCatalogViews(String sql) {
+        return ExternalReferenceScanner.containsIdentifierPrefix(sql, "svv_external_");
+    }
     public void refreshMetadata(SpectrumSession session, BackendSql backend) { for (ExternalSchemaBinding binding : registry.list(session.accountId(),session.clusterKey(),session.databaseName())) metadata.refresh(backend,session.accountId(),binding); }
     public void forgetCluster(String accountId, String clusterKey) { registry.removeCluster(accountId, clusterKey); materializer.forgetCluster(clusterKey); }
     private Set<String> schemaNames(SpectrumSession session) {
@@ -161,7 +162,7 @@ public class ExternalSchemaService {
             if (!"EntityNotFoundException".equals(exception.getErrorCode())) throw exception;
             if (!statement.ifExists()) throw new SpectrumSqlException("42P01", "table \"" + statement.tableName() + "\" does not exist");
         }
-        materializer.forget(session.clusterKey(), statement.schemaName(), statement.tableName());
+        materializer.forget(session.clusterKey(), session.databaseName(), statement.schemaName(), statement.tableName());
         backend.execute("DROP TABLE IF EXISTS " + quote(statement.schemaName()) + "." + quote(statement.tableName()));
         metadata.refresh(backend, session.accountId(), binding.get());
         return Optional.of("DROP TABLE");

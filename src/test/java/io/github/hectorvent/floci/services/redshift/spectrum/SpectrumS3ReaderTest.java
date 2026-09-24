@@ -122,7 +122,7 @@ class SpectrumS3ReaderTest {
         IamService iam = mock(IamService.class);
         String role = "arn:aws:iam::000000000000:role/Reader";
         when(iam.resolvePrincipalContext(role)).thenReturn(CallerContext.of(List.of(policy(
-                "s3:ListBucket", RedshiftRoleAccess.bucketArn("warehouse")))));
+                "s3:ListBucket", RedshiftRoleAccess.bucketArn(role, "warehouse")))));
 
         SpectrumReadException exception = assertThrows(SpectrumReadException.class,
                 () -> new SpectrumS3Reader(s3, iam).read(session(role), schema(role), table(
@@ -144,8 +144,8 @@ class SpectrumS3ReaderTest {
         IamService iam = mock(IamService.class);
         String role = "arn:aws:iam::000000000000:role/Reader";
         when(iam.resolvePrincipalContext(role)).thenReturn(CallerContext.of(List.of(
-                policy("s3:ListBucket", RedshiftRoleAccess.bucketArn("warehouse")),
-                policy("s3:GetObject", RedshiftRoleAccess.objectArn("warehouse", "events/data.csv")))));
+                policy("s3:ListBucket", RedshiftRoleAccess.bucketArn(role, "warehouse")),
+                policy("s3:GetObject", RedshiftRoleAccess.objectArn(role, "warehouse", "events/data.csv")))));
 
         List<SpectrumRow> rows = new SpectrumS3Reader(s3, iam)
                 .read(session(role), schema(role), table(SpectrumColumn.Type.VARCHAR)).toList();
@@ -162,7 +162,7 @@ class SpectrumS3ReaderTest {
         IamService iam = mock(IamService.class);
         String role = "arn:aws:iam::000000000000:role/Reader";
         when(iam.resolvePrincipalContext(role)).thenReturn(CallerContext.of(List.of(policy(
-                "s3:GetObject", RedshiftRoleAccess.objectArn("warehouse", "events/data.csv")))));
+                "s3:GetObject", RedshiftRoleAccess.objectArn(role, "warehouse", "events/data.csv")))));
 
         SpectrumReadException exception = assertThrows(SpectrumReadException.class,
                 () -> new SpectrumS3Reader(s3, iam).read(session(role), schema(role), table(

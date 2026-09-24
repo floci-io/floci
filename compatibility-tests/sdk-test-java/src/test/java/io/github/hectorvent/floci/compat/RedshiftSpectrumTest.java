@@ -10,14 +10,10 @@ import software.amazon.awssdk.services.redshift.model.CreateClusterRequest;
 import software.amazon.awssdk.services.redshift.model.DeleteClusterRequest;
 import software.amazon.awssdk.services.redshift.model.DescribeClustersRequest;
 import software.amazon.awssdk.services.glue.GlueClient;
-import software.amazon.awssdk.services.glue.model.Column;
 import software.amazon.awssdk.services.glue.model.CreateDatabaseRequest;
-import software.amazon.awssdk.services.glue.model.CreateTableRequest;
 import software.amazon.awssdk.services.glue.model.DatabaseInput;
 import software.amazon.awssdk.services.glue.model.DeleteDatabaseRequest;
 import software.amazon.awssdk.services.glue.model.DeleteTableRequest;
-import software.amazon.awssdk.services.glue.model.StorageDescriptor;
-import software.amazon.awssdk.services.glue.model.TableInput;
 import software.amazon.awssdk.services.iam.IamClient;
 import software.amazon.awssdk.services.iam.model.CreateRoleRequest;
 import software.amazon.awssdk.services.iam.model.DeleteRolePolicyRequest;
@@ -78,14 +74,6 @@ class RedshiftSpectrumTest {
                     .build());
             glue.createDatabase(CreateDatabaseRequest.builder().databaseInput(DatabaseInput.builder()
                     .name(glueDatabase).build()).build());
-            Column id = Column.builder().name("id").type("int").build();
-            Column name = Column.builder().name("name").type("string").build();
-            glue.createTable(CreateTableRequest.builder().databaseName(glueDatabase)
-                    .tableInput(TableInput.builder().name("events").tableType("EXTERNAL_TABLE")
-                            .storageDescriptor(StorageDescriptor.builder().location("s3://" + bucket + "/events/")
-                                    .inputFormat("org.apache.hadoop.mapred.TextInputFormat")
-                                    .columns(id, name).build())
-                            .build()).build());
             redshift.createCluster(CreateClusterRequest.builder().clusterIdentifier(clusterId)
                     .nodeType("dc2.large").masterUsername("admin").masterUserPassword("Password123")
                     .iamRoles(roleArn)

@@ -282,7 +282,8 @@ public class RedshiftInterceptingBridge {
                     write(client.getOutputStream(), backendFrame('1', EMPTY_BODY));
                     return;
                 }
-                if (plan instanceof SpectrumInterceptor.Plan.Load || plan instanceof SpectrumInterceptor.Plan.Refresh) {
+                if (plan instanceof SpectrumInterceptor.Plan.Load || plan instanceof SpectrumInterceptor.Plan.Refresh
+                        || plan instanceof SpectrumInterceptor.Plan.RefreshLoad) {
                     awaitPriorBackendResponses();
                     runWithBackendOwned(() -> {
                         spectrumInterceptor.execute(plan, spectrumSession, new PostgresBackendSession(backend));

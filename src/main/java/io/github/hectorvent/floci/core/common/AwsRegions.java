@@ -112,6 +112,12 @@ public final class AwsRegions {
         return rule == null ? DEFAULT_DNS_SUFFIX : rule.dnsSuffix();
     }
 
+    /** DNS suffix for a partition id, including global-service principals without a region. */
+    public static String dnsSuffixForPartition(String partition) {
+        return PARTITION_RULES.stream().filter(rule -> rule.partition().equals(partition))
+                .map(PartitionRule::dnsSuffix).findFirst().orElse(DEFAULT_DNS_SUFFIX);
+    }
+
     private static PartitionRule ruleFor(String region) {
         if (region == null || region.isBlank()) {
             return null;

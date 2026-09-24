@@ -6,7 +6,9 @@ import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.floci.duck.FlociDuckClient;
 import io.github.hectorvent.floci.services.glue.GlueService;
 import io.github.hectorvent.floci.services.glue.GlueTableResolver;
+import io.github.hectorvent.floci.services.glue.model.Column;
 import io.github.hectorvent.floci.services.glue.model.Partition;
+import io.github.hectorvent.floci.services.glue.model.StorageDescriptor;
 import io.github.hectorvent.floci.services.glue.model.Table;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.redshift.proxy.RedshiftRoleAccess;
@@ -69,10 +71,12 @@ public class ExternalTableMaterializer {
         String label = binding.schemaName() + "." + tableName;
         try {
             Location location = Location.parse(table);
-            authorize(binding, location);
-            List<S3Object> objects = listObjects(session.accountId(), location);
-            String cacheKey = session.clusterKey() + "|" + binding.schemaName() + "|" + tableName;
-            String fingerprint = fingerprint(session.accountId(), binding, table, objects);
+            List<Partition> partitions = partitions(session.accountId(), binding, table);
+            List<ReadSource> sources = readSources(session.accountId(), binding, table, location, partitions);
+            List<S3Object> objects = sources.stream().flatMap(source -> source.objects().stream()).toList();
+            authorizeObjects(binding, sources);
+            String cacheKey = cacheKey(session, binding, tableName);
+            String fingerprint = fingerprint(table, partitions, objects);
             if (!session.inTransaction() && fingerprint.equals(fingerprints.get(cacheKey))) {
                 return Outcome.CURRENT;
             }
@@ -82,7 +86,7 @@ public class ExternalTableMaterializer {
                 if (!session.inTransaction() && fingerprint.equals(fingerprints.get(cacheKey))) {
                     return Outcome.CURRENT;
                 }
-                load(backend, session, binding, table, objects);
+                load(backend, session, binding, table, sources);
                 if (session.inTransaction()) {
                     fingerprints.remove(cacheKey);
                 } else {
@@ -99,21 +103,70 @@ public class ExternalTableMaterializer {
         }
     }
 
-    public void forget(String clusterKey, String schemaName, String tableName) {
-        fingerprints.remove(clusterKey + "|" + schemaName + "|" + tableName);
+    public void forget(String clusterKey, String databaseName, String schemaName, String tableName) {
+        fingerprints.remove(clusterKey + "|" + databaseName + "|" + schemaName + "|" + tableName);
     }
 
     public void forgetCluster(String clusterKey) {
         fingerprints.keySet().removeIf(key -> key.startsWith(clusterKey + "|"));
     }
 
-    private void authorize(ExternalSchemaBinding binding, Location location) {
+    private void authorizeList(ExternalSchemaBinding binding, Location location) {
         try {
-            RedshiftRoleAccess.authorizeRoleAction(s3Service, iamService, binding.iamRoleArn(), "s3:ListBucket", RedshiftRoleAccess.bucketArn(location.bucket()));
-            RedshiftRoleAccess.authorizeRoleAction(s3Service, iamService, binding.iamRoleArn(), "s3:GetObject", RedshiftRoleAccess.objectArn(location.bucket(), location.prefix() + "*"));
+            RedshiftRoleAccess.authorizeRoleAction(s3Service, iamService, binding.iamRoleArn(), "s3:ListBucket", RedshiftRoleAccess.bucketArn(binding.iamRoleArn(), location.bucket()));
         } catch (S3CopySimulator.S3TransferException exception) {
             throw new SpectrumSqlException(exception.sqlState(), exception.getMessage());
         }
+    }
+
+    private void authorizeObjects(ExternalSchemaBinding binding, List<ReadSource> sources) {
+        try {
+            for (ReadSource source : sources) {
+                for (S3Object object : source.objects()) {
+                    RedshiftRoleAccess.authorizeRoleAction(s3Service, iamService, binding.iamRoleArn(), "s3:GetObject",
+                            RedshiftRoleAccess.objectArn(binding.iamRoleArn(), source.location().bucket(), object.getKey()));
+                }
+            }
+        } catch (S3CopySimulator.S3TransferException exception) {
+            throw new SpectrumSqlException(exception.sqlState(), exception.getMessage());
+        }
+    }
+
+    private String cacheKey(SpectrumSession session, ExternalSchemaBinding binding, String tableName) {
+        return session.clusterKey() + "|" + session.databaseName() + "|" + binding.schemaName() + "|" + tableName;
+    }
+
+    private List<Partition> partitions(String accountId, ExternalSchemaBinding binding, Table table) {
+        if (GlueTableResolver.isIcebergTable(table)) {
+            return List.of();
+        }
+        List<Partition> partitions = RequestScopes.callAs(accountId,
+                () -> glueService.getPartitions(binding.glueDatabase(), table.getName()));
+        return partitions == null ? List.of() : partitions;
+    }
+
+    private List<ReadSource> readSources(String accountId, ExternalSchemaBinding binding, Table table, Location tableLocation,
+                                         List<Partition> partitions) {
+        if (partitions.isEmpty()) {
+            authorizeList(binding, tableLocation);
+            return List.of(new ReadSource(table, null, tableLocation, listObjects(accountId, tableLocation)));
+        }
+        List<ReadSource> sources = new ArrayList<>();
+        for (Partition partition : partitions) {
+            StorageDescriptor descriptor = partition.getStorageDescriptor();
+            if (descriptor == null || descriptor.getLocation() == null || descriptor.getLocation().isBlank()) {
+                descriptor = table.getStorageDescriptor();
+            }
+            Table partitionTable = new Table();
+            partitionTable.setName(table.getName());
+            partitionTable.setParameters(table.getParameters());
+            partitionTable.setPartitionKeys(table.getPartitionKeys());
+            partitionTable.setStorageDescriptor(descriptor);
+            Location location = Location.parse(descriptor.getLocation(), table.getName());
+            authorizeList(binding, location);
+            sources.add(new ReadSource(partitionTable, partition, location, listObjects(accountId, location)));
+        }
+        return List.copyOf(sources);
     }
 
     private List<S3Object> listObjects(String accountId, Location location) {
@@ -130,10 +183,9 @@ public class ExternalTableMaterializer {
         });
     }
 
-    private String fingerprint(String accountId, ExternalSchemaBinding binding, Table table, List<S3Object> objects) {
+    private String fingerprint(Table table, List<Partition> partitions, List<S3Object> objects) {
         StringBuilder value = new StringBuilder().append(table.getVersionId()).append('|').append(table.getUpdateTime()).append('|');
-        List<Partition> partitions = RequestScopes.callAs(accountId, () -> glueService.getPartitions(binding.glueDatabase(), table.getName()));
-        if (partitions != null) {
+        if (!partitions.isEmpty()) {
             partitions.stream().map(partition -> partition.getValues() + "=" + (partition.getStorageDescriptor() == null ? "" : partition.getStorageDescriptor().getLocation())).sorted().forEach(entry -> value.append(entry).append(';'));
         }
         for (S3Object object : objects) {
@@ -146,7 +198,8 @@ public class ExternalTableMaterializer {
         }
     }
 
-    private void load(BackendSql backend, SpectrumSession session, ExternalSchemaBinding binding, Table table, List<S3Object> objects) {
+    private void load(BackendSql backend, SpectrumSession session, ExternalSchemaBinding binding, Table table,
+                      List<ReadSource> sources) {
         GlueTableResolver.ReadPlan plan = GlueTableResolver.readPlan(table);
         if (plan.columns().isEmpty()) {
             throw new SpectrumSqlException("0A000", "Glue table \"" + binding.schemaName() + "." + table.getName() + "\" declares no columns");
@@ -160,9 +213,10 @@ public class ExternalTableMaterializer {
         try {
             backend.execute("DROP TABLE IF EXISTS " + staging + "; CREATE TABLE " + staging + " (" + definitions + ")");
             stagingCreated = true;
-            if (plan.iceberg() || !objects.isEmpty()) {
+            boolean hasObjects = sources.stream().anyMatch(source -> !source.objects().isEmpty());
+            if (plan.iceberg() || hasObjects) {
                 scratchKey = "spectrum-" + UUID.randomUUID() + ".csv";
-                byte[] csv = readWithDuckDb(session.accountId(), plan,
+                byte[] csv = readWithDuckDb(session.accountId(), table, sources,
                         config.services().redshift().spectrumMaxRows(), scratchKey);
                 long rows = backend.copyIn("COPY " + staging + " FROM STDIN " + COPY_OPTIONS, new ByteArrayInputStream(csv));
                 if (rows > config.services().redshift().spectrumMaxRows()) {
@@ -192,7 +246,8 @@ public class ExternalTableMaterializer {
         }
     }
 
-    private byte[] readWithDuckDb(String accountId, GlueTableResolver.ReadPlan plan, long maxRows, String scratchKey) {
+    private byte[] readWithDuckDb(String accountId, Table table, List<ReadSource> sources, long maxRows,
+                                  String scratchKey) {
         RequestScopes.runAs(accountId, () -> {
             try {
                 s3Service.createBucket(SCRATCH_BUCKET, config.defaultRegion());
@@ -202,10 +257,47 @@ public class ExternalTableMaterializer {
                 }
             }
         });
-        String projection = plan.columns().stream().map(column -> GlueTypeMapper.duckProjection(column.getName(), column.getType())).collect(Collectors.joining(", "));
-        duckClient.execute("SELECT " + projection + " FROM " + plan.fromClause() + " LIMIT " + (maxRows + 1),
-                plan.iceberg() ? ICEBERG_SETUP : null, "s3://" + SCRATCH_BUCKET + "/" + scratchKey, accountId);
+        List<String> selects = sources.stream().filter(source -> source.partition() == null || !source.objects().isEmpty())
+                .map(this::readSelect).toList();
+        if (selects.isEmpty() && GlueTableResolver.isIcebergTable(table)) {
+            GlueTableResolver.ReadPlan plan = GlueTableResolver.readPlan(table);
+            selects = List.of("SELECT " + projection(plan.columns()) + " FROM " + plan.fromClause());
+        }
+        String query = selects.size() == 1 ? selects.getFirst()
+                : "SELECT * FROM (" + String.join(" UNION ALL ", selects) + ") AS spectrum_partitions";
+        String setup = GlueTableResolver.isIcebergTable(table) ? ICEBERG_SETUP : null;
+        duckClient.execute(query + " LIMIT " + (maxRows + 1), setup,
+                "s3://" + SCRATCH_BUCKET + "/" + scratchKey, accountId);
         return RequestScopes.callAs(accountId, () -> s3Service.getObject(SCRATCH_BUCKET, scratchKey).getData());
+    }
+
+    private String readSelect(ReadSource source) {
+        GlueTableResolver.ReadPlan plan = GlueTableResolver.readPlan(source.table());
+        String projection;
+        if (source.partition() == null) {
+            projection = projection(plan.columns());
+        } else {
+            List<Column> dataColumns = source.table().getStorageDescriptor().getColumns();
+            List<String> parts = new ArrayList<>(dataColumns.stream()
+                    .map(column -> GlueTypeMapper.duckProjection(column.getName(), column.getType())).toList());
+            List<Column> partitionKeys = source.table().getPartitionKeys();
+            List<String> values = source.partition().getValues();
+            for (int index = 0; index < partitionKeys.size(); index++) {
+                Column key = partitionKeys.get(index);
+                String value = index < values.size() ? values.get(index) : null;
+                String expression = value == null || "__HIVE_DEFAULT_PARTITION__".equals(value)
+                        ? "CAST(NULL AS VARCHAR)"
+                        : "CAST('" + value.replace("'", "''") + "' AS VARCHAR)";
+                parts.add("COALESCE(" + expression + ", '\\N') AS " + quote(key.getName()));
+            }
+            projection = String.join(", ", parts);
+        }
+        return "SELECT " + projection + " FROM " + plan.fromClause();
+    }
+
+    private static String projection(List<Column> columns) {
+        return columns.stream().map(column -> GlueTypeMapper.duckProjection(column.getName(), column.getType()))
+                .collect(Collectors.joining(", "));
     }
 
     static String quote(String identifier) {
@@ -215,8 +307,12 @@ public class ExternalTableMaterializer {
     private record Location(String bucket, String prefix) {
         static Location parse(Table table) {
             String location = table.getStorageDescriptor() == null ? null : table.getStorageDescriptor().getLocation();
+            return parse(location, table.getName());
+        }
+
+        static Location parse(String location, String tableName) {
             if (location == null || location.isBlank() || !location.startsWith("s3://")) {
-                throw new SpectrumSqlException("0A000", "Glue table \"" + table.getName() + "\" has no supported storage location");
+                throw new SpectrumSqlException("0A000", "Glue table \"" + tableName + "\" has no supported storage location");
             }
             String rest = location.substring(5);
             int slash = rest.indexOf('/');
@@ -224,5 +320,8 @@ public class ExternalTableMaterializer {
             String prefix = slash < 0 ? "" : rest.substring(slash + 1);
             return new Location(bucket, prefix.isEmpty() || prefix.endsWith("/") ? prefix : prefix + "/");
         }
+    }
+
+    private record ReadSource(Table table, Partition partition, Location location, List<S3Object> objects) {
     }
 }

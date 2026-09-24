@@ -67,7 +67,7 @@ public final class SpectrumS3Reader {
                 s3Service.authorizeAnonymousListBucket(location.bucket());
             } else {
                 RedshiftRoleAccess.authorizeRoleAction(s3Service, iamService, roleArn, "s3:ListBucket",
-                        RedshiftRoleAccess.bucketArn(location.bucket()));
+                        RedshiftRoleAccess.bucketArn(roleArn, location.bucket()));
             }
             List<S3Object> objects = new ArrayList<>();
             String continuationToken = null;
@@ -147,7 +147,7 @@ public final class SpectrumS3Reader {
                             s3Service.authorizeAnonymousGetObject(bucket, currentKey);
                         } else {
                             RedshiftRoleAccess.authorizeRoleAction(s3Service, iamService, roleArn, "s3:GetObject",
-                                    RedshiftRoleAccess.objectArn(bucket, currentKey));
+                                    RedshiftRoleAccess.objectArn(roleArn, bucket, currentKey));
                         }
                         S3Object object = s3Service.getObject(bucket, currentKey);
                         reader = new BufferedReader(new InputStreamReader(

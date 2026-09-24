@@ -5,9 +5,11 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.floci.duck.FlociDuckClient;
 import io.github.hectorvent.floci.services.glue.GlueService;
 import io.github.hectorvent.floci.services.glue.model.Column;
+import io.github.hectorvent.floci.services.glue.model.Partition;
 import io.github.hectorvent.floci.services.glue.model.StorageDescriptor;
 import io.github.hectorvent.floci.services.glue.model.Table;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.junit.jupiter.api.BeforeEach;
@@ -40,6 +42,7 @@ class ExternalTableMaterializerTest {
     private FlociDuckClient duck;
     private GlueService glue;
     private S3Service s3;
+    private IamService iam;
     private RecordingBackend backend;
     private ExternalTableMaterializer materializer;
 
@@ -63,11 +66,12 @@ class ExternalTableMaterializerTest {
         duck = mock(FlociDuckClient.class);
         glue = mock(GlueService.class);
         s3 = mock(S3Service.class);
+        iam = mock(IamService.class);
         EmulatorConfig config = mock(EmulatorConfig.class, Answers.RETURNS_DEEP_STUBS);
         when(config.services().redshift().spectrumMaxRows()).thenReturn(1000L);
         when(config.defaultRegion()).thenReturn("us-east-1");
         backend = new RecordingBackend();
-        materializer = new ExternalTableMaterializer(duck, glue, s3, mock(IamService.class), config);
+        materializer = new ExternalTableMaterializer(duck, glue, s3, iam, config);
         S3Object scratch = new S3Object(ExternalTableMaterializer.SCRATCH_BUCKET, "scratch.csv",
                 "id,name\n1,Alice\n2,Bob\n".getBytes(StandardCharsets.UTF_8), "text/csv");
         when(s3.getObject(eq(ExternalTableMaterializer.SCRATCH_BUCKET), anyString())).thenReturn(scratch);
@@ -147,6 +151,68 @@ class ExternalTableMaterializerTest {
         assertThat(materializer.ensureCurrent(backend, session(false), BINDING, "native"),
                 equalTo(ExternalTableMaterializer.Outcome.NOT_EXTERNAL));
         assertThat(backend.statements.size(), equalTo(0));
+    }
+
+    @Test
+    void deniesAListedObjectUsingItsExactKeyBeforeDuckDbReadsIt() {
+        when(glue.getTable("lake", "events")).thenReturn(csvTable());
+        when(s3.isAuthEnforced()).thenReturn(true);
+        S3Object publicObject = new S3Object("bucket", "events/public.csv", new byte[]{1}, "text/csv", "etag1");
+        S3Object privateObject = new S3Object("bucket", "events/private.csv", new byte[]{2}, "text/csv", "etag2");
+        when(s3.listObjectsWithPrefixes(eq("bucket"), eq("events/"), eq(""), eq(1000), any(), any()))
+                .thenReturn(new S3Service.ListObjectsResult(List.of(publicObject, privateObject), List.of(), false, null));
+        when(iam.resolvePrincipalContext(BINDING.iamRoleArn())).thenReturn(CallerContext.of(List.of("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":["s3:ListBucket","s3:GetObject"],"Resource":"*"},
+                  {"Effect":"Deny","Action":"s3:GetObject","Resource":"arn:aws:s3:::bucket/events/private.csv"}
+                ]}""")));
+
+        SpectrumSqlException exception = assertThrows(SpectrumSqlException.class,
+                () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
+
+        assertThat(exception.sqlState(), equalTo("42501"));
+        verify(duck, never()).execute(anyString(), any(), anyString(), anyString());
+    }
+
+    @Test
+    void doesNotReuseAStagingTableCacheEntryAcrossRedshiftDatabases() {
+        when(glue.getTable("lake", "events")).thenReturn(csvTable());
+        SpectrumSession otherDatabase = new SpectrumSession(ACCOUNT, BINDING.clusterKey(), "reporting",
+                List.of(BINDING.iamRoleArn()), false);
+        ExternalSchemaBinding otherBinding = new ExternalSchemaBinding(ACCOUNT, BINDING.clusterKey(),
+                "reporting", "analytics", "lake", BINDING.iamRoleArn());
+
+        materializer.ensureCurrent(backend, session(false), BINDING, "events");
+        int statementCount = backend.statements.size();
+
+        assertThat(materializer.ensureCurrent(backend, otherDatabase, otherBinding, "events"),
+                equalTo(ExternalTableMaterializer.Outcome.LOADED));
+        assertThat(backend.statements.size(), equalTo(statementCount + 3));
+    }
+
+    @Test
+    void readsObjectsFromRegisteredPartitionLocationsOutsideTheTableRoot() {
+        Table table = csvTable();
+        table.setPartitionKeys(List.of(new Column("day", "string")));
+        when(glue.getTable("lake", "events")).thenReturn(table);
+        StorageDescriptor partitionDescriptor = new StorageDescriptor();
+        partitionDescriptor.setLocation("s3://bucket/archived/day=2026-09-25/");
+        partitionDescriptor.setInputFormat("org.apache.hadoop.mapred.TextInputFormat");
+        partitionDescriptor.setColumns(table.getStorageDescriptor().getColumns());
+        Partition partition = new Partition();
+        partition.setValues(List.of("2026-09-25"));
+        partition.setStorageDescriptor(partitionDescriptor);
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(partition));
+        when(s3.listObjectsWithPrefixes(eq("bucket"), eq("archived/day=2026-09-25/"), eq(""), eq(1000), any(), any()))
+                .thenReturn(new S3Service.ListObjectsResult(List.of(
+                        new S3Object("bucket", "archived/day=2026-09-25/part.csv", new byte[]{1}, "text/csv", "partition-etag")),
+                        List.of(), false, null));
+
+        materializer.ensureCurrent(backend, session(false), BINDING, "events");
+
+        verify(duck).execute(argThat(sql -> sql.contains("s3://bucket/archived/day=2026-09-25/**")
+                && sql.contains("CAST('2026-09-25' AS VARCHAR)") && sql.contains("AS \"day\"")),
+                any(), anyString(), eq(ACCOUNT));
     }
 
     private static SpectrumSession session(boolean inTransaction) {

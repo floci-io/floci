@@ -11,11 +11,20 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class RedshiftRoleAccessTest {
+
+    @Test
+    void s3ResourcesInheritTheRoleArnPartition() {
+        String roleArn = "arn:aws-cn:iam::111111111111:role/spectrum-role";
+
+        assertEquals("arn:aws-cn:s3:::bucket", RedshiftRoleAccess.bucketArn(roleArn, "bucket"));
+        assertEquals("arn:aws-cn:s3:::bucket/key", RedshiftRoleAccess.objectArn(roleArn, "bucket", "key"));
+    }
 
     @Test
     void authorizeRoleActionThrowsWhenEnforcedPolicyDeniesTheAction() {

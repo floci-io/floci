@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.redshift.proxy;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.services.iam.AssumeRolePolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamService;
@@ -84,9 +85,10 @@ public final class RedshiftRoleAccess {
         }
         if (clusterAccountId != null
                 && !ROLE_TRUST_POLICY_EVALUATOR.allowsService(
-                        role.get().getAssumeRolePolicyDocument(), "redshift.amazonaws.com")) {
+                        role.get().getAssumeRolePolicyDocument(), servicePrincipal(parsed.partition()))) {
             throw new S3CopySimulator.S3TransferException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
-                    "IAM Role '" + iamRoleArn + "' could not be assumed: trust policy does not allow redshift.amazonaws.com",
+                    "IAM Role '" + iamRoleArn + "' could not be assumed: trust policy does not allow "
+                            + servicePrincipal(parsed.partition()),
                     null);
         }
 
@@ -133,12 +135,18 @@ public final class RedshiftRoleAccess {
         }
     }
 
-    public static String bucketArn(String bucket) {
-        return "arn:aws:s3:::" + bucket;
+    public static String bucketArn(String roleArn, String bucket) {
+        AwsArnUtils.Arn role = AwsArnUtils.parse(roleArn);
+        return new AwsArnUtils.Arn(role.partition(), "s3", "", "", bucket).toString();
     }
 
-    public static String objectArn(String bucket, String key) {
-        return "arn:aws:s3:::" + bucket + "/" + key;
+    public static String objectArn(String roleArn, String bucket, String key) {
+        AwsArnUtils.Arn role = AwsArnUtils.parse(roleArn);
+        return new AwsArnUtils.Arn(role.partition(), "s3", "", "", bucket + "/" + key).toString();
+    }
+
+    private static String servicePrincipal(String partition) {
+        return "redshift." + AwsRegions.dnsSuffixForPartition(partition);
     }
 
     private static String randomString(String characters, int length) {

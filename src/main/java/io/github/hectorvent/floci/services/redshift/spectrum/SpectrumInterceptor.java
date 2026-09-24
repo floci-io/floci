@@ -46,10 +46,10 @@ public class SpectrumInterceptor {
             return new Plan.Ddl(statement.get());
         }
         service.rejectExternalWrites(sql, session);
-        if (service.touchesCatalogViews(sql)) {
-            return new Plan.Refresh();
-        }
         List<ExternalReferenceScanner.Reference> references = service.referencesIn(sql, session);
+        if (service.touchesCatalogViews(sql)) {
+            return references.isEmpty() ? new Plan.Refresh() : new Plan.RefreshLoad(references);
+        }
         if (references.isEmpty()) {
             return new Plan.Forward();
         }
@@ -108,6 +108,11 @@ public class SpectrumInterceptor {
                 service.refreshMetadata(session, backend);
                 yield new Decision.Forward();
             }
+            case Plan.RefreshLoad refreshLoad -> {
+                service.refreshMetadata(session, backend);
+                service.loadReferences(refreshLoad.references(), session, backend);
+                yield new Decision.Forward();
+            }
             case Plan.Forward ignored -> new Decision.Forward();
         };
     }
@@ -159,11 +164,13 @@ public class SpectrumInterceptor {
         };
     }
 
-    public sealed interface Plan permits Plan.Ddl, Plan.Load, Plan.PhaseOneQuery, Plan.Refresh, Plan.Forward {
+    public sealed interface Plan permits Plan.Ddl, Plan.Load, Plan.PhaseOneQuery, Plan.Refresh,
+            Plan.RefreshLoad, Plan.Forward {
         record Ddl(ExternalStatement statement) implements Plan { }
         record Load(List<ExternalReferenceScanner.Reference> references) implements Plan { }
         record PhaseOneQuery(SpectrumQuery query, SpectrumGlueCsvAdapter.CsvTable table, String identifier) implements Plan { }
         record Refresh() implements Plan { }
+        record RefreshLoad(List<ExternalReferenceScanner.Reference> references) implements Plan { }
         record Forward() implements Plan { }
     }
 

@@ -24,6 +24,8 @@ import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -74,6 +76,13 @@ class ExternalSchemaServiceTest {
         assertThat(statements, contains("CREATE SCHEMA \"analytics\""));
         verify(registry).bind(new ExternalSchemaBinding(ACCOUNT, CLUSTER, "dev", "analytics", "lake", ROLE_ARN));
         verify(metadata).refresh(any(BackendSql.class), eq(ACCOUNT), any(ExternalSchemaBinding.class));
+    }
+
+    @Test
+    void catalogViewDetectionIgnoresCommentsAndStringLiterals() {
+        assertFalse(service.touchesCatalogViews("SELECT 'svv_external_tables'"));
+        assertFalse(service.touchesCatalogViews("SELECT 1 /* svv_external_tables */"));
+        assertTrue(service.touchesCatalogViews("SELECT * FROM svv_external_tables"));
     }
 
     @Test

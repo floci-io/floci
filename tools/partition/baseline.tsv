@@ -35,6 +35,7 @@ arn-literal	src/main/java/io/github/hectorvent/floci/services/emrserverless/EmrS
 arn-literal	src/main/java/io/github/hectorvent/floci/services/guardduty/GuardDutyService.java	1
 arn-literal	src/main/java/io/github/hectorvent/floci/services/iam/AwsManagedPolicies.java	1
 arn-literal	src/main/java/io/github/hectorvent/floci/services/iam/IamPolicyEvaluator.java	4
+arn-literal	src/main/java/io/github/hectorvent/floci/services/iam/IamService.java	1
 arn-literal	src/main/java/io/github/hectorvent/floci/services/iam/SAMLAssertionVerifier.java	2
 arn-literal	src/main/java/io/github/hectorvent/floci/services/iam/SAMLProviderService.java	2
 arn-literal	src/main/java/io/github/hectorvent/floci/services/kinesisanalytics/KinesisAnalyticsV2JsonHandler.java	2
@@ -56,7 +57,6 @@ arn-literal	src/main/java/io/github/hectorvent/floci/services/ram/RamService.jav
 arn-literal	src/main/java/io/github/hectorvent/floci/services/rds/RdsService.java	1
 arn-literal	src/main/java/io/github/hectorvent/floci/services/rds/proxy/RdsSigV4Validator.java	1
 arn-literal	src/main/java/io/github/hectorvent/floci/services/redshift/RedshiftService.java	1
-arn-literal	src/main/java/io/github/hectorvent/floci/services/redshift/proxy/S3CopySimulator.java	2
 arn-literal	src/main/java/io/github/hectorvent/floci/services/redshiftdata/RedshiftDataResourceResolver.java	1
 arn-literal	src/main/java/io/github/hectorvent/floci/services/resourceexplorer2/ResourceExplorer2Service.java	2
 arn-literal	src/main/java/io/github/hectorvent/floci/services/route53resolver/Route53ResolverService.java	5
@@ -80,8 +80,10 @@ arn-regex-dialect	src/main/java/io/github/hectorvent/floci/services/apigateway/A
 arn-regex-dialect	src/main/java/io/github/hectorvent/floci/services/bedrockagentcorecontrol/BedrockAgentCoreGatewayRuleService.java	3
 arn-regex-dialect	src/main/java/io/github/hectorvent/floci/services/bedrockagentcorecontrol/BedrockAgentCoreToolsService.java	1
 arn-regex-dialect	src/main/java/io/github/hectorvent/floci/services/budgets/BudgetsService.java	2
+arn-regex-dialect	src/main/java/io/github/hectorvent/floci/services/ce/CostAnomalyService.java	1
 arn-regex-dialect	src/main/java/io/github/hectorvent/floci/services/controltower/ControlTowerControlService.java	1
 arn-regex-dialect	src/main/java/io/github/hectorvent/floci/services/controltower/ControlTowerService.java	1
+arn-regex-dialect	src/main/java/io/github/hectorvent/floci/services/ecr/EcrService.java	1
 arn-regex-dialect	src/main/java/io/github/hectorvent/floci/services/firehose/ProcessingConfigurationValidator.java	1
 arn-regex-dialect	src/main/java/io/github/hectorvent/floci/services/kms/KmsService.java	2
 arn-regex-dialect	src/main/java/io/github/hectorvent/floci/services/lambda/LambdaService.java	1
@@ -113,6 +115,7 @@ dns-suffix	src/main/java/io/github/hectorvent/floci/services/cloudtrail/CloudTra
 dns-suffix	src/main/java/io/github/hectorvent/floci/services/cognito/CognitoService.java	1
 dns-suffix	src/main/java/io/github/hectorvent/floci/services/connect/ConnectService.java	1
 dns-suffix	src/main/java/io/github/hectorvent/floci/services/ec2/Ec2QueryHandler.java	1
+dns-suffix	src/main/java/io/github/hectorvent/floci/services/ecr/EcrService.java	1
 dns-suffix	src/main/java/io/github/hectorvent/floci/services/eks/EksOidcService.java	2
 dns-suffix	src/main/java/io/github/hectorvent/floci/services/eks/EksPodIdentityCredentialsController.java	1
 dns-suffix	src/main/java/io/github/hectorvent/floci/services/eks/EksPodIdentityWebhook.java	2
@@ -123,7 +126,6 @@ dns-suffix	src/main/java/io/github/hectorvent/floci/services/iam/SAMLAssertionVe
 dns-suffix	src/main/java/io/github/hectorvent/floci/services/iam/StsQueryHandler.java	2
 dns-suffix	src/main/java/io/github/hectorvent/floci/services/macie2/MacieController.java	1
 dns-suffix	src/main/java/io/github/hectorvent/floci/services/ram/RamController.java	2
-dns-suffix	src/main/java/io/github/hectorvent/floci/services/redshift/proxy/S3CopySimulator.java	2
 dns-suffix	src/main/java/io/github/hectorvent/floci/services/s3/S3Service.java	1
 dns-suffix	src/main/java/io/github/hectorvent/floci/services/s3/S3VirtualHostFilter.java	1
 dns-suffix	src/main/java/io/github/hectorvent/floci/services/signin/SigninService.java	1
