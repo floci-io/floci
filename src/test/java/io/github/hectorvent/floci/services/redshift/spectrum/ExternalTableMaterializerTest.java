@@ -119,6 +119,28 @@ class ExternalTableMaterializerTest {
     }
 
     @Test
+    void forgettingOneClusterInvalidatesOnlyItsFingerprints() {
+        when(glue.getTable("lake", "events")).thenReturn(csvTable());
+        SpectrumSession first = session(ACCOUNT + ":first", false);
+        SpectrumSession second = session(ACCOUNT + ":second", false);
+        ExternalSchemaBinding firstBinding = new ExternalSchemaBinding(ACCOUNT, first.clusterKey(), "dev",
+                "analytics", "lake", BINDING.iamRoleArn());
+        ExternalSchemaBinding secondBinding = new ExternalSchemaBinding(ACCOUNT, second.clusterKey(), "dev",
+                "analytics", "lake", BINDING.iamRoleArn());
+
+        materializer.ensureCurrent(backend, first, firstBinding, "events");
+        materializer.ensureCurrent(backend, second, secondBinding, "events");
+        int sizeBeforeForget = backend.statements.size();
+        materializer.forgetCluster(first.clusterKey());
+
+        assertThat(materializer.ensureCurrent(backend, first, firstBinding, "events"),
+                equalTo(ExternalTableMaterializer.Outcome.LOADED));
+        assertThat(materializer.ensureCurrent(backend, second, secondBinding, "events"),
+                equalTo(ExternalTableMaterializer.Outcome.CURRENT));
+        assertThat(backend.statements.size(), equalTo(sizeBeforeForget + 3));
+    }
+
+    @Test
     void missingGlueTableIsNotTreatedAsAnExternalTable() {
         when(glue.getTable("lake", "native")).thenThrow(new AwsException("EntityNotFoundException", "missing", 400));
 
@@ -128,7 +150,11 @@ class ExternalTableMaterializerTest {
     }
 
     private static SpectrumSession session(boolean inTransaction) {
-        return new SpectrumSession(ACCOUNT, ACCOUNT + ":c", "dev", List.of(BINDING.iamRoleArn()), inTransaction);
+        return session(BINDING.clusterKey(), inTransaction);
+    }
+
+    private static SpectrumSession session(String clusterKey, boolean inTransaction) {
+        return new SpectrumSession(ACCOUNT, clusterKey, "dev", List.of(BINDING.iamRoleArn()), inTransaction);
     }
 
     private Table csvTable() {

@@ -57,7 +57,8 @@ class ExternalSchemaServiceTest {
         when(role.getAssumeRolePolicyDocument()).thenReturn(TRUST_POLICY);
         when(iam.findRole(ACCOUNT, "SpectrumRole")).thenReturn(Optional.of(role));
         tableMaterializer = mock(ExternalTableMaterializer.class);
-        service = new ExternalSchemaService(registry, tableMaterializer, metadata, glue, iam);
+        service = new ExternalSchemaService(registry, new SpectrumCatalogResolver(registry, mock(SpectrumCatalog.class)),
+                tableMaterializer, metadata, glue, iam);
         session = new SpectrumSession(ACCOUNT, CLUSTER, "dev", List.of(ROLE_ARN), false);
         statements.clear();
     }
@@ -124,6 +125,14 @@ class ExternalSchemaServiceTest {
                 List.of(new ExternalReferenceScanner.Reference("analytics", "events")), session, backend()));
 
         assertThat(error.sqlState(), equalTo("42P01"));
+    }
+
+    @Test
+    void deletingClusterRemovesOnlyItsGlueBindingsAndMaterializerFingerprints() {
+        service.forgetCluster(ACCOUNT, CLUSTER);
+
+        verify(registry).removeCluster(ACCOUNT, CLUSTER);
+        verify(tableMaterializer).forgetCluster(CLUSTER);
     }
 
     private BackendSql backend() {

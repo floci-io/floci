@@ -43,6 +43,24 @@ public class SpectrumCatalog implements Resettable {
         return schemas.getForAccount(accountId, schemaKey(accountId, databaseName, schemaName));
     }
 
+    public Optional<SpectrumExternalSchema> findLegacySchema(String accountId, String schemaName) {
+        String prefix = accountId + ":";
+        return schemas.scanForAccount(accountId, key -> key.startsWith(prefix)).stream()
+                .filter(schema -> accountId.equals(schema.accountId()) && schema.schemaName().equals(schemaName))
+                .sorted(Comparator.comparing(SpectrumExternalSchema::databaseName))
+                .findFirst();
+    }
+
+    public List<String> legacySchemaNames(String accountId) {
+        String prefix = accountId + ":";
+        return schemas.scanForAccount(accountId, key -> key.startsWith(prefix)).stream()
+                .filter(schema -> accountId.equals(schema.accountId()))
+                .map(SpectrumExternalSchema::schemaName)
+                .distinct()
+                .sorted()
+                .toList();
+    }
+
     public Optional<SpectrumExternalTable> table(String accountId, String databaseName,
                                                  String schemaName, String tableName) {
         return tables.getForAccount(accountId, tableKey(accountId, databaseName, schemaName, tableName));

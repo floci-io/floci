@@ -20,37 +20,68 @@ import java.util.stream.Collectors;
 @ApplicationScoped
 public class ExternalSchemaService {
     private final ExternalCatalogRegistry registry;
+    private final SpectrumCatalogResolver catalogResolver;
     private final ExternalTableMaterializer materializer;
     private final ExternalMetadataWriter metadata;
     private final GlueService glueService;
     private final IamService iamService;
-    public ExternalSchemaService(ExternalCatalogRegistry registry, ExternalTableMaterializer materializer, ExternalMetadataWriter metadata, GlueService glueService, IamService iamService) { this.registry=registry; this.materializer=materializer; this.metadata=metadata; this.glueService=glueService; this.iamService=iamService; }
+    public ExternalSchemaService(ExternalCatalogRegistry registry, SpectrumCatalogResolver catalogResolver,
+                                 ExternalTableMaterializer materializer, ExternalMetadataWriter metadata,
+                                 GlueService glueService, IamService iamService) {
+        this.registry = registry;
+        this.catalogResolver = catalogResolver;
+        this.materializer = materializer;
+        this.metadata = metadata;
+        this.glueService = glueService;
+        this.iamService = iamService;
+    }
     public List<ExternalReferenceScanner.Reference> referencesIn(String sql, SpectrumSession session) { return List.copyOf(ExternalReferenceScanner.scan(sql, schemaNames(session))); }
     public void rejectExternalWrites(String sql, SpectrumSession session) { if (ExternalReferenceScanner.writeTarget(sql, schemaNames(session)).isPresent()) throw new SpectrumSqlException("0A000", "cannot modify external table"); }
     public void loadReferences(List<ExternalReferenceScanner.Reference> refs, SpectrumSession session, BackendSql backend) {
         for (ExternalReferenceScanner.Reference ref : refs) {
-            Optional<ExternalSchemaBinding> binding = registry.find(session.accountId(), session.clusterKey(), session.databaseName(), ref.schema());
-            if (binding.isEmpty()) {
+            Optional<SpectrumCatalogResolver.Resolution> resolution = resolveCatalog(ref, session);
+            if (resolution.isEmpty()) {
                 throw new SpectrumSqlException("3F000", "schema \"" + ref.schema() + "\" does not exist");
             }
-            ExternalTableMaterializer.Outcome outcome = materializer.ensureCurrent(backend, session, binding.get(), ref.table());
-            if (outcome == ExternalTableMaterializer.Outcome.NOT_EXTERNAL) {
-                throw new SpectrumSqlException("42P01", "table \"" + ref.schema() + "." + ref.table() + "\" does not exist in the Glue Data Catalog");
+            switch (resolution.get()) {
+                case SpectrumCatalogResolver.Resolution.Glue glue -> {
+                    ExternalTableMaterializer.Outcome outcome = materializer.ensureCurrent(backend, session, glue.binding(), ref.table());
+                    if (outcome == ExternalTableMaterializer.Outcome.NOT_EXTERNAL) {
+                        throw new SpectrumSqlException("42P01", "table \"" + ref.schema() + "." + ref.table() + "\" does not exist in the Glue Data Catalog");
+                    }
+                }
+                case SpectrumCatalogResolver.Resolution.PhaseOne ignored -> throw new SpectrumSqlException(
+                        "0A000", "legacy Spectrum tables require a supported single-table SELECT");
             }
         }
     }
     public Optional<BoundGlueTable> resolveGlueTable(ExternalReferenceScanner.Reference ref, SpectrumSession session) {
-        Optional<ExternalSchemaBinding> binding = registry.find(session.accountId(), session.clusterKey(), session.databaseName(), ref.schema());
-        if (binding.isEmpty()) {
+        Optional<SpectrumCatalogResolver.Resolution> resolution = resolveCatalog(ref, session);
+        if (resolution.isEmpty() || !(resolution.get() instanceof SpectrumCatalogResolver.Resolution.Glue glue)) {
             return Optional.empty();
         }
-        Table table = findGlueTable(session, binding.get(), ref.table());
-        return Optional.of(new BoundGlueTable(binding.get(), table));
+        Table table = findGlueTable(session, glue.binding(), ref.table());
+        return Optional.of(new BoundGlueTable(glue.binding(), table));
+    }
+    public Optional<SpectrumCatalogResolver.Resolution> resolveCatalog(ExternalReferenceScanner.Reference ref, SpectrumSession session) {
+        return catalogResolver.resolve(session.accountId(), session.clusterKey(), session.databaseName(), ref.schema());
+    }
+    public Optional<SpectrumExternalTable> legacyTable(ExternalReferenceScanner.Reference ref, SpectrumSession session) {
+        return catalogResolver.legacyTable(session.accountId(), session.databaseName(), ref.schema(), ref.table());
+    }
+    public boolean referencesLegacy(List<ExternalReferenceScanner.Reference> refs, SpectrumSession session) {
+        return refs.stream().anyMatch(ref -> resolveCatalog(ref, session)
+                .filter(SpectrumCatalogResolver.Resolution.PhaseOne.class::isInstance).isPresent());
     }
     public boolean touchesCatalogViews(String sql) { return sql != null && sql.toLowerCase(Locale.ROOT).contains("svv_external_"); }
     public void refreshMetadata(SpectrumSession session, BackendSql backend) { for (ExternalSchemaBinding binding : registry.list(session.accountId(),session.clusterKey(),session.databaseName())) metadata.refresh(backend,session.accountId(),binding); }
     public void forgetCluster(String accountId, String clusterKey) { registry.removeCluster(accountId, clusterKey); materializer.forgetCluster(clusterKey); }
-    private Set<String> schemaNames(SpectrumSession session) { return registry.list(session.accountId(),session.clusterKey(),session.databaseName()).stream().map(ExternalSchemaBinding::schemaName).collect(Collectors.toSet()); }
+    private Set<String> schemaNames(SpectrumSession session) {
+        Set<String> names = registry.list(session.accountId(), session.clusterKey(), session.databaseName()).stream()
+                .map(ExternalSchemaBinding::schemaName).collect(Collectors.toSet());
+        names.addAll(catalogResolver.legacySchemaNames(session.accountId()));
+        return names;
+    }
     public Optional<String> execute(ExternalStatement statement, SpectrumSession session, BackendSql backend) {
         return switch (statement) {
             case ExternalStatement.CreateSchema create -> Optional.of(createSchema(create, session, backend));

@@ -45,6 +45,8 @@ class SpectrumRoutingTest {
         when(config.services().redshift().spectrumEnabled()).thenReturn(true);
         when(service.referencesIn(any(), eq(SESSION)))
                 .thenReturn(List.of(new ExternalReferenceScanner.Reference("a", "t")));
+        when(service.resolveCatalog(eq(new ExternalReferenceScanner.Reference("a", "t")), eq(SESSION)))
+                .thenReturn(Optional.of(new SpectrumCatalogResolver.Resolution.Glue(BINDING)));
         when(service.resolveGlueTable(any(), eq(SESSION))).thenReturn(Optional.of(new ExternalSchemaService.BoundGlueTable(BINDING, csvTable("TEXTFILE", false))));
         when(materializer.nextIdentifier()).thenReturn("spectrum_tmp_test");
         interceptor = new SpectrumInterceptor(new SpectrumStatementParser(), new ExternalStatementParser(),

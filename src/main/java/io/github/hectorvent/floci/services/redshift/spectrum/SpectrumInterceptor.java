@@ -58,16 +58,34 @@ public class SpectrumInterceptor {
             ExternalReferenceScanner.Reference reference = references.getFirst();
             if (query.get().tableName().equalsIgnoreCase(reference.table())
                     && (query.get().schemaName() == null || query.get().schemaName().equalsIgnoreCase(reference.schema()))) {
-                Optional<ExternalSchemaService.BoundGlueTable> resolved = service.resolveGlueTable(reference, session);
-                if (resolved.isPresent()) {
-                    ExternalSchemaService.BoundGlueTable glueTable = resolved.get();
-                    Optional<SpectrumGlueCsvAdapter.CsvTable> csvTable = csvAdapter.adapt(
-                            glueTable.binding(), glueTable.table(), session.accountId(), session.databaseName());
-                    if (csvTable.isPresent()) {
-                        return new Plan.PhaseOneQuery(query.get(), csvTable.get(), spectrumMaterializer.nextIdentifier());
+                Optional<SpectrumCatalogResolver.Resolution> resolution = service.resolveCatalog(reference, session);
+                if (resolution.isPresent()) {
+                    switch (resolution.get()) {
+                        case SpectrumCatalogResolver.Resolution.Glue ignored -> {
+                            Optional<ExternalSchemaService.BoundGlueTable> resolved = service.resolveGlueTable(reference, session);
+                            if (resolved.isPresent()) {
+                                ExternalSchemaService.BoundGlueTable glueTable = resolved.get();
+                                Optional<SpectrumGlueCsvAdapter.CsvTable> csvTable = csvAdapter.adapt(
+                                        glueTable.binding(), glueTable.table(), session.accountId(), session.databaseName());
+                                if (csvTable.isPresent()) {
+                                    return new Plan.PhaseOneQuery(query.get(), csvTable.get(), spectrumMaterializer.nextIdentifier());
+                                }
+                            }
+                        }
+                        case SpectrumCatalogResolver.Resolution.PhaseOne legacy -> {
+                            SpectrumExternalTable table = service.legacyTable(reference, session)
+                                    .orElseThrow(() -> new SpectrumSqlException("42P01",
+                                            "legacy Spectrum table \"" + reference.schema() + "." + reference.table() + "\" does not exist"));
+                            SpectrumGlueCsvAdapter.CsvTable legacyTable = new SpectrumGlueCsvAdapter.CsvTable(
+                                    legacy.schema(), table);
+                            return new Plan.PhaseOneQuery(query.get(), legacyTable, spectrumMaterializer.nextIdentifier());
+                        }
                     }
                 }
             }
+        }
+        if (service.referencesLegacy(references, session)) {
+            throw new SpectrumSqlException("0A000", "legacy Spectrum tables require a supported single-table SELECT");
         }
         return new Plan.Load(references);
     }
