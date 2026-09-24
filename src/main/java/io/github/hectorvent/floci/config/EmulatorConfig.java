@@ -2883,6 +2883,17 @@ public interface EmulatorConfig {
         @WithDefault("alpine/socat")
         String socatImage();
 
+        /**
+         * When true, EBS volumes are backed by real storage and attached as block devices
+         * inside target containers. When false or unavailable, attachment remains metadata-only.
+         */
+        @WithDefault("true")
+        boolean volumeBlockDevices();
+
+        /** Image used for the helper container that manages volume loop devices and storage. */
+        @WithDefault("alpine:3.21")
+        String volumeHelperImage();
+
         /** When true, instances go straight to RUNNING without launching Docker containers. */
         @WithDefault("false")
         boolean mock();

@@ -1644,6 +1644,7 @@ public class EksClusterManager implements ClusterNodeInstanceProvider {
             String region = clusterRegion(cluster);
             ContainerIps containerIps = resolveContainerIps(containerId);
             Instance nodeInstance = synthesizeClusterNodeInstance(cluster, containerIps.primaryIp(), region, accountId);
+            nodeInstance.setDockerContainerId(containerId);
             clusterNodeInstances.put(clusterResourceName(cluster), new ClusterNodeRecord(accountId, region, nodeInstance));
         } catch (Exception e) {
             LOG.warnv("Could not register cluster node instance for EKS cluster {0}: {1}",
@@ -1663,7 +1664,10 @@ public class EksClusterManager implements ClusterNodeInstanceProvider {
                 String accountId = resolveClusterAccountId(cluster);
                 String region = clusterRegion(cluster);
                 nodeInstance = synthesizeClusterNodeInstance(cluster, containerIps.primaryIp(), region, accountId);
+                nodeInstance.setDockerContainerId(containerId);
                 clusterNodeInstances.put(clusterResourceName(cluster), new ClusterNodeRecord(accountId, region, nodeInstance));
+            } else if (nodeInstance.getDockerContainerId() == null) {
+                nodeInstance.setDockerContainerId(containerId);
             }
 
             if (metadataServer != null) {

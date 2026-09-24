@@ -234,9 +234,18 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     private VpcNetworkManager vpcNetworkManager;
     private jakarta.enterprise.inject.Instance<ClusterNodeInstanceProvider> clusterNodeInstanceProviders;
     private ClusterNodeInstanceProvider testClusterNodeInstanceProvider;
+    private Ec2VolumeBlockDeviceManager volumeBlockDeviceManager;
 
     void setClusterNodeInstanceProvider(ClusterNodeInstanceProvider provider) {
         this.testClusterNodeInstanceProvider = provider;
+    }
+
+    void setVolumeBlockDeviceManager(Ec2VolumeBlockDeviceManager manager) {
+        this.volumeBlockDeviceManager = manager;
+    }
+
+    void putInstanceForTest(Instance instance) {
+        instances.put(key(instance.getRegion(), instance.getInstanceId()), instance);
     }
 
     // Public, no request context - for callers (and tests) that construct this service directly
@@ -267,11 +276,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                       Ec2InstanceTypeCatalog instanceTypeCatalog, StorageFactory storageFactory,
                       jakarta.enterprise.inject.Instance<RequestContext> requestContextInstance,
                       VpcNetworkManager vpcNetworkManager, IamService iamService,
-                      jakarta.enterprise.inject.Instance<ClusterNodeInstanceProvider> clusterNodeInstanceProviders) {
+                      jakarta.enterprise.inject.Instance<ClusterNodeInstanceProvider> clusterNodeInstanceProviders,
+                      Ec2VolumeBlockDeviceManager volumeBlockDeviceManager) {
         this(config, containerManager, portForwardManager, amiImageResolver, imageCatalog,
                 instanceTypeCatalog, storageFactory, requestContextInstance, iamService);
         this.vpcNetworkManager = vpcNetworkManager;
         this.clusterNodeInstanceProviders = clusterNodeInstanceProviders;
+        this.volumeBlockDeviceManager = volumeBlockDeviceManager;
     }
 
     public Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
@@ -560,10 +571,50 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         if (restored > 0) {
             LOG.infov("Restored IMDS metadata registration for {0} EC2 container(s)", restored);
         }
+        if (volumeBlockDeviceManager != null && volumeBlockDeviceManager.isAvailable()) {
+            restoreAttachedVolumesOnStartup();
+        }
 
         // Runs after the restore loop, so anything legitimately revived above is already
         // accounted for and only genuine leftovers are left to collect.
         containerManager.reconcileOrphanedContainers(this::instanceContainerStillWanted);
+    }
+
+    private void restoreAttachedVolumesOnStartup() {
+        for (String k : volumes.keys()) {
+            Volume vol = volumes.get(k).orElse(null);
+            if (vol == null || !"in-use".equals(vol.getState()) || vol.getAttachments().isEmpty()) {
+                continue;
+            }
+            for (VolumeAttachment att : vol.getAttachments()) {
+                String reg = vol.getRegion() != null ? vol.getRegion() : config.defaultRegion();
+                Instance inst = instances.get(key(reg, att.getInstanceId())).orElse(null);
+                if (inst == null) {
+                    inst = findExternalInstance(defaultAccountId, reg, att.getInstanceId()).orElse(null);
+                }
+                if (inst != null && inst.getDockerContainerId() != null
+                        && containerManager.isContainerRunning(inst.getDockerContainerId())) {
+                    volumeBlockDeviceManager.attachVolume(vol, inst, att.getDevice());
+                }
+            }
+        }
+    }
+
+    private void restoreAttachedVolumesForInstance(String region, Instance inst) {
+        if (volumeBlockDeviceManager == null || inst == null) {
+            return;
+        }
+        for (String k : volumes.keys()) {
+            Volume vol = volumes.get(k).orElse(null);
+            if (vol == null || !region.equals(vol.getRegion()) || vol.getAttachments().isEmpty()) {
+                continue;
+            }
+            for (VolumeAttachment att : vol.getAttachments()) {
+                if (inst.getInstanceId().equals(att.getInstanceId())) {
+                    volumeBlockDeviceManager.attachVolume(vol, inst, att.getDevice());
+                }
+            }
+        }
     }
 
     /**
@@ -3186,8 +3237,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             }
             // Delete root volume if deleteOnTermination (matches real AWS behavior)
             if (inst.getRootVolumeId() != null) {
+                if (volumeBlockDeviceManager != null) {
+                    volumeBlockDeviceManager.deleteVolume(inst.getRootVolumeId());
+                }
                 volumes.delete(key(region, inst.getRootVolumeId()));
             }
+            detachAttachedVolumesOnTermination(region, inst);
             releaseStandaloneInterfacesOnTermination(region, inst);
             instances.put(key(region, id), inst);
             // The last instance depending on a deregistered AMI's capture has just gone away.
@@ -3311,6 +3366,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             } else {
                 restoreInstanceFirewall(inst);
                 containerManager.start(inst);
+                restoreAttachedVolumesForInstance(region, inst);
             }
             instances.put(key(region, id), inst);
             Map<String, String> entry = new LinkedHashMap<>();
@@ -3766,6 +3822,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         copy.setStateReasonCode(source.getStateReasonCode());
         copy.setStateReasonMessage(source.getStateReasonMessage());
         copy.setRegion(source.getRegion());
+        copy.setDockerContainerId(source.getDockerContainerId());
         copy.setRootVolumeId(source.getRootVolumeId());
         copy.setDisableApiStop(source.isDisableApiStop());
         copy.setDisableApiTermination(source.isDisableApiTermination());
@@ -8350,6 +8407,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         vol.setRegion(region);
         if (volumeTags != null) vol.setTags(new ArrayList<>(volumeTags));
         volumes.put(key(region, volumeId), vol);
+        if (volumeBlockDeviceManager != null) {
+            volumeBlockDeviceManager.createVolume(volumeId, vol.getSize());
+        }
         return vol;
     }
 
@@ -8371,9 +8431,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     }
 
     public void deleteVolume(String region, String volumeId) {
-        if (volumes.get(key(region, volumeId)).isEmpty()) {
-            throw new AwsException("InvalidVolume.NotFound",
-                    "The volume '" + volumeId + "' does not exist.", 400);
+        Volume volume = volumes.get(key(region, volumeId)).orElseThrow(() ->
+                new AwsException("InvalidVolume.NotFound",
+                        "The volume '" + volumeId + "' does not exist.", 400));
+        if ("in-use".equals(volume.getState()) || !volume.getAttachments().isEmpty()) {
+            throw new AwsException("VolumeInUse",
+                    "Volume " + volumeId + " is currently attached to an instance", 400);
+        }
+        if (volumeBlockDeviceManager != null) {
+            volumeBlockDeviceManager.deleteVolume(volumeId);
         }
         volumes.delete(key(region, volumeId));
     }
@@ -8540,6 +8606,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         volume.getAttachments().add(attachment);
         volume.setState("in-use");
         volumes.put(key(region, volumeId), volume);
+
+        if (volumeBlockDeviceManager != null) {
+            volumeBlockDeviceManager.attachVolume(volume, inst, device);
+        }
+
         return attachment;
     }
 
@@ -8577,6 +8648,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         volume.getAttachments().clear();
         volume.setState("available");
         volumes.put(key(region, volumeId), volume);
+
+        if (volumeBlockDeviceManager != null) {
+            volumeBlockDeviceManager.detachVolume(volume, inst, target.getDevice());
+        }
+
         return target;
     }
 
@@ -8991,6 +9067,38 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             ni.setAttachment(null);
             ni.setStatus("available");
             networkInterfaces.put(key(region, ni.getNetworkInterfaceId()), ni);
+        }
+    }
+
+    private void detachAttachedVolumesOnTermination(String region, Instance inst) {
+        for (String k : volumes.keys()) {
+            Volume vol = volumes.get(k).orElse(null);
+            if (vol == null || !region.equals(vol.getRegion()) || vol.getAttachments().isEmpty()) {
+                continue;
+            }
+            boolean modified = false;
+            for (VolumeAttachment att : new ArrayList<>(vol.getAttachments())) {
+                if (inst.getInstanceId().equals(att.getInstanceId())) {
+                    if (volumeBlockDeviceManager != null) {
+                        volumeBlockDeviceManager.detachVolume(vol, inst, att.getDevice());
+                    }
+                    if (att.isDeleteOnTermination()) {
+                        if (volumeBlockDeviceManager != null) {
+                            volumeBlockDeviceManager.deleteVolume(vol.getVolumeId());
+                        }
+                        volumes.delete(k);
+                        modified = false;
+                        break;
+                    } else {
+                        vol.getAttachments().remove(att);
+                        modified = true;
+                    }
+                }
+            }
+            if (modified) {
+                vol.setState(vol.getAttachments().isEmpty() ? "available" : "in-use");
+                volumes.put(k, vol);
+            }
         }
     }
 

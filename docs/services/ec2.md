@@ -698,7 +698,13 @@ A standalone ENI created via `CreateNetworkInterface` can also be handed to `Run
 | AttachVolume | Attaches a volume to an instance at the requested device; returns the attachment in `attaching` state. |
 | DetachVolume | Detaches a volume from an instance, optionally forced; returns the attachment in `detaching` state. |
 
-Volumes are tracked as logical metadata records and are not backed by real block storage devices. Volume modifications update recorded state only without resizing an underlying medium. `ModifyVolume` applies attribute updates directly to the volume record and records a modification entry in `completed` state with 100% progress.
+When `floci.services.ec2.volume-block-devices` is enabled (the default), attached EBS volumes are backed by real Linux loop devices inside running instance containers and synthesized EKS cluster node containers:
+- **Storage mechanism**: Backing sparse raw image files are allocated in Floci storage under `floci-aws-ec2-volumes` (named volume or host path). A privileged helper container (`floci-aws-ec2-volume-helper`, running `floci.services.ec2.volume-helper-image`, default `alpine:3.21`) manages Linux loop devices via `losetup`.
+- **Target device nodes**: Inside privileged target instance containers, the corresponding device node is created at the requested path (for example `/dev/xvdf` or `/dev/sdf`) using `mknod` or a symlink to the loop device, matching the exact size specified during volume creation. Target containers can format filesystems (such as ext4 or xfs), mount them, and persist data across detach and reattach.
+- **Restart reconciliation**: When an instance container stops and starts, or when Floci restarts, attached volume device nodes are automatically restored inside the target container. Backing raw files remain preserved across reboots in persistent storage.
+- **Graceful degradation**: If Docker is unavailable, the target instance container is not running, or the container is not privileged, volume attachments degrade gracefully to metadata-only tracking without failing the API call.
+- **Platform requirements**: Requires a Linux Docker environment (native Linux Docker daemon, or Colima / Docker Desktop with a Linux virtual machine) and privileged instance containers.
+- **Unmodeled aspects**: Multi-attach is tracked at metadata level only. Automated filesystem formatting (volumes start unformatted like real EBS block devices), volume encryption at the block layer, and live resizing of underlying raw backing files are not modeled. `ModifyVolume` updates recorded metadata and reports completion without resizing the backing raw image.
 
 Validation matches AWS behavior:
 - Unknown volumes are rejected with `InvalidVolume.NotFound`.

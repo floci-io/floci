@@ -540,6 +540,8 @@ floci:
       app-port-range-end: 30999
       max-published-ports-per-instance: 20
       socat-image: alpine/socat
+      volume-block-devices: true
+      volume-helper-image: alpine:3.21
       mock: false
       # Bound instance containers to their instance type's CPU and memory limits from the catalog.
       # FLOCI_SERVICES_EC2_INSTANCE_RESOURCE_LIMITS
