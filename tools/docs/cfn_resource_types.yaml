@@ -152,7 +152,7 @@ notes:
   AWS::S3::BucketPolicy: document stored on the bucket; S3 does not evaluate it
   AWS::SQS::QueuePolicy: accepted; policy not enforced
   AWS::Lambda::Function: Zip via S3/inline `ZipFile`, Image, and the `hot-reload` bind-mount bucket
-  AWS::Lambda::EventSourceMapping: SQS, Kinesis, DynamoDB Streams
+  AWS::Lambda::EventSourceMapping: 'SQS, Kinesis, DynamoDB Streams; `ParallelizationFactor` and `TumblingWindowInSeconds` are ignored'
   AWS::Lambda::Alias: also what SAM's `AutoPublishAlias` expands into
   AWS::EC2::SecurityGroup: inline `SecurityGroupIngress`/`SecurityGroupEgress` supported
   AWS::RDS::DBInstance: starts a real container
