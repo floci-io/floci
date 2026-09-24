@@ -254,12 +254,41 @@ class SesExportJobServiceTest {
         });
 
         creator.start();
-        Thread.sleep(200);
+        // Waiting for the thread to actually park proves the reset blocked it. A plain sleep would
+        // pass while the thread was merely unscheduled, and stay green with the blocking removed.
+        awaitParked(creator);
         assertFalse(admitted.get(), "a create must not be admitted while the reset is in progress");
         service.afterReset();
         creator.join(5_000);
 
         assertTrue(admitted.get(), "afterReset must release the waiting create");
+    }
+
+    @Test
+    void theConcurrentJobCeilingIsThePublishedQuota() {
+        // SES documents 20 concurrent export jobs, the same figure it gives import jobs. The
+        // workers are captured here, so every job stays PROCESSING and occupies a slot.
+        for (int i = 0; i < SesExportJobService.MAX_CONCURRENT_JOBS; i++) {
+            createJob();
+        }
+
+        AwsException thrown = assertThrows(AwsException.class, this::createJob);
+
+        assertEquals("LimitExceededException", thrown.getErrorCode());
+        assertEquals(20, SesExportJobService.MAX_CONCURRENT_JOBS);
+    }
+
+    /** {@code awaitResetFinished} parks in {@code Object.wait(timeout)}, so the state is timed. */
+    private static void awaitParked(Thread thread) {
+        long deadline = System.currentTimeMillis() + 5_000;
+        while (System.currentTimeMillis() < deadline) {
+            Thread.State state = thread.getState();
+            if (state == Thread.State.TIMED_WAITING || state == Thread.State.WAITING) {
+                return;
+            }
+            Thread.onSpinWait();
+        }
+        throw new AssertionError("the create never parked on the reset, it was " + thread.getState());
     }
 
     @Test

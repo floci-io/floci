@@ -53,14 +53,17 @@ import static io.github.hectorvent.floci.services.ses.SesV2Json.stringMemberOrAb
  * <p>Deviations, all documented in {@code docs/services/ses.md}: real SES writes into a bucket it
  * owns, while Floci writes into its own S3 emulation so the presigned URL resolves; the metrics
  * export lists only the dimension values Floci has seen rather than AWS's fixed ISP catalogue; and
- * the concurrent-job ceiling is Floci's own number, since the probe hit it before measuring it.
+ * and the concurrent-job ceiling is the published quota of 20, since the probe hit AWS's own
+ * limit before it could measure one.
  */
 @ApplicationScoped
 public class SesExportJobService implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(SesExportJobService.class);
 
-    static final int MAX_CONCURRENT_JOBS = 10;
+    // The published quota, the same figure SES gives import jobs:
+    // https://docs.aws.amazon.com/ses/latest/dg/quotas.html
+    static final int MAX_CONCURRENT_JOBS = 20;
     static final int MAX_RESULTS = 10_000;
     static final long RESET_DRAIN_TIMEOUT_MILLIS = 5_000L;
     private static final long RESET_ADMISSION_WAIT_MILLIS = 30_000L;
