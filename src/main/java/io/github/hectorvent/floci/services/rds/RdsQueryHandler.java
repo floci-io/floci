@@ -291,7 +291,8 @@ public class RdsQueryHandler {
                 params.getFirst("SourceType"),
                 memberList(params, "SourceIds"),
                 memberList(params, "EventCategories"),
-                optionalBoolean(params.getFirst("Enabled")));
+                optionalBoolean(params.getFirst("Enabled")),
+                parseTags(params));
         return Response.ok(AwsQueryResponse.envelope("CreateEventSubscription", AwsNamespaces.RDS,
                 new XmlBuilder().raw(eventSubscriptionXml(subscription)).build())).build();
     }
@@ -315,13 +316,18 @@ public class RdsQueryHandler {
     }
 
     private Response handleDescribeEventSubscriptions(MultivaluedMap<String, String> params, String region) {
-        List<EventSubscription> subscriptions = service.describeEventSubscriptions(region,
-                params.getFirst("SubscriptionName"));
+        RdsService.EventSubscriptionPage page = service.describeEventSubscriptions(region,
+                params.getFirst("SubscriptionName"),
+                optionalInt(params.getFirst("MaxRecords")),
+                params.getFirst("Marker"));
         XmlBuilder xml = new XmlBuilder().start("EventSubscriptionsList");
-        for (EventSubscription subscription : subscriptions) {
+        for (EventSubscription subscription : page.subscriptions()) {
             xml.raw(eventSubscriptionXml(subscription));
         }
         xml.end("EventSubscriptionsList");
+        if (page.marker() != null) {
+            xml.elem("Marker", page.marker());
+        }
         return Response.ok(AwsQueryResponse.envelope("DescribeEventSubscriptions", AwsNamespaces.RDS,
                 xml.build())).build();
     }

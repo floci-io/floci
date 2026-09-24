@@ -1965,6 +1965,16 @@ public class RdsService implements Resettable, ResourceProvider {
                     putSnapshotForScope(currentAccountId(), effectiveRegion, resourceId, snapshot);
                 });
             }
+            case "es" -> {
+                EventSubscription subscription = eventSubscriptions
+                        .get(eventSubscriptionKey(effectiveRegion, resourceId))
+                        .orElseThrow(() -> new AwsException("SubscriptionNotFound",
+                                "Subscription " + resourceId + " not found.", 404));
+                yield new TagHandle(subscription.getTags(), updated -> {
+                    subscription.setTags(updated);
+                    eventSubscriptions.put(eventSubscriptionKey(effectiveRegion, resourceId), subscription);
+                });
+            }
             case "db-proxy" -> {
                 DbProxy proxy = proxies.scan(k -> true).stream()
                         .filter(candidate -> effectiveRegion.equals(regionFromArn(candidate.getDbProxyArn())))
@@ -8494,7 +8504,8 @@ public class RdsService implements Resettable, ResourceProvider {
     public synchronized EventSubscription createEventSubscription(String region, String subscriptionName,
                                                      String snsTopicArn, String sourceType,
                                                      List<String> sourceIds,
-                                                     List<String> eventCategories, Boolean enabled) {
+                                                     List<String> eventCategories, Boolean enabled,
+                                                     Map<String, String> tags) {
         if (subscriptionName == null || subscriptionName.isBlank()) {
             throw new AwsException("InvalidParameterValue", "SubscriptionName is required.", 400);
         }
@@ -8540,6 +8551,7 @@ public class RdsService implements Resettable, ResourceProvider {
         subscription.setEnabled(enabled == null || enabled);
         subscription.setEventSubscriptionArn(AwsArnUtils.Arn.of("rds", region, accountId,
                 "es:" + subscriptionName).toString());
+        subscription.setTags(tags == null ? new LinkedHashMap<>() : new LinkedHashMap<>(tags));
         eventSubscriptions.put(key, subscription);
         return subscription;
     }
@@ -8549,14 +8561,17 @@ public class RdsService implements Resettable, ResourceProvider {
                                                      String snsTopicArn, String sourceType,
                                                      List<String> eventCategories, Boolean enabled) {
         EventSubscription subscription = requireEventSubscription(region, subscriptionName);
+        // Validated before anything is applied. The store hands back the live instance, so setting
+        // the topic first would leave it written when a later member is rejected, and a describe
+        // would report a change the request was answered 400 for.
+        if (sourceType != null && !sourceType.isBlank() && !EVENT_SOURCE_TYPES.contains(sourceType)) {
+            throw new AwsException("InvalidParameterValue",
+                    "SourceType must be one of " + EVENT_SOURCE_TYPES + ".", 400);
+        }
         if (snsTopicArn != null && !snsTopicArn.isBlank()) {
             subscription.setSnsTopicArn(snsTopicArn);
         }
         if (sourceType != null && !sourceType.isBlank()) {
-            if (!EVENT_SOURCE_TYPES.contains(sourceType)) {
-                throw new AwsException("InvalidParameterValue",
-                        "SourceType must be one of " + EVENT_SOURCE_TYPES + ".", 400);
-            }
             subscription.setSourceType(sourceType);
         }
         if (eventCategories != null && !eventCategories.isEmpty()) {
@@ -8576,14 +8591,35 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     /** Every subscription in the region, or the one the request names. */
-    public synchronized List<EventSubscription> describeEventSubscriptions(String region, String subscriptionName) {
+    /** One page of subscriptions, plus the marker to continue from, or null at the end. */
+    public record EventSubscriptionPage(List<EventSubscription> subscriptions, String marker) {}
+
+    public synchronized EventSubscriptionPage describeEventSubscriptions(
+            String region, String subscriptionName, Integer maxRecords, String marker) {
         if (subscriptionName != null && !subscriptionName.isBlank()) {
-            return List.of(requireEventSubscription(region, subscriptionName));
+            return new EventSubscriptionPage(
+                    List.of(requireEventSubscription(region, subscriptionName)), null);
         }
         String prefix = eventSubscriptionKey(region, "");
-        return eventSubscriptions.scan(k -> k.startsWith(prefix)).stream()
+        List<EventSubscription> all = eventSubscriptions.scan(k -> k.startsWith(prefix)).stream()
                 .sorted(Comparator.comparing(EventSubscription::getCustSubscriptionId))
                 .toList();
+        // The marker is the last name of the previous page, so the next starts after it. Sorting by
+        // name is what makes that stable across calls.
+        int from = 0;
+        if (marker != null && !marker.isBlank()) {
+            for (int i = 0; i < all.size(); i++) {
+                if (marker.equals(all.get(i).getCustSubscriptionId())) {
+                    from = i + 1;
+                    break;
+                }
+            }
+        }
+        int limit = maxRecords == null ? all.size() : maxRecords;
+        int to = Math.min(all.size(), from + limit);
+        List<EventSubscription> page = all.subList(Math.min(from, all.size()), to);
+        String next = to < all.size() ? page.get(page.size() - 1).getCustSubscriptionId() : null;
+        return new EventSubscriptionPage(page, next);
     }
 
     private EventSubscription requireEventSubscription(String region, String subscriptionName) {

@@ -2,12 +2,14 @@ package io.github.hectorvent.floci.services.rds;
 
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 /** Create, Describe, Modify and Delete for an RDS event notification subscription. */
 @QuarkusTest
@@ -16,7 +18,7 @@ class RdsEventSubscriptionIntegrationTest {
     private static final String TOPIC = "arn:aws:sns:us-east-1:000000000000:rds-events";
 
     private static ValidatableResponse rds(String action, String... formParams) {
-        var request = given()
+        RequestSpecification request = given()
                 .header("Authorization", "AWS4-HMAC-SHA256 Credential=test/20260615/us-east-1/rds/aws4_request, "
                         + "SignedHeaders=content-type;host, Signature=test")
                 .contentType("application/x-www-form-urlencoded")
@@ -67,6 +69,58 @@ class RdsEventSubscriptionIntegrationTest {
 
         rds("DeleteEventSubscription", "SubscriptionName", subscription).statusCode(200);
         rds("DescribeEventSubscriptions", "SubscriptionName", subscription).statusCode(404);
+    }
+
+    @Test
+    void aRejectedModifyChangesNothing() {
+        String subscription = name("atomic");
+        rds("CreateEventSubscription", "SubscriptionName", subscription, "SnsTopicArn", TOPIC,
+                "SourceType", "db-instance").statusCode(200);
+
+        // Valid SnsTopicArn, invalid SourceType. The topic must not survive the 400.
+        rds("ModifyEventSubscription", "SubscriptionName", subscription,
+                "SnsTopicArn", "arn:aws:sns:us-east-1:000000000000:other", "SourceType", "db-widget")
+            .statusCode(400);
+
+        rds("DescribeEventSubscriptions", "SubscriptionName", subscription)
+            .statusCode(200)
+            .body(containsString("<SnsTopicArn>" + TOPIC + "</SnsTopicArn>"))
+            .body(not(containsString("rds-events-other")));
+    }
+
+    @Test
+    void tagsGivenAtCreateAreReadableThroughListTagsForResource() {
+        String subscription = name("tagged");
+        String arn = rds("CreateEventSubscription", "SubscriptionName", subscription,
+                "SnsTopicArn", TOPIC, "Tags.Tag.1.Key", "team", "Tags.Tag.1.Value", "platform")
+            .statusCode(200)
+            .extract().path("CreateEventSubscriptionResponse.CreateEventSubscriptionResult"
+                    + ".EventSubscription.EventSubscriptionArn");
+
+        rds("ListTagsForResource", "ResourceName", arn)
+            .statusCode(200)
+            .body(containsString("<Key>team</Key>"))
+            .body(containsString("<Value>platform</Value>"));
+    }
+
+    @Test
+    void describeHonoursMaxRecordsAndMarker() {
+        String prefix = "page-" + Long.toString(System.nanoTime(), 36);
+        for (String suffix : new String[]{"a", "b", "c"}) {
+            rds("CreateEventSubscription", "SubscriptionName", prefix + "-" + suffix,
+                    "SnsTopicArn", TOPIC).statusCode(200);
+        }
+
+        String first = rds("DescribeEventSubscriptions", "MaxRecords", "1")
+            .statusCode(200)
+            .extract().path("DescribeEventSubscriptionsResponse"
+                    + ".DescribeEventSubscriptionsResult.Marker");
+        assertNotNull(first, "a bounded page short of the end carries a Marker");
+
+        // Continuing from the marker must not repeat the row it names.
+        rds("DescribeEventSubscriptions", "MaxRecords", "1", "Marker", first)
+            .statusCode(200)
+            .body(not(containsString("<CustSubscriptionId>" + first + "</CustSubscriptionId>")));
     }
 
     @Test
