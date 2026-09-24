@@ -210,7 +210,47 @@ public class RedshiftOperationsTest {
             .statusCode(200)
             .body(not(containsString("redshift-copy")));
 
-        // 1e. Static discovery APIs
+        // 1e. Logging: EnableLogging with s3table destination does not require BucketName
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "EnableLogging")
+            .formParam("ClusterIdentifier", "cluster-src")
+            .formParam("LogDestinationType", "s3table")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body(containsString("<LoggingEnabled>true</LoggingEnabled>"))
+            .body(containsString("<LogDestinationType>s3table</LogDestinationType>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DescribeLoggingStatus")
+            .formParam("ClusterIdentifier", "cluster-src")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body(containsString("<LoggingEnabled>true</LoggingEnabled>"))
+            .body(containsString("<LogDestinationType>s3table</LogDestinationType>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DisableLogging")
+            .formParam("ClusterIdentifier", "cluster-src")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body(containsString("<LoggingEnabled>false</LoggingEnabled>"));
+
+        // 1f. Static discovery APIs
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", AUTH_HEADER)
@@ -273,6 +313,21 @@ public class RedshiftOperationsTest {
             .contentType("application/xml")
             .body(containsString("<ClusterIdentifier>cluster-src</ClusterIdentifier>"))
             .body(containsString("<ClusterStatus>deleting</ClusterStatus>"));
+
+        // 4b. RestoreFromClusterSnapshot rejects carrying both SnapshotIdentifier and SnapshotArn
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "RestoreFromClusterSnapshot")
+            .formParam("ClusterIdentifier", "cluster-restored-invalid")
+            .formParam("SnapshotIdentifier", "snap-test-1")
+            .formParam("SnapshotArn", "arn:aws:redshift:us-east-1:000000000000:snapshot:cluster-src/snap-test-1")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .contentType("application/xml")
+            .body(containsString("<Code>InvalidParameterCombination</Code>"));
 
         // 5. RestoreFromClusterSnapshot
         given()

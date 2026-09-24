@@ -47,7 +47,7 @@ For running SQL without a PostgreSQL wire connection (the way Lambda and Step Fu
 | `DescribeOrderableClusterOptions` | Return the static node types and cluster types, optionally filtered by `NodeType` or `ClusterVersion` |
 | `ModifyClusterIamRoles` | Add or remove the IAM roles associated with a cluster; COPY and UNLOAD see the change on new connections. `DefaultIamRoleArn` is ignored |
 | `DescribeLoggingStatus` | Return a cluster's stored audit-logging configuration |
-| `EnableLogging` | Store audit-logging configuration (S3 bucket, or CloudWatch via `LogDestinationType`); no logs are delivered |
+| `EnableLogging` | Store audit-logging configuration (S3 bucket, CloudWatch, or S3 table via `LogDestinationType`); no logs are delivered |
 | `DisableLogging` | Clear a cluster's audit-logging configuration |
 | `RebootCluster` | Restart a cluster's container |
 | `GetClusterCredentials` | Issue a short-lived DbUser / DbPassword pair the auth proxy and Data API accept for a non-master user |

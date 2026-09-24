@@ -871,10 +871,16 @@ public class RedshiftQueryHandler {
 
     // RestoreFromClusterSnapshot accepts SnapshotIdentifier or SnapshotArn.
     private String resolveSnapshotIdentifier(String snapshotIdentifier, String snapshotArn, String authorizationHeader) {
-        if (snapshotIdentifier != null && !snapshotIdentifier.isBlank()) {
+        boolean hasIdentifier = snapshotIdentifier != null && !snapshotIdentifier.isBlank();
+        boolean hasArn = snapshotArn != null && !snapshotArn.isBlank();
+        if (hasIdentifier && hasArn) {
+            throw new AwsException("InvalidParameterCombination",
+                    "You must specify either SnapshotIdentifier or SnapshotArn, but not both.", 400);
+        }
+        if (hasIdentifier) {
             return snapshotIdentifier;
         }
-        if (snapshotArn == null || snapshotArn.isBlank()) {
+        if (!hasArn) {
             throw new AwsException("InvalidParameterValue", "SnapshotIdentifier or SnapshotArn is required", 400);
         }
         AwsArnUtils.Arn arn;

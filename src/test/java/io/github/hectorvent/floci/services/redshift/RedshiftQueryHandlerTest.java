@@ -346,6 +346,20 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
+    void restoreFromClusterSnapshotWithBothIdentifierAndArnIs400() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "restored-cluster");
+        params.putSingle("SnapshotIdentifier", "snap-a");
+        params.putSingle("SnapshotArn", "arn:aws:redshift:us-east-1:acc:snapshot:src/snap-b");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("RestoreFromClusterSnapshot", params, "auth"));
+        assertEquals("InvalidParameterCombination", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        verify(service, never()).restoreFromClusterSnapshot(any(), any(), any());
+    }
+
+    @Test
     void clusterXmlCarriesDefaultParameterGroupAndMultiAZ() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("ClusterIdentifier", "c1");

@@ -930,6 +930,18 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void enableLoggingS3TableDoesNotRequireBucketName() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+
+        Cluster result = service.enableLogging("my-cluster", null, null, "s3table", null);
+        assertTrue(result.isLoggingEnabled());
+        assertEquals("s3table", result.getLoggingDestinationType());
+        assertNull(result.getLoggingBucketName());
+    }
+
+    @Test
     void createClusterAssignsDefaultParameterGroup() {
         when(clusterBackend.get(anyString())).thenReturn(Optional.empty());
         when(cm.start(any(), any(), any(), any())).thenReturn(new RedshiftContainerHandle("c1", "my-cluster", "localhost", 5432));
