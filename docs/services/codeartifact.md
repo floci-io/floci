@@ -7,10 +7,10 @@
 Floci supports the CodeArtifact control plane: domains, repositories, resource policies, tags,
 and public upstream (external) connections. Package publish/fetch through the CodeArtifact API
 itself is implemented for the `generic` format only, matching AWS's own restriction that
-`PublishPackageVersion` accepts only `generic`. The `maven` format is served through its own real
-package-manager-protocol proxy (`mvn`/Gradle publish and resolve both work against the URL
-`GetRepositoryEndpoint` returns); the remaining formats (npm, PyPI, NuGet, etc.) have no real
-proxy behind them yet.
+`PublishPackageVersion` accepts only `generic`. The `maven` and `npm` formats are each served
+through their own real package-manager-protocol proxy (`mvn`/Gradle and `npm`/`yarn`/`pnpm`
+publish and resolve all work against the URL `GetRepositoryEndpoint` returns); the remaining
+formats (PyPI, NuGet, etc.) have no real proxy behind them yet.
 
 ## Supported Actions
 
@@ -21,7 +21,7 @@ proxy behind them yet.
 | `DeleteDomain` | Deletes a domain; fails with `ConflictException` while it still contains repositories, and with `ResourceNotFoundException` for a missing domain (as AWS does, although the API reference does not list it). |
 | `DescribeDomain` | Returns a domain's full description, including its repository count. |
 | `ListDomains` | Lists domain summaries for the account and Region, paginated. |
-| `GetAuthorizationToken` | Issues a bearer token scoped to a domain, valid for 0 (12 hours) or 900-43200 seconds, required by the `maven` repository endpoint. |
+| `GetAuthorizationToken` | Issues a bearer token scoped to a domain, valid for 0 (12 hours) or 900-43200 seconds, required by the `maven` and `npm` repository endpoints. |
 | `PutDomainPermissionsPolicy` | Attaches or replaces a domain's resource policy, versioned by `policyRevision`. |
 | `GetDomainPermissionsPolicy` | Returns a domain's current resource policy and revision. |
 | `DeleteDomainPermissionsPolicy` | Removes a domain's resource policy, optionally checked against `policyRevision`. |
@@ -95,6 +95,31 @@ shared settings list. Two config knobs,
 image version or point at an already-running instance and skip container management, matching the
 pattern used elsewhere in Floci for sidecars.
 
+## The npm repository endpoint
+
+`GetRepositoryEndpoint` for `format=npm` returns `http://localhost:4566/codeartifact/npm/<domain>/<repository>/`.
+Real npm clients (`npm publish`, `npm install`, and their `yarn`/`pnpm` equivalents) can publish to
+and resolve from that URL directly; it speaks the real npm registry protocol (package metadata,
+tarball fetch, publish), proxied straight through to a real [Verdaccio](https://verdaccio.org)
+instance rather than reimplemented. Every request needs `Authorization: Bearer <token>`, using a
+token from `GetAuthorizationToken` scoped to the domain being accessed; npm's own credential
+configuration (`.npmrc`'s `//<registry-host>/<path>/:_authToken=...`) sets this the same way it
+would against real AWS, and always as Bearer (unlike Maven's HTTP Basic). A missing, invalid,
+expired, or wrong-domain token gets a 401 challenging `Bearer`.
+
+Unlike Reposilite, which has a native concept of multiple named repositories inside one instance,
+Verdaccio does not: each CodeArtifact repository gets its own Verdaccio container instead of
+sharing one, started lazily on first use and identified internally by a fresh id generated at
+`CreateRepository` time, so a repository deleted and recreated under the same name never inherits
+the previous one's packages. `DeleteRepository` stops and removes that repository's container
+immediately (the Maven proxy releases its own storage the same way, just through Reposilite's
+settings API instead of a container stop, since Reposilite is one shared instance). Each container is
+started with `VERDACCIO_PUBLIC_URL` set to that repository's own proxy URL, so package metadata it
+returns (`dist.tarball`) points back through Floci instead of the container's own internal,
+client-unreachable address; without this, `npm install` would try to fetch the tarball directly
+from an address it cannot reach. One config knob, `FLOCI_SERVICES_CODEARTIFACT_NPM_IMAGE`, pins
+the image version.
+
 ## AWS-compatible failures
 
 Domain and repository names, tags, pagination, duplicate names, missing upstreams, policy-revision
@@ -135,24 +160,28 @@ state.
   runs. The rejection (`ServiceQuotaExceededException` from `PublishPackageVersion`, HTTP 413 from
   the Maven endpoint) is correct for anything that does fit in memory; it is not itself a streaming
   size limit.
-- **Maven artifacts do not survive a Floci restart, even under persistent storage.** The Reposilite
-  sidecar container has no volume attached and is removed on shutdown along with everything
-  published to it. CodeArtifact repository/domain metadata (including the stored sidecar container
-  id) survives a restart the same way any other Floci state does under persistent storage mode;
-  the artifacts themselves do not, so the first Maven request after a restart
-  re-provisions an empty Reposilite repository and returns 404 for anything published before the
-  restart.
+- **Maven artifacts and npm packages do not survive a Floci restart, even under persistent
+  storage.** The Reposilite instance and every per-repository Verdaccio container have no volume
+  attached and are removed on shutdown along with everything published to them. CodeArtifact
+  repository/domain metadata (including each format's stored sidecar container id) survives a
+  restart the same way any other Floci state does under persistent storage mode; the artifacts and
+  packages themselves do not, so the first request after a restart re-provisions empty storage and
+  returns 404 for anything published before the restart.
 - **`GetAuthorizationToken` tokens are not revocable and are not tied to any IAM identity.** Real
   CodeArtifact tokens are scoped to the calling principal's permissions; Floci's are scoped only to
   the domain named in the request; anyone who obtains one keeps the same domain-scoped access for
   its full lifetime.
-- **The Maven repository endpoint does not resolve through upstream repositories or external
-  connections.** On real CodeArtifact, a repository with another repository configured as an
-  upstream (`UpdateRepository`'s `upstreams`) or with an `AssociateExternalConnection` to a public
-  repository (`public:maven-central`, etc.) serves packages from those sources too, not just its
-  own. Floci's Maven proxy only ever looks up the repository's own backing storage: a package that
-  exists solely in an upstream, or only through an external connection, returns 404 through a
-  repository that has it configured as one.
+- **Neither the Maven nor the npm repository endpoint resolves through upstream repositories or
+  external connections.** On real CodeArtifact, a repository with another repository configured as
+  an upstream (`UpdateRepository`'s `upstreams`) or with an `AssociateExternalConnection` to a
+  public repository (`public:maven-central`, `public:npmjs`, etc.) serves packages from those
+  sources too, not just its own. Floci's proxies only ever look up the repository's own backing
+  storage: a package that exists solely in an upstream, or only through an external connection,
+  returns 404 through a repository that has it configured as one.
+- **The npm repository endpoint does not enforce the 5 GB asset size quota.** Unlike
+  `PublishPackageVersion` and the Maven endpoint, it streams the request straight through to the
+  backing Verdaccio container rather than buffering it first, so there is nowhere in the request
+  path to check a byte count against the quota before forwarding it.
 
 See the [CodeArtifact API Reference](https://docs.aws.amazon.com/codeartifact/latest/APIReference/Welcome.html).
 
@@ -164,3 +193,4 @@ See the [CodeArtifact API Reference](https://docs.aws.amazon.com/codeartifact/la
 | `FLOCI_SERVICES_CODEARTIFACT_MAVEN_IMAGE` | `dzikoysk/reposilite:3.6.3` | Reposilite image used to serve the `maven` format |
 | `FLOCI_SERVICES_CODEARTIFACT_MAVEN_URL` | unset | When set, use this URL and skip Reposilite container management |
 | `FLOCI_SERVICES_CODEARTIFACT_MAVEN_TOKEN` | unset | `name:secret` access token for a pre-configured `MAVEN_URL` |
+| `FLOCI_SERVICES_CODEARTIFACT_NPM_IMAGE` | `verdaccio/verdaccio:6.10.4` | Verdaccio image used to serve the `npm` format |

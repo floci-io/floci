@@ -877,6 +877,7 @@ floci:
       enabled: true
       # maven-url: http://floci-reposilite:8080  # set to skip Reposilite sidecar container management
       maven-image: "dzikoysk/reposilite:3.6.3"
+      npm-image: "verdaccio/verdaccio:6.10.4"
     marketplace:
       enabled: true
     dms:

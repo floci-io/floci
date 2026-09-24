@@ -825,6 +825,15 @@ public interface EmulatorConfig {
 
         @WithDefault("dzikoysk/reposilite:3.6.3")
         String mavenImage();
+
+        /**
+         * Image used for the per-repository Verdaccio container backing the {@code npm} format.
+         * No URL/token override like {@link #mavenUrl()}: unlike Reposilite's one shared instance,
+         * npm gets one container per CodeArtifact repository, so there is no single external
+         * instance to point at.
+         */
+        @WithDefault("verdaccio/verdaccio:6.10.4")
+        String npmImage();
     }
 
     interface ConnectServiceConfig {

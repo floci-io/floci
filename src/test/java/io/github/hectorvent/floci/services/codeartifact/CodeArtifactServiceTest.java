@@ -49,6 +49,7 @@ class CodeArtifactServiceTest {
     private CodeArtifactService service;
     private RegionResolver regionResolver;
     private AccountAwareStorageBackend<CodeArtifactRepository> repoStore;
+    private VerdaccioSidecarManager verdaccioManager;
     private ReposiliteSidecarClient reposiliteClient;
 
     @BeforeEach
@@ -67,10 +68,12 @@ class CodeArtifactServiceTest {
         EmulatorConfig config = mock(EmulatorConfig.class);
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
 
+        verdaccioManager = mock(VerdaccioSidecarManager.class);
+        when(verdaccioManager.format()).thenReturn("npm");
         reposiliteClient = mock(ReposiliteSidecarClient.class);
         when(reposiliteClient.format()).thenReturn("maven");
         service = new CodeArtifactService(domainStore, repoStore, packageVersionStore, regionResolver, config,
-                true, null, new CodeArtifactSidecarRegistry(List.of(reposiliteClient)));
+                true, null, new CodeArtifactSidecarRegistry(List.of(verdaccioManager, reposiliteClient)));
     }
 
     // -------------------------------------------------------------- domains
@@ -297,7 +300,7 @@ class CodeArtifactServiceTest {
         service.createDomain(REGION, "dom", null, Map.of());
         CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
 
-        assertEquals(Set.of("maven"), created.getSidecarContainerIds().keySet());
+        assertEquals(Set.of("maven", "npm"), created.getSidecarContainerIds().keySet());
         created.getSidecarContainerIds().values()
                 .forEach(id -> assertTrue(id != null && !id.isBlank()));
     }
@@ -310,9 +313,12 @@ class CodeArtifactServiceTest {
         service.deleteRepository(REGION, "dom", null, "repo");
         CodeArtifactRepository recreated = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
 
-        assertTrue(!first.getSidecarContainerIds().get("maven").equals(recreated.getSidecarContainerIds().get("maven")),
-                "a recreated repository must never reuse the previous one's container id for a format, "
-                        + "or it would inherit its leftover artifacts");
+        for (String format : Set.of("maven", "npm")) {
+            assertTrue(
+                    !first.getSidecarContainerIds().get(format).equals(recreated.getSidecarContainerIds().get(format)),
+                    "a recreated repository must never reuse the previous one's container id for a format, "
+                            + "or it would inherit its leftover artifacts");
+        }
     }
 
     @Test
@@ -332,6 +338,24 @@ class CodeArtifactServiceTest {
     }
 
     @Test
+    void ensureFormatContainerIdBackfillsALegacyRepositoryMissingTheNpmFormat() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        // Simulates a repository persisted before the npm format's proxy existed: Jackson would
+        // deserialize a missing map entry exactly like this.
+        Map<String, String> withoutNpm = new HashMap<>(created.getSidecarContainerIds());
+        withoutNpm.remove("npm");
+        created.setSidecarContainerIds(withoutNpm);
+        repoStore.putForAccount(ACCOUNT_ID, REGION + "::dom::repo", created);
+
+        String backfilled = service.ensureFormatContainerId("npm", REGION, "dom", null, "repo");
+
+        assertTrue(backfilled != null && !backfilled.isBlank());
+        assertEquals(backfilled,
+                service.describeRepository(REGION, "dom", null, "repo").getSidecarContainerIds().get("npm"));
+    }
+
+    @Test
     void ensureFormatContainerIdIsIdempotentForAnAlreadyAssignedFormat() {
         service.createDomain(REGION, "dom", null, Map.of());
         CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
@@ -339,6 +363,16 @@ class CodeArtifactServiceTest {
         String result = service.ensureFormatContainerId("maven", REGION, "dom", null, "repo");
 
         assertEquals(created.getSidecarContainerIds().get("maven"), result);
+    }
+
+    @Test
+    void ensureFormatContainerIdIsIdempotentForAnAlreadyAssignedNpmFormat() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        String result = service.ensureFormatContainerId("npm", REGION, "dom", null, "repo");
+
+        assertEquals(created.getSidecarContainerIds().get("npm"), result);
     }
 
     @Test
@@ -356,21 +390,55 @@ class CodeArtifactServiceTest {
 
         service.deleteRepository(REGION, "dom", null, "repo");
 
+        verify(verdaccioManager).release(created.getSidecarContainerIds().get("npm"));
         verify(reposiliteClient).release(created.getSidecarContainerIds().get("maven"));
     }
 
     @Test
-    void deleteRepositorySucceedsEvenWhenSidecarReleaseFails() {
+    void beforeResetReleasesEveryRepositorysSidecarStorageAcrossEveryAccount() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository first = service.createRepository(REGION, "dom", null, "repo-1", null, null, Map.of());
+        CodeArtifactRepository second = service.createRepository(REGION, "dom", null, "repo-2", null, null, Map.of());
+
+        service.beforeReset();
+
+        verify(verdaccioManager).release(first.getSidecarContainerIds().get("npm"));
+        verify(reposiliteClient).release(first.getSidecarContainerIds().get("maven"));
+        verify(verdaccioManager).release(second.getSidecarContainerIds().get("npm"));
+        verify(reposiliteClient).release(second.getSidecarContainerIds().get("maven"));
+    }
+
+    @Test
+    void beforeResetToleratesASidecarReleaseFailureAndStillReleasesTheRest() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository first = service.createRepository(REGION, "dom", null, "repo-1", null, null, Map.of());
+        CodeArtifactRepository second = service.createRepository(REGION, "dom", null, "repo-2", null, null, Map.of());
+        doThrow(new IllegalStateException("Reposilite unreachable")).when(reposiliteClient)
+                .release(first.getSidecarContainerIds().get("maven"));
+
+        // A reset must not abort partway through and leave later repositories' containers running
+        // just because one repository's release failed.
+        service.beforeReset();
+
+        verify(reposiliteClient).release(second.getSidecarContainerIds().get("maven"));
+        verify(verdaccioManager).release(first.getSidecarContainerIds().get("npm"));
+        verify(verdaccioManager).release(second.getSidecarContainerIds().get("npm"));
+    }
+
+    @Test
+    void deleteRepositorySucceedsEvenWhenOneFormatsSidecarReleaseFails() {
         service.createDomain(REGION, "dom", null, Map.of());
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
         doThrow(new IllegalStateException("Reposilite unreachable")).when(reposiliteClient).release(anyString());
 
         // The metadata delete already committed; a sidecar failure must not turn that into a
         // caller-visible error, and must not leave the caller unable to ever get a clean response
-        // for this repository (a retry would just 404, since the record is already gone).
+        // for this repository (a retry would just 404, since the record is already gone). npm's
+        // release still runs for the same repository even though maven's threw first.
         CodeArtifactRepository deleted = service.deleteRepository(REGION, "dom", null, "repo");
 
         assertEquals("repo", deleted.getName());
+        verify(verdaccioManager).release(deleted.getSidecarContainerIds().get("npm"));
         AwsException e = assertThrows(AwsException.class,
                 () -> service.describeRepository(REGION, "dom", null, "repo"));
         assertEquals("ResourceNotFoundException", e.getErrorCode());
