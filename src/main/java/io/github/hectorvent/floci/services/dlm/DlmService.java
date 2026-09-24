@@ -31,7 +31,7 @@ public class DlmService implements Resettable, TagHandler {
     private static final String SERVICE = "dlm";
     private static final Pattern DESCRIPTION = Pattern.compile("[0-9A-Za-z _-]{1,500}");
     private static final Pattern EXECUTION_ROLE_ARN = Pattern.compile(
-            "arn:aws(?:-[a-z]{1,4}){0,2}:iam::[0-9]+:role/.+");
+            "arn:" + AwsArnUtils.PARTITION_REGEX + ":iam::[0-9]+:role/.+");
     private static final Pattern TAG_KEY = Pattern.compile("(?!aws:)[a-zA-Z+\\-=._:/]{1,128}");
     private static final Set<String> STATES = Set.of("ENABLED", "DISABLED");
     private static final Set<String> DEFAULT_POLICY_TYPES = Set.of("VOLUME", "INSTANCE");
