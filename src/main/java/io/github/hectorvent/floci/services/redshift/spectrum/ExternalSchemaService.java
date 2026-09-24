@@ -27,7 +27,26 @@ public class ExternalSchemaService {
     public ExternalSchemaService(ExternalCatalogRegistry registry, ExternalTableMaterializer materializer, ExternalMetadataWriter metadata, GlueService glueService, IamService iamService) { this.registry=registry; this.materializer=materializer; this.metadata=metadata; this.glueService=glueService; this.iamService=iamService; }
     public List<ExternalReferenceScanner.Reference> referencesIn(String sql, SpectrumSession session) { return List.copyOf(ExternalReferenceScanner.scan(sql, schemaNames(session))); }
     public void rejectExternalWrites(String sql, SpectrumSession session) { if (ExternalReferenceScanner.writeTarget(sql, schemaNames(session)).isPresent()) throw new SpectrumSqlException("0A000", "cannot modify external table"); }
-    public void loadReferences(List<ExternalReferenceScanner.Reference> refs, SpectrumSession session, BackendSql backend) { for (ExternalReferenceScanner.Reference ref : refs) registry.find(session.accountId(),session.clusterKey(),session.databaseName(),ref.schema()).ifPresent(binding -> materializer.ensureCurrent(backend,session,binding,ref.table())); }
+    public void loadReferences(List<ExternalReferenceScanner.Reference> refs, SpectrumSession session, BackendSql backend) {
+        for (ExternalReferenceScanner.Reference ref : refs) {
+            Optional<ExternalSchemaBinding> binding = registry.find(session.accountId(), session.clusterKey(), session.databaseName(), ref.schema());
+            if (binding.isEmpty()) {
+                throw new SpectrumSqlException("3F000", "schema \"" + ref.schema() + "\" does not exist");
+            }
+            ExternalTableMaterializer.Outcome outcome = materializer.ensureCurrent(backend, session, binding.get(), ref.table());
+            if (outcome == ExternalTableMaterializer.Outcome.NOT_EXTERNAL) {
+                throw new SpectrumSqlException("42P01", "table \"" + ref.schema() + "." + ref.table() + "\" does not exist in the Glue Data Catalog");
+            }
+        }
+    }
+    public Optional<BoundGlueTable> resolveGlueTable(ExternalReferenceScanner.Reference ref, SpectrumSession session) {
+        Optional<ExternalSchemaBinding> binding = registry.find(session.accountId(), session.clusterKey(), session.databaseName(), ref.schema());
+        if (binding.isEmpty()) {
+            return Optional.empty();
+        }
+        Table table = findGlueTable(session, binding.get(), ref.table());
+        return Optional.of(new BoundGlueTable(binding.get(), table));
+    }
     public boolean touchesCatalogViews(String sql) { return sql != null && sql.toLowerCase(Locale.ROOT).contains("svv_external_"); }
     public void refreshMetadata(SpectrumSession session, BackendSql backend) { for (ExternalSchemaBinding binding : registry.list(session.accountId(),session.clusterKey(),session.databaseName())) metadata.refresh(backend,session.accountId(),binding); }
     public void forgetCluster(String accountId, String clusterKey) { registry.removeCluster(accountId, clusterKey); materializer.forgetCluster(clusterKey); }
@@ -131,4 +150,5 @@ public class ExternalSchemaService {
     }
 
     private static String quote(String value) { return "\"" + value.replace("\"", "\"\"") + "\""; }
+    public record BoundGlueTable(ExternalSchemaBinding binding, Table table) { }
 }

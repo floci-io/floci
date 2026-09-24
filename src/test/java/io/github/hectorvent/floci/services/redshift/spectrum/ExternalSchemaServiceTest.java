@@ -43,6 +43,7 @@ class ExternalSchemaServiceTest {
     private ExternalCatalogRegistry registry;
     private ExternalMetadataWriter metadata;
     private GlueService glue;
+    private ExternalTableMaterializer tableMaterializer;
     private ExternalSchemaService service;
     private SpectrumSession session;
 
@@ -55,7 +56,8 @@ class ExternalSchemaServiceTest {
         IamRole role = mock(IamRole.class);
         when(role.getAssumeRolePolicyDocument()).thenReturn(TRUST_POLICY);
         when(iam.findRole(ACCOUNT, "SpectrumRole")).thenReturn(Optional.of(role));
-        service = new ExternalSchemaService(registry, mock(ExternalTableMaterializer.class), metadata, glue, iam);
+        tableMaterializer = mock(ExternalTableMaterializer.class);
+        service = new ExternalSchemaService(registry, tableMaterializer, metadata, glue, iam);
         session = new SpectrumSession(ACCOUNT, CLUSTER, "dev", List.of(ROLE_ARN), false);
         statements.clear();
     }
@@ -97,6 +99,31 @@ class ExternalSchemaServiceTest {
         assertThat(result, equalTo(Optional.of("CREATE TABLE")));
         verify(glue).createTable(eq("lake"), any(Table.class));
         verify(metadata).refresh(any(BackendSql.class), eq(ACCOUNT), eq(binding));
+    }
+
+    @Test
+    void missingGlueTableFailsClosedInsteadOfForwardingToNativeTable() {
+        ExternalSchemaBinding binding = new ExternalSchemaBinding(ACCOUNT, CLUSTER, "dev", "analytics", "lake", ROLE_ARN);
+        when(registry.find(ACCOUNT, CLUSTER, "dev", "analytics")).thenReturn(Optional.of(binding));
+        when(glue.getTable("lake", "events")).thenThrow(new AwsException("EntityNotFoundException", "missing", 400));
+
+        SpectrumSqlException error = assertThrows(SpectrumSqlException.class, () -> service.resolveGlueTable(
+                new ExternalReferenceScanner.Reference("analytics", "events"), session));
+
+        assertThat(error.sqlState(), equalTo("42P01"));
+    }
+
+    @Test
+    void materializerNotExternalOutcomeFailsClosedInsteadOfForwardingToNativeTable() {
+        ExternalSchemaBinding binding = new ExternalSchemaBinding(ACCOUNT, CLUSTER, "dev", "analytics", "lake", ROLE_ARN);
+        when(registry.find(ACCOUNT, CLUSTER, "dev", "analytics")).thenReturn(Optional.of(binding));
+        when(tableMaterializer.ensureCurrent(any(), eq(session), eq(binding), eq("events")))
+                .thenReturn(ExternalTableMaterializer.Outcome.NOT_EXTERNAL);
+
+        SpectrumSqlException error = assertThrows(SpectrumSqlException.class, () -> service.loadReferences(
+                List.of(new ExternalReferenceScanner.Reference("analytics", "events")), session, backend()));
+
+        assertThat(error.sqlState(), equalTo("42P01"));
     }
 
     private BackendSql backend() {
