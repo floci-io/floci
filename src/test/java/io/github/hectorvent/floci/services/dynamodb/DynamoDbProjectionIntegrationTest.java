@@ -12,6 +12,8 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.util.Map;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 import static org.junit.jupiter.api.Assertions.*;
@@ -267,6 +269,40 @@ class DynamoDbProjectionIntegrationTest {
             .body("__type", equalTo("ValidationException"))
             .body("message", equalTo("Invalid ProjectionExpression: Two document paths overlap with each other; "
                     + "must remove or rewrite one of these paths; path one: [a], path two: [a, b]"));
+    }
+
+    @Test
+    @Order(11)
+    void otherReadsRejectOverlappingPathsWhenNothingMatches() {
+        String missingKey = "{\"pk\": {\"S\": \"no-such-item\"}}";
+        Map<String, String> requests = Map.of(
+                "Query", """
+                    {"TableName": "%s", "KeyConditionExpression": "pk = :p",
+                     "ExpressionAttributeValues": {":p": {"S": "no-such-item"}}, "ProjectionExpression": "a, a.b"}
+                    """.formatted(TABLE),
+                "Scan", """
+                    {"TableName": "%s", "FilterExpression": "pk = :p",
+                     "ExpressionAttributeValues": {":p": {"S": "no-such-item"}}, "ProjectionExpression": "a, a.b"}
+                    """.formatted(TABLE),
+                "BatchGetItem", """
+                    {"RequestItems": {"%s": {"Keys": [%s], "ProjectionExpression": "a, a.b"}}}
+                    """.formatted(TABLE, missingKey),
+                "TransactGetItems", """
+                    {"TransactItems": [
+                        {"Get": {"TableName": "%1$s", "Key": {"pk": {"S": "other"}}}},
+                        {"Get": {"TableName": "%1$s", "Key": %2$s, "ProjectionExpression": "a, a.b"}}]}
+                    """.formatted(TABLE, missingKey));
+        requests.forEach((action, body) -> given()
+            .header("X-Amz-Target", "DynamoDB_20120810." + action)
+            .contentType(CT)
+            .body(body)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("Invalid ProjectionExpression: Two document paths overlap with each other; "
+                    + "must remove or rewrite one of these paths; path one: [a], path two: [a, b]")));
     }
 
     @AfterAll
