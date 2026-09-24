@@ -27,6 +27,8 @@ class EcrIntegrationTest {
     private static final String CT = "application/x-amz-json-1.1";
     private static final String PREFIX = "AmazonEC2ContainerRegistry_V20150921.";
     private static final String REPO = "floci-it/integration";
+    private static final String CACHE_PREFIX = "docker-hub";
+    private static final String SECOND_CACHE_PREFIX = "kubernetes";
 
     @BeforeAll
     static void configureRestAssured() {
@@ -201,5 +203,150 @@ class EcrIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("RepositoryNotFoundException"));
+    }
+
+    @Test
+    @Order(10)
+    void createPullThroughCacheRule() {
+        given()
+            .header("X-Amz-Target", PREFIX + "CreatePullThroughCacheRule")
+            .contentType(CT)
+            .body("""
+                {
+                  "ecrRepositoryPrefix": "%s/",
+                  "upstreamRegistryUrl": "registry-1.docker.io",
+                  "credentialArn": "arn:aws:secretsmanager:us-east-1:000000000000:secret:ecr-pullthroughcache/docker-hub",
+                  "upstreamRepositoryPrefix": "library"
+                }
+                """.formatted(CACHE_PREFIX))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ecrRepositoryPrefix", equalTo(CACHE_PREFIX))
+            .body("upstreamRegistryUrl", equalTo("registry-1.docker.io"))
+            .body("upstreamRegistry", equalTo("docker-hub"))
+            .body("upstreamRepositoryPrefix", equalTo("library"))
+            .body("registryId", equalTo("000000000000"))
+            .body("createdAt", notNullValue());
+
+        given()
+            .header("X-Amz-Target", PREFIX + "CreatePullThroughCacheRule")
+            .contentType(CT)
+            .body("""
+                {
+                  "ecrRepositoryPrefix": "%s",
+                  "upstreamRegistryUrl": "registry.k8s.io"
+                }
+                """.formatted(SECOND_CACHE_PREFIX))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("upstreamRegistry", equalTo("k8s"))
+            .body("upstreamRepositoryPrefix", equalTo("ROOT"));
+    }
+
+    @Test
+    @Order(11)
+    void describePullThroughCacheRulesFiltersAndPaginates() {
+        String nextToken = given()
+            .header("X-Amz-Target", PREFIX + "DescribePullThroughCacheRules")
+            .contentType(CT)
+            .body("{ \"maxResults\": 1 }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("pullThroughCacheRules", hasSize(1))
+            .body("pullThroughCacheRules[0].createdAt", notNullValue())
+            .body("pullThroughCacheRules[0].updatedAt", notNullValue())
+            .body("nextToken", not(emptyString()))
+            .extract().jsonPath().getString("nextToken");
+
+        given()
+            .header("X-Amz-Target", PREFIX + "DescribePullThroughCacheRules")
+            .contentType(CT)
+            .body("""
+                { "maxResults": 1, "nextToken": "%s" }
+                """.formatted(nextToken))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("pullThroughCacheRules", hasSize(1));
+
+        given()
+            .header("X-Amz-Target", PREFIX + "DescribePullThroughCacheRules")
+            .contentType(CT)
+            .body("""
+                { "ecrRepositoryPrefixes": ["%s/"] }
+                """.formatted(CACHE_PREFIX))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("pullThroughCacheRules", hasSize(1))
+            .body("pullThroughCacheRules[0].ecrRepositoryPrefix", equalTo(CACHE_PREFIX));
+    }
+
+    @Test
+    @Order(12)
+    void createPullThroughCacheRuleDuplicateFails() {
+        given()
+            .header("X-Amz-Target", PREFIX + "CreatePullThroughCacheRule")
+            .contentType(CT)
+            .body("""
+                {
+                  "ecrRepositoryPrefix": "%s",
+                  "upstreamRegistryUrl": "registry-1.docker.io"
+                }
+                """.formatted(CACHE_PREFIX))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("PullThroughCacheRuleAlreadyExistsException"));
+
+        given()
+            .header("X-Amz-Target", PREFIX + "DescribePullThroughCacheRules")
+            .contentType(CT)
+            .body("{ \"ecrRepositoryPrefixes\": [] }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterException"));
+    }
+
+    @Test
+    @Order(13)
+    void deletePullThroughCacheRules() {
+        for (String prefix : new String[] {CACHE_PREFIX, SECOND_CACHE_PREFIX}) {
+            given()
+                .header("X-Amz-Target", PREFIX + "DeletePullThroughCacheRule")
+                .contentType(CT)
+                .body("""
+                    { "ecrRepositoryPrefix": "%s" }
+                    """.formatted(prefix))
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("ecrRepositoryPrefix", equalTo(prefix))
+                .body("createdAt", notNullValue());
+        }
+
+        given()
+            .header("X-Amz-Target", PREFIX + "DeletePullThroughCacheRule")
+            .contentType(CT)
+            .body("""
+                { "ecrRepositoryPrefix": "%s" }
+                """.formatted(CACHE_PREFIX))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("PullThroughCacheRuleNotFoundException"));
     }
 }
