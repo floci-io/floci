@@ -12,9 +12,12 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -25,6 +28,7 @@ class WebSocketIntegrationInvokerHttpTargetTest {
 
     private WebSocketIntegrationInvoker invoker;
     private HttpServer backend;
+    private final AtomicReference<String> receivedHost = new AtomicReference<>();
 
     @BeforeEach
     void setUp() throws IOException {
@@ -35,6 +39,7 @@ class WebSocketIntegrationInvokerHttpTargetTest {
                 mock(VtlTemplateEngine.class));
         backend = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         backend.createContext("/", exchange -> {
+            receivedHost.set(exchange.getRequestHeaders().getFirst("Host"));
             byte[] body = "ok".getBytes(StandardCharsets.UTF_8);
             exchange.sendResponseHeaders(200, body.length);
             exchange.getResponseBody().write(body);
@@ -79,5 +84,43 @@ class WebSocketIntegrationInvokerHttpTargetTest {
 
         assertEquals(200, result.statusCode());
         assertEquals("ok", result.body());
+    }
+
+    @Test
+    void httpProxyConnectsToTheAddressItCheckedInsteadOfResolvingTheNameAgain() throws Exception {
+        assertConnectsToTheAddressItCheckedInsteadOfResolvingTheNameAgain("HTTP_PROXY");
+    }
+
+    @Test
+    void httpConnectsToTheAddressItCheckedInsteadOfResolvingTheNameAgain() throws Exception {
+        assertConnectsToTheAddressItCheckedInsteadOfResolvingTheNameAgain("HTTP");
+    }
+
+    private void assertConnectsToTheAddressItCheckedInsteadOfResolvingTheNameAgain(String integrationType)
+            throws Exception {
+        receivedHost.set(null);
+        AtomicInteger lookups = new AtomicInteger();
+        WebSocketIntegrationInvoker pinnedInvoker = new WebSocketIntegrationInvoker(
+                mock(LambdaService.class),
+                mock(AwsServiceRouter.class),
+                new ObjectMapper(),
+                mock(VtlTemplateEngine.class),
+                host -> {
+                    if (lookups.incrementAndGet() == 1) {
+                        return new InetAddress[] {InetAddress.getByName("127.0.0.1")};
+                    }
+                    return new InetAddress[] {InetAddress.getByName("169.254.169.254")};
+                });
+        String uri = "http://rebind.example.test:" + backend.getAddress().getPort() + "/";
+        Integration integration = new Integration();
+        integration.setIntegrationType(integrationType);
+        integration.setIntegrationUri(uri);
+
+        IntegrationResult result = pinnedInvoker.invoke("us-east-1", integration, "{}", Map.of(), Map.of(), Map.of());
+
+        assertEquals(200, result.statusCode());
+        assertEquals("ok", result.body());
+        assertEquals(1, lookups.get(), "the name must be resolved once, then the checked address used");
+        assertEquals("rebind.example.test:" + backend.getAddress().getPort(), receivedHost.get());
     }
 }
