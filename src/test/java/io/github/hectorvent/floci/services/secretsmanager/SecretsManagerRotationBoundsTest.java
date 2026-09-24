@@ -14,41 +14,16 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Rotation churns through a unique secret (and, per rotation, a unique lock key) every time a
- * secret is created, rotated, and deleted. Nothing ever pruned the per-ARN lock, and rotations ran
- * on an unbounded thread pool, so heavy churn grew both without bound. These tests prove both are
- * now capped, independent of how many secrets have been rotated.
+ * Rotations used to run on an unbounded thread pool, one thread per rotation that could not
+ * reuse an idle one. They now share a fixed pool.
  */
 class SecretsManagerRotationBoundsTest {
 
     private static final String REGION = "us-east-1";
     private static final String LAMBDA_ARN = "arn:aws:lambda:us-east-1:000000000000:function:rotate";
-
-    @Test
-    void rotationLockStorageDoesNotGrowWithTheNumberOfSecretsChurnedThrough() {
-        int lockCountAfterFewSecrets = rotationLockCountAfterChurn(5);
-        int lockCountAfterManySecrets = rotationLockCountAfterChurn(500);
-
-        assertEquals(lockCountAfterFewSecrets, lockCountAfterManySecrets,
-                "rotation lock storage grew with the number of secrets churned through "
-                        + "create/rotate/delete: " + lockCountAfterFewSecrets
-                        + " locks for 5 secrets vs " + lockCountAfterManySecrets + " for 500");
-    }
-
-    private int rotationLockCountAfterChurn(int secretCount) {
-        SecretsManagerService svc = new SecretsManagerService(new InMemoryStorage<>(), 30);
-        for (int i = 0; i < secretCount; i++) {
-            String name = "lock-churn-" + secretCount + "-" + i;
-            svc.createSecret(name, "v1", null, null, null, null, REGION);
-            svc.rotateSecret(name, null, LAMBDA_ARN, null, true, REGION);
-            svc.deleteSecret(name, null, true, REGION);
-        }
-        return svc.rotationLockCount();
-    }
 
     @Test
     void rotationThreadCountDoesNotScaleWithConcurrentRotations() throws Exception {

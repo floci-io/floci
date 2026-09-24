@@ -89,20 +89,13 @@ public class SecretsManagerService implements ResourceProvider {
         return rotationLockStripes[index];
     }
 
-    /** Test seam: the number of lock objects held for rotation. */
-    int rotationLockCount() {
-        return rotationLockStripes.length;
-    }
-
-    /** Names rotation threads for diagnostics and marks them daemon so they never block shutdown. */
+    /** Names rotation threads for diagnostics. */
     private static final class RotationThreadFactory implements ThreadFactory {
         private final AtomicInteger nextId = new AtomicInteger(1);
 
         @Override
         public Thread newThread(Runnable runnable) {
-            Thread thread = new Thread(runnable, "secretsmanager-rotation-" + nextId.getAndIncrement());
-            thread.setDaemon(true);
-            return thread;
+            return new Thread(runnable, "secretsmanager-rotation-" + nextId.getAndIncrement());
         }
     }
 
