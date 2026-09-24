@@ -9,12 +9,17 @@ on:
       - 'pom.xml'
       - '.github/ci/**'
       - '.github/workflows/ci.yml'
+      - '.github/workflows/pr-draft-gate.yml'
   pull_request:
+    # ready_for_review is not a default type: without it, marking a draft ready
+    # would not start the run the draft skipped.
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - 'src/**'
       - 'pom.xml'
       - '.github/ci/**'
       - '.github/workflows/ci.yml'
+      - '.github/workflows/pr-draft-gate.yml'
 
 permissions:
   contents: read
@@ -30,10 +35,15 @@ env:
   SHARD_TOTAL: 4
 
 jobs:
+  # Drafts skip the suite to spare runners; it runs once the PR is ready for review.
+  draft-gate:
+    uses: ./.github/workflows/pr-draft-gate.yml
+
   test:
     name: Build and Test (shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    needs: draft-gate
     strategy:
       fail-fast: false
       matrix:
@@ -125,8 +135,9 @@ jobs:
     name: CI summary
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    needs: test
-    if: always()
+    needs: [draft-gate, test]
+    # Without the gate check, always() would run this on a draft and fail on the skipped shards.
+    if: always() && needs.draft-gate.result == 'success'
     steps:
       - name: Fail if any shard failed
         if: needs.test.result != 'success'
