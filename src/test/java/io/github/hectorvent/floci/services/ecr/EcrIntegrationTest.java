@@ -307,6 +307,53 @@ class EcrIntegrationTest {
 
     @Test
     @Order(12)
+    void updateAndValidatePullThroughCacheRule() {
+        String updatedCredential =
+                "arn:aws:secretsmanager:us-east-1:000000000000:secret:ecr-pullthroughcache/updated";
+        String customRole = "arn:aws:iam::000000000000:role/EcrPullThroughCache";
+
+        given()
+            .header("X-Amz-Target", PREFIX + "UpdatePullThroughCacheRule")
+            .contentType(CT)
+            .body("""
+                {
+                  "ecrRepositoryPrefix": "%s/",
+                  "credentialArn": "%s",
+                  "customRoleArn": "%s"
+                }
+                """.formatted(CACHE_PREFIX, updatedCredential, customRole))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ecrRepositoryPrefix", equalTo(CACHE_PREFIX))
+            .body("credentialArn", equalTo(updatedCredential))
+            .body("customRoleArn", equalTo(customRole))
+            .body("upstreamRepositoryPrefix", equalTo("library"))
+            .body("updatedAt", notNullValue())
+            .body("upstreamRegistryUrl", nullValue());
+
+        given()
+            .header("X-Amz-Target", PREFIX + "ValidatePullThroughCacheRule")
+            .contentType(CT)
+            .body("""
+                { "ecrRepositoryPrefix": "%s" }
+                """.formatted(CACHE_PREFIX))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ecrRepositoryPrefix", equalTo(CACHE_PREFIX))
+            .body("upstreamRegistryUrl", equalTo("registry-1.docker.io"))
+            .body("credentialArn", equalTo(updatedCredential))
+            .body("customRoleArn", equalTo(customRole))
+            .body("upstreamRepositoryPrefix", equalTo("library"))
+            .body("isValid", equalTo(true))
+            .body("failure", nullValue());
+    }
+
+    @Test
+    @Order(13)
     void describePullThroughCacheRulesFiltersAndPaginates() {
         String nextToken = given()
             .header("X-Amz-Target", PREFIX + "DescribePullThroughCacheRules")
@@ -349,7 +396,7 @@ class EcrIntegrationTest {
     }
 
     @Test
-    @Order(13)
+    @Order(14)
     void createPullThroughCacheRuleDuplicateFails() {
         given()
             .header("X-Amz-Target", PREFIX + "CreatePullThroughCacheRule")
@@ -378,7 +425,7 @@ class EcrIntegrationTest {
     }
 
     @Test
-    @Order(14)
+    @Order(15)
     void deletePullThroughCacheRules() {
         for (String prefix : new String[] {CACHE_PREFIX, SECOND_CACHE_PREFIX}) {
             given()
@@ -397,6 +444,18 @@ class EcrIntegrationTest {
 
         given()
             .header("X-Amz-Target", PREFIX + "DeletePullThroughCacheRule")
+            .contentType(CT)
+            .body("""
+                { "ecrRepositoryPrefix": "%s" }
+                """.formatted(CACHE_PREFIX))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("PullThroughCacheRuleNotFoundException"));
+
+        given()
+            .header("X-Amz-Target", PREFIX + "ValidatePullThroughCacheRule")
             .contentType(CT)
             .body("""
                 { "ecrRepositoryPrefix": "%s" }

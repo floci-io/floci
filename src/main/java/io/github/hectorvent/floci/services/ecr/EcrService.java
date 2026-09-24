@@ -185,6 +185,43 @@ public class EcrService implements ResourceProvider {
         return rule;
     }
 
+    public PullThroughCacheRule updatePullThroughCacheRule(String ecrRepositoryPrefix,
+                                                           String registryId,
+                                                           String credentialArn,
+                                                           String customRoleArn,
+                                                           String region) {
+        String prefix = normalizePullThroughCachePrefix(ecrRepositoryPrefix);
+        validatePullThroughCachePrefix(prefix, "ecrRepositoryPrefix");
+        String account = effectiveAccount(registryId);
+        validateRegistryId(account);
+        validateCredentialArn(credentialArn);
+        validateCustomRoleArn(customRoleArn);
+
+        String key = pullThroughCacheRuleKey(region, account, prefix);
+        PullThroughCacheRule rule = pullThroughCacheRuleStore.get(key)
+                .orElseThrow(() -> pullThroughCacheRuleNotFound(prefix, account));
+        if (credentialArn != null) {
+            rule.setCredentialArn(credentialArn);
+        }
+        if (customRoleArn != null) {
+            rule.setCustomRoleArn(customRoleArn);
+        }
+        rule.setUpdatedAt(Instant.now());
+        pullThroughCacheRuleStore.put(key, rule);
+        return rule;
+    }
+
+    public PullThroughCacheRule validatePullThroughCacheRule(String ecrRepositoryPrefix,
+                                                             String registryId,
+                                                             String region) {
+        String prefix = normalizePullThroughCachePrefix(ecrRepositoryPrefix);
+        validatePullThroughCachePrefix(prefix, "ecrRepositoryPrefix");
+        String account = effectiveAccount(registryId);
+        validateRegistryId(account);
+        return pullThroughCacheRuleStore.get(pullThroughCacheRuleKey(region, account, prefix))
+                .orElseThrow(() -> pullThroughCacheRuleNotFound(prefix, account));
+    }
+
     /**
      * Recreates {@link Repository} metadata entries for registry namespaces found in the catalog.
      * Namespaces created by Floci are {@code <account>/<region>/<repoName>}; pre-proxy registry

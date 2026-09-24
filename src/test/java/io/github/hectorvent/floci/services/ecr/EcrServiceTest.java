@@ -24,6 +24,7 @@ import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
+import java.time.Instant;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.List;
@@ -177,6 +178,53 @@ class EcrServiceTest {
         AwsException exception = assertThrows(AwsException.class,
                 () -> service.deletePullThroughCacheRule("delete/cache", null, REGION));
         assertEquals("PullThroughCacheRuleNotFoundException", exception.getErrorCode());
+    }
+
+    @Test
+    void updatePullThroughCacheRule_updatesProvidedFieldsAndPreservesTheRest() {
+        String originalCredential =
+                "arn:aws:secretsmanager:us-east-1:000000000000:secret:ecr-pullthroughcache/original";
+        String updatedCredential =
+                "arn:aws:secretsmanager:us-east-1:000000000000:secret:ecr-pullthroughcache/updated";
+        PullThroughCacheRule created = service.createPullThroughCacheRule(
+                "update/cache", "registry-1.docker.io", null, null,
+                originalCredential, null, "library", REGION);
+        Instant createdAt = created.getCreatedAt();
+
+        PullThroughCacheRule updated = service.updatePullThroughCacheRule(
+                "update/cache/", null, updatedCredential,
+                "arn:aws:iam::000000000000:role/EcrPullThroughCache", REGION);
+
+        assertEquals(updatedCredential, updated.getCredentialArn());
+        assertEquals("arn:aws:iam::000000000000:role/EcrPullThroughCache", updated.getCustomRoleArn());
+        assertEquals("registry-1.docker.io", updated.getUpstreamRegistryUrl());
+        assertEquals("library", updated.getUpstreamRepositoryPrefix());
+        assertEquals(createdAt, updated.getCreatedAt());
+        assertFalse(updated.getUpdatedAt().isBefore(createdAt));
+
+        PullThroughCacheRule roleOnlyUpdate = service.updatePullThroughCacheRule(
+                "update/cache", null, null,
+                "arn:aws:iam::000000000000:role/ReplacedRole", REGION);
+        assertEquals(updatedCredential, roleOnlyUpdate.getCredentialArn());
+        assertEquals("arn:aws:iam::000000000000:role/ReplacedRole", roleOnlyUpdate.getCustomRoleArn());
+    }
+
+    @Test
+    void validatePullThroughCacheRule_returnsStoredRuleAndMissingRulesFail() {
+        PullThroughCacheRule created = service.createPullThroughCacheRule(
+                "validate/cache", "quay.io", null, null,
+                null, null, null, REGION);
+
+        PullThroughCacheRule validated = service.validatePullThroughCacheRule(
+                "validate/cache/", null, REGION);
+
+        assertSame(created, validated);
+        assertEquals("quay.io", validated.getUpstreamRegistryUrl());
+        assertEquals("PullThroughCacheRuleNotFoundException", assertThrows(AwsException.class,
+                () -> service.validatePullThroughCacheRule("missing/cache", null, REGION)).getErrorCode());
+        assertEquals("PullThroughCacheRuleNotFoundException", assertThrows(AwsException.class,
+                () -> service.updatePullThroughCacheRule(
+                        "missing/cache", null, null, null, REGION)).getErrorCode());
     }
 
     @Test

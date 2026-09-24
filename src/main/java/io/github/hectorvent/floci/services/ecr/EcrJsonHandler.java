@@ -46,6 +46,8 @@ public class EcrJsonHandler {
             case "CreateRepository" -> handleCreateRepository(request, region);
             case "CreatePullThroughCacheRule" -> handleCreatePullThroughCacheRule(request, region);
             case "DescribePullThroughCacheRules" -> handleDescribePullThroughCacheRules(request, region);
+            case "UpdatePullThroughCacheRule" -> handleUpdatePullThroughCacheRule(request, region);
+            case "ValidatePullThroughCacheRule" -> handleValidatePullThroughCacheRule(request, region);
             case "DeletePullThroughCacheRule" -> handleDeletePullThroughCacheRule(request, region);
             case "DescribeRepositories" -> handleDescribeRepositories(request, region);
             case "BatchGetRepositoryScanningConfiguration" ->
@@ -134,6 +136,51 @@ public class EcrJsonHandler {
                 request.path("registryId").asText(null),
                 region);
         return Response.ok(buildPullThroughCacheRule(rule, false, false)).build();
+    }
+
+    private Response handleUpdatePullThroughCacheRule(JsonNode request, String region) {
+        PullThroughCacheRule rule = service.updatePullThroughCacheRule(
+                request.path("ecrRepositoryPrefix").asText(null),
+                request.path("registryId").asText(null),
+                request.path("credentialArn").asText(null),
+                request.path("customRoleArn").asText(null),
+                region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("ecrRepositoryPrefix", rule.getEcrRepositoryPrefix());
+        response.put("registryId", rule.getRegistryId());
+        response.put("updatedAt", rule.getUpdatedAt().getEpochSecond());
+        if (rule.getCredentialArn() != null) {
+            response.put("credentialArn", rule.getCredentialArn());
+        }
+        if (rule.getCustomRoleArn() != null) {
+            response.put("customRoleArn", rule.getCustomRoleArn());
+        }
+        if (rule.getUpstreamRepositoryPrefix() != null) {
+            response.put("upstreamRepositoryPrefix", rule.getUpstreamRepositoryPrefix());
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleValidatePullThroughCacheRule(JsonNode request, String region) {
+        PullThroughCacheRule rule = service.validatePullThroughCacheRule(
+                request.path("ecrRepositoryPrefix").asText(null),
+                request.path("registryId").asText(null),
+                region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("ecrRepositoryPrefix", rule.getEcrRepositoryPrefix());
+        response.put("registryId", rule.getRegistryId());
+        response.put("upstreamRegistryUrl", rule.getUpstreamRegistryUrl());
+        if (rule.getCredentialArn() != null) {
+            response.put("credentialArn", rule.getCredentialArn());
+        }
+        if (rule.getCustomRoleArn() != null) {
+            response.put("customRoleArn", rule.getCustomRoleArn());
+        }
+        if (rule.getUpstreamRepositoryPrefix() != null) {
+            response.put("upstreamRepositoryPrefix", rule.getUpstreamRepositoryPrefix());
+        }
+        response.put("isValid", true);
+        return Response.ok(response).build();
     }
 
     private Response handleDescribeRepositories(JsonNode request, String region) {

@@ -11,6 +11,8 @@
 | `CreateRepository` | Create a new repository (lazy-starts the backing registry on first call) |
 | `CreatePullThroughCacheRule` | Create and persist pull-through cache rule configuration |
 | `DescribePullThroughCacheRules` | List or filter pull-through cache rules with pagination |
+| `UpdatePullThroughCacheRule` | Update a rule's credential or custom role |
+| `ValidatePullThroughCacheRule` | Validate that a configured rule exists and report it as usable |
 | `DeletePullThroughCacheRule` | Delete a pull-through cache rule by repository prefix |
 | `DescribeRepositories` | List repositories or fetch by name |
 | `DeleteRepository` | Delete a repository (with `force=true` semantics for non-empty repos) |
@@ -39,7 +41,7 @@
 - **Loopback URI scheme.** Repository URIs follow `<account>.dkr.ecr.<region>.localhost:<flociPort>/<repoName>`. RFC 6761 reserves `*.localhost` to resolve to the loopback address, and the docker daemon auto-trusts loopback as an insecure registry, so `docker push` and `docker pull` work without daemon configuration. A `path` URI style fallback (`localhost:<flociPort>/<account>/<region>/<repo>`) is available via `floci.services.ecr.uri-style: path` for environments where `*.localhost` resolution misbehaves.
 - **Image tag mutability.** `IMMUTABLE` repositories allow the first manifest write for a tag and reject every replacement, including a replacement with the same manifest. The proxy forwards blob uploads and digest-addressed manifests unchanged.
 - **Authorization.** `GetAuthorizationToken` returns `Base64("AWS:floci")` plus a proxy endpoint. The backing `registry:2` runs without auth, so any `aws ecr get-login-password | docker login` succeeds.
-- **Pull through cache rule configuration.** `CreatePullThroughCacheRule`, `DescribePullThroughCacheRules`, and `DeletePullThroughCacheRule` persist AWS-compatible rule metadata with account and Region isolation. Rules do not proxy or cache images from the configured upstream registry.
+- **Pull through cache rule configuration.** Pull-through cache rule actions persist AWS-compatible rule metadata with account and Region isolation. `UpdatePullThroughCacheRule` preserves fields omitted by the request and refreshes `updatedAt`. `ValidatePullThroughCacheRule` checks that the rule exists and reports it as valid; Floci does not contact the upstream registry or validate credentials. Rules do not proxy or cache images from the configured upstream registry.
 - **Manifest format negotiation.** `BatchGetImage` forwards the caller's `acceptedMediaTypes` as the upstream `Accept` header. Modern OCI manifests (`application/vnd.oci.image.manifest.v1+json`) and Docker v2 schema 2 are both supported.
 - **Cross-account / cross-region isolation.** Internally the registry namespaces repositories as `<account>/<region>/<repoName>`, so the same repository name in different accounts or regions cannot collide.
 - **Reconcile on first start.** When the registry container starts, Floci queries `GET /v2/_catalog` and recreates `Repository` metadata entries for any namespaces present in the registry but missing from local storage. This means image bytes are never orphaned across restarts.

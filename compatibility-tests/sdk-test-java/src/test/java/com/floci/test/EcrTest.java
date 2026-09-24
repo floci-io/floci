@@ -185,6 +185,20 @@ class EcrTest {
                     .extracting(PullThroughCacheRule::ecrRepositoryPrefix)
                     .containsExactly(firstPrefix);
 
+            String credentialArn =
+                    "arn:aws:secretsmanager:us-east-1:000000000000:secret:ecr-pullthroughcache/sdk";
+            UpdatePullThroughCacheRuleResponse updated = ecr.updatePullThroughCacheRule(builder -> builder
+                    .ecrRepositoryPrefix(firstPrefix)
+                    .credentialArn(credentialArn));
+            ValidatePullThroughCacheRuleResponse validated = ecr.validatePullThroughCacheRule(
+                    builder -> builder.ecrRepositoryPrefix(firstPrefix));
+
+            assertThat(updated.credentialArn()).isEqualTo(credentialArn);
+            assertThat(updated.updatedAt()).isNotNull();
+            assertThat(validated.isValid()).isTrue();
+            assertThat(validated.credentialArn()).isEqualTo(credentialArn);
+            assertThat(validated.upstreamRegistryUrl()).isEqualTo("registry-1.docker.io");
+
             DeletePullThroughCacheRuleResponse deleted = ecr.deletePullThroughCacheRule(
                     builder -> builder.ecrRepositoryPrefix(firstPrefix));
             assertThat(deleted.ecrRepositoryPrefix()).isEqualTo(firstPrefix);
