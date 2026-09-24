@@ -1734,8 +1734,8 @@ public class EksClusterManager implements ClusterNodeInstanceProvider {
                     .exec();
             LOG.infov("Injected registry host {0} for k3s cluster {1}", host, clusterName);
         } catch (Exception e) {
-            LOG.warnv("EKS cluster {0} registry host {1} is not configured: could not copy "
-                    + "hosts.toml into the k3s container: {2}", clusterName, host, e.getMessage());
+            LOG.warnv("EKS cluster {0} registry host {1} not configured: hosts.toml copy failed: {2}",
+                    clusterName, host, e.getMessage());
         }
     }
 
