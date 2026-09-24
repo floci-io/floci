@@ -237,24 +237,39 @@ Floci's Redshift auth proxy inspects frontend queries on the PostgreSQL wire pro
 
 ### Redshift Spectrum
 
-Redshift Spectrum uses the Glue Data Catalog for external schemas and tables. The proxy supports
-`CREATE EXTERNAL SCHEMA ... FROM DATA CATALOG DATABASE ... IAM_ROLE ...`, including optional
-`REGION` and `CREATE EXTERNAL DATABASE IF NOT EXISTS`, queries and joins against external tables,
-`CREATE EXTERNAL TABLE`, `ALTER TABLE ... ADD PARTITION`, `DROP TABLE`, and `DROP SCHEMA`. The
+Redshift Spectrum uses the Glue Data Catalog as the authoritative metadata store for new external
+schemas and tables. The proxy supports `CREATE EXTERNAL SCHEMA ... FROM DATA CATALOG DATABASE ...
+IAM_ROLE ...`, optional `REGION` and `CREATE EXTERNAL DATABASE IF NOT EXISTS`, `CREATE EXTERNAL
+TABLE`, `ALTER TABLE ... ADD PARTITION`, `DROP TABLE`, and `DROP SCHEMA`. The
 `svv_external_schemas`, `svv_external_tables`, `svv_external_columns`, and
-`svv_external_partitions` views expose Glue metadata.
+`svv_external_partitions` views expose Glue metadata. A missing Glue database or table is an error;
+it does not fall through to a same-named local PostgreSQL table.
 
-DuckDB reads S3 using the same Glue read-plan logic as Athena. Floci loads each referenced table
-into a PostgreSQL staging table and swaps it into place before forwarding the original query, so
-PostgreSQL handles joins and the rest of the SQL. A fingerprint cache avoids unchanged reloads;
-inside an explicit transaction tables are always reloaded because that transaction may roll back.
-An external table is a snapshot for each query, not a live federated scan.
+For an unpartitioned Glue `EXTERNAL_TABLE` with supported CSV/text metadata, simple `SELECT`
+statements use the retained Phase 1 streaming reader. That narrow path supports one table, column
+projections or `*`, and simple comparison predicates joined with `AND`. It does not accept joins,
+bind parameters, grouping, ordering, limits, subqueries, or general expressions. The reader lists
+the S3 location and gets each object using the schema's bound IAM role, then streams rows into a
+temporary PostgreSQL table and rewrites the query to read it. This path does not require
+`floci-duck`.
 
-Supported formats follow Athena's Glue resolution: Parquet, CSV/text, JSON, and Iceberg. The
-`floci-duck` sidecar is required when Spectrum interception is enabled. Set
-`FLOCI_SERVICES_REDSHIFT_SPECTRUM_ENABLED=false` to forward external-schema statements without
-interception and avoid that dependency. CSV inputs should have a header matching the declared
-column names. Nested Glue types are loaded as `jsonb`.
+Other Glue tables and queries use the generalized materializer: DuckDB reads the Glue-resolved S3
+data into a PostgreSQL staging table, then PostgreSQL evaluates the original query, including
+joins and bind parameters. This path supports Glue-resolved Parquet, CSV/text, JSON, and Iceberg
+formats, subject to the metadata and type mappings below, and requires the `floci-duck` sidecar.
+A fingerprint cache avoids unchanged reloads; inside an explicit transaction tables are always
+reloaded because that transaction may roll back. An external table is a snapshot for each query,
+not a live federated scan. Generalized loads are capped by `spectrum-max-rows`; exceeding the cap
+fails rather than returning truncated results. The Phase 1 streaming path does not use this
+materialization cap.
+
+Glue owns metadata for new DDL. Persisted Phase 1 schema and table records remain readable for
+backward compatibility, including historical schema records whose table key used the `dev`
+database name. A current Glue binding takes precedence over legacy records; new DDL is not written
+into the old Phase 1 catalog. Set `FLOCI_SERVICES_REDSHIFT_SPECTRUM_ENABLED=false` to forward
+external-schema statements without interception. CSV inputs should have a header matching the
+declared column names when `skip.header.line.count` is configured. Nested Glue types are loaded as
+`jsonb` on the generalized path.
 
 | Glue type | PostgreSQL type |
 |---|---|
@@ -271,9 +286,10 @@ column names. Nested Glue types are loaded as `jsonb`.
 
 Writes to external tables (`INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`) fail with SQLSTATE `0A000`.
 Views depending on an external table can prevent its reload; drop those views before querying the
-table again. `IAM_ROLE default` and cross-account roles are unsupported. Extended Query loads data
-at `Parse`, so a prepared statement sees the data as of its parse. Loads are capped by
-`spectrum-max-rows`; exceeding the cap fails rather than returning truncated results.
+table again. `IAM_ROLE default` and cross-account roles are unsupported. The Phase 1 reader uses the
+role bound to the Redshift cluster and external schema, and evaluates its S3 identity policy when
+S3 IAM enforcement is enabled. Extended Query loads generalized materializations at `Parse`, so a
+prepared statement sees the data as of its parse; the Phase 1 path materializes at execution.
 
 | SQLSTATE | Meaning |
 |---|---|

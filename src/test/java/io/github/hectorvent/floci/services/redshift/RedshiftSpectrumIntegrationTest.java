@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.redshift;
 
+import io.github.hectorvent.floci.services.floci.duck.FlociDuckClient;
 import io.github.hectorvent.floci.services.glue.GlueService;
 import io.github.hectorvent.floci.services.glue.model.Column;
 import io.github.hectorvent.floci.services.glue.model.Database;
@@ -51,6 +52,8 @@ class RedshiftSpectrumIntegrationTest {
     GlueService glueService;
     @Inject
     IamService iamService;
+    @Inject
+    FlociDuckClient duckClient;
 
     private String clusterId;
     private String bucket;
@@ -87,7 +90,8 @@ class RedshiftSpectrumIntegrationTest {
             glueService.deleteDatabase(glueDatabase);
         }
         if (bucket != null) {
-            for (String key : List.of("events/part-1.csv", "events/part-2.csv", "more/part-1.csv")) {
+            for (String key : List.of("events/part-1.csv", "events/part-2.csv", "events/part-1.parquet",
+                    "more/part-1.csv")) {
                 try {
                     s3Service.deleteObject(bucket, key);
                 } catch (RuntimeException ignored) {
@@ -133,6 +137,34 @@ class RedshiftSpectrumIntegrationTest {
         table.setName(tableName);
         table.setTableType("EXTERNAL_TABLE");
         table.setParameters(Map.of("skip.header.line.count", "1"));
+        table.setStorageDescriptor(descriptor);
+        glueService.createTable(glueDatabase, table);
+    }
+
+    private void seedParquetTable() {
+        bucket = "spectrum-it-" + System.nanoTime();
+        s3Service.createBucket(bucket, "us-east-1");
+        duckClient.execute("COPY (SELECT 7 AS id, 'Parquet' AS name) TO 's3://" + bucket
+                + "/events/part-1.parquet' (FORMAT PARQUET)", null, null, "000000000000");
+        glueDatabase = "spectrum_it_" + System.nanoTime();
+        glueService.createDatabase(new Database(glueDatabase));
+        Column id = new Column();
+        id.setName("id");
+        id.setType("int");
+        Column name = new Column();
+        name.setName("name");
+        name.setType("string");
+        StorageDescriptor descriptor = new StorageDescriptor();
+        descriptor.setColumns(List.of(id, name));
+        descriptor.setLocation("s3://" + bucket + "/events/");
+        descriptor.setInputFormat("org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat");
+        descriptor.setOutputFormat("org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat");
+        StorageDescriptor.SerDeInfo serde = new StorageDescriptor.SerDeInfo();
+        serde.setSerializationLibrary("org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe");
+        descriptor.setSerdeInfo(serde);
+        Table table = new Table();
+        table.setName("events");
+        table.setTableType("EXTERNAL_TABLE");
         table.setStorageDescriptor(descriptor);
         glueService.createTable(glueDatabase, table);
     }
@@ -236,6 +268,22 @@ class RedshiftSpectrumIntegrationTest {
                 assertEquals(List.of(1, 2, 3, 4, 5), ids);
             }
             connection.commit();
+        }
+    }
+
+    @Test
+    @Timeout(120)
+    void queriesParquetGlueTableThroughDuckDbMaterializer() throws SQLException {
+        seedParquetTable();
+        Cluster cluster = newCluster("parquet");
+        try (Connection connection = connect(cluster); Statement statement = connection.createStatement()) {
+            statement.execute(createSchemaSql("analytics"));
+            try (ResultSet rows = statement.executeQuery("SELECT id, name FROM analytics.events")) {
+                assertTrue(rows.next());
+                assertEquals(7, rows.getInt("id"));
+                assertEquals("Parquet", rows.getString("name"));
+                assertFalse(rows.next());
+            }
         }
     }
 }
