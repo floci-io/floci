@@ -99,13 +99,17 @@ class DynamoDbGlobalTableIntegrationTest {
         createTable(noStream, false, null);
         call("CreateGlobalTable", "{\"GlobalTableName\":\"" + noStream + "\","
                 + "\"ReplicationGroup\":[{\"RegionName\":\"eu-west-1\"}]}")
-            .then().statusCode(400);
+            .then().statusCode(400)
+            // The code matters: this file raises ValidationException everywhere else, so a
+            // different shape here would slip past a client catching that one.
+            .body("__type", is("ValidationException"));
 
         String newOnly = "gt-newonly-" + Long.toString(System.nanoTime(), 36);
         createTable(newOnly, true, "NEW_IMAGE");
         call("CreateGlobalTable", "{\"GlobalTableName\":\"" + newOnly + "\","
                 + "\"ReplicationGroup\":[{\"RegionName\":\"eu-west-1\"}]}")
-            .then().statusCode(400);
+            .then().statusCode(400)
+            .body("__type", is("ValidationException"));
     }
 
     @Test
@@ -115,6 +119,36 @@ class DynamoDbGlobalTableIntegrationTest {
         call("DescribeGlobalTable", "{\"GlobalTableName\":\"" + name + "\"}")
             .then().statusCode(400)
             .body("__type", is("GlobalTableNotFoundException"));
+    }
+
+    @Test
+    void updateRefusesADuplicateAddAndAnAbsentRemove() {
+        String name = "gt-replicafault-" + Long.toString(System.nanoTime(), 36);
+        createTable(name, true, "NEW_AND_OLD_IMAGES");
+        call("CreateGlobalTable", "{\"GlobalTableName\":\"" + name + "\","
+                + "\"ReplicationGroup\":[{\"RegionName\":\"eu-west-1\"}]}").then().statusCode(200);
+
+        call("UpdateGlobalTable", "{\"GlobalTableName\":\"" + name + "\","
+                + "\"ReplicaUpdates\":[{\"Create\":{\"RegionName\":\"eu-west-1\"}}]}")
+            .then().statusCode(400)
+            .body("__type", is("ReplicaAlreadyExistsException"));
+
+        // The home region is a replica of its own global table, so re-adding it clashes too.
+        call("UpdateGlobalTable", "{\"GlobalTableName\":\"" + name + "\","
+                + "\"ReplicaUpdates\":[{\"Create\":{\"RegionName\":\"us-east-1\"}}]}")
+            .then().statusCode(400)
+            .body("__type", is("ReplicaAlreadyExistsException"));
+
+        call("UpdateGlobalTable", "{\"GlobalTableName\":\"" + name + "\","
+                + "\"ReplicaUpdates\":[{\"Delete\":{\"RegionName\":\"ap-northeast-1\"}}]}")
+            .then().statusCode(400)
+            .body("__type", is("ReplicaNotFoundException"));
+
+        // UpdateTable keeps its idempotent behaviour: the same re-add is accepted there, because
+        // the model declares neither fault for it.
+        call("UpdateTable", "{\"TableName\":\"" + name + "\","
+                + "\"ReplicaUpdates\":[{\"Create\":{\"RegionName\":\"eu-west-1\"}}]}")
+            .then().statusCode(200);
     }
 
     @Test

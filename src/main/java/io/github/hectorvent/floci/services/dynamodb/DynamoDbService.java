@@ -2543,11 +2543,46 @@ public class DynamoDbService implements ResourceProvider {
         return table;
     }
 
-    /** UpdateGlobalTable's replica adds and removes, on a table that is already a global table. */
+    /**
+     * UpdateGlobalTable's replica adds and removes, on a table that is already a global table.
+     *
+     * <p>The membership checks live here rather than in {@link #applyReplicaUpdates}, which stays
+     * idempotent for the UpdateTable and CloudFormation paths that re-apply an unchanged set. The
+     * model draws the same line: UpdateGlobalTable declares ReplicaAlreadyExistsException and
+     * ReplicaNotFoundException, and UpdateTable declares neither, so delegating without checking
+     * first is exactly what would drop them.
+     */
     public TableDefinition updateGlobalTable(String globalTableName, List<String> addRegions,
                                              List<String> removeRegions, String region) {
-        describeGlobalTable(globalTableName, region);
+        TableDefinition table = describeGlobalTable(globalTableName, region);
+        Set<String> replicas = currentReplicaRegions(table);
+        if (addRegions != null) {
+            for (String add : addRegions) {
+                if (replicas.contains(add)) {
+                    throw new AwsException("ReplicaAlreadyExistsException",
+                            "Replica already exists in region " + add + ".", 400);
+                }
+            }
+        }
+        if (removeRegions != null) {
+            for (String remove : removeRegions) {
+                if (!replicas.contains(remove)) {
+                    throw new AwsException("ReplicaNotFoundException",
+                            "Replica not found in region " + remove + ".", 400);
+                }
+            }
+        }
         return applyReplicaUpdates(globalTableName, addRegions, removeRegions, region);
+    }
+
+    /** The tracked replicas plus the home region, which is a replica of its own global table. */
+    private static Set<String> currentReplicaRegions(TableDefinition table) {
+        Set<String> regions = new LinkedHashSet<>(
+                table.getReplicaRegions() != null ? table.getReplicaRegions() : List.of());
+        if (table.getGlobalTableHomeRegion() != null) {
+            regions.add(table.getGlobalTableHomeRegion());
+        }
+        return regions;
     }
 
     /** ListGlobalTables, optionally narrowed to the tables replicated into one region. */
@@ -2568,7 +2603,7 @@ public class DynamoDbService implements ResourceProvider {
      */
     private static void requireStreamWithBothImages(TableDefinition table, String tableName) {
         if (!table.isStreamEnabled() || !"NEW_AND_OLD_IMAGES".equals(table.getStreamViewType())) {
-            throw new AwsException("InvalidParameterValue",
+            throw new AwsException("ValidationException",
                     "Table " + tableName + " must have DynamoDB Streams enabled with "
                             + "StreamViewType NEW_AND_OLD_IMAGES to join a global table.", 400);
         }
