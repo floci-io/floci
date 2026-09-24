@@ -18,6 +18,8 @@ import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ContainerRequestFilter;
+import jakarta.ws.rs.container.ResourceInfo;
+import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.ext.Provider;
@@ -81,6 +83,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     private final IamService iamService;
     private final IamPolicyEvaluator evaluator;
     private final IamActionRegistry actionRegistry;
+    private final AwsQueryServiceResolver queryServiceResolver;
     private final ResourceArnBuilder arnBuilder;
     private final RequestContext requestContext;
     private final IamConditionContextResolver conditionContextResolver;
@@ -91,12 +94,16 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     private final SessionAccountLookup sessionAccountLookup;
     private final Instance<ResourcePolicyProvider> resourcePolicyProviders;
 
+    @Context
+    ResourceInfo resourceInfo;
+
     @Inject
     public IamEnforcementFilter(EmulatorConfig config,
                                 AccountResolver accountResolver,
                                 IamService iamService,
                                 IamPolicyEvaluator evaluator,
                                 IamActionRegistry actionRegistry,
+                                AwsQueryServiceResolver queryServiceResolver,
                                 ResourceArnBuilder arnBuilder,
                                 RequestContext requestContext,
                                 IamConditionContextResolver conditionContextResolver,
@@ -111,6 +118,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         this.iamService = iamService;
         this.evaluator = evaluator;
         this.actionRegistry = actionRegistry;
+        this.queryServiceResolver = queryServiceResolver;
         this.arnBuilder = arnBuilder;
         this.requestContext = requestContext;
         this.conditionContextResolver = conditionContextResolver;
@@ -120,6 +128,27 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         this.scpProvider = scpProvider;
         this.sessionAccountLookup = sessionAccountLookup;
         this.resourcePolicyProviders = resourcePolicyProviders;
+    }
+
+    /** Package-private constructor for callers predating Query dispatch-aware enforcement. */
+    IamEnforcementFilter(EmulatorConfig config,
+                         AccountResolver accountResolver,
+                         IamService iamService,
+                         IamPolicyEvaluator evaluator,
+                         IamActionRegistry actionRegistry,
+                         ResourceArnBuilder arnBuilder,
+                         RequestContext requestContext,
+                         IamConditionContextResolver conditionContextResolver,
+                         CloudTrailService cloudTrailService,
+                         CurrentVertxRequest currentVertxRequest,
+                         ResolvedServiceCatalog catalog,
+                         Instance<ScpProvider> scpProvider,
+                         SessionAccountLookup sessionAccountLookup,
+                         Instance<ResourcePolicyProvider> resourcePolicyProviders) {
+        this(config, accountResolver, iamService, evaluator, actionRegistry,
+                new AwsQueryServiceResolver(catalog), arnBuilder, requestContext,
+                conditionContextResolver, cloudTrailService, currentVertxRequest, catalog,
+                scpProvider, sessionAccountLookup, resourcePolicyProviders);
     }
 
     /** Package-private constructor for callers predating resourcePolicyProviders. */
@@ -136,9 +165,10 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                          ResolvedServiceCatalog catalog,
                          Instance<ScpProvider> scpProvider,
                          SessionAccountLookup sessionAccountLookup) {
-        this(config, accountResolver, iamService, evaluator, actionRegistry, arnBuilder,
-                requestContext, conditionContextResolver, cloudTrailService, currentVertxRequest,
-                catalog, scpProvider, sessionAccountLookup, null);
+        this(config, accountResolver, iamService, evaluator, actionRegistry,
+                new AwsQueryServiceResolver(catalog), arnBuilder, requestContext,
+                conditionContextResolver, cloudTrailService, currentVertxRequest, catalog,
+                scpProvider, sessionAccountLookup, null);
     }
 
     @Override
@@ -167,9 +197,10 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         // Normalise signing aliases (s3express → s3) before anything keyed by scope runs:
         // action rules, ARN building and condition keys all match the canonical name, so an
         // alias would resolve to no action and be allowed through without any policy check.
-        String credentialScope = servingCredentialScope(catalog.canonicalCredentialScope(rawScope), ctx);
-
-        String action = actionRegistry.resolve(credentialScope, ctx);
+        String claimedScope = catalog.canonicalCredentialScope(rawScope);
+        ResolvedAuthorization resolvedAuthorization = resolveAuthorization(auth, claimedScope, ctx);
+        String credentialScope = resolvedAuthorization.credentialScope();
+        String action = resolvedAuthorization.action();
         if (action == null) {
             return; // unknown action → ALLOW (permissive)
         }
@@ -267,6 +298,56 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             abortIfDenied(ctx, caller, "s3:GetObject", credentialScope, resources,
                     withoutObjectTags(targetContexts), region, accountId, akid);
         }
+    }
+
+    /**
+     * Resolves both the IAM namespace and action from the service that will actually handle the
+     * request. Query traffic shares the dispatch resolver with {@link AwsQueryController}; REST
+     * traffic uses the JAX-RS resource class that won route matching.
+     */
+    private ResolvedAuthorization resolveAuthorization(String auth, String claimedScope,
+                                                        ContainerRequestContext ctx) {
+        Object claimValue = ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY);
+        if (claimValue instanceof ProtocolClaim claim && claim.protocol() == WireProtocol.AWS_QUERY) {
+            String queryAction = actionRegistry.queryAction(ctx);
+            if (queryAction == null || queryAction.isBlank()) {
+                return new ResolvedAuthorization(claimedScope, null);
+            }
+            String service = queryServiceResolver.resolve(auth, queryAction);
+            String servingScope = catalog.byExternalKey(service)
+                    .map(descriptor -> iamServiceScope(descriptor, claimedScope))
+                    .orElseGet(() -> catalog.canonicalCredentialScope(service));
+            return new ResolvedAuthorization(servingScope, servingScope + ":" + queryAction);
+        }
+
+        if (claimValue instanceof ProtocolClaim claim && claim.protocol() == WireProtocol.REST
+                && resourceInfo != null && resourceInfo.getResourceClass() != null) {
+            ServiceDescriptor descriptor = catalog.byResourceClass(resourceInfo.getResourceClass()).orElse(null);
+            if (descriptor != null) {
+                ResolvedAuthorization routeAuthorization = resolveRestAuthorization(descriptor, ctx);
+                if (routeAuthorization != null) {
+                    return routeAuthorization;
+                }
+            }
+        }
+
+        String servingScope = servingCredentialScope(claimedScope, ctx);
+        return new ResolvedAuthorization(servingScope, actionRegistry.resolve(servingScope, ctx));
+    }
+
+    private ResolvedAuthorization resolveRestAuthorization(ServiceDescriptor descriptor,
+                                                            ContainerRequestContext ctx) {
+        return descriptor.credentialScopes().stream()
+                .map(catalog::canonicalCredentialScope)
+                .distinct()
+                .sorted()
+                .map(scope -> new ResolvedAuthorization(scope, actionRegistry.resolve(scope, ctx)))
+                .filter(authorization -> authorization.action() != null)
+                .findFirst()
+                .orElse(null);
+    }
+
+    private record ResolvedAuthorization(String credentialScope, String action) {
     }
 
     /**
