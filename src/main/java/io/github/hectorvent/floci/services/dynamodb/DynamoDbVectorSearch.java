@@ -39,7 +39,7 @@ final class DynamoDbVectorSearch {
         float[] query = parseSearchVector(searchVector, index);
         ExpressionEvaluator.Expr condition = parseSearchCondition(index, searchConditionExpression,
                 exprAttrNames, exprAttrValues);
-        ProjectionEvaluator.validateExpression(projectionExpression);
+        ProjectionEvaluator.validateExpression(projectionExpression, exprAttrNames);
 
         String hashAttribute = index.getHashAttributeName();
         String distanceFunction = index.getDistanceFunction();

@@ -978,4 +978,19 @@ class DynamoDbVectorSearchIntegrationTest {
                 + "constraint: Member must have length greater than or equal to 1");
     }
 
+    @Test
+    @Order(44)
+    void searchVectorsRejectsOverlappingAndUndefinedProjectionPaths() {
+        expectValidation("SearchVectors", search(DOCS, "cosine", 1, """
+            , "ProjectionExpression": "#x, label", "ExpressionAttributeNames": {"#x": "label"}
+            """),
+                "Invalid ProjectionExpression: Two document paths overlap with each other; "
+                + "must remove or rewrite one of these paths; path one: [label], path two: [label]");
+        expectValidation("SearchVectors", search(DOCS, "cosine", 1, """
+            , "ProjectionExpression": "#undef"
+            """),
+                "Invalid ProjectionExpression: An expression attribute name used in the document "
+                + "path is not defined; attribute name: #undef");
+    }
+
 }
