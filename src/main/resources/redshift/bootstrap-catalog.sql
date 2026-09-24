@@ -362,3 +362,73 @@ WHERE c.relkind IN ('r', 'm')
 GRANT USAGE ON SCHEMA pg_catalog TO PUBLIC;
 GRANT ALL ON TABLE pg_catalog.stl_load_errors TO PUBLIC;
 GRANT SELECT ON ALL TABLES IN SCHEMA pg_catalog TO PUBLIC;
+
+-- Spectrum's Glue-backed external catalog metadata.
+CREATE SCHEMA IF NOT EXISTS floci_internal;
+CREATE TABLE IF NOT EXISTS floci_internal.external_schemas (
+    schemaname name PRIMARY KEY,
+    databasename text,
+    esoptions text
+);
+CREATE TABLE IF NOT EXISTS floci_internal.external_tables (
+    schemaname name,
+    tablename name,
+    tabletype text,
+    location text,
+    input_format text,
+    output_format text,
+    serialization_lib text,
+    serde_parameters text,
+    compressed integer,
+    parameters text,
+    PRIMARY KEY (schemaname, tablename)
+);
+CREATE TABLE IF NOT EXISTS floci_internal.external_columns (
+    schemaname name,
+    tablename name,
+    columnname name,
+    external_type text,
+    columnnum integer,
+    part_key integer,
+    is_nullable text
+);
+CREATE TABLE IF NOT EXISTS floci_internal.external_partitions (
+    schemaname name,
+    tablename name,
+    "values" text,
+    location text,
+    input_format text,
+    output_format text,
+    serialization_lib text,
+    serde_parameters text,
+    compressed integer,
+    parameters text
+);
+
+DROP VIEW IF EXISTS pg_catalog.svv_external_schemas CASCADE;
+CREATE OR REPLACE VIEW pg_catalog.svv_external_schemas AS
+SELECT (100000 + row_number() OVER (ORDER BY schemaname))::oid AS esoid,
+       1::smallint AS eskind, schemaname::name AS schemaname, 100::integer AS esowner,
+       databasename::text AS databasename, esoptions::text AS esoptions
+FROM floci_internal.external_schemas;
+DROP VIEW IF EXISTS pg_catalog.svv_external_tables CASCADE;
+CREATE OR REPLACE VIEW pg_catalog.svv_external_tables AS
+SELECT current_database()::text AS redshift_database_name, schemaname::text AS schemaname,
+       tablename::text AS tablename, tabletype::text AS tabletype, location::text AS location,
+       input_format::text AS input_format, output_format::text AS output_format,
+       serialization_lib::text AS serialization_lib, serde_parameters::text AS serde_parameters,
+       compressed::integer AS compressed, parameters::text AS parameters
+FROM floci_internal.external_tables;
+DROP VIEW IF EXISTS pg_catalog.svv_external_columns CASCADE;
+CREATE OR REPLACE VIEW pg_catalog.svv_external_columns AS
+SELECT current_database()::text AS redshift_database_name, schemaname::text AS schemaname,
+       tablename::text AS tablename, columnname::text AS columnname, external_type::text AS external_type,
+       columnnum::integer AS columnnum, part_key::integer AS part_key, is_nullable::text AS is_nullable
+FROM floci_internal.external_columns;
+DROP VIEW IF EXISTS pg_catalog.svv_external_partitions CASCADE;
+CREATE OR REPLACE VIEW pg_catalog.svv_external_partitions AS
+SELECT schemaname::text AS schemaname, tablename::text AS tablename, "values"::text AS "values",
+       location::text AS location, input_format::text AS input_format, output_format::text AS output_format,
+       serialization_lib::text AS serialization_lib, serde_parameters::text AS serde_parameters,
+       compressed::integer AS compressed, parameters::text AS parameters
+FROM floci_internal.external_partitions;

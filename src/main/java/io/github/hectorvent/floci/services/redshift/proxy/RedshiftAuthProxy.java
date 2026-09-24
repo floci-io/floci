@@ -222,7 +222,7 @@ public class RedshiftAuthProxy {
                 // Redshift-only DDL (DISTKEY/SORTKEY/ENCODE/...) is rewritten for the plain
                 // PostgreSQL backend on the way through; every other message is relayed verbatim.
                 new RedshiftInterceptingBridge(session.client(), session.backend(), s3Service, iamService,
-                        clusterAccountId, iamRoleArns, spectrumInterceptor).run();
+                        clusterAccountId, iamRoleArns, spectrumInterceptor, clusterKey, dbName).run();
             }
         } catch (Exception e) {
             LOG.debugv("Redshift connection error for cluster {0}: {1}", clusterKey, e.getMessage());

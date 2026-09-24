@@ -140,6 +140,15 @@ public class RedshiftProxyManager {
         }
     }
 
+    public void forgetCluster(String relayKey) {
+        if (spectrumInterceptor != null) {
+            int separator = relayKey.indexOf(':');
+            if (separator > 0) {
+                spectrumInterceptor.forgetCluster(relayKey.substring(0, separator), relayKey);
+            }
+        }
+    }
+
     public synchronized void stopAll() {
         proxies.forEach((relayKey, proxy) -> {
             try {

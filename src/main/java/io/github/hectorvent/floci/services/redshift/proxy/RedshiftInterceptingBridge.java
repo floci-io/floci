@@ -1,10 +1,10 @@
 package io.github.hectorvent.floci.services.redshift.proxy;
 
 import io.github.hectorvent.floci.services.iam.IamService;
-import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumColumn;
+import io.github.hectorvent.floci.services.redshift.spectrum.PostgresBackendSession;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumInterceptor;
-import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumQueryRewriter;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumReadException;
+import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumSession;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumSqlException;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import org.jboss.logging.Logger;
@@ -18,7 +18,6 @@ import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -60,10 +59,11 @@ public class RedshiftInterceptingBridge {
     private final String clusterAccountId;
     private final List<String> iamRoleArns;
     private final SpectrumInterceptor spectrumInterceptor;
+    private final String clusterKey;
+    private final String databaseName;
     private final ExtendedQuerySession session = new ExtendedQuerySession();
     private final Map<String, SpectrumInterceptor.Plan> spectrumStatements = new HashMap<>();
     private final Map<String, SpectrumInterceptor.Plan> spectrumPortals = new HashMap<>();
-    private final Map<String, ExtendedSpectrumExchange.PortalCursor> spectrumCursors = new HashMap<>();
     private final BackendResponseCoordinator coordinator = new BackendResponseCoordinator(session);
 
     private final ReentrantLock backendLock = new ReentrantLock(true);
@@ -88,6 +88,20 @@ public class RedshiftInterceptingBridge {
     public RedshiftInterceptingBridge(Socket client, Socket backend, S3Service s3Service, IamService iamService,
                                       String clusterAccountId, List<String> iamRoleArns,
                                       SpectrumInterceptor spectrumInterceptor) {
+        this(client, backend, s3Service, iamService, clusterAccountId, iamRoleArns, spectrumInterceptor, null);
+    }
+
+    public RedshiftInterceptingBridge(Socket client, Socket backend, S3Service s3Service, IamService iamService,
+                                      String clusterAccountId, List<String> iamRoleArns,
+                                      SpectrumInterceptor spectrumInterceptor, String clusterKey) {
+        this(client, backend, s3Service, iamService, clusterAccountId, iamRoleArns,
+                spectrumInterceptor, clusterKey, "dev");
+    }
+
+    public RedshiftInterceptingBridge(Socket client, Socket backend, S3Service s3Service, IamService iamService,
+                                      String clusterAccountId, List<String> iamRoleArns,
+                                      SpectrumInterceptor spectrumInterceptor, String clusterKey,
+                                      String databaseName) {
         this.client = client;
         this.backend = backend;
         this.s3Service = s3Service;
@@ -95,6 +109,13 @@ public class RedshiftInterceptingBridge {
         this.clusterAccountId = clusterAccountId;
         this.iamRoleArns = iamRoleArns == null ? List.of() : List.copyOf(iamRoleArns);
         this.spectrumInterceptor = spectrumInterceptor;
+        this.clusterKey = clusterKey;
+        this.databaseName = databaseName;
+    }
+
+    private SpectrumSession spectrumSession() {
+        String key = clusterKey != null ? clusterKey : clusterAccountId + ":default";
+        return new SpectrumSession(clusterAccountId, key, databaseName, iamRoleArns, coordinator.lastReadyStatus() != 'I');
     }
 
     @FunctionalInterface
@@ -181,32 +202,24 @@ public class RedshiftInterceptingBridge {
             throws IOException {
         String sql = message.getSql();
         if (spectrumInterceptor != null) {
+            SpectrumSession spectrumSession = spectrumSession();
             SpectrumInterceptor.Decision[] decision = new SpectrumInterceptor.Decision[1];
             boolean intercepted;
             try {
                 intercepted = runWithBackendOwned(() -> {
-                    decision[0] = spectrumInterceptor.intercept(sql, clusterAccountId, "dev", backend);
+                    decision[0] = spectrumInterceptor.intercept(sql, spectrumSession, new PostgresBackendSession(backend));
                     return true;
                 });
             } catch (SpectrumSqlException | SpectrumReadException | IllegalArgumentException exception) {
                 writeSimpleSpectrumError(exception);
                 return;
             }
-            if (intercepted && decision[0] instanceof SpectrumInterceptor.Decision.Handled) {
+            if (intercepted && decision[0] instanceof SpectrumInterceptor.Decision.Handled handled) {
                 coordinator.register(BackendResponseCoordinator.Operation.SIMPLE_QUERY, null);
-                write(client.getOutputStream(), commandComplete("CREATE EXTERNAL\0"));
-                write(client.getOutputStream(), readyForQuery('I'));
-                coordinator.onBackendFrame('Z', new byte[]{'I'});
-                return;
-            }
-            if (intercepted && decision[0] instanceof SpectrumInterceptor.Decision.Rewritten rewritten) {
-                // The response streams back to the client through the async backend->client pump
-                // (see class docs), so the materialized temp table cannot be dropped synchronously
-                // here without racing that pump; it is cleaned up implicitly when the underlying
-                // PostgreSQL session ends (CREATE TEMP TABLE is session-scoped). The Extended Query
-                // path (ExtendedSpectrumExchange) owns the whole round trip and can clean up eagerly.
-                coordinator.register(BackendResponseCoordinator.Operation.SIMPLE_QUERY, null);
-                write(backendOut, PostgresWireDecoder.encodeQuery(rewritten.sql()));
+                char readyStatus = coordinator.lastReadyStatus();
+                write(client.getOutputStream(), commandComplete(handled.commandTag() + "\0"));
+                write(client.getOutputStream(), readyForQuery(readyStatus));
+                coordinator.onBackendFrame('Z', new byte[]{(byte) readyStatus});
                 return;
             }
         }
@@ -246,14 +259,22 @@ public class RedshiftInterceptingBridge {
         // it, per protocol; without this, a later non-Spectrum statement reusing that name would still
         // resolve to the stale Spectrum plan in handleBind/handleDescribe/handleExecute.
         spectrumStatements.remove(parse.statementName());
-        if (spectrumInterceptor != null && parse.parameterTypeOids().isEmpty()) {
+        if (spectrumInterceptor != null) {
             try {
-                SpectrumInterceptor.Plan plan = spectrumInterceptor.plan(parse.sql(), clusterAccountId, "dev");
-                if (plan instanceof SpectrumInterceptor.Plan.Ddl || plan instanceof SpectrumInterceptor.Plan.Query) {
+                SpectrumSession spectrumSession = spectrumSession();
+                SpectrumInterceptor.Plan plan = spectrumInterceptor.plan(parse.sql(), spectrumSession);
+                if (plan instanceof SpectrumInterceptor.Plan.Ddl && parse.parameterTypeOids().isEmpty()) {
                     awaitPriorBackendResponses();
                     spectrumStatements.put(parse.statementName(), plan);
                     write(client.getOutputStream(), backendFrame('1', EMPTY_BODY));
                     return;
+                }
+                if (plan instanceof SpectrumInterceptor.Plan.Load || plan instanceof SpectrumInterceptor.Plan.Refresh) {
+                    awaitPriorBackendResponses();
+                    runWithBackendOwned(() -> {
+                        spectrumInterceptor.execute(plan, spectrumSession, new PostgresBackendSession(backend));
+                        return true;
+                    });
                 }
             } catch (SpectrumSqlException | SpectrumReadException | IllegalArgumentException exception) {
                 writeParseSpectrumError(exception);
@@ -308,13 +329,9 @@ public class RedshiftInterceptingBridge {
             try {
                 awaitPriorBackendResponses();
                 if (describe.targetType() == 'S') {
-                    // Describe(Statement) must answer with ParameterDescription before RowDescription
-                    // or NoData; every Spectrum-owned Parse has zero parameters (handleParse only
-                    // takes this path when parse.parameterTypeOids() is empty), so this is always 0.
                     write(client.getOutputStream(), backendFrame('t', new byte[]{0, 0}));
                 }
-                byte[] response = spectrumDescribeResponse(spectrumPlan);
-                write(client.getOutputStream(), response);
+                write(client.getOutputStream(), backendFrame('n', EMPTY_BODY));
             } catch (SpectrumSqlException | SpectrumReadException | IllegalArgumentException exception) {
                 writeParseSpectrumError(exception);
             }
@@ -327,43 +344,6 @@ public class RedshiftInterceptingBridge {
         write(backendOut, message.toPacketBytes());
     }
 
-    /** {@code RowDescription} for a Spectrum SELECT, or {@code NoData} for a DDL statement, computed
-     * entirely from catalog metadata so Describe never has to round-trip the real backend. */
-    private static byte[] spectrumDescribeResponse(SpectrumInterceptor.Plan plan) {
-        if (plan instanceof SpectrumInterceptor.Plan.Query query) {
-            return rowDescription(SpectrumQueryRewriter.outputColumns(query.query(), query.table()));
-        }
-        return backendFrame('n', EMPTY_BODY);
-    }
-
-    private static byte[] rowDescription(List<SpectrumColumn> columns) {
-        ByteArrayOutputStream body = new ByteArrayOutputStream();
-        body.write((columns.size() >>> 8) & 0xFF);
-        body.write(columns.size() & 0xFF);
-        for (SpectrumColumn column : columns) {
-            writeCString(body, column.name());
-            writeInt32(body, 0);
-            writeInt16(body, 0);
-            writeInt32(body, column.type().postgresTypeOid());
-            writeInt16(body, column.type().postgresTypeLength());
-            writeInt32(body, -1);
-            writeInt16(body, 0);
-        }
-        return backendFrame('T', body.toByteArray());
-    }
-
-    private static void writeInt32(ByteArrayOutputStream out, int value) {
-        out.write((value >>> 24) & 0xFF);
-        out.write((value >>> 16) & 0xFF);
-        out.write((value >>> 8) & 0xFF);
-        out.write(value & 0xFF);
-    }
-
-    private static void writeInt16(ByteArrayOutputStream out, int value) {
-        out.write((value >>> 8) & 0xFF);
-        out.write(value & 0xFF);
-    }
-
     private void handleExecute(PostgresWireDecoder decoder, PostgresWireDecoder.FrontendMessage message,
             OutputStream backendOut) throws IOException {
         PostgresWireDecoder.ExecuteMessage execute = decoder.decodeExecute(message);
@@ -371,7 +351,7 @@ public class RedshiftInterceptingBridge {
         if (spectrumPlan != null) {
             BackendResponseCoordinator.Ticket ticket = coordinator.register(
                     BackendResponseCoordinator.Operation.EXECUTE, null);
-            runExtendedSpectrumWithBackendOwned(spectrumPlan, execute.portalName(), execute.maxRows(), ticket);
+            runExtendedSpectrumWithBackendOwned(spectrumPlan, ticket);
             return;
         }
         BackendResponseCoordinator.Ticket ticket = coordinator.register(
@@ -384,7 +364,7 @@ public class RedshiftInterceptingBridge {
         runExtendedWithBackendOwned(message, statement, ticket);
     }
 
-    private void runExtendedSpectrumWithBackendOwned(SpectrumInterceptor.Plan plan, String portalName, int maxRows,
+    private void runExtendedSpectrumWithBackendOwned(SpectrumInterceptor.Plan plan,
             BackendResponseCoordinator.Ticket ticket) throws IOException {
         BackendResponseCoordinator.GateResult gate;
         try {
@@ -425,8 +405,8 @@ public class RedshiftInterceptingBridge {
         }
         try {
             backend.setSoTimeout(EXCHANGE_READ_TIMEOUT_MS);
-            ExtendedSpectrumExchange.execute(client, backend, plan, spectrumInterceptor, clusterAccountId, "dev",
-                    coordinator, ticket, portalName, maxRows, spectrumCursors);
+            ExtendedSpectrumExchange.execute(client, backend, plan, spectrumInterceptor, spectrumSession(),
+                    coordinator, ticket);
         } finally {
             try {
                 backend.setSoTimeout(PUMP_READ_TIMEOUT_MS);
@@ -445,20 +425,10 @@ public class RedshiftInterceptingBridge {
             SpectrumInterceptor.Plan closedPlan = spectrumStatements.remove(close.name());
             spectrumOwned = closedPlan != null;
             if (closedPlan != null) {
-                abandonStatementPortals(closedPlan);
+                spectrumPortals.values().removeIf(plan -> plan == closedPlan);
             }
         } else {
             spectrumOwned = spectrumPortals.remove(close.name()) != null;
-            ExtendedSpectrumExchange.PortalCursor cursor = spectrumCursors.remove(close.name());
-            if (cursor != null) {
-                // The portal is closed before the client exhausted it (fetch-size cursor abandoned
-                // mid-stream): the temp table has no other owner and would otherwise leak until the
-                // backend session ends, so drop it now.
-                runWithBackendOwned(() -> {
-                    ExtendedSpectrumExchange.abandon(spectrumInterceptor, backend, cursor);
-                    return true;
-                });
-            }
         }
         if (spectrumOwned) {
             // Parse/Bind for a spectrum-owned statement or portal never reached the real backend
@@ -471,28 +441,6 @@ public class RedshiftInterceptingBridge {
         ExtendedQuerySession.Mutation mutation = session.stageClose(close.targetType(), close.name());
         coordinator.register(BackendResponseCoordinator.Operation.CLOSE, mutation);
         write(backendOut, message.toPacketBytes());
-    }
-
-    /** Closing a prepared statement also closes every portal created from it. */
-    private void abandonStatementPortals(SpectrumInterceptor.Plan closedPlan) throws IOException {
-        List<ExtendedSpectrumExchange.PortalCursor> abandoned = new ArrayList<>();
-        Iterator<Map.Entry<String, SpectrumInterceptor.Plan>> portals = spectrumPortals.entrySet().iterator();
-        while (portals.hasNext()) {
-            Map.Entry<String, SpectrumInterceptor.Plan> portal = portals.next();
-            if (portal.getValue() == closedPlan) {
-                portals.remove();
-                ExtendedSpectrumExchange.PortalCursor cursor = spectrumCursors.remove(portal.getKey());
-                if (cursor != null) {
-                    abandoned.add(cursor);
-                }
-            }
-        }
-        for (ExtendedSpectrumExchange.PortalCursor cursor : abandoned) {
-            runWithBackendOwned(() -> {
-                ExtendedSpectrumExchange.abandon(spectrumInterceptor, backend, cursor);
-                return true;
-            });
-        }
     }
 
     private CopyStatementParser.S3Statement parseS3Statement(String sql) {
@@ -601,9 +549,10 @@ public class RedshiftInterceptingBridge {
 
     private void writeSimpleSpectrumError(RuntimeException exception) throws IOException {
         coordinator.register(BackendResponseCoordinator.Operation.SIMPLE_QUERY, null);
+        char readyStatus = coordinator.lastReadyStatus();
         write(client.getOutputStream(), errorResponse(spectrumSqlState(exception), exception.getMessage()));
-        write(client.getOutputStream(), readyForQuery('I'));
-        coordinator.onBackendFrame('Z', new byte[]{'I'});
+        write(client.getOutputStream(), readyForQuery(readyStatus));
+        coordinator.onBackendFrame('Z', new byte[]{(byte) readyStatus});
     }
 
     private void writeParseSpectrumError(RuntimeException exception) throws IOException {

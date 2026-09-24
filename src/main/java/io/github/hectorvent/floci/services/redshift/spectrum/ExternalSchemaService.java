@@ -1,0 +1,134 @@
+package io.github.hectorvent.floci.services.redshift.spectrum;
+
+import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.services.glue.GlueService;
+import io.github.hectorvent.floci.services.glue.model.Database;
+import io.github.hectorvent.floci.services.glue.model.Partition;
+import io.github.hectorvent.floci.services.glue.model.Table;
+import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.redshift.proxy.RedshiftRoleAccess;
+import io.github.hectorvent.floci.services.redshift.proxy.S3CopySimulator;
+import jakarta.enterprise.context.ApplicationScoped;
+
+import java.util.List;
+import java.util.Locale;
+import java.util.Optional;
+import java.util.Set;
+import java.util.stream.Collectors;
+
+@ApplicationScoped
+public class ExternalSchemaService {
+    private final ExternalCatalogRegistry registry;
+    private final ExternalTableMaterializer materializer;
+    private final ExternalMetadataWriter metadata;
+    private final GlueService glueService;
+    private final IamService iamService;
+    public ExternalSchemaService(ExternalCatalogRegistry registry, ExternalTableMaterializer materializer, ExternalMetadataWriter metadata, GlueService glueService, IamService iamService) { this.registry=registry; this.materializer=materializer; this.metadata=metadata; this.glueService=glueService; this.iamService=iamService; }
+    public List<ExternalReferenceScanner.Reference> referencesIn(String sql, SpectrumSession session) { return List.copyOf(ExternalReferenceScanner.scan(sql, schemaNames(session))); }
+    public void rejectExternalWrites(String sql, SpectrumSession session) { if (ExternalReferenceScanner.writeTarget(sql, schemaNames(session)).isPresent()) throw new SpectrumSqlException("0A000", "cannot modify external table"); }
+    public void loadReferences(List<ExternalReferenceScanner.Reference> refs, SpectrumSession session, BackendSql backend) { for (ExternalReferenceScanner.Reference ref : refs) registry.find(session.accountId(),session.clusterKey(),session.databaseName(),ref.schema()).ifPresent(binding -> materializer.ensureCurrent(backend,session,binding,ref.table())); }
+    public boolean touchesCatalogViews(String sql) { return sql != null && sql.toLowerCase(Locale.ROOT).contains("svv_external_"); }
+    public void refreshMetadata(SpectrumSession session, BackendSql backend) { for (ExternalSchemaBinding binding : registry.list(session.accountId(),session.clusterKey(),session.databaseName())) metadata.refresh(backend,session.accountId(),binding); }
+    public void forgetCluster(String accountId, String clusterKey) { registry.removeCluster(accountId, clusterKey); materializer.forgetCluster(clusterKey); }
+    private Set<String> schemaNames(SpectrumSession session) { return registry.list(session.accountId(),session.clusterKey(),session.databaseName()).stream().map(ExternalSchemaBinding::schemaName).collect(Collectors.toSet()); }
+    public Optional<String> execute(ExternalStatement statement, SpectrumSession session, BackendSql backend) {
+        return switch (statement) {
+            case ExternalStatement.CreateSchema create -> Optional.of(createSchema(create, session, backend));
+            case ExternalStatement.CreateTable create -> Optional.of(createTable(create, session, backend));
+            case ExternalStatement.AddPartitions add -> Optional.of(addPartitions(add, session, backend));
+            case ExternalStatement.DropSchema drop -> dropSchema(drop, session, backend);
+            case ExternalStatement.DropTable drop -> dropTable(drop, session, backend);
+        };
+    }
+
+    private String createSchema(ExternalStatement.CreateSchema statement, SpectrumSession session, BackendSql backend) {
+        if (registry.find(session.accountId(), session.clusterKey(), session.databaseName(), statement.schemaName()).isPresent()) {
+            throw new SpectrumSqlException("42P06", "schema \"" + statement.schemaName() + "\" already exists");
+        }
+        try {
+            RedshiftRoleAccess.RoleSession role = RedshiftRoleAccess.resolveRoleSession(statement.iamRoleArn(), iamService, session.accountId(), session.iamRoleArns());
+            RedshiftRoleAccess.releaseRoleSession(role, statement.iamRoleArn(), iamService);
+        } catch (S3CopySimulator.S3TransferException exception) {
+            throw new SpectrumSqlException(exception.sqlState(), exception.getMessage());
+        }
+        RequestScopes.runAs(session.accountId(), () -> {
+            try { glueService.getDatabase(statement.glueDatabase()); }
+            catch (AwsException exception) {
+                if (!"EntityNotFoundException".equals(exception.getErrorCode())) throw exception;
+                if (!statement.createDatabaseIfNotExists()) throw new SpectrumSqlException("XX000", "Glue database \"" + statement.glueDatabase() + "\" not found");
+                glueService.createDatabase(new Database(statement.glueDatabase()));
+            }
+        });
+        backend.execute("CREATE SCHEMA " + quote(statement.schemaName()));
+        ExternalSchemaBinding binding = new ExternalSchemaBinding(session.accountId(), session.clusterKey(), session.databaseName(), statement.schemaName(), statement.glueDatabase(), statement.iamRoleArn());
+        registry.bind(binding);
+        metadata.refresh(backend, session.accountId(), binding);
+        return "CREATE SCHEMA";
+    }
+
+    private String createTable(ExternalStatement.CreateTable statement, SpectrumSession session, BackendSql backend) {
+        ExternalSchemaBinding binding = requireBinding(statement.schemaName(), session);
+        Table table = GlueTableBuilder.toGlueTable(statement);
+        try { RequestScopes.runAs(session.accountId(), () -> glueService.createTable(binding.glueDatabase(), table)); }
+        catch (AwsException exception) {
+            if ("AlreadyExistsException".equals(exception.getErrorCode())) throw new SpectrumSqlException("42P07", "relation \"" + statement.tableName() + "\" already exists");
+            throw exception;
+        }
+        metadata.refresh(backend, session.accountId(), binding);
+        return "CREATE TABLE";
+    }
+
+    private String addPartitions(ExternalStatement.AddPartitions statement, SpectrumSession session, BackendSql backend) {
+        ExternalSchemaBinding binding = requireBinding(statement.schemaName(), session);
+        Table table = findGlueTable(session, binding, statement.tableName());
+        for (ExternalStatement.PartitionSpec spec : statement.partitions()) {
+            Partition partition = GlueTableBuilder.toGluePartition(table, spec);
+            try { RequestScopes.runAs(session.accountId(), () -> glueService.createPartition(binding.glueDatabase(), table.getName(), partition)); }
+            catch (AwsException exception) {
+                boolean duplicate = "AlreadyExistsException".equals(exception.getErrorCode());
+                if (!duplicate || !statement.ifNotExists()) throw duplicate ? new SpectrumSqlException("42710", "partition already exists") : exception;
+            }
+        }
+        metadata.refresh(backend, session.accountId(), binding);
+        return "ALTER TABLE";
+    }
+
+    private Optional<String> dropSchema(ExternalStatement.DropSchema statement, SpectrumSession session, BackendSql backend) {
+        Optional<ExternalSchemaBinding> binding = registry.find(session.accountId(), session.clusterKey(), session.databaseName(), statement.schemaName());
+        if (binding.isEmpty()) return Optional.empty();
+        backend.execute("DROP SCHEMA IF EXISTS " + quote(statement.schemaName()) + " CASCADE");
+        registry.unbind(session.accountId(), session.clusterKey(), session.databaseName(), statement.schemaName());
+        metadata.purge(backend, statement.schemaName());
+        return Optional.of("DROP SCHEMA");
+    }
+
+    private Optional<String> dropTable(ExternalStatement.DropTable statement, SpectrumSession session, BackendSql backend) {
+        Optional<ExternalSchemaBinding> binding = registry.find(session.accountId(), session.clusterKey(), session.databaseName(), statement.schemaName());
+        if (binding.isEmpty()) return Optional.empty();
+        try { RequestScopes.runAs(session.accountId(), () -> glueService.deleteTable(binding.get().glueDatabase(), statement.tableName())); }
+        catch (AwsException exception) {
+            if (!"EntityNotFoundException".equals(exception.getErrorCode())) throw exception;
+            if (!statement.ifExists()) throw new SpectrumSqlException("42P01", "table \"" + statement.tableName() + "\" does not exist");
+        }
+        materializer.forget(session.clusterKey(), statement.schemaName(), statement.tableName());
+        backend.execute("DROP TABLE IF EXISTS " + quote(statement.schemaName()) + "." + quote(statement.tableName()));
+        metadata.refresh(backend, session.accountId(), binding.get());
+        return Optional.of("DROP TABLE");
+    }
+
+    private ExternalSchemaBinding requireBinding(String schemaName, SpectrumSession session) {
+        return registry.find(session.accountId(), session.clusterKey(), session.databaseName(), schemaName)
+                .orElseThrow(() -> new SpectrumSqlException("3F000", "schema \"" + schemaName + "\" does not exist"));
+    }
+
+    private Table findGlueTable(SpectrumSession session, ExternalSchemaBinding binding, String tableName) {
+        try { return RequestScopes.callAs(session.accountId(), () -> glueService.getTable(binding.glueDatabase(), tableName)); }
+        catch (AwsException exception) {
+            if ("EntityNotFoundException".equals(exception.getErrorCode())) throw new SpectrumSqlException("42P01", "table \"" + tableName + "\" does not exist");
+            throw exception;
+        }
+    }
+
+    private static String quote(String value) { return "\"" + value.replace("\"", "\"\"") + "\""; }
+}

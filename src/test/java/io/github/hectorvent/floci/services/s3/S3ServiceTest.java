@@ -138,6 +138,17 @@ class S3ServiceTest {
     }
 
     @Test
+    void listBucketsHidesInternalBuckets() {
+        s3Service.createBucket("bucket-a", "us-east-1");
+        s3Service.createBucket(S3Service.INTERNAL_BUCKET_PREFIX + "scratch", "us-east-1");
+
+        List<Bucket> buckets = s3Service.listBuckets();
+
+        assertEquals(1, buckets.size());
+        assertEquals("bucket-a", buckets.get(0).getName());
+    }
+
+    @Test
     void putObjectLastModifiedHasMillisecondPrecision() {
         s3Service.createBucket("test-bucket", null);
         S3Object obj = s3Service.putObject("test-bucket", "file.txt", "data".getBytes(), null, null);

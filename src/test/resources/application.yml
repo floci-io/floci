@@ -197,6 +197,8 @@ floci:
       proxy-handshake-timeout-millis: 10000
       proxy-backend-connect-timeout-millis: 5000
       proxy-max-connections: 100
+      spectrum-enabled: true
+      spectrum-max-rows: 1000000
     rds:
       enabled: true
       mock: false

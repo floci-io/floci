@@ -22,10 +22,9 @@ import java.util.Optional;
  * Spectrum: validates an {@code IAM_ROLE} ARN against the cluster and Redshift's trust policy,
  * mints a short-lived session, and evaluates the role's identity policy for one S3 action.
  *
- * <p>Extracted from {@link S3CopySimulator}, whose {@code S3TransferException} this still throws
- * (same package, matching {@link ManifestReader}'s existing precedent for this kind of extraction).
+ * <p>Extracted from {@link S3CopySimulator} so the Spectrum package shares one implementation.
  */
-final class RedshiftRoleAccess {
+public final class RedshiftRoleAccess {
 
     private static final String SQLSTATE_INSUFFICIENT_PRIVILEGE = "42501";
 
@@ -49,13 +48,13 @@ final class RedshiftRoleAccess {
     private RedshiftRoleAccess() {
     }
 
-    record RoleSession(String accessKeyId, String sessionToken) {
+    public record RoleSession(String accessKeyId, String sessionToken) {
     }
 
     /**
      * Validates the role ARN, its account and Redshift trust policy, then mints a short-lived session.
      */
-    static RoleSession resolveRoleSession(String iamRoleArn, IamService iamService,
+    public static RoleSession resolveRoleSession(String iamRoleArn, IamService iamService,
                                           String clusterAccountId, List<String> associatedRoleArns) {
         AwsArnUtils.Arn parsed;
         try {
@@ -102,7 +101,7 @@ final class RedshiftRoleAccess {
         return new RoleSession(accessKeyId, sessionToken);
     }
 
-    static void releaseRoleSession(RoleSession roleSession, String iamRoleArn, IamService iamService) {
+    public static void releaseRoleSession(RoleSession roleSession, String iamRoleArn, IamService iamService) {
         if (roleSession == null) {
             return;
         }
@@ -114,7 +113,7 @@ final class RedshiftRoleAccess {
      * Evaluates the role's identity-based policy for one S3 action, skipped entirely when
      * {@code FLOCI_SERVICES_S3_ENFORCE_AUTH} is off (matching the anonymous path's behavior).
      */
-    static void authorizeRoleAction(S3Service s3, IamService iamService, String roleArn,
+    public static void authorizeRoleAction(S3Service s3, IamService iamService, String roleArn,
                                     String action, String resourceArn) {
         if (!s3.isAuthEnforced()) {
             return;
@@ -134,11 +133,11 @@ final class RedshiftRoleAccess {
         }
     }
 
-    static String bucketArn(String bucket) {
+    public static String bucketArn(String bucket) {
         return "arn:aws:s3:::" + bucket;
     }
 
-    static String objectArn(String bucket, String key) {
+    public static String objectArn(String bucket, String key) {
         return "arn:aws:s3:::" + bucket + "/" + key;
     }
 

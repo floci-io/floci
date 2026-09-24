@@ -75,15 +75,15 @@ public final class S3CopySimulator {
         void close();
     }
 
-    static final class S3TransferException extends RuntimeException {
+    public static final class S3TransferException extends RuntimeException {
         private final String sqlState;
 
-        S3TransferException(String sqlState, String message, Throwable cause) {
+        public S3TransferException(String sqlState, String message, Throwable cause) {
             super(message, cause);
             this.sqlState = sqlState;
         }
 
-        String sqlState() {
+        public String sqlState() {
             return sqlState;
         }
     }

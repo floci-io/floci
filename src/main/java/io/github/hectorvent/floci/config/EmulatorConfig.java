@@ -1502,6 +1502,12 @@ public interface EmulatorConfig {
         int proxyBackendConnectTimeoutMillis();
         @WithDefault("100")
         int proxyMaxConnections();
+
+        @WithDefault("true")
+        boolean spectrumEnabled();
+
+        @WithDefault("1000000")
+        long spectrumMaxRows();
     }
 
     interface RdsServiceConfig {

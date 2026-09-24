@@ -30,6 +30,25 @@ public final class GlueTableResolver {
     private GlueTableResolver() {
     }
 
+    public record ReadPlan(String fromClause, boolean iceberg, List<Column> columns) {
+    }
+
+    public static ReadPlan readPlan(Table table) {
+        if (table == null || table.getStorageDescriptor() == null
+                || table.getStorageDescriptor().getLocation() == null
+                || table.getStorageDescriptor().getLocation().isBlank()) {
+            throw new IllegalArgumentException("Glue table has no storage location");
+        }
+        List<Column> columns = declaredColumns(table);
+        String metadata = isIcebergTable(table) ? icebergMetadataLocation(table) : null;
+        if (metadata != null && !metadata.isBlank()) {
+            return new ReadPlan(icebergReadExpression(metadata), true, columns);
+        }
+        String location = table.getStorageDescriptor().getLocation();
+        String normalized = location.endsWith("/") ? location.substring(0, location.length() - 1) : location;
+        return new ReadPlan(readExpression(inferReadFunction(table), readPath(table, normalized)), false, columns);
+    }
+
     /**
      * Projects the columns the catalog declares, rather than whatever the underlying files spell.
      *
@@ -45,16 +64,7 @@ public final class GlueTableResolver {
      * in charge.
      */
     public static String buildProjection(Table table) {
-        List<Column> declared = new ArrayList<>();
-        if (table != null) {
-            if (table.getStorageDescriptor() != null && table.getStorageDescriptor().getColumns() != null) {
-                declared.addAll(table.getStorageDescriptor().getColumns());
-            }
-            if (table.getPartitionKeys() != null) {
-                declared.addAll(table.getPartitionKeys());
-            }
-        }
-
+        List<Column> declared = declaredColumns(table);
         List<String> names = new ArrayList<>();
         Set<String> seen = new HashSet<>();
         for (Column c : declared) {
@@ -80,6 +90,27 @@ public final class GlueTableResolver {
             sb.append(quote(names.get(i))).append(" AS ").append(quote(names.get(i)));
         }
         return sb.toString();
+    }
+
+    private static List<Column> declaredColumns(Table table) {
+        List<Column> declared = new ArrayList<>();
+        if (table != null) {
+            if (table.getStorageDescriptor() != null && table.getStorageDescriptor().getColumns() != null) {
+                declared.addAll(table.getStorageDescriptor().getColumns());
+            }
+            if (table.getPartitionKeys() != null) {
+                declared.addAll(table.getPartitionKeys());
+            }
+        }
+        List<Column> result = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        for (Column column : declared) {
+            if (column != null && column.getName() != null && !column.getName().isBlank()
+                    && seen.add(column.getName().toLowerCase(Locale.ROOT))) {
+                result.add(column);
+            }
+        }
+        return result;
     }
 
     public static String inferReadFunction(Table table) {

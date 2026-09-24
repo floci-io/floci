@@ -1,74 +1,71 @@
 package io.github.hectorvent.floci.services.redshift.spectrum;
 
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.Answers;
 
-import java.net.Socket;
+import java.io.InputStream;
 import java.util.List;
+import java.util.Optional;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.instanceOf;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class SpectrumInterceptorTest {
-
-    private SpectrumCatalog catalog;
-    private SpectrumMaterializer materializer;
+    private static final SpectrumSession SESSION = new SpectrumSession("000000000000", "000000000000:c", "dev", List.of(), false);
+    private static final BackendSql BACKEND = new BackendSql() {
+        @Override public void execute(String sql) { }
+        @Override public long copyIn(String sql, InputStream data) { return 0; }
+    };
+    private ExternalSchemaService service;
+    private EmulatorConfig config;
     private SpectrumInterceptor interceptor;
 
     @BeforeEach
     void setUp() {
-        catalog = mock(SpectrumCatalog.class);
-        materializer = mock(SpectrumMaterializer.class);
-        interceptor = new SpectrumInterceptor(catalog, new SpectrumStatementParser(), new SpectrumQueryClassifier(),
-                null, mock(SpectrumS3Reader.class), materializer);
+        service = mock(ExternalSchemaService.class);
+        config = mock(EmulatorConfig.class, Answers.RETURNS_DEEP_STUBS);
+        when(config.services().redshift().spectrumEnabled()).thenReturn(true);
+        interceptor = new SpectrumInterceptor(new ExternalStatementParser(), service, config);
     }
 
     @Test
-    void storesExternalSchemaAndTableDdl() {
-        SpectrumInterceptor.Decision schema = interceptor.intercept(
-                "CREATE EXTERNAL SCHEMA analytics FROM DATA CATALOG DATABASE 'dev' IAM_ROLE 'role'",
-                "000000000000", "dev", null);
-        SpectrumInterceptor.Decision table = interceptor.intercept(
-                "CREATE EXTERNAL TABLE analytics.events (id INTEGER) STORED AS TEXTFILE LOCATION 's3://b/events/'",
-                "000000000000", "dev", null);
-
-        assertInstanceOf(SpectrumInterceptor.Decision.Handled.class, schema);
-        assertInstanceOf(SpectrumInterceptor.Decision.Handled.class, table);
+    void externalDdlIsHandledWithTheCommandTag() {
+        when(service.execute(any(), eq(SESSION), eq(BACKEND))).thenReturn(Optional.of("CREATE SCHEMA"));
+        SpectrumInterceptor.Decision result = interceptor.intercept(
+                "CREATE EXTERNAL SCHEMA a FROM DATA CATALOG DATABASE 'd' IAM_ROLE 'arn:aws:iam::000000000000:role/R'", SESSION, BACKEND);
+        assertThat(result, equalTo(new SpectrumInterceptor.Decision.Handled("CREATE SCHEMA")));
     }
 
     @Test
-    void forwardsLocalQueryAndRewritesCatalogResolvedExternalQuery() {
-        SpectrumExternalTable table = new SpectrumExternalTable("000000000000", "dev", "analytics", "events",
-                List.of(new SpectrumColumn("id", SpectrumColumn.Type.INTEGER)), "s3://b/events/", ',', '"', '\\', "\\N", 0);
-        SpectrumExternalSchema schema = new SpectrumExternalSchema("000000000000", "dev", "analytics",
-                "s3://b/root/", null);
-        SpectrumMaterializer.Materialization materialization = new SpectrumMaterializer.Materialization(
-                "spectrum_tmp_x", table.columns());
-        when(catalog.table("000000000000", "dev", "analytics", "events")).thenReturn(java.util.Optional.of(table));
-        when(catalog.schema("000000000000", "dev", "analytics")).thenReturn(java.util.Optional.of(schema));
-        when(materializer.nextIdentifier()).thenReturn("spectrum_tmp_x");
-        when(materializer.materialize(any(), any(), any(), any(), eq("spectrum_tmp_x"))).thenReturn(materialization);
-
-        assertInstanceOf(SpectrumInterceptor.Decision.Forward.class,
-                interceptor.intercept("SELECT * FROM local.events", "000000000000", "dev", null));
-        SpectrumInterceptor.Decision decision = interceptor.intercept(
-                "SELECT * FROM analytics.events", "000000000000", "dev", null);
-        SpectrumInterceptor.Decision.Rewritten rewritten = assertInstanceOf(
-                SpectrumInterceptor.Decision.Rewritten.class, decision);
-        assertEquals("SELECT * FROM \"spectrum_tmp_x\"", rewritten.sql());
+    void externalReadsLoadBeforeForwarding() {
+        List<ExternalReferenceScanner.Reference> refs = List.of(new ExternalReferenceScanner.Reference("a", "t"));
+        when(service.referencesIn("SELECT * FROM a.t", SESSION)).thenReturn(refs);
+        assertThat(interceptor.intercept("SELECT * FROM a.t", SESSION, BACKEND), instanceOf(SpectrumInterceptor.Decision.Forward.class));
+        verify(service).loadReferences(refs, SESSION, BACKEND);
     }
 
     @Test
-    void delegatesCleanupToMaterializer() {
-        Socket backend = mock(Socket.class);
-        SpectrumMaterializer.Materialization materialization = new SpectrumMaterializer.Materialization(
-                "spectrum_tmp_x", List.of());
-        interceptor.cleanup(backend, materialization);
-        verify(materializer).cleanup(backend, materialization);
+    void catalogViewsRefreshFirst() {
+        when(service.touchesCatalogViews("SELECT * FROM svv_external_tables")).thenReturn(true);
+        interceptor.intercept("SELECT * FROM svv_external_tables", SESSION, BACKEND);
+        verify(service).refreshMetadata(SESSION, BACKEND);
+    }
+
+    @Test
+    void nativeStatementsDoNotLoadAndDisabledSpectrumForwards() {
+        assertThat(interceptor.intercept("SELECT 1", SESSION, BACKEND), instanceOf(SpectrumInterceptor.Decision.Forward.class));
+        verify(service, never()).loadReferences(any(), any(), any());
+        when(config.services().redshift().spectrumEnabled()).thenReturn(false);
+        assertThat(interceptor.intercept("CREATE EXTERNAL SCHEMA a FROM DATA CATALOG DATABASE 'd' IAM_ROLE 'r'", SESSION, BACKEND),
+                instanceOf(SpectrumInterceptor.Decision.Forward.class));
     }
 }

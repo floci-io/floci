@@ -81,6 +81,7 @@ public class S3Service implements Resettable, ResourceProvider {
         return "000000000000";
     }
     private static final String DEFAULT_OWNER_DISPLAY_NAME = "floci";
+    public static final String INTERNAL_BUCKET_PREFIX = "floci-internal-";
     private static final String AUTHENTICATED_USERS_GROUP_URI = "http://acs.amazonaws.com/groups/global/AuthenticatedUsers";
     private static final String LOG_DELIVERY_GROUP_URI = "http://acs.amazonaws.com/groups/s3/LogDelivery";
     private static final String LEGACY_ACCESS_KEY_ID = "test";
@@ -394,7 +395,7 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     public List<Bucket> listBuckets() {
-        return bucketStore.scan(key -> true);
+        return bucketStore.scan(key -> !key.startsWith(INTERNAL_BUCKET_PREFIX));
     }
 
     public void putBucketLogging(String bucketName, String loggingConfigurationXml) {

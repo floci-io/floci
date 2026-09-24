@@ -609,6 +609,7 @@ public class RedshiftService {
         // Invalidate any GetClusterCredentials passwords so a cluster later recreated with this
         // identifier does not accept them as master-equivalent.
         credentialBroker.revokeCluster(clusters.accountId(), identifier);
+        proxyManager.forgetCluster(relayKey(clusters.accountId(), identifier));
 
         if (cluster.getMasterPasswordSecretArn() != null && secretsManagerService != null) {
             try {

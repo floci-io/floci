@@ -136,6 +136,8 @@ For `AWS::Redshift::ClusterParameterGroup`, `Parameters` is applied via `ModifyC
 | `FLOCI_SERVICES_REDSHIFT_PROXY_HANDSHAKE_TIMEOUT_MILLIS` | `10000` | Max time a client has to complete the startup/auth handshake before the proxy drops it |
 | `FLOCI_SERVICES_REDSHIFT_PROXY_BACKEND_CONNECT_TIMEOUT_MILLIS` | `5000` | Max time the proxy waits for the backend TCP connect |
 | `FLOCI_SERVICES_REDSHIFT_PROXY_MAX_CONNECTIONS` | `100` | Max concurrent connections per proxy before new ones are refused |
+| `FLOCI_SERVICES_REDSHIFT_SPECTRUM_ENABLED` | `true` | Turns external-schema interception off, so a cluster needs no floci-duck sidecar |
+| `FLOCI_SERVICES_REDSHIFT_SPECTRUM_MAX_ROWS` | `1000000` | Cap on rows loaded per external table per query; exceeding it fails the query |
 
 Redshift needs the Docker socket so it can launch PostgreSQL containers. Each cluster's container is published on a dynamically assigned host port, returned by `DescribeClusters`.
 
@@ -233,40 +235,53 @@ Floci's Redshift auth proxy inspects frontend queries on the PostgreSQL wire pro
 - The rewrite only runs when the statement's first keyword is `CREATE TABLE` or `ALTER TABLE`. A `SELECT`, `INSERT`, function body, or string literal that merely contains one of these keywords is forwarded byte-for-byte. Single-quoted and dollar-quoted string literals are masked before the rewrite, so a keyword inside a quoted value (including in a later statement of a multi-statement query) is preserved.
 - Columns legitimately named `distkey`, `sortkey`, or `encode` survive.
 
-### Redshift Spectrum Phase 1
+### Redshift Spectrum
 
-The PostgreSQL wire proxy supports a bounded Spectrum subset for CSV data in S3. The supported
-statements are:
+Redshift Spectrum uses the Glue Data Catalog for external schemas and tables. The proxy supports
+`CREATE EXTERNAL SCHEMA ... FROM DATA CATALOG DATABASE ... IAM_ROLE ...`, including optional
+`REGION` and `CREATE EXTERNAL DATABASE IF NOT EXISTS`, queries and joins against external tables,
+`CREATE EXTERNAL TABLE`, `ALTER TABLE ... ADD PARTITION`, `DROP TABLE`, and `DROP SCHEMA`. The
+`svv_external_schemas`, `svv_external_tables`, `svv_external_columns`, and
+`svv_external_partitions` views expose Glue metadata.
 
-```sql
-CREATE EXTERNAL SCHEMA <schema>
-  FROM DATA CATALOG DATABASE '<database>' IAM_ROLE '<role>';
+DuckDB reads S3 using the same Glue read-plan logic as Athena. Floci loads each referenced table
+into a PostgreSQL staging table and swaps it into place before forwarding the original query, so
+PostgreSQL handles joins and the rest of the SQL. A fingerprint cache avoids unchanged reloads;
+inside an explicit transaction tables are always reloaded because that transaction may roll back.
+An external table is a snapshot for each query, not a live federated scan.
 
-CREATE EXTERNAL TABLE <schema>.<table> (<name> <type>, ...)
-  STORED AS TEXTFILE LOCATION 's3://<bucket>/<prefix>/'
-  TBLPROPERTIES ('skip.header.line.count'='<n>');
-```
+Supported formats follow Athena's Glue resolution: Parquet, CSV/text, JSON, and Iceberg. The
+`floci-duck` sidecar is required when Spectrum interception is enabled. Set
+`FLOCI_SERVICES_REDSHIFT_SPECTRUM_ENABLED=false` to forward external-schema statements without
+interception and avoid that dependency. CSV inputs should have a header matching the declared
+column names. Nested Glue types are loaded as `jsonb`.
 
-Supported column types are `VARCHAR`, `CHAR`, `INTEGER`, `BIGINT`, `DECIMAL`, `BOOLEAN`, `DATE`,
-and `TIMESTAMP`. CSV reads support `DELIMITER`, `QUOTE`, `ESCAPE`, `NULL AS`, and
-`skip.header.line.count`. Objects under the location are read in lexicographic key order.
+| Glue type | PostgreSQL type |
+|---|---|
+| `string`, unsized `varchar`, unsized `char` | `text` |
+| `varchar(n)`, `char(n)` | `varchar(n)` |
+| `tinyint`, `smallint` | `smallint` |
+| `int`, `integer` | `integer` |
+| `bigint` | `bigint` |
+| `float`, `double` | `real`, `double precision` |
+| `decimal(p,s)` | `numeric(p,s)` |
+| `boolean`, `date`, `timestamp` | same |
+| `binary` | `bytea` |
+| `array`, `map`, `struct` | `jsonb` |
 
-The query path supports `SELECT *`, explicit column projections, and simple `WHERE` predicates
-over one external table. Queries with joins, grouping, ordering, subqueries, parameters, or
-multiple statements are outside Phase 1 and are forwarded to PostgreSQL, which returns its own
-error. Rows are materialized into a connection-local temporary table (`CREATE TEMP TABLE`) before
-the rewritten query is sent to PostgreSQL. The temporary table is not visible to another
-connection. Under the Extended Query protocol, the temporary table is dropped eagerly once
-the cursor is exhausted or closed. Under the Simple Query protocol, the table remains
-session-scoped and is cleaned up when the connection terminates, avoiding race conditions
-with the streaming backend-to-client pump. Each query materializes its own table, so a
-long-lived or pooled connection holds one copy per query until it closes.
+Writes to external tables (`INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`) fail with SQLSTATE `0A000`.
+Views depending on an external table can prevent its reload; drop those views before querying the
+table again. `IAM_ROLE default` and cross-account roles are unsupported. Extended Query loads data
+at `Parse`, so a prepared statement sees the data as of its parse. Loads are capped by
+`spectrum-max-rows`; exceeding the cap fails rather than returning truncated results.
 
-`IAM_ROLE` is parsed and retained in the external schema metadata. Phase 1 does not yet assume
-the role or evaluate its IAM policy for Spectrum reads. S3 authorization therefore follows the
-current S3 emulator authorization mode, and role-specific Spectrum access enforcement is a
-future phase. Parquet, JSON, Avro, ORC, partition discovery, `ALTER`, and `DROP` lifecycle
-operations are not supported in Phase 1.
+| SQLSTATE | Meaning |
+|---|---|
+| `XX000` | Glue database was not found |
+| `42501` | IAM role is missing, untrusted, or not associated with the cluster |
+| `42P06` | External schema already exists |
+| `0A000` | Unsupported operation, including writes to an external table |
+| `58030` | Sidecar or external table load failed |
 
 ### COPY from S3
 
@@ -391,7 +406,7 @@ These views expose the documented Redshift column names, types, and ordering map
 
 ## Out of Scope
 
-- Real Redshift SQL semantics: the data plane is stock PostgreSQL. Redshift-only table DDL keywords (DISTSTYLE / DISTKEY / SORTKEY / ENCODE) are stripped so CREATE TABLE / ALTER TABLE executes (see [SQL Interceptor](#sql-interceptor)), but the distribution/sort behavior they request is not; SUPER and Spectrum features outside the documented [Phase 1 subset](#redshift-spectrum-phase-1) are not emulated.
+- Real Redshift SQL semantics: the data plane is stock PostgreSQL. Redshift-only table DDL keywords (DISTSTYLE / DISTKEY / SORTKEY / ENCODE) are stripped so CREATE TABLE / ALTER TABLE executes (see [SQL Interceptor](#sql-interceptor)), but the distribution/sort behavior they request is not; SUPER is not emulated, and Spectrum follows the documented [subset](#redshift-spectrum).
 - Multi-node clusters: `NodeType` and `NumberOfNodes` are stored as metadata; every cluster is a single PostgreSQL container.
 - Parameter groups apply no real engine settings; values are stored and echoed back only.
 - Subnet groups, VPC routing, and security groups are metadata only.

@@ -1,0 +1,25 @@
+package io.github.hectorvent.floci.services.redshift.spectrum;
+
+import java.util.List;
+import java.util.Map;
+
+public sealed interface ExternalStatement permits ExternalStatement.CreateSchema, ExternalStatement.CreateTable,
+        ExternalStatement.AddPartitions, ExternalStatement.DropSchema, ExternalStatement.DropTable {
+    record ColumnDefinition(String name, String type) { }
+    enum TableFormat { PARQUET, TEXTFILE, JSON }
+    record PartitionSpec(Map<String, String> values, String location) {
+        public PartitionSpec { values = Map.copyOf(values); }
+    }
+    record CreateSchema(String schemaName, String glueDatabase, String iamRoleArn, boolean createDatabaseIfNotExists) implements ExternalStatement { }
+    record CreateTable(String schemaName, String tableName, List<ColumnDefinition> columns,
+                       List<ColumnDefinition> partitionColumns, TableFormat format, String location,
+                       String delimiter, String serde, Map<String, String> properties) implements ExternalStatement {
+        public CreateTable { columns = List.copyOf(columns); partitionColumns = List.copyOf(partitionColumns); properties = Map.copyOf(properties); }
+    }
+    record AddPartitions(String schemaName, String tableName, boolean ifNotExists,
+                         List<PartitionSpec> partitions) implements ExternalStatement {
+        public AddPartitions { partitions = List.copyOf(partitions); }
+    }
+    record DropSchema(String schemaName, boolean ifExists) implements ExternalStatement { }
+    record DropTable(String schemaName, String tableName, boolean ifExists) implements ExternalStatement { }
+}
