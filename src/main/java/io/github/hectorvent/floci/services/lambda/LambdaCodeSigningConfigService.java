@@ -25,7 +25,12 @@ import java.util.Map;
 @ApplicationScoped
 public class LambdaCodeSigningConfigService {
 
-    /** The model's own id alphabet and length: csc- followed by 17 characters. */
+    /**
+     * Lowercase alphanumerics because the ARN is the stricter of the two patterns, not the id.
+     * CodeSigningConfigId allows {@code csc-[a-zA-Z0-9-_\.]{17}}, while CodeSigningConfigArn ends
+     * in {@code csc-[a-z0-9]{17}}. Widening this alphabet to match the id pattern would still mint
+     * a conforming id and an ARN that no longer conforms.
+     */
     private static final String ID_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
     private static final int ID_LENGTH = 17;
     private static final int MAX_DESCRIPTION = 256;

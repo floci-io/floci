@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.lambda;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.hasItem;
@@ -91,7 +93,7 @@ class LambdaCodeSigningConfigLifecycleIntegrationTest {
         // the 404 it had to give when no config could exist at all.
         given().when().get(BASE + "/" + arn + "/functions").then()
             .statusCode(200)
-            .body("FunctionArns", is(java.util.List.of()))
+            .body("FunctionArns", is(List.of()))
             .body("NextMarker", nullValue());
 
         String missing = "arn:aws:lambda:us-east-1:000000000000:code-signing-config:csc-abcdefghij1234567";
