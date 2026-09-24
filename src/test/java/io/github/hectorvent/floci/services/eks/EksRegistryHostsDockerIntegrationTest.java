@@ -130,7 +130,7 @@ class EksRegistryHostsDockerIntegrationTest {
 
         String hostsToml = execInContainer(containerId, new String[]{"cat",
                 EksClusterManager.K3S_DATA_DIR + "/" + EksClusterManager.CONTAINERD_CERTS_DIR + "/" + host + "/hosts.toml"});
-        assertTrue(hostsToml.contains("X-Floci-Test = \"registry-hosts\""),
+        assertTrue(hostsToml.contains("\"X-Floci-Test\" = \"registry-hosts\""),
                 "the configured header must be present in the container's hosts.toml");
 
         long saDeadline = System.currentTimeMillis() + 30000;
