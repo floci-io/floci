@@ -13,6 +13,9 @@ import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+import java.util.Map;
+
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.is;
@@ -89,9 +92,9 @@ class CloudWatchLogsHandlerTest {
     void describeLogStreamsHonorsOrderByDescendingLimitAndReturnsNextToken() {
         service.createLogStream(GROUP, "another-stream", REGION);
         service.putLogEvents(GROUP, STREAM,
-                java.util.List.of(java.util.Map.of("timestamp", 2000L, "message", "new")), REGION);
+                List.of(Map.of("timestamp", 2000L, "message", "new")), REGION);
         service.putLogEvents(GROUP, "another-stream",
-                java.util.List.of(java.util.Map.of("timestamp", 1000L, "message", "old")), REGION);
+                List.of(Map.of("timestamp", 1000L, "message", "old")), REGION);
         ObjectNode request = MAPPER.createObjectNode()
                 .put("logGroupName", GROUP)
                 .put("orderBy", "LastEventTime")
@@ -131,9 +134,9 @@ class CloudWatchLogsHandlerTest {
     void describeLogGroupsReturnsStoredBytesSummedAcrossStreams() {
         service.createLogStream(GROUP, "second-stream", REGION);
         service.putLogEvents(GROUP, STREAM,
-                java.util.List.of(java.util.Map.of("timestamp", 1L, "message", "alpha")), REGION);
+                List.of(Map.of("timestamp", 1L, "message", "alpha")), REGION);
         service.putLogEvents(GROUP, "second-stream",
-                java.util.List.of(java.util.Map.of("timestamp", 2L, "message", "beta")), REGION);
+                List.of(Map.of("timestamp", 2L, "message", "beta")), REGION);
 
         long expected = service.describeLogStreams(GROUP, null, REGION).stream()
                 .mapToLong(LogStream::getStoredBytes)
@@ -376,7 +379,7 @@ class CloudWatchLogsHandlerTest {
     void getLogEventsByLogGroupIdentifierArnAndLogStreamArn() {
         long now = System.currentTimeMillis();
         service.putLogEvents(GROUP, STREAM,
-                java.util.List.of(java.util.Map.of("timestamp", now, "message", "via arn")),
+                List.of(Map.of("timestamp", now, "message", "via arn")),
                 REGION);
 
         ObjectNode request = MAPPER.createObjectNode();
@@ -396,9 +399,9 @@ class CloudWatchLogsHandlerTest {
     @Test
     void filterLogEventsByLogGroupIdentifierArnAndStreamArns() {
         long now = System.currentTimeMillis();
-        service.putLogEvents(GROUP, STREAM, java.util.List.of(
-                java.util.Map.of("timestamp", now, "message", "ERROR: kaboom"),
-                java.util.Map.of("timestamp", now + 1, "message", "INFO: fine")
+        service.putLogEvents(GROUP, STREAM, List.of(
+                Map.of("timestamp", now, "message", "ERROR: kaboom"),
+                Map.of("timestamp", now + 1, "message", "INFO: fine")
         ), REGION);
 
         ObjectNode request = MAPPER.createObjectNode();
@@ -424,11 +427,11 @@ class CloudWatchLogsHandlerTest {
         service.createLogStream(GROUP, otherStream, REGION);
 
         long now = System.currentTimeMillis();
-        service.putLogEvents(GROUP, STREAM, java.util.List.of(
-                java.util.Map.of("timestamp", now, "message", "ERROR: from first")
+        service.putLogEvents(GROUP, STREAM, List.of(
+                Map.of("timestamp", now, "message", "ERROR: from first")
         ), REGION);
-        service.putLogEvents(GROUP, otherStream, java.util.List.of(
-                java.util.Map.of("timestamp", now + 1, "message", "ERROR: from second")
+        service.putLogEvents(GROUP, otherStream, List.of(
+                Map.of("timestamp", now + 1, "message", "ERROR: from second")
         ), REGION);
 
         ObjectNode request = MAPPER.createObjectNode();
@@ -449,8 +452,8 @@ class CloudWatchLogsHandlerTest {
         // OutputLogEvent has no logStreamName in real AWS: the caller named the stream in the
         // request, so echoing it back would be a shape floci invents.
         long now = System.currentTimeMillis();
-        service.putLogEvents(GROUP, STREAM, java.util.List.of(
-                java.util.Map.of("timestamp", now, "message", "only one stream here")
+        service.putLogEvents(GROUP, STREAM, List.of(
+                Map.of("timestamp", now, "message", "only one stream here")
         ), REGION);
 
         ObjectNode request = MAPPER.createObjectNode();
@@ -468,9 +471,9 @@ class CloudWatchLogsHandlerTest {
     @Test
     void filterLogEventsByLogGroupIdentifierArnWithoutStreamFilter() {
         long now = System.currentTimeMillis();
-        service.putLogEvents(GROUP, STREAM, java.util.List.of(
-                java.util.Map.of("timestamp", now, "message", "a"),
-                java.util.Map.of("timestamp", now + 1, "message", "b")
+        service.putLogEvents(GROUP, STREAM, List.of(
+                Map.of("timestamp", now, "message", "a"),
+                Map.of("timestamp", now + 1, "message", "b")
         ), REGION);
 
         ObjectNode request = MAPPER.createObjectNode();
@@ -488,12 +491,12 @@ class CloudWatchLogsHandlerTest {
         // response, goes out on the next request, and the second page carries the matches the
         // first one capped off.
         long now = System.currentTimeMillis();
-        service.putLogEvents(GROUP, STREAM, java.util.List.of(
-                java.util.Map.of("timestamp", now, "message", "msg-0"),
-                java.util.Map.of("timestamp", now + 1, "message", "msg-1"),
-                java.util.Map.of("timestamp", now + 2, "message", "msg-2"),
-                java.util.Map.of("timestamp", now + 3, "message", "msg-3"),
-                java.util.Map.of("timestamp", now + 4, "message", "msg-4")
+        service.putLogEvents(GROUP, STREAM, List.of(
+                Map.of("timestamp", now, "message", "msg-0"),
+                Map.of("timestamp", now + 1, "message", "msg-1"),
+                Map.of("timestamp", now + 2, "message", "msg-2"),
+                Map.of("timestamp", now + 3, "message", "msg-3"),
+                Map.of("timestamp", now + 4, "message", "msg-4")
         ), REGION);
 
         ObjectNode firstRequest = MAPPER.createObjectNode();
