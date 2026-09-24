@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.eks;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -7,6 +8,9 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.TagHandler;
 import io.github.hectorvent.floci.core.common.docker.UserDataPipeline;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -19,9 +23,9 @@ import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
 import io.github.hectorvent.floci.services.ec2.model.Vpc;
+import io.github.hectorvent.floci.services.eks.model.AccessConfig;
 import io.github.hectorvent.floci.services.eks.model.CertificateAuthority;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
-import io.github.hectorvent.floci.services.eks.model.AccessConfig;
 import io.github.hectorvent.floci.services.eks.model.ClusterIdentity;
 import io.github.hectorvent.floci.services.eks.model.ClusterStatus;
 import io.github.hectorvent.floci.services.eks.model.CreateClusterRequest;
@@ -41,13 +45,13 @@ import io.github.hectorvent.floci.services.eks.model.Provider;
 import io.github.hectorvent.floci.services.eks.model.RegistryEndpoint;
 import io.github.hectorvent.floci.services.eks.model.RegistryHostConfig;
 import io.github.hectorvent.floci.services.eks.model.ResourcesVpcConfig;
-import com.fasterxml.jackson.core.type.TypeReference;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.net.URI;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -69,9 +73,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
-import io.github.hectorvent.floci.core.resource.ExplorerResource;
-import io.github.hectorvent.floci.core.resource.ResourceProvider;
-import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 
 @ApplicationScoped
 public class EksService implements TagHandler, ResourceProvider {
@@ -902,10 +903,11 @@ public class EksService implements TagHandler, ResourceProvider {
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "No cluster found for name: " + clusterName, 404));
         validateRegistryHosts(hosts);
+        Set<String> previousHosts = EksClusterManager.registryHostNames(cluster);
         cluster.setRegistryHosts(hosts);
         storage.put(clusterName, cluster);
         if (!config.services().eks().mock() && cluster.getContainerId() != null) {
-            clusterManager.injectRegistryHosts(cluster.getContainerId(), cluster);
+            clusterManager.updateRegistryHosts(cluster.getContainerId(), cluster, previousHosts);
         }
         return cluster;
     }
@@ -919,6 +921,9 @@ public class EksService implements TagHandler, ResourceProvider {
 
     private static final Pattern REGISTRY_HOST_PATTERN =
             Pattern.compile("^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?$");
+    private static final Pattern HEADER_NAME_PATTERN =
+            Pattern.compile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+$");
+    private static final Set<String> REGISTRY_CAPABILITIES = Set.of("pull", "push", "resolve");
 
     private static void validateRegistryHosts(List<RegistryHostConfig> hosts) {
         if (hosts == null) {
@@ -926,27 +931,93 @@ public class EksService implements TagHandler, ResourceProvider {
         }
         Set<String> seen = new HashSet<>();
         for (RegistryHostConfig host : hosts) {
+            if (host == null) {
+                throw invalidRegistryHost("registry host entries must not be null");
+            }
             if (host.host() == null || host.host().isBlank()
                     || !REGISTRY_HOST_PATTERN.matcher(host.host()).matches()) {
-                throw new AwsException("InvalidParameterException",
-                        "registry host '" + host.host() + "' is not a valid hostname[:port]", 400);
+                throw invalidRegistryHost("registry host must be a valid hostname[:port]");
+            }
+            int portSeparator = host.host().lastIndexOf(':');
+            if (portSeparator >= 0) {
+                int port = Integer.parseInt(host.host().substring(portSeparator + 1));
+                if (port < 1 || port > 65535) {
+                    throw invalidRegistryHost("registry host port must be between 1 and 65535");
+                }
             }
             if (!seen.add(host.host())) {
-                throw new AwsException("InvalidParameterException",
-                        "registry host '" + host.host() + "' is configured more than once", 400);
+                throw invalidRegistryHost("registry host '" + host.host() + "' is configured more than once");
             }
             if (host.endpoints() == null || host.endpoints().isEmpty()) {
-                throw new AwsException("InvalidParameterException",
-                        "registry host '" + host.host() + "' must specify at least one endpoint", 400);
+                throw invalidRegistryHost("registry host '" + host.host() + "' must specify at least one endpoint");
             }
+            Set<String> endpointUrls = new HashSet<>();
             for (RegistryEndpoint endpoint : host.endpoints()) {
-                if (endpoint.url() == null
-                        || !(endpoint.url().startsWith("http://") || endpoint.url().startsWith("https://"))) {
-                    throw new AwsException("InvalidParameterException",
-                            "registry host '" + host.host() + "' endpoint url must be an http(s) URL", 400);
+                if (endpoint == null) {
+                    throw invalidRegistryHost("registry host '" + host.host() + "' endpoints must not be null");
+                }
+                URI endpointUri;
+                try {
+                    endpointUri = endpoint.url() == null ? null : URI.create(endpoint.url());
+                } catch (IllegalArgumentException e) {
+                    endpointUri = null;
+                }
+                if (endpointUri == null || !endpointUri.isAbsolute()
+                        || !("http".equalsIgnoreCase(endpointUri.getScheme())
+                        || "https".equalsIgnoreCase(endpointUri.getScheme()))
+                        || endpointUri.getHost() == null || endpointUri.getRawUserInfo() != null
+                        || endpointUri.getFragment() != null
+                        || (endpointUri.getPort() != -1
+                        && (endpointUri.getPort() < 1 || endpointUri.getPort() > 65535))) {
+                    throw invalidRegistryHost("registry host '" + host.host() + "' endpoint URL must be a valid http(s) URL");
+                }
+                if (!endpointUrls.add(endpoint.url())) {
+                    throw invalidRegistryHost("registry host '" + host.host() + "' endpoint URLs must be unique");
+                }
+                if (host.capabilities() != null) {
+                    for (String capability : host.capabilities()) {
+                        if (capability == null || !REGISTRY_CAPABILITIES.contains(capability)) {
+                            throw invalidRegistryHost("registry host '" + host.host()
+                                    + "' capabilities may only contain pull, push, or resolve");
+                        }
+                    }
+                }
+                if (endpoint.headers() != null) {
+                    for (Map.Entry<String, String> header : endpoint.headers().entrySet()) {
+                        if (header.getKey() == null || !HEADER_NAME_PATTERN.matcher(header.getKey()).matches()
+                                || hasInvalidHeaderValue(header.getValue())) {
+                            throw invalidRegistryHost("registry host '" + host.host()
+                                    + "' endpoint headers must have valid names and single-line values");
+                        }
+                    }
                 }
             }
         }
+    }
+
+    private static AwsException invalidRegistryHost(String message) {
+        return new AwsException("InvalidParameterException", message, 400);
+    }
+
+    private static boolean hasInvalidHeaderValue(String value) {
+        if (value == null) {
+            return true;
+        }
+        for (int index = 0; index < value.length(); index++) {
+            char character = value.charAt(index);
+            if ((character < 0x20 && character != '\t') || character == 0x7f) {
+                return true;
+            }
+            if (Character.isHighSurrogate(character)) {
+                if (index + 1 >= value.length() || !Character.isLowSurrogate(value.charAt(index + 1))) {
+                    return true;
+                }
+                index++;
+            } else if (Character.isLowSurrogate(character)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private String extractClusterName(String resourceArn) {

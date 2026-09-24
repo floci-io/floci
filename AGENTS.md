@@ -36,6 +36,7 @@ When making changes, follow these priorities:
 Critical rules:
 
 - Do not introduce custom endpoint shapes
+- Floci-only control APIs may use the reserved `/_floci/...` namespace when an operation has no AWS protocol equivalent. Document these endpoints as Floci plumbing and keep them separate from AWS-compatible paths.
 - Do not change request or response formats for convenience
 - Do not perform broad refactors unless the task explicitly requires them
 - Keep behavior aligned with AWS expectations and existing Floci conventions

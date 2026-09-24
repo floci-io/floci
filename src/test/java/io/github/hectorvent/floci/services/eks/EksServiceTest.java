@@ -1,5 +1,8 @@
 package io.github.hectorvent.floci.services.eks;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -7,7 +10,6 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.PersistentStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
-import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.AmiImageResolver;
 import io.github.hectorvent.floci.services.ec2.Ec2ContainerManager;
@@ -19,10 +21,10 @@ import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
+import io.github.hectorvent.floci.services.eks.model.Cluster;
 import io.github.hectorvent.floci.services.eks.model.ClusterIdentity;
 import io.github.hectorvent.floci.services.eks.model.ClusterOidcKey;
 import io.github.hectorvent.floci.services.eks.model.ClusterStatus;
-import io.github.hectorvent.floci.services.eks.model.OidcIdentity;
 import io.github.hectorvent.floci.services.eks.model.CreateClusterRequest;
 import io.github.hectorvent.floci.services.eks.model.CreateFargateProfileRequest;
 import io.github.hectorvent.floci.services.eks.model.CreateNodeGroupRequest;
@@ -30,19 +32,16 @@ import io.github.hectorvent.floci.services.eks.model.EncryptionConfig;
 import io.github.hectorvent.floci.services.eks.model.FargateProfile;
 import io.github.hectorvent.floci.services.eks.model.FargateProfileStatus;
 import io.github.hectorvent.floci.services.eks.model.KubernetesNetworkConfig;
-import io.github.hectorvent.floci.services.eks.model.Cluster;
 import io.github.hectorvent.floci.services.eks.model.LogSetup;
 import io.github.hectorvent.floci.services.eks.model.Logging;
 import io.github.hectorvent.floci.services.eks.model.Nodegroup;
 import io.github.hectorvent.floci.services.eks.model.NodegroupScalingConfig;
 import io.github.hectorvent.floci.services.eks.model.NodegroupStatus;
+import io.github.hectorvent.floci.services.eks.model.OidcIdentity;
 import io.github.hectorvent.floci.services.eks.model.Provider;
 import io.github.hectorvent.floci.services.eks.model.RegistryEndpoint;
 import io.github.hectorvent.floci.services.eks.model.RegistryHostConfig;
 import io.github.hectorvent.floci.services.eks.model.ResourcesVpcConfig;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -51,6 +50,7 @@ import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -901,6 +901,30 @@ class EksServiceTest {
 
         assertThrows(AwsException.class, () -> eksService.setRegistryHosts(
                 "registry-hosts-duplicate-cluster", List.of(hostConfig, hostConfig)));
+    }
+
+    @Test
+    void setRegistryHostsRejectsNullEntries() {
+        createTestCluster("registry-hosts-null-host-cluster");
+        assertThrows(AwsException.class, () -> eksService.setRegistryHosts(
+                "registry-hosts-null-host-cluster", Arrays.asList((RegistryHostConfig) null)));
+
+        createTestCluster("registry-hosts-null-endpoint-cluster");
+        RegistryHostConfig hostConfig = new RegistryHostConfig("mirror.internal",
+                Arrays.asList((RegistryEndpoint) null), null, null);
+        assertThrows(AwsException.class, () -> eksService.setRegistryHosts(
+                "registry-hosts-null-endpoint-cluster", List.of(hostConfig)));
+    }
+
+    @Test
+    void setRegistryHostsRejectsHeaderLineBreaks() {
+        createTestCluster("registry-hosts-header-line-break-cluster");
+        RegistryHostConfig hostConfig = new RegistryHostConfig("mirror.internal",
+                List.of(new RegistryEndpoint("https://cache.internal:5000",
+                        Map.of("X-Test", "value\r\nInjected: yes"))), null, null);
+
+        assertThrows(AwsException.class, () -> eksService.setRegistryHosts(
+                "registry-hosts-header-line-break-cluster", List.of(hostConfig)));
     }
 
     @Test

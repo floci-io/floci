@@ -529,7 +529,9 @@ Precedence and timing:
   against a cluster whose container is already running is copied straight into it and takes
   effect on the next pull. A `PUT` before the container exists (or before a Floci restart
   recreates it) is applied the next time the container starts, since it is stored on the cluster
-  record.
+  record. Replacing or clearing the list removes files for hosts that were removed. Floci also
+  refreshes `registries.yaml`, so a removed caller host that collided with an ECR mirror is
+  restored by k3s on its next restart.
 - **Default is unchanged.** A cluster with no registry host configuration gets exactly the
   `registries.yaml` it always has.
 

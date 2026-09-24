@@ -1,5 +1,11 @@
 package io.github.hectorvent.floci.services.eks;
 
+import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.async.ResultCallback;
+import com.github.dockerjava.api.command.ExecCreateCmdResponse;
+import com.github.dockerjava.api.command.InspectContainerResponse;
+import com.github.dockerjava.api.model.ContainerNetwork;
+import com.github.dockerjava.api.model.Frame;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.AwsRegions;
@@ -14,6 +20,13 @@ import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import io.github.hectorvent.floci.core.common.docker.UserDataPipeline;
+import io.github.hectorvent.floci.services.ec2.ClusterNodeInstanceProvider;
+import io.github.hectorvent.floci.services.ec2.Ec2MetadataProxy;
+import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
+import io.github.hectorvent.floci.services.ec2.model.Instance;
+import io.github.hectorvent.floci.services.ec2.model.InstanceState;
+import io.github.hectorvent.floci.services.ec2.model.Placement;
+import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.eks.model.CertificateAuthority;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
@@ -23,19 +36,6 @@ import io.github.hectorvent.floci.services.eks.model.LogSetup;
 import io.github.hectorvent.floci.services.eks.model.OidcIdentity;
 import io.github.hectorvent.floci.services.eks.model.RegistryEndpoint;
 import io.github.hectorvent.floci.services.eks.model.RegistryHostConfig;
-import com.github.dockerjava.api.DockerClient;
-import com.github.dockerjava.api.async.ResultCallback;
-import com.github.dockerjava.api.command.ExecCreateCmdResponse;
-import com.github.dockerjava.api.command.InspectContainerResponse;
-import com.github.dockerjava.api.model.ContainerNetwork;
-import com.github.dockerjava.api.model.Frame;
-import io.github.hectorvent.floci.services.ec2.ClusterNodeInstanceProvider;
-import io.github.hectorvent.floci.services.ec2.Ec2MetadataProxy;
-import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
-import io.github.hectorvent.floci.services.ec2.model.Instance;
-import io.github.hectorvent.floci.services.ec2.model.InstanceState;
-import io.github.hectorvent.floci.services.ec2.model.Placement;
-import io.github.hectorvent.floci.services.ec2.model.Tag;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
@@ -60,6 +60,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -68,7 +69,6 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
-import java.util.stream.Collectors;
 
 /**
  * Manages the Docker lifecycle of k3s containers for real-mode EKS clusters.
@@ -89,8 +89,8 @@ public class EksClusterManager implements ClusterNodeInstanceProvider {
     // k3s templates registries.yaml into containerd hosts.toml files under this path (inside the
     // k3s data volume) once, at agent startup; containerd itself re-reads whatever is there on
     // every image resolution afterward, so files placed here take effect without a restart. k3s's
-    // own regeneration only touches the host directories it is about to (re)write — the ones named
-    // in registries.yaml — so a caller-configured host absent from registries.yaml is never
+    // own regeneration only touches the host directories it is about to (re)write: the ones named
+    // in registries.yaml, so a caller-configured host absent from registries.yaml is never
     // clobbered. See #buildRegistriesYaml for how a colliding host name is kept out of
     // registries.yaml so the caller's file always wins on that host.
     static final String CONTAINERD_CERTS_DIR = "agent/etc/containerd/certs.d";
@@ -1426,15 +1426,22 @@ public class EksClusterManager implements ClusterNodeInstanceProvider {
      * always wins on a name collision with a generated ECR mirror.
      */
     void injectEcrRegistryMirror(String containerId, String clusterName, Set<String> callerHosts) {
+        injectEcrRegistryMirror(containerId, clusterName, callerHosts, true);
+    }
+
+    private void injectEcrRegistryMirror(String containerId, String clusterName,
+            Set<String> callerHosts, boolean ensureRegistryStarted) {
         if (!config.services().eks().ecrRegistryMirror() || !config.services().ecr().enabled()) {
             return;
         }
-        try {
-            ecrRegistryManager.ensureStarted();
-        } catch (Exception e) {
-            LOG.warnv("EKS cluster {0} gets no ECR registry mirror: registry unavailable: {1}",
-                    clusterName, e.getMessage());
-            return;
+        if (ensureRegistryStarted) {
+            try {
+                ecrRegistryManager.ensureStarted();
+            } catch (Exception e) {
+                LOG.warnv("EKS cluster {0} gets no ECR registry mirror: registry unavailable: {1}",
+                        clusterName, e.getMessage());
+                return;
+            }
         }
         List<String> regions = new ArrayList<>(AwsRegions.advertised(AwsRegions.partitionFor(config.defaultRegion())));
         if (!regions.contains(config.defaultRegion())) {
@@ -1647,9 +1654,25 @@ public class EksClusterManager implements ClusterNodeInstanceProvider {
         }
         Set<String> names = new LinkedHashSet<>();
         for (RegistryHostConfig host : hosts) {
-            names.add(host.host());
+            if (host != null && host.host() != null) {
+                names.add(host.host());
+            }
         }
         return names;
+    }
+
+    /** Reconciles caller hosts and the generated ECR mirror after a runtime update. */
+    void updateRegistryHosts(String containerId, Cluster cluster, Set<String> previousHosts) {
+        Set<String> currentHosts = registryHostNames(cluster);
+        injectEcrRegistryMirror(containerId, cluster.getName(), currentHosts, false);
+
+        Set<String> removedHosts = new HashSet<>(previousHosts);
+        removedHosts.removeAll(currentHosts);
+        for (String host : removedHosts) {
+            removeRegistryHost(containerId, cluster.getName(), host);
+        }
+
+        injectRegistryHosts(containerId, cluster);
     }
 
     /**
@@ -1685,34 +1708,102 @@ public class EksClusterManager implements ClusterNodeInstanceProvider {
         }
     }
 
+    private void removeRegistryHost(String containerId, String clusterName, String host) {
+        Path localDirectory = Paths.get(config.services().eks().dataPath(), "registries", clusterName, host);
+        try {
+            Files.deleteIfExists(localDirectory.resolve("hosts.toml"));
+            Files.deleteIfExists(localDirectory);
+        } catch (IOException e) {
+            LOG.warnv("Could not remove local registry host copy for EKS cluster {0}, host {1}: {2}",
+                    clusterName, host, e.getMessage());
+        }
+
+        String containerDirectory = K3S_DATA_DIR + "/" + CONTAINERD_CERTS_DIR + "/" + host;
+        try {
+            ContainerExecResult result = execInContainerForResult(containerId,
+                    new String[] {"rm", "-rf", "--", containerDirectory}, 10);
+            if (result.exitCode() != 0) {
+                LOG.warnv("Could not remove registry host {0} from EKS cluster {1}: {2}",
+                        host, clusterName, result.summary());
+            }
+        } catch (Exception e) {
+            LOG.warnv("Could not remove registry host {0} from EKS cluster {1}: {2}",
+                    host, clusterName, e.getMessage());
+        }
+    }
+
     /**
      * Renders one {@code hosts.toml} file: a {@code server} pointing at the host itself so
      * unlisted paths still resolve normally, followed by one {@code [host."<url>"]} table per
-     * endpoint (capabilities default to pull/resolve, matching containerd's own default), with a
-     * nested {@code .header} table when the endpoint carries request headers.
+     * endpoint. Capabilities default to pull and resolve, matching containerd's own default. A
+     * nested {@code .header} table is written when an endpoint carries request headers.
      */
     static String buildHostsToml(RegistryHostConfig hostConfig) {
         StringBuilder toml = new StringBuilder();
-        toml.append("server = \"https://").append(hostConfig.host()).append("\"\n");
+        toml.append("server = ").append(tomlBasicString("https://" + hostConfig.host())).append('\n');
         List<String> capabilities = hostConfig.capabilities() != null && !hostConfig.capabilities().isEmpty()
                 ? hostConfig.capabilities() : List.of("pull", "resolve");
         for (RegistryEndpoint endpoint : hostConfig.endpoints()) {
-            toml.append("\n[host.\"").append(endpoint.url()).append("\"]\n")
-                    .append("  capabilities = [")
-                    .append(capabilities.stream().map(c -> "\"" + c + "\"").collect(Collectors.joining(", ")))
-                    .append("]\n");
+            String quotedUrl = tomlBasicString(endpoint.url());
+            toml.append("\n[host.").append(quotedUrl).append("]\n")
+                    .append("  capabilities = [");
+            for (int index = 0; index < capabilities.size(); index++) {
+                if (index > 0) {
+                    toml.append(", ");
+                }
+                toml.append(tomlBasicString(capabilities.get(index)));
+            }
+            toml.append("]\n");
             if (Boolean.TRUE.equals(hostConfig.skipVerify())) {
                 toml.append("  skip_verify = true\n");
             }
             if (endpoint.headers() != null && !endpoint.headers().isEmpty()) {
-                toml.append("  [host.\"").append(endpoint.url()).append("\".header]\n");
+                toml.append("  [host.").append(quotedUrl).append(".header]\n");
                 for (Map.Entry<String, String> header : endpoint.headers().entrySet()) {
-                    toml.append("    ").append(header.getKey()).append(" = \"")
-                            .append(header.getValue()).append("\"\n");
+                    toml.append("    ").append(tomlBasicString(header.getKey())).append(" = ")
+                            .append(tomlBasicString(header.getValue())).append('\n');
                 }
             }
         }
         return toml.toString();
+    }
+
+    private static String tomlBasicString(String value) {
+        StringBuilder quoted = new StringBuilder(value.length() + 2).append('"');
+        for (int index = 0; index < value.length(); index++) {
+            char character = value.charAt(index);
+            switch (character) {
+                case '\b' -> quoted.append("\\b");
+                case '\t' -> quoted.append("\\t");
+                case '\n' -> quoted.append("\\n");
+                case '\f' -> quoted.append("\\f");
+                case '\r' -> quoted.append("\\r");
+                case '"' -> quoted.append("\\\"");
+                case '\\' -> quoted.append("\\\\");
+                default -> {
+                    if (character < 0x20 || character == 0x7f) {
+                        appendTomlUnicodeEscape(quoted, character);
+                    } else if (Character.isHighSurrogate(character)) {
+                        if (index + 1 >= value.length() || !Character.isLowSurrogate(value.charAt(index + 1))) {
+                            throw new IllegalArgumentException("TOML strings cannot contain unpaired surrogates");
+                        }
+                        quoted.append(character).append(value.charAt(++index));
+                    } else if (Character.isLowSurrogate(character)) {
+                        throw new IllegalArgumentException("TOML strings cannot contain unpaired surrogates");
+                    } else {
+                        quoted.append(character);
+                    }
+                }
+            }
+        }
+        return quoted.append('"').toString();
+    }
+
+    private static void appendTomlUnicodeEscape(StringBuilder target, char character) {
+        target.append("\\u");
+        for (int shift = 12; shift >= 0; shift -= 4) {
+            target.append(Character.forDigit((character >> shift) & 0xF, 16));
+        }
     }
 
     /** The Floci token-webhook URL as reachable from inside the k3s container. */
