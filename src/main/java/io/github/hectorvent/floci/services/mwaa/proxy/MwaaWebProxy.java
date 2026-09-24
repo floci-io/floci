@@ -108,19 +108,22 @@ public class MwaaWebProxy {
         }
         req.bodyHandler(body -> {
             String command = body.toString(StandardCharsets.UTF_8).trim();
-            try {
-                MwaaEnvironmentManager.ExecResult result = cliExecutor.execute(command);
-                String stdoutB64 = Base64.getEncoder().encodeToString(result.stdout().getBytes(StandardCharsets.UTF_8));
-                String stderrB64 = Base64.getEncoder().encodeToString(result.stderr().getBytes(StandardCharsets.UTF_8));
-                req.response()
-                        .putHeader("Content-Type", "application/json")
-                        .end("{\"stdout\":\"" + stdoutB64 + "\",\"stderr\":\"" + stderrB64 + "\"}");
-            } catch (Exception e) {
-                LOG.warnv("MWAA CLI exec failed for environment {0}: {1}", environmentName, e.getMessage());
-                req.response().setStatusCode(500)
-                        .putHeader("Content-Type", "application/json")
-                        .end("{\"message\":\"" + escapeJson(e.getMessage()) + "\"}");
-            }
+            // The Docker exec can block for up to 30 seconds, so keep it off the event loop.
+            // Unordered: independent CLI calls should not queue behind each other.
+            vertx.<MwaaEnvironmentManager.ExecResult>executeBlocking(() -> cliExecutor.execute(command), false)
+                    .onSuccess(result -> {
+                        String stdoutB64 = Base64.getEncoder().encodeToString(result.stdout().getBytes(StandardCharsets.UTF_8));
+                        String stderrB64 = Base64.getEncoder().encodeToString(result.stderr().getBytes(StandardCharsets.UTF_8));
+                        req.response()
+                                .putHeader("Content-Type", "application/json")
+                                .end("{\"stdout\":\"" + stdoutB64 + "\",\"stderr\":\"" + stderrB64 + "\"}");
+                    })
+                    .onFailure(e -> {
+                        LOG.warnv("MWAA CLI exec failed for environment {0}: {1}", environmentName, e.getMessage());
+                        req.response().setStatusCode(500)
+                                .putHeader("Content-Type", "application/json")
+                                .end("{\"message\":\"" + escapeJson(e.getMessage()) + "\"}");
+                    });
         });
     }
 
