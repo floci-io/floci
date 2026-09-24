@@ -875,6 +875,13 @@ class EksClusterManagerTest {
         }
 
         @Test
+        void deriveClusterNodeAvailabilityZoneDerivesFromClusterArn() {
+            Cluster cluster = new Cluster();
+            cluster.setArn("arn:aws:eks:ap-southeast-1:123456789012:cluster/test-cluster");
+            assertEquals("ap-southeast-1a", manager.deriveClusterNodeAvailabilityZone(cluster));
+        }
+
+        @Test
         void configuresMetadataProxyWhenEnabled() {
             Cluster cluster = new Cluster();
             cluster.setName("test-cluster");
@@ -1405,6 +1412,85 @@ class EksClusterManagerTest {
             List<String> cmd = cmdCaptor.getValue();
 
             assertFalse(cmd.stream().anyMatch(arg -> arg.startsWith("--kubelet-arg=provider-id=")));
+        }
+
+        @Test
+        void startClusterConfiguresKubeletTopologyLabelsArg() {
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+            cluster.setAccountId("123456789012");
+            cluster.setArn("arn:aws:eks:us-west-2:123456789012:cluster/prod-cluster");
+
+            manager.startCluster(cluster);
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+            List<String> cmd = cmdCaptor.getValue();
+
+            String expectedAz = manager.deriveClusterNodeAvailabilityZone(cluster, "us-west-2");
+            assertEquals("us-west-2a", expectedAz);
+            assertTrue(cmd.contains("--kubelet-arg=node-labels=topology.kubernetes.io/zone=" + expectedAz
+                    + ",topology.kubernetes.io/region=us-west-2"));
+        }
+
+        @Test
+        void topologyLabelZoneMatchesProviderIdZone() {
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+            cluster.setAccountId("123456789012");
+            cluster.setArn("arn:aws:eks:eu-central-1:123456789012:cluster/prod-cluster");
+
+            manager.startCluster(cluster);
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+            List<String> cmd = cmdCaptor.getValue();
+
+            String providerIdArg = cmd.stream()
+                    .filter(arg -> arg.startsWith("--kubelet-arg=provider-id="))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("provider-id arg missing"));
+            String providerId = providerIdArg.substring("--kubelet-arg=provider-id=".length());
+            String[] parts = providerId.split("/");
+            assertTrue(parts.length >= 4, "Provider ID should have format aws:///<zone>/<instance-id>");
+            String providerZone = parts[3];
+
+            String nodeLabelsArg = cmd.stream()
+                    .filter(arg -> arg.startsWith("--kubelet-arg=node-labels="))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("node-labels arg missing"));
+            String labelZone = null;
+            String labelsPart = nodeLabelsArg.substring("--kubelet-arg=node-labels=".length());
+            for (String pair : labelsPart.split(",")) {
+                String[] kv = pair.split("=", 2);
+                if ("topology.kubernetes.io/zone".equals(kv[0])) {
+                    labelZone = kv[1];
+                    break;
+                }
+            }
+            assertNotNull(labelZone, "topology.kubernetes.io/zone must be present in node-labels arg");
+            assertEquals(providerZone, labelZone);
+        }
+
+        @Test
+        void startClusterContinuesWhenTopologyLabelsDerivationFails() {
+            EksClusterManager spyManager = Mockito.spy(manager);
+            Mockito.doThrow(new RuntimeException("derivation failure"))
+                    .when(spyManager).deriveClusterNodeAvailabilityZone(any(), any());
+
+            Cluster cluster = new Cluster();
+            cluster.setName("fail-cluster");
+
+            assertDoesNotThrow(() -> spyManager.startCluster(cluster));
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+            List<String> cmd = cmdCaptor.getValue();
+
+            assertFalse(cmd.stream().anyMatch(arg -> arg.startsWith("--kubelet-arg=node-labels=")));
         }
 
         @Test

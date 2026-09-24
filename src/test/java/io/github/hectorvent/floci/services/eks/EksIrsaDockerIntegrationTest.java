@@ -203,6 +203,20 @@ class EksIrsaDockerIntegrationTest {
         assertEquals(eksClusterManager.deriveClusterNodeProviderId(cluster), nodeResult.stdout().trim(),
                 "Node providerID must match the derived AWS provider ID");
 
+        ExecResult zoneResult = execInContainerWithExitCode(containerId,
+                new String[]{"kubectl", "get", "nodes", "-o",
+                        "jsonpath={.items[0].metadata.labels.topology\\.kubernetes\\.io/zone}"});
+        assertEquals(0, zoneResult.exitCode(), "kubectl get nodes failed");
+        assertEquals(eksClusterManager.deriveClusterNodeAvailabilityZone(cluster), zoneResult.stdout().trim(),
+                "Node topology zone label must match the derived availability zone");
+
+        ExecResult regionResult = execInContainerWithExitCode(containerId,
+                new String[]{"kubectl", "get", "nodes", "-o",
+                        "jsonpath={.items[0].metadata.labels.topology\\.kubernetes\\.io/region}"});
+        assertEquals(0, regionResult.exitCode(), "kubectl get nodes failed");
+        assertEquals(eksClusterManager.clusterRegion(cluster), regionResult.stdout().trim(),
+                "Node topology region label must match the cluster region");
+
         // Extract the projected token from the pod volume
         String token = execInContainer(containerId,
                 new String[]{"kubectl", "exec", "irsa-workload-pod", "--", "cat", "/var/run/secrets/tokens/token"}).trim();

@@ -328,6 +328,17 @@ public class EksClusterManager implements ClusterNodeInstanceProvider {
                     clusterName, e.getMessage());
         }
 
+        try {
+            String region = clusterRegion(cluster);
+            String az = deriveClusterNodeAvailabilityZone(cluster, region);
+            serverArgs.add("--kubelet-arg=node-labels=topology.kubernetes.io/zone=" + az
+                    + ",topology.kubernetes.io/region=" + region);
+        } catch (Exception e) {
+            String clusterName = cluster != null ? cluster.getName() : "unknown";
+            LOG.warnv("EKS node topology labels injection disabled for cluster {0}: could not derive topology labels: {1}",
+                    clusterName, e.getMessage());
+        }
+
         // The account label comes from the cluster record when set (restore runs with no request
         // context); regionResolver is the fallback for the create path.
         String labelAccountId = resolveClusterAccountId(cluster);
@@ -1769,6 +1780,10 @@ public class EksClusterManager implements ClusterNodeInstanceProvider {
     String deriveClusterNodeAvailabilityZone(Cluster cluster, String region) {
         String safeRegion = (region != null && !region.isBlank()) ? region : clusterRegion(cluster);
         return safeRegion + "a";
+    }
+
+    String deriveClusterNodeAvailabilityZone(Cluster cluster) {
+        return deriveClusterNodeAvailabilityZone(cluster, clusterRegion(cluster));
     }
 
     String deriveClusterNodeInstanceId(Cluster cluster, String region, String accountId) {

@@ -369,7 +369,7 @@ A restored cluster reports `CREATING` until its API server answers again, then r
 back (for example Docker is unavailable), the cluster is marked `FAILED` instead of appearing
 `ACTIVE` while unreachable.
 
-#### Cluster node provider ID
+#### Cluster node provider ID and topology labels
 
 In real mode, cluster nodes carry a Kubernetes `spec.providerID` matching the AWS format:
 
@@ -378,6 +378,13 @@ aws:///<availability-zone>/<instance-id>
 ```
 
 For example, `aws:///us-east-1a/i-0123456789abcdef0`. Floci derives this identifier deterministically before container startup and passes `--kubelet-arg=provider-id=<providerId>` to k3s.
+
+Cluster nodes also carry standard Kubernetes topology labels:
+
+- `topology.kubernetes.io/zone`
+- `topology.kubernetes.io/region`
+
+Floci derives the availability zone from the cluster region (for example, `<region>a` for `us-east-1`, yielding `us-east-1a`), rather than from node group subnets as real EKS does. The zone matches the availability zone in the node's `spec.providerID` and synthetic EC2 node instance. These labels enable topology-aware scheduling and allow controllers such as the AWS EBS CSI driver to discover the node's availability zone.
 
 The derived availability zone and instance ID match the synthetic EC2 node instance created for link-local IMDS, ensuring consistent identity across node metadata and kubelet registration. The provider ID enables controllers that reconcile nodes against EC2 (such as CSI drivers) to extract the instance ID. Note that nothing yet resolves that synthetic instance through the EC2 API.
 
