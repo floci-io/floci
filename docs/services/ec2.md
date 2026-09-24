@@ -691,8 +691,18 @@ A standalone ENI created via `CreateNetworkInterface` can also be handed to `Run
 | CreateVolume | Creates an EBS volume record. |
 | DescribeVolumes | Lists or returns stored EBS volume records. |
 | DeleteVolume | Deletes an EBS volume record. |
+| ModifyVolume | Modifies size, type, IOPS, throughput, or multi-attach settings of an EBS volume record. |
+| DescribeVolumesModifications | Reports the current modification state for EBS volumes, filterable by volume ID and state. |
 | AttachVolume | Attaches a volume to an instance at the requested device; returns the attachment in `attaching` state. |
 | DetachVolume | Detaches a volume from an instance, optionally forced; returns the attachment in `detaching` state. |
+
+Volumes are tracked as logical metadata records and are not backed by real block storage devices. Volume modifications update recorded state only without resizing an underlying medium. `ModifyVolume` applies attribute updates directly to the volume record and records a modification entry in `completed` state with 100% progress.
+
+Validation matches AWS behavior:
+- Unknown volumes are rejected with `InvalidVolume.NotFound`.
+- Decreasing volume size is rejected with `InvalidParameterValue`.
+- Unsupported parameters (such as `Throughput` on non-gp3 volumes or `Iops` on non-provisioned IOPS volume types) are rejected with `InvalidParameterCombination`.
+- When querying `DescribeVolumesModifications` with an explicit volume ID for an unmodified volume, the request fails with `InvalidVolumeModification.NotFound`. Listing or filtering without explicit IDs returns only modified volumes.
 
 ### Snapshots
 

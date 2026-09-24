@@ -269,6 +269,8 @@ public class Ec2QueryHandler {
                 case "CreateVolume" -> handleCreateVolume(params, region);
                 case "DescribeVolumes" -> handleDescribeVolumes(params, region);
                 case "DeleteVolume" -> handleDeleteVolume(params, region);
+                case "ModifyVolume" -> handleModifyVolume(params, region);
+                case "DescribeVolumesModifications" -> handleDescribeVolumesModifications(params, region);
                 case "AttachVolume" -> handleAttachVolume(params, region);
                 case "DetachVolume" -> handleDetachVolume(params, region);
                 // Spot Instances
@@ -5718,6 +5720,95 @@ public class Ec2QueryHandler {
         return booleanResponse("DeleteVolume");
     }
 
+    private Response handleModifyVolume(MultivaluedMap<String, String> p, String region) {
+        String volumeId = p.getFirst("VolumeId");
+        if (volumeId == null || volumeId.isBlank()) {
+            throw new AwsException("MissingParameter", "The parameter VolumeId is missing", 400);
+        }
+        Integer size = parseOptionalInt(p.getFirst("Size"), "Size");
+        String volumeType = p.getFirst("VolumeType");
+        Integer iops = parseOptionalInt(p.getFirst("Iops"), "Iops");
+        Integer throughput = parseOptionalInt(p.getFirst("Throughput"), "Throughput");
+        Boolean multiAttachEnabled = p.getFirst("MultiAttachEnabled") != null
+                ? Boolean.parseBoolean(p.getFirst("MultiAttachEnabled"))
+                : null;
+        boolean dryRun = Boolean.parseBoolean(p.getFirst("DryRun"));
+        VolumeModification mod = service.modifyVolume(region, volumeId, size, volumeType,
+                iops, throughput, multiAttachEnabled, dryRun);
+        XmlBuilder xml = new XmlBuilder()
+                .start("ModifyVolumeResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .raw(volumeModificationXml(mod, "volumeModification"))
+                .end("ModifyVolumeResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeVolumesModifications(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
+        List<String> ids = getList(p, "VolumeId");
+        Map<String, List<String>> filters = getFilters(p);
+        List<VolumeModification> modList = service.describeVolumesModifications(region, ids, filters);
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeVolumesModificationsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("volumeModificationSet");
+        for (VolumeModification mod : modList) {
+            xml.raw(volumeModificationXml(mod, "item"));
+        }
+        xml.end("volumeModificationSet")
+                .end("DescribeVolumesModificationsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private String volumeModificationXml(VolumeModification mod, String wrapperTag) {
+        XmlBuilder xml = new XmlBuilder().start(wrapperTag)
+                .elem("volumeId", mod.getVolumeId())
+                .elem("modificationState", mod.getModificationState());
+        if (mod.getTargetSize() != null) {
+            xml.elem("targetSize", String.valueOf(mod.getTargetSize()));
+        }
+        if (mod.getTargetIops() != null) {
+            xml.elem("targetIops", String.valueOf(mod.getTargetIops()));
+        }
+        if (mod.getTargetVolumeType() != null) {
+            xml.elem("targetVolumeType", mod.getTargetVolumeType());
+        }
+        if (mod.getTargetThroughput() != null) {
+            xml.elem("targetThroughput", String.valueOf(mod.getTargetThroughput()));
+        }
+        if (mod.getTargetMultiAttachEnabled() != null) {
+            xml.elem("targetMultiAttachEnabled", String.valueOf(mod.getTargetMultiAttachEnabled()));
+        }
+        if (mod.getOriginalSize() != null) {
+            xml.elem("originalSize", String.valueOf(mod.getOriginalSize()));
+        }
+        if (mod.getOriginalIops() != null) {
+            xml.elem("originalIops", String.valueOf(mod.getOriginalIops()));
+        }
+        if (mod.getOriginalVolumeType() != null) {
+            xml.elem("originalVolumeType", mod.getOriginalVolumeType());
+        }
+        if (mod.getOriginalThroughput() != null) {
+            xml.elem("originalThroughput", String.valueOf(mod.getOriginalThroughput()));
+        }
+        if (mod.getOriginalMultiAttachEnabled() != null) {
+            xml.elem("originalMultiAttachEnabled", String.valueOf(mod.getOriginalMultiAttachEnabled()));
+        }
+        if (mod.getProgress() != null) {
+            xml.elem("progress", String.valueOf(mod.getProgress()));
+        }
+        if (mod.getStatusMessage() != null) {
+            xml.elem("statusMessage", mod.getStatusMessage());
+        }
+        if (mod.getStartTime() != null) {
+            xml.elem("startTime", ISO_FMT.format(mod.getStartTime()));
+        }
+        if (mod.getEndTime() != null) {
+            xml.elem("endTime", ISO_FMT.format(mod.getEndTime()));
+        }
+        return xml.end(wrapperTag).build();
+    }
+
     private Response handleAttachVolume(MultivaluedMap<String, String> p, String region) {
         String volumeId = p.getFirst("VolumeId");
         String instanceId = p.getFirst("InstanceId");
@@ -5759,6 +5850,9 @@ public class Ec2QueryHandler {
                 .elem("status", vol.getState())
                 .elem("availabilityZone", vol.getAvailabilityZone())
                 .elem("encrypted", String.valueOf(vol.isEncrypted()));
+        if (vol.getMultiAttachEnabled() != null) {
+            xml.elem("multiAttachEnabled", String.valueOf(vol.getMultiAttachEnabled()));
+        }
         if (vol.getIops() > 0) {
             xml.elem("iops", String.valueOf(vol.getIops()));
         }
