@@ -86,16 +86,25 @@ public class LambdaCodeSigningConfigService {
                                     CodeSigningConfig.AllowedPublishers allowedPublishers,
                                     CodeSigningConfig.CodeSigningPolicies policies) {
         CodeSigningConfig config = get(region, arn);
+        // Every member is validated before any is applied. The store hands back the live instance,
+        // so validating and setting in turn would leave an earlier member written when a later one
+        // is rejected, and the request would have changed the configuration while answering 400.
         if (description != null) {
             validateDescription(description);
-            config.setDescription(description);
         }
         if (allowedPublishers != null) {
             validateAllowedPublishers(allowedPublishers);
-            config.setAllowedPublishers(allowedPublishers);
         }
         if (policies != null) {
             validatePolicies(policies);
+        }
+        if (description != null) {
+            config.setDescription(description);
+        }
+        if (allowedPublishers != null) {
+            config.setAllowedPublishers(allowedPublishers);
+        }
+        if (policies != null) {
             config.setCodeSigningPolicies(policies);
         }
         config.setLastModified(now());

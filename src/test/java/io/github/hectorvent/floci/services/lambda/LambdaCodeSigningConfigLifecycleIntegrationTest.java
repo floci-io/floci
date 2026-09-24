@@ -73,6 +73,34 @@ class LambdaCodeSigningConfigLifecycleIntegrationTest {
     }
 
     @Test
+    void aRejectedUpdateChangesNothing() {
+        String arn = create("{\"AllowedPublishers\":{\"SigningProfileVersionArns\":[\"" + PROFILE + "\"]},"
+                + "\"Description\":\"before\"}");
+
+        // Valid Description, invalid AllowedPublishers. The description must not survive the 400.
+        given().contentType("application/json")
+            .body("{\"Description\":\"after\",\"AllowedPublishers\":{\"SigningProfileVersionArns\":[]}}")
+            .when().put(BASE + "/" + arn)
+            .then().statusCode(400)
+            .body("__type", is("InvalidParameterValueException"));
+
+        given().when().get(BASE + "/" + arn).then()
+            .statusCode(200)
+            .body("CodeSigningConfig.Description", is("before"));
+
+        // The same shape with the policy as the rejected member.
+        given().contentType("application/json")
+            .body("{\"Description\":\"after\","
+                    + "\"CodeSigningPolicies\":{\"UntrustedArtifactOnDeployment\":\"Ignore\"}}")
+            .when().put(BASE + "/" + arn)
+            .then().statusCode(400);
+
+        given().when().get(BASE + "/" + arn).then()
+            .statusCode(200)
+            .body("CodeSigningConfig.Description", is("before"));
+    }
+
+    @Test
     void listReturnsTheConfigsAndDeleteRemovesOne() {
         String arn = create("{\"AllowedPublishers\":{\"SigningProfileVersionArns\":[\"" + PROFILE + "\"]}}");
 
