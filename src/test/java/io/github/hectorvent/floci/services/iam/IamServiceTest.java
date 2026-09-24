@@ -9,19 +9,23 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.iam.model.AccessKey;
 import io.github.hectorvent.floci.services.iam.model.AccountPasswordPolicy;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
+import io.github.hectorvent.floci.services.iam.model.CredentialReport;
 import io.github.hectorvent.floci.services.iam.model.IamGroup;
 import io.github.hectorvent.floci.services.iam.model.IamPolicy;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.iam.model.IamUser;
 import io.github.hectorvent.floci.services.iam.model.LoginProfile;
 import io.github.hectorvent.floci.services.iam.model.OpenIDConnectProvider;
+import io.github.hectorvent.floci.services.iam.model.OrganizationRootFeatures;
 import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
 import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
 import io.github.hectorvent.floci.services.iam.model.SessionCredential;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.time.Instant;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 
@@ -2054,5 +2058,131 @@ class IamServiceTest {
         assertTrue(details.users().stream().anyMatch(u -> u.getUserName().equals("aad-list-user")));
         assertTrue(details.groups().stream().anyMatch(g -> g.getGroupName().equals("aad-list-group")));
         assertTrue(details.roles().stream().anyMatch(r -> r.getRoleName().equals("aad-list-role")));
+    }
+
+    // =========================================================================
+    // Credential Report
+    // =========================================================================
+
+    @Test
+    void getCredentialReportBeforeAnyGenerateReturnsReportNotPresent() {
+        AwsException ex = assertThrows(AwsException.class, () -> iamService.getCredentialReport());
+        assertEquals("ReportNotPresent", ex.getErrorCode());
+    }
+
+    @Test
+    void generateCredentialReportReturnsStartedWhenNoneExists() {
+        IamService.CredentialReportGeneration generation = iamService.generateCredentialReport();
+
+        assertEquals("STARTED", generation.state());
+        assertEquals("No report exists. Starting a new report generation task", generation.description());
+    }
+
+    @Test
+    void generateCredentialReportReturnsCompleteWithinFourHoursOfAnExistingReport() {
+        iamService.generateCredentialReport();
+
+        IamService.CredentialReportGeneration second = iamService.generateCredentialReport();
+
+        assertEquals("COMPLETE", second.state());
+    }
+
+    @Test
+    void getCredentialReportAfterGenerateReturnsDecodableCsvWithTheHeaderAndRootRow() {
+        iamService.generateCredentialReport();
+
+        IamService.CredentialReportContent content = iamService.getCredentialReport();
+
+        assertEquals("text/csv", content.reportFormat());
+        String csv = new String(Base64.getDecoder().decode(content.base64Content()));
+        assertTrue(csv.startsWith("user,arn,user_creation_time,password_enabled,"),
+                "expected the documented column header, got: " + csv);
+        assertTrue(csv.contains("<root_account>,arn:aws:iam::"), "expected a root account row, got: " + csv);
+    }
+
+    @Test
+    void getCredentialReportIncludesEveryUserWithPasswordAndAccessKeyState() {
+        iamService.createUser("cred-report-user", "/");
+        iamService.createLoginProfile("cred-report-user", "Sup3r-Secret!", false);
+        iamService.createAccessKey("cred-report-user");
+        iamService.generateCredentialReport();
+
+        String csv = new String(Base64.getDecoder().decode(iamService.getCredentialReport().base64Content()));
+        String row = csv.lines().filter(line -> line.startsWith("cred-report-user,")).findFirst()
+                .orElseThrow(() -> new AssertionError("no row for cred-report-user in: " + csv));
+        String[] fields = row.split(",", -1);
+
+        assertEquals("TRUE", fields[3], "password_enabled");
+        assertEquals("TRUE", fields[8], "access_key_1_active");
+        assertEquals("FALSE", fields[7], "mfa_active is never modeled");
+    }
+
+    /**
+     * UpdateLoginProfile changes the password without touching LoginProfile's own createDate
+     * (its meaning stays "profile created"), so the credential report's password_last_changed
+     * column has to be backed by a separate field, updated whenever the password itself
+     * changes: otherwise a changed password would still report the original creation time.
+     */
+    @Test
+    void updateLoginProfilePasswordChangeMovesPasswordLastChanged() {
+        iamService.createUser("cred-report-changed-user", "/");
+        iamService.createLoginProfile("cred-report-changed-user", "Original-P4ss!", false);
+        Instant createdAt = iamService.getLoginProfile("cred-report-changed-user").getPasswordLastChanged();
+
+        iamService.updateLoginProfile("cred-report-changed-user", "Updated-P4ss!", null);
+        Instant changedAt = iamService.getLoginProfile("cred-report-changed-user").getPasswordLastChanged();
+
+        assertTrue(changedAt.isAfter(createdAt),
+                "expected password_last_changed to move: created=" + createdAt + " changed=" + changedAt);
+    }
+
+    /** Toggling only passwordResetRequired is not a password change, so the timestamp must not move. */
+    @Test
+    void updateLoginProfileWithoutAPasswordChangeLeavesPasswordLastChangedAlone() {
+        iamService.createUser("cred-report-unchanged-user", "/");
+        iamService.createLoginProfile("cred-report-unchanged-user", "Original-P4ss!", false);
+        Instant createdAt = iamService.getLoginProfile("cred-report-unchanged-user").getPasswordLastChanged();
+
+        iamService.updateLoginProfile("cred-report-unchanged-user", null, true);
+
+        assertEquals(createdAt, iamService.getLoginProfile("cred-report-unchanged-user").getPasswordLastChanged());
+    }
+
+    @Test
+    void getCredentialReportOnAnExpiredReportThrowsReportExpired() {
+        StorageBackend<String, CredentialReport> credentialReports = new InMemoryStorage<>();
+        credentialReports.put("credential-report",
+                new CredentialReport("dGVzdA==", Instant.now().minus(Duration.ofHours(5))));
+        IamService withExpiredReport = new IamService(
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), credentialReports,
+                new RegionResolver("us-east-1", "000000000000"), false, null);
+
+        AwsException ex = assertThrows(AwsException.class, withExpiredReport::getCredentialReport);
+        assertEquals("ReportExpired", ex.getErrorCode());
+    }
+
+    @Test
+    void generateCredentialReportOnAnExpiredReportStartsANewOne() {
+        StorageBackend<String, CredentialReport> credentialReports = new InMemoryStorage<>();
+        credentialReports.put("credential-report",
+                new CredentialReport("dGVzdA==", Instant.now().minus(Duration.ofHours(5))));
+        IamService withExpiredReport = new IamService(
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), credentialReports,
+                new RegionResolver("us-east-1", "000000000000"), false, null);
+
+        IamService.CredentialReportGeneration generation = withExpiredReport.generateCredentialReport();
+
+        assertEquals("STARTED", generation.state());
+        assertEquals("The previous report has expired. Starting a new report generation task",
+                generation.description());
+        assertDoesNotThrow(withExpiredReport::getCredentialReport);
     }
 }

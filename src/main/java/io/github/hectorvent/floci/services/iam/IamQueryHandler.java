@@ -134,6 +134,8 @@ public class IamQueryHandler {
             case "ListEntitiesForPolicy" -> handleListEntitiesForPolicy(params);
             case "GetAccountSummary" -> handleGetAccountSummary(params);
             case "GetAccountAuthorizationDetails" -> handleGetAccountAuthorizationDetails(params);
+            case "GenerateCredentialReport" -> handleGenerateCredentialReport(params);
+            case "GetCredentialReport" -> handleGetCredentialReport(params);
             case "CreatePolicyVersion" -> handleCreatePolicyVersion(params);
             case "GetPolicyVersion" -> handleGetPolicyVersion(params);
             case "DeletePolicyVersion" -> handleDeletePolicyVersion(params);
@@ -853,6 +855,25 @@ public class IamQueryHandler {
         }
         xml.end("SummaryMap");
         return Response.ok(AwsQueryResponse.envelope("GetAccountSummary", AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    private Response handleGenerateCredentialReport(MultivaluedMap<String, String> params) {
+        IamService.CredentialReportGeneration generation = iamService.generateCredentialReport();
+        String result = new XmlBuilder()
+                .elem("Description", generation.description())
+                .elem("State", generation.state())
+                .build();
+        return Response.ok(AwsQueryResponse.envelope("GenerateCredentialReport", AwsNamespaces.IAM, result)).build();
+    }
+
+    private Response handleGetCredentialReport(MultivaluedMap<String, String> params) {
+        IamService.CredentialReportContent content = iamService.getCredentialReport();
+        String result = new XmlBuilder()
+                .elem("Content", content.base64Content())
+                .elem("ReportFormat", content.reportFormat())
+                .elem("GeneratedTime", isoDate(content.generatedTime()))
+                .build();
+        return Response.ok(AwsQueryResponse.envelope("GetCredentialReport", AwsNamespaces.IAM, result)).build();
     }
 
     // Filter, MaxItems and Marker are not honored: every user, group, role and relevant policy

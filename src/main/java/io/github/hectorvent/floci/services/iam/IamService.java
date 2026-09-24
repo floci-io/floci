@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.iam.model.AccessKey;
 import io.github.hectorvent.floci.services.iam.model.AccountPasswordPolicy;
+import io.github.hectorvent.floci.services.iam.model.CredentialReport;
 import io.github.hectorvent.floci.services.iam.model.IamGroup;
 import io.github.hectorvent.floci.services.iam.model.IamPolicy;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
@@ -35,7 +36,10 @@ import org.jboss.logging.Logger;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
+import java.time.Duration;
 import java.time.Instant;
+import java.time.format.DateTimeFormatter;
+import java.util.Base64;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
@@ -118,6 +122,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     /** {@code tagListType} / {@code tagKeyListType} are both {@code max: 50}. */
     private static final int MAX_TAGS_PER_INSTANCE_PROFILE = 50;
     private static final String ROOT_FEATURES_KEY = "org-root-features";
+    private static final String CREDENTIAL_REPORT_KEY = "credential-report";
+    /** AWS generates a fresh report only if the most recent one is older than this. */
+    private static final Duration CREDENTIAL_REPORT_MAX_AGE = Duration.ofHours(4);
     public static final String FEATURE_ROOT_CREDENTIALS = "RootCredentialsManagement";
     public static final String FEATURE_ROOT_SESSIONS = "RootSessions";
 
@@ -150,6 +157,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     /** Deletion is synchronous, so an issued task id is a completed one; the value is its role. */
     private final StorageBackend<String, String> serviceLinkedRoleDeletions;
     private final StorageBackend<String, OrganizationRootFeatures> orgRootFeatures;
+    /**
+     * Holds at most one entry per account under {@link #CREDENTIAL_REPORT_KEY}: the same
+     * single-value-per-account shape as {@link #accountAliases}.
+     */
+    private final StorageBackend<String, CredentialReport> credentialReports;
     private final RegionResolver regionResolver;
     private final boolean seedDeployerPrincipal;
     private final String seededAccountAlias;
@@ -179,6 +191,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             storageFactory.create("iam", "iam-oidc-providers.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-slr-deletions.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-org-root-features.json", new TypeReference<>() {}),
+            storageFactory.create("iam", "iam-credential-reports.json", new TypeReference<>() {}),
             regionResolver,
             config.services().iam().seedDeployerPrincipal(),
             config.services().iam().accountAlias().orElse(null)
@@ -208,7 +221,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         this(users, groups, roles, policies, accessKeys, instanceProfiles, sessions,
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                regionResolver, seedDeployerPrincipal, null);
+                new InMemoryStorage<>(), regionResolver, seedDeployerPrincipal, null);
     }
 
     // 8-backend constructor (no org-root-features): kept for existing callers/tests;
@@ -229,8 +242,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                String seededAccountAlias) {
         this(users, groups, roles, policies, accessKeys, instanceProfiles, sessions,
                 accountAliases, passwordPolicies, new InMemoryStorage<>(), oidcProviders,
-                serviceLinkedRoleDeletions, new InMemoryStorage<>(), regionResolver,
-                seedDeployerPrincipal, seededAccountAlias);
+                serviceLinkedRoleDeletions, new InMemoryStorage<>(), new InMemoryStorage<>(),
+                regionResolver, seedDeployerPrincipal, seededAccountAlias);
     }
 
     // 9-backend constructor (no alias/OIDC/SLR backends): kept for existing callers/tests;
@@ -248,8 +261,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                boolean seedDeployerPrincipal) {
         this(users, groups, roles, policies, accessKeys, instanceProfiles, sessions,
                 new InMemoryStorage<>(), passwordPolicies, new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), orgRootFeatures, regionResolver,
-                seedDeployerPrincipal, null);
+                new InMemoryStorage<>(), new InMemoryStorage<>(), orgRootFeatures,
+                new InMemoryStorage<>(), regionResolver, seedDeployerPrincipal, null);
     }
 
     IamService(StorageBackend<String, IamUser> users,
@@ -265,6 +278,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                StorageBackend<String, OpenIDConnectProvider> oidcProviders,
                StorageBackend<String, String> serviceLinkedRoleDeletions,
                StorageBackend<String, OrganizationRootFeatures> orgRootFeatures,
+               StorageBackend<String, CredentialReport> credentialReports,
                RegionResolver regionResolver,
                boolean seedDeployerPrincipal,
                String seededAccountAlias) {
@@ -281,6 +295,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         this.oidcProviders = oidcProviders;
         this.serviceLinkedRoleDeletions = serviceLinkedRoleDeletions;
         this.orgRootFeatures = orgRootFeatures;
+        this.credentialReports = credentialReports;
         this.regionResolver = regionResolver;
         this.seedDeployerPrincipal = seedDeployerPrincipal;
         this.seededAccountAlias = seededAccountAlias;
@@ -1811,6 +1826,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         if (password != null) {
             validateLoginProfilePassword(password);
             profile.setPassword(password);
+            profile.setPasswordLastChanged(Instant.now());
         }
         if (passwordResetRequired != null) {
             profile.setPasswordResetRequired(passwordResetRequired);
@@ -2871,5 +2887,153 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             List<IamPolicy> policies,
             Map<String, Integer> attachmentCounts,
             Map<String, Integer> permissionsBoundaryUsageCounts) {
+    }
+
+    // =========================================================================
+    // Credential Report
+    // =========================================================================
+
+    public record CredentialReportGeneration(String state, String description) {}
+
+    public record CredentialReportContent(String base64Content, String reportFormat, Instant generatedTime) {}
+
+    /**
+     * AWS generates a fresh report only if the most recent one is older than
+     * {@link #CREDENTIAL_REPORT_MAX_AGE}; otherwise it downloads the existing one. Building the
+     * CSV here is effectively instant, so unlike real AWS this never actually returns
+     * {@code INPROGRESS}: a caller polling {@code GetCredentialReport} after this finds the
+     * report ready immediately. The {@code STARTED} state and its description text still match
+     * AWS's own documented example response for the no-report-exists case.
+     */
+    public CredentialReportGeneration generateCredentialReport() {
+        Instant now = Instant.now();
+        Optional<CredentialReport> existing = credentialReports.get(CREDENTIAL_REPORT_KEY);
+        if (existing.isPresent() && now.isBefore(existing.get().getGeneratedTime().plus(CREDENTIAL_REPORT_MAX_AGE))) {
+            return new CredentialReportGeneration("COMPLETE",
+                    "Current report has already been generated within the past 4 hours.");
+        }
+        String csv = buildCredentialReportCsv();
+        String base64Content = Base64.getEncoder().encodeToString(csv.getBytes(StandardCharsets.UTF_8));
+        credentialReports.put(CREDENTIAL_REPORT_KEY, new CredentialReport(base64Content, now));
+        String description = existing.isEmpty()
+                ? "No report exists. Starting a new report generation task"
+                : "The previous report has expired. Starting a new report generation task";
+        return new CredentialReportGeneration("STARTED", description);
+    }
+
+    public CredentialReportContent getCredentialReport() {
+        CredentialReport report = credentialReports.get(CREDENTIAL_REPORT_KEY)
+                .orElseThrow(() -> new AwsException("ReportNotPresent",
+                        "The request was rejected because the credential report does not exist. "
+                                + "To generate a credential report, use GenerateCredentialReport.", 410));
+        if (Instant.now().isAfter(report.getGeneratedTime().plus(CREDENTIAL_REPORT_MAX_AGE))) {
+            throw new AwsException("ReportExpired",
+                    "The request was rejected because the most recent credential report has expired. "
+                            + "To generate a new credential report, use GenerateCredentialReport.", 410);
+        }
+        return new CredentialReportContent(report.getBase64Content(), "text/csv", report.getGeneratedTime());
+    }
+
+    /**
+     * The 23 columns AWS documents for the credential report, in order, always led by the
+     * {@code <root_account>} row. Floci does not model root account credentials at all (see
+     * {@code GetAccountSummary}'s {@code AccountPasswordPresent}/{@code AccountAccessKeysPresent},
+     * always zero), so that row is always unused/not-present placeholders. MFA devices and X.509
+     * signing certificates are not modeled for IAM users either, so those columns are always
+     * {@code FALSE}/{@code N/A} for every row; access key last-used tracking (date, region,
+     * service) is not modeled, so those three columns are always {@code N/A} too.
+     */
+    private String buildCredentialReportCsv() {
+        StringBuilder csv = new StringBuilder(
+                "user,arn,user_creation_time,password_enabled,password_last_used,password_last_changed,"
+                + "password_next_rotation,mfa_active,access_key_1_active,access_key_1_last_rotated,"
+                + "access_key_1_last_used_date,access_key_1_last_used_region,access_key_1_last_used_service,"
+                + "access_key_2_active,access_key_2_last_rotated,access_key_2_last_used_date,"
+                + "access_key_2_last_used_region,access_key_2_last_used_service,cert_1_active,"
+                + "cert_1_last_rotated,cert_2_active,cert_2_last_rotated,additional_credentials_info\n");
+        csv.append(rootAccountReportRow()).append('\n');
+        for (IamUser user : listUsers(null)) {
+            csv.append(userReportRow(user)).append('\n');
+        }
+        return csv.toString();
+    }
+
+    private String rootAccountReportRow() {
+        String arn = "arn:aws:iam::" + regionResolver.getAccountId() + ":root";
+        return String.join(",",
+                "<root_account>", arn, "N/A",
+                "FALSE", "N/A", "N/A", "not_supported",
+                "FALSE",
+                "FALSE", "N/A", "N/A", "N/A", "N/A",
+                "FALSE", "N/A", "N/A", "N/A", "N/A",
+                "FALSE", "N/A", "FALSE", "N/A", "");
+    }
+
+    private String userReportRow(IamUser user) {
+        List<AccessKey> keys = userAccessKeys(user.getUserName());
+        AccessKey key1 = keys.size() > 0 ? keys.get(0) : null;
+        AccessKey key2 = keys.size() > 1 ? keys.get(1) : null;
+        Optional<LoginProfile> loginProfile = loginProfiles.get(user.getUserName());
+        boolean passwordEnabled = loginProfile.isPresent();
+
+        return String.join(",",
+                user.getUserName(),
+                user.getArn(),
+                isoDate(user.getCreateDate()),
+                passwordEnabled ? "TRUE" : "FALSE",
+                passwordLastUsedField(user, passwordEnabled),
+                passwordEnabled ? isoDate(passwordLastChanged(loginProfile.get())) : "N/A",
+                passwordNextRotationField(loginProfile, passwordEnabled),
+                "FALSE",
+                accessKeyActiveField(key1), accessKeyRotatedField(key1), "N/A", "N/A", "N/A",
+                accessKeyActiveField(key2), accessKeyRotatedField(key2), "N/A", "N/A", "N/A",
+                "FALSE", "N/A", "FALSE", "N/A",
+                additionalCredentialsInfoField(keys));
+    }
+
+    /**
+     * AWS documents this as naming the count of extra access keys or certificates and the
+     * actions to list them, but not the exact wording, so this is Floci's own text, not a
+     * verified match. In practice this branch is unreachable through the API: {@link
+     * #createAccessKey} already enforces the real 2-key-per-user quota, so more than two keys
+     * can only happen through directly-edited persisted state, not anything a caller can do.
+     */
+    private String additionalCredentialsInfoField(List<AccessKey> keys) {
+        return keys.size() > 2 ? (keys.size() - 2) + " additional access key(s)" : "";
+    }
+
+    private String passwordLastUsedField(IamUser user, boolean passwordEnabled) {
+        if (!passwordEnabled) {
+            return "N/A";
+        }
+        return user.getPasswordLastUsed() != null ? isoDate(user.getPasswordLastUsed()) : "no_information";
+    }
+
+    /** AWS documents this as always {@code not_supported} for root; blank when no rotation policy is set. */
+    private String passwordNextRotationField(Optional<LoginProfile> loginProfile, boolean passwordEnabled) {
+        if (!passwordEnabled) {
+            return "N/A";
+        }
+        return getAccountPasswordPolicy()
+                .map(AccountPasswordPolicy::getMaxPasswordAge)
+                .map(maxAge -> isoDate(passwordLastChanged(loginProfile.get()).plus(Duration.ofDays(maxAge))))
+                .orElse("");
+    }
+
+    /** Falls back to createDate for a profile persisted before passwordLastChanged existed. */
+    private Instant passwordLastChanged(LoginProfile profile) {
+        return profile.getPasswordLastChanged() != null ? profile.getPasswordLastChanged() : profile.getCreateDate();
+    }
+
+    private String accessKeyActiveField(AccessKey key) {
+        return key != null && "Active".equals(key.getStatus()) ? "TRUE" : "FALSE";
+    }
+
+    private String accessKeyRotatedField(AccessKey key) {
+        return key != null ? isoDate(key.getCreateDate()) : "N/A";
+    }
+
+    private String isoDate(Instant instant) {
+        return instant == null ? "" : DateTimeFormatter.ISO_INSTANT.format(instant);
     }
 }

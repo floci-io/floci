@@ -327,6 +327,8 @@ read; the comparison is driven entirely by the policy's own condition operator (
 |--------|-------------|
 | GetAccountSummary | Returns entity counts (users, groups, roles, customer-managed policies, instance profiles) and IAM quota values. `Providers` counts OIDC providers only; SAML providers are not included. Resources Floci does not track (MFA devices, server certificates) are reported as zero rather than omitted. |
 | GetAccountAuthorizationDetails | Returns every user, group and role in the account, and the policies relevant to them: every local (customer-managed) policy, and every AWS-managed policy actually attached to or used as a permissions boundary by something in the account. |
+| GenerateCredentialReport | Generates (or, within 4 hours of the last one, reuses) the account's credential report. |
+| GetCredentialReport | Returns the most recently generated credential report as Base64-encoded CSV. |
 
 `Filter`, `MaxItems` and `Marker` are not honored: the response always includes everything, with
 `IsTruncated` always `false`. `AttachmentCount` and `PermissionsBoundaryUsageCount` are computed by
@@ -336,6 +338,22 @@ are correctly scoped to the calling account even for an AWS-managed policy (see 
 returned as plain JSON, not URL-encoded as AWS documents them; this matches every other IAM action
 that returns a policy document (`GetPolicyVersion`, `GetRolePolicy`, and so on), none of which
 URL-encode either.
+
+The credential report holds the 23 columns AWS documents, always led by a `<root_account>` row.
+Floci does not model root account credentials at all (`GetAccountSummary`'s
+`AccountPasswordPresent`/`AccountAccessKeysPresent` are always zero for the same reason), so that
+row is placeholder values throughout. MFA devices and X.509 signing certificates are not modeled
+for IAM users either, so `mfa_active` and every `cert_*` column are always `FALSE`/`N/A`; access
+key last-used tracking (date, region, service) is not modeled, so those three columns are always
+`N/A` too. `password_last_used` is likewise not tracked, so it is always `no_information`.
+`password_last_changed` reflects an `UpdateLoginProfile` password change, not just
+`CreateLoginProfile`. `additional_credentials_info` is Floci's own wording, since AWS does not
+document the exact text; in practice it is unreachable, since `CreateAccessKey` already enforces
+the real 2-key-per-user quota. Generating a report is effectively instant, so `GenerateCredentialReport` never actually
+returns `INPROGRESS`, and a `GetCredentialReport` call right after it always finds the report
+ready. `GenerateCredentialReport`'s `State`/`Description` for the no-report-exists case match AWS's
+own documented example response (`STARTED` / "No report exists. Starting a new report generation
+task"); the wording for the report-expired case is Floci's own, since AWS does not document it.
 
 ### Organizations Root Access
 
