@@ -859,9 +859,11 @@ public class IamQueryHandler {
 
     private Response handleGenerateCredentialReport(MultivaluedMap<String, String> params) {
         IamService.CredentialReportGeneration generation = iamService.generateCredentialReport();
+        // State before Description: GenerateCredentialReportResponse's member order in the
+        // wire model, and the order AWS's own documented example emits them in.
         String result = new XmlBuilder()
-                .elem("Description", generation.description())
                 .elem("State", generation.state())
+                .elem("Description", generation.description())
                 .build();
         return Response.ok(AwsQueryResponse.envelope("GenerateCredentialReport", AwsNamespaces.IAM, result)).build();
     }
