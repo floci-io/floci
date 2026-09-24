@@ -34,6 +34,10 @@
 | `EnableKinesisStreamingDestination` | Enable Kinesis streaming for a table |
 | `DisableKinesisStreamingDestination` | Disable Kinesis streaming for a table |
 | `ExportTableToPointInTime` | Export table data to S3 as gzip NDJSON |
+| `CreateGlobalTable` | Make an existing table a global table (2017.11.29) |
+| `DescribeGlobalTable` | Read a global table's replication group |
+| `UpdateGlobalTable` | Add or remove replica regions |
+| `ListGlobalTables` | List global tables, optionally filtered by region |
 | `DescribeExport` | Get export status and metadata |
 | `ListExports` | List exports, optionally filtered by table ARN |
 | `ImportTable` | Create a table and load DynamoDB JSON from S3 into it |

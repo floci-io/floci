@@ -3379,7 +3379,7 @@ given()
     @Test
     void unsupportedOperation() {
         given()
-            .header("X-Amz-Target", "DynamoDB_20120810.CreateGlobalTable")
+            .header("X-Amz-Target", "DynamoDB_20120810.DescribeGlobalTableSettings")
             .contentType(DYNAMODB_CONTENT_TYPE)
             .body("{}")
         .when()

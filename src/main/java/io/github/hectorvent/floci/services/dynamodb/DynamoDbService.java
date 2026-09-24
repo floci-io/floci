@@ -2505,6 +2505,75 @@ public class DynamoDbService implements ResourceProvider {
         return table;
     }
 
+    /**
+     * CreateGlobalTable, the 2017.11.29 API. It builds a global table out of a table that already
+     * exists, so the table is resolved first and an absent one is TableNotFoundException rather
+     * than the ResourceNotFoundException the item operations raise.
+     *
+     * <p>The model states the conditions a replica must meet, and the one this emulator can check
+     * is the stream: the table must have DynamoDB Streams enabled with both the new and the old
+     * image. The rest concern tables in other regions, which a single-process emulator serves from
+     * this same table, so there is nothing separate to compare.
+     */
+    public TableDefinition createGlobalTable(String globalTableName, List<String> replicaRegions,
+                                             String region) {
+        String canonicalTableName = canonicalTableName(region, globalTableName);
+        TableDefinition table = tableStore.get(regionKey(region, canonicalTableName))
+                .orElseThrow(() -> new AwsException("TableNotFoundException",
+                        "Table not found: " + canonicalTableName, 400));
+        if (table.getGlobalTableHomeRegion() != null) {
+            throw new AwsException("GlobalTableAlreadyExistsException",
+                    "Global table already exists: " + globalTableName, 400);
+        }
+        requireStreamWithBothImages(table, canonicalTableName);
+        List<String> adds = replicaRegions == null ? List.of() : replicaRegions.stream()
+                .filter(r -> r != null && !r.isBlank() && !r.equals(region))
+                .toList();
+        applyReplicaUpdates(globalTableName, adds, List.of(), region);
+        return ensureGlobalTable(globalTableName, region);
+    }
+
+    /** DescribeGlobalTable. A table that is not a global table has no description to give. */
+    public TableDefinition describeGlobalTable(String globalTableName, String region) {
+        String canonicalTableName = canonicalTableName(region, globalTableName);
+        TableDefinition table = tableStore.get(regionKey(region, canonicalTableName))
+                .filter(t -> t.getGlobalTableHomeRegion() != null)
+                .orElseThrow(() -> new AwsException("GlobalTableNotFoundException",
+                        "Global table not found: " + globalTableName, 400));
+        return table;
+    }
+
+    /** UpdateGlobalTable's replica adds and removes, on a table that is already a global table. */
+    public TableDefinition updateGlobalTable(String globalTableName, List<String> addRegions,
+                                             List<String> removeRegions, String region) {
+        describeGlobalTable(globalTableName, region);
+        return applyReplicaUpdates(globalTableName, addRegions, removeRegions, region);
+    }
+
+    /** ListGlobalTables, optionally narrowed to the tables replicated into one region. */
+    public List<TableDefinition> listGlobalTables(String regionFilter, String region) {
+        return tableStore.scan(k -> k.startsWith(region + "::")).stream()
+                .filter(t -> t.getGlobalTableHomeRegion() != null)
+                .filter(t -> regionFilter == null || regionFilter.isBlank()
+                        || regionFilter.equals(t.getGlobalTableHomeRegion())
+                        || t.getReplicaRegions().contains(regionFilter))
+                .sorted(Comparator.comparing(TableDefinition::getTableName))
+                .toList();
+    }
+
+    /**
+     * The one replica precondition a single-process emulator can actually test. A global table
+     * replicates by reading the stream, so a table without one, or with a view that omits either
+     * image, cannot be a replica source.
+     */
+    private static void requireStreamWithBothImages(TableDefinition table, String tableName) {
+        if (!table.isStreamEnabled() || !"NEW_AND_OLD_IMAGES".equals(table.getStreamViewType())) {
+            throw new AwsException("InvalidParameterValue",
+                    "Table " + tableName + " must have DynamoDB Streams enabled with "
+                            + "StreamViewType NEW_AND_OLD_IMAGES to join a global table.", 400);
+        }
+    }
+
     public void validateReplicaUpdates(String tableName, List<String> addRegions,
                                        List<String> removeRegions, List<String> updateRegions, String region) {
         validateReplicaUpdatesAndGetTable(tableName, addRegions, removeRegions, updateRegions, region);

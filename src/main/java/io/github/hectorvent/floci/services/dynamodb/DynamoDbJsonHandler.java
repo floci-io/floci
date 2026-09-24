@@ -77,6 +77,10 @@ public class DynamoDbJsonHandler {
             case "DisableKinesisStreamingDestination" -> handleDisableKinesisStreamingDestination(request, region);
             case "DescribeKinesisStreamingDestination" -> handleDescribeKinesisStreamingDestination(request, region);
             case "ExportTableToPointInTime" -> handleExportTable(request, region);
+            case "CreateGlobalTable" -> handleCreateGlobalTable(request, region);
+            case "DescribeGlobalTable" -> handleDescribeGlobalTable(request, region);
+            case "UpdateGlobalTable" -> handleUpdateGlobalTable(request, region);
+            case "ListGlobalTables" -> handleListGlobalTables(request, region);
             case "DescribeExport" -> handleDescribeExport(request, region);
             case "ListExports" -> handleListExports(request, region);
             case "ImportTable" -> handleImportTable(request, region);
@@ -386,6 +390,104 @@ public class DynamoDbJsonHandler {
         response.set("TableDescription", tableToNode(table));
         dynamoDbService.deleteTable(tableName, region);
         return Response.ok(response).build();
+    }
+
+    // ── Global tables, the 2017.11.29 API ────────────────────────────────────
+
+    private Response handleCreateGlobalTable(JsonNode request, String region) {
+        String name = request.path("GlobalTableName").asText();
+        TableDefinition table = dynamoDbService.createGlobalTable(
+                name, replicationGroupRegions(request), region);
+        ObjectNode root = objectMapper.createObjectNode();
+        root.set("GlobalTableDescription", globalTableDescription(table, name));
+        return Response.ok(root).build();
+    }
+
+    private Response handleDescribeGlobalTable(JsonNode request, String region) {
+        String name = request.path("GlobalTableName").asText();
+        TableDefinition table = dynamoDbService.describeGlobalTable(name, region);
+        ObjectNode root = objectMapper.createObjectNode();
+        root.set("GlobalTableDescription", globalTableDescription(table, name));
+        return Response.ok(root).build();
+    }
+
+    private Response handleUpdateGlobalTable(JsonNode request, String region) {
+        String name = request.path("GlobalTableName").asText();
+        List<String> adds = new ArrayList<>();
+        List<String> removes = new ArrayList<>();
+        for (JsonNode update : request.path("ReplicaUpdates")) {
+            String create = update.path("Create").path("RegionName").asText(null);
+            String delete = update.path("Delete").path("RegionName").asText(null);
+            if (create != null) {
+                adds.add(create);
+            }
+            if (delete != null) {
+                removes.add(delete);
+            }
+        }
+        TableDefinition table = dynamoDbService.updateGlobalTable(name, adds, removes, region);
+        ObjectNode root = objectMapper.createObjectNode();
+        root.set("GlobalTableDescription", globalTableDescription(table, name));
+        return Response.ok(root).build();
+    }
+
+    private Response handleListGlobalTables(JsonNode request, String region) {
+        String regionFilter = request.path("RegionName").asText(null);
+        ArrayNode list = objectMapper.createArrayNode();
+        for (TableDefinition table : dynamoDbService.listGlobalTables(regionFilter, region)) {
+            ObjectNode entry = objectMapper.createObjectNode();
+            entry.put("GlobalTableName", table.getTableName());
+            entry.set("ReplicationGroup", replicaNodes(table, objectMapper.createArrayNode(), false));
+            list.add(entry);
+        }
+        ObjectNode root = objectMapper.createObjectNode();
+        root.set("GlobalTables", list);
+        return Response.ok(root).build();
+    }
+
+    private static List<String> replicationGroupRegions(JsonNode request) {
+        List<String> regions = new ArrayList<>();
+        for (JsonNode replica : request.path("ReplicationGroup")) {
+            String name = replica.path("RegionName").asText(null);
+            if (name != null && !name.isBlank()) {
+                regions.add(name);
+            }
+        }
+        return regions;
+    }
+
+    private ObjectNode globalTableDescription(TableDefinition table, String globalTableName) {
+        ObjectNode description = objectMapper.createObjectNode();
+        description.put("GlobalTableName", globalTableName);
+        description.put("GlobalTableStatus", "ACTIVE");
+        description.put("GlobalTableArn", table.getTableArn());
+        if (table.getCreationDateTime() != null) {
+            description.put("CreationDateTime", table.getCreationDateTime().getEpochSecond());
+        }
+        description.set("ReplicationGroup", replicaNodes(table, objectMapper.createArrayNode(), true));
+        return description;
+    }
+
+    /**
+     * The replica list of a global table: every tracked replica plus the home region, which AWS
+     * reports as a replica of its own global table. ReplicaStatus is only carried by the
+     * description shapes, not by the ListGlobalTables entry.
+     */
+    private ArrayNode replicaNodes(TableDefinition table, ArrayNode replicas, boolean withStatus) {
+        LinkedHashSet<String> regions = new LinkedHashSet<>(
+                table.getReplicaRegions() != null ? table.getReplicaRegions() : List.of());
+        if (table.getGlobalTableHomeRegion() != null) {
+            regions.add(table.getGlobalTableHomeRegion());
+        }
+        for (String replicaRegion : regions) {
+            ObjectNode replica = objectMapper.createObjectNode();
+            replica.put("RegionName", replicaRegion);
+            if (withStatus) {
+                replica.put("ReplicaStatus", "ACTIVE");
+            }
+            replicas.add(replica);
+        }
+        return replicas;
     }
 
     private Response handleDescribeTable(JsonNode request, String region) {
