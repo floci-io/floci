@@ -23,6 +23,7 @@ import java.time.Instant;
 import java.util.Arrays;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Random;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -31,12 +32,14 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 @TestProfile(IotMqttEnabledIntegrationTest.EnabledMqttProfile.class)
 class IotMqttEnabledIntegrationTest {
 
+    static final int AWS_MAX_PAYLOAD = 128 * 1024;
     private static final int PORT = 18831;
     private static final String BROKER_URI = "tcp://127.0.0.1:" + PORT;
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
@@ -174,6 +177,44 @@ class IotMqttEnabledIntegrationTest {
         }
 
         awaitPublishedEvent(topic, payload);
+    }
+
+    @Test
+    void publishOfTheAwsMaximumPayloadIsDelivered() throws Exception {
+        String topic = "phase6/limit/" + System.nanoTime();
+        byte[] payload = randomPayload(AWS_MAX_PAYLOAD);
+
+        try (MqttTestClient subscriber = connectMqtt("limit-sub")) {
+            subscriber.subscribe(topic, 1);
+            try (MqttTestClient publisher = connectMqtt("limit-pub")) {
+                publisher.publish(topic, payload, 1);
+            }
+            assertArrayEquals(payload, subscriber.takePublish().payload());
+        }
+
+        awaitPublishedEvent(topic, payload);
+    }
+
+    @Test
+    void publishAboveTheAwsMaximumPayloadDisconnectsWithoutAckOrDelivery() throws Exception {
+        String topic = "phase6/over-limit/" + System.nanoTime();
+        byte[] after = "after".getBytes(StandardCharsets.UTF_8);
+
+        try (MqttTestClient subscriber = connectMqtt("over-limit-sub")) {
+            subscriber.subscribe(topic, 1);
+            try (MqttTestClient publisher = connectMqtt("over-limit-pub")) {
+                assertThrows(MqttException.class, () -> publisher.publish(topic, randomPayload(AWS_MAX_PAYLOAD + 1), 1));
+                publisher.awaitDisconnected();
+            }
+            try (MqttTestClient next = connectMqtt("over-limit-next")) {
+                next.publish(topic, after);
+            }
+            assertArrayEquals(after, subscriber.takePublish().payload(), "the oversized publish is never delivered");
+        }
+
+        awaitPublishedEvent(topic, after);
+        assertEquals(1, eventRecorder.recentEvents().stream().filter(event -> topic.equals(event.topic())).count(),
+                "the oversized publish reaches no rule");
     }
 
     @Test
@@ -408,6 +449,12 @@ class IotMqttEnabledIntegrationTest {
         return Mqtt5TestClient.connect(uniqueClientId(clientId));
     }
 
+    static byte[] randomPayload(int size) {
+        byte[] payload = new byte[size];
+        new Random(size).nextBytes(payload);
+        return payload;
+    }
+
     private byte[] json(String value) {
         return value.getBytes(StandardCharsets.UTF_8);
     }
@@ -494,7 +541,7 @@ class IotMqttEnabledIntegrationTest {
                 }
                 Thread.sleep(25);
             }
-            throw new AssertionError("MQTT connection stayed open after DeleteConnection");
+            throw new AssertionError("MQTT connection stayed open");
         }
 
         @Override
