@@ -110,12 +110,14 @@ final class ProjectionEvaluator {
             }
         }
         for (int i = 0; i < paths.size(); i++) {
+            List<PathSegment> first = paths.get(i);
             for (int j = i + 1; j < paths.size(); j++) {
-                if (covers(paths.get(i), paths.get(j)) || covers(paths.get(j), paths.get(i))) {
+                List<PathSegment> second = paths.get(j);
+                if (covers(first, second) || covers(second, first)) {
                     throw new AwsException("ValidationException",
                             "Invalid ProjectionExpression: Two document paths overlap with each other; "
-                            + "must remove or rewrite one of these paths; path one: " + render(paths.get(i))
-                            + ", path two: " + render(paths.get(j)), 400);
+                            + "must remove or rewrite one of these paths; path one: " + render(first)
+                            + ", path two: " + render(second), 400);
                 }
             }
         }
