@@ -1512,7 +1512,7 @@ public class DynamoDbJsonHandler {
         if (!"NONE".equals(returnCCBatch)) {
             costs = new LinkedHashMap<>();
             for (var entry : items.entrySet()) {
-                var costTable = dynamoDbService.requireTableForItemCall(entry.getKey(), region);
+                TableDefinition costTable = dynamoDbService.requireTableForItemCall(entry.getKey(), region);
                 var cost = DynamoDbWriteCapacity.Cost.zero();
                 for (var writeReq : entry.getValue()) {
                     var newItem = writeReq.has("PutRequest")
