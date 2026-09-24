@@ -167,7 +167,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         // Normalise signing aliases (s3express → s3) before anything keyed by scope runs:
         // action rules, ARN building and condition keys all match the canonical name, so an
         // alias would resolve to no action and be allowed through without any policy check.
-        String credentialScope = catalog.canonicalCredentialScope(rawScope);
+        String credentialScope = servingCredentialScope(catalog.canonicalCredentialScope(rawScope), ctx);
 
         String action = actionRegistry.resolve(credentialScope, ctx);
         if (action == null) {
@@ -312,6 +312,50 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             }
         }
         return false;
+    }
+
+    /**
+     * The scope of the service that will actually serve this request, which is not always the one
+     * the caller signed for. Everything keyed by scope (the action, its ARNs, its condition keys)
+     * has to describe the service that runs, or a policy naming that service never matches.
+     *
+     * <p>Only the claim decides this, never {@code X-Amz-Target} read directly: the target routes
+     * a request solely under the conditions {@link ProtocolClaimer} applies, and reading it here
+     * would let a header attached to, say, an S3 request move the authorization to another
+     * service while S3 still served it.
+     *
+     * <p>{@link WireProtocol#AWS_QUERY} is out of scope for this method, not solved by it. A Query
+     * claim carries the credential-scope service, which restates the caller whenever that service
+     * serves Query at all; when it does not, {@code AwsQueryController} falls through to inferring
+     * the service from the action name and can dispatch somewhere else entirely. Closing that needs
+     * the controller's inference shared rather than duplicated here, and is tracked separately.
+     */
+    private String servingCredentialScope(String claimedScope, ContainerRequestContext ctx) {
+        if (ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY) instanceof ProtocolClaim claim
+                && claim.service() != null
+                && claim.protocol() != WireProtocol.AWS_QUERY) {
+            return iamServiceScope(claim.service(), claimedScope);
+        }
+        return claimedScope;
+    }
+
+    /** The descriptor's own scope, keeping {@code claimedScope} when the descriptor accepts it. */
+    private String iamServiceScope(ServiceDescriptor descriptor, String claimedScope) {
+        if (descriptor.credentialScopes().contains(claimedScope)) {
+            return claimedScope;
+        }
+        // The service's own key, not just any scope it signs under: pricing accepts both
+        // "pricing" and "api.pricing", and only the former is the namespace its policies name.
+        // Sorting the rest keeps the choice stable, since credentialScopes is a Set.of whose
+        // iteration order changes per JVM run.
+        if (descriptor.credentialScopes().contains(descriptor.externalKey())) {
+            return descriptor.externalKey();
+        }
+        return descriptor.credentialScopes().stream()
+                .filter(scope -> scope.equals(catalog.canonicalCredentialScope(scope)))
+                .sorted()
+                .findFirst()
+                .orElse(descriptor.externalKey());
     }
 
     /** The same contexts with every object-tag key removed, keeping the principal and global keys. */
