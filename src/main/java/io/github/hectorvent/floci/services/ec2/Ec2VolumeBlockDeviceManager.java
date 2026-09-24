@@ -117,6 +117,21 @@ public class Ec2VolumeBlockDeviceManager implements Resettable {
     private static final Pattern VALID_DEVICE_PATTERN =
             Pattern.compile("^(/dev/)?[a-zA-Z0-9/_-]+$");
 
+    /**
+     * Shell helper function that finds loop devices backing a file across both BusyBox
+     * losetup (which outputs `/dev/loopX: 0 /path/file`) and util-linux losetup
+     * (which supports {@code losetup -j} and formats {@code losetup -a} as {@code /dev/loopX: [dev]:ino (/path/file)}).
+     */
+    private static final String SHELL_LOOP_FINDER =
+            "find_loops() {\n"
+            + "  f=\"$1\"\n"
+            + "  if losetup -j \"$f\" >/dev/null 2>&1; then\n"
+            + "    losetup -j \"$f\" 2>/dev/null | cut -d: -f1\n"
+            + "  else\n"
+            + "    losetup -a 2>/dev/null | grep -E \"[ (]$f[) ]?$\" | cut -d: -f1\n"
+            + "  fi\n"
+            + "}\n";
+
     private final Object loopAllocationLock = new Object();
 
     /**
@@ -133,9 +148,10 @@ public class Ec2VolumeBlockDeviceManager implements Resettable {
             return false;
         }
         String rawFile = "/volumes/" + volumeId + ".raw";
-        String script = "raw=\"$1\"\n"
+        String script = SHELL_LOOP_FINDER
+                + "raw=\"$1\"\n"
                 + "while true; do\n"
-                + "  loop=$(losetup -a 2>/dev/null | grep -F \" $raw\" | head -n1 | cut -d: -f1)\n"
+                + "  loop=$(find_loops \"$raw\" | head -n1)\n"
                 + "  [ -n \"$loop\" ] || break\n"
                 + "  losetup -d \"$loop\" 2>/dev/null || break\n"
                 + "done\n"
@@ -187,10 +203,11 @@ public class Ec2VolumeBlockDeviceManager implements Resettable {
 
         int effectiveSize = volume.getSize() > 0 ? volume.getSize() : 8;
         String rawFile = "/volumes/" + volume.getVolumeId() + ".raw";
-        String helperScript = "file=\"$1\"\n"
+        String helperScript = SHELL_LOOP_FINDER
+                + "file=\"$1\"\n"
                 + "size=\"$2\"\n"
                 + "[ -f \"$file\" ] || truncate -s \"${size}G\" \"$file\"\n"
-                + "loop=$(losetup -a 2>/dev/null | grep -F \" $file\" | head -n1 | cut -d: -f1)\n"
+                + "loop=$(find_loops \"$file\" | head -n1)\n"
                 + "if [ -z \"$loop\" ]; then\n"
                 + "  loop=$(losetup -f 2>/dev/null)\n"
                 + "  if [ -n \"$loop\" ]; then\n"
@@ -275,9 +292,10 @@ public class Ec2VolumeBlockDeviceManager implements Resettable {
         String helperId = ensureHelperContainer();
         if (helperId != null) {
             String rawFile = "/volumes/" + volume.getVolumeId() + ".raw";
-            String script = "raw=\"$1\"\n"
+            String script = SHELL_LOOP_FINDER
+                    + "raw=\"$1\"\n"
                     + "while true; do\n"
-                    + "  loop=$(losetup -a 2>/dev/null | grep -F \" $raw\" | head -n1 | cut -d: -f1)\n"
+                    + "  loop=$(find_loops \"$raw\" | head -n1)\n"
                     + "  [ -n \"$loop\" ] || break\n"
                     + "  losetup -d \"$loop\" 2>/dev/null || break\n"
                     + "done";
@@ -385,10 +403,11 @@ public class Ec2VolumeBlockDeviceManager implements Resettable {
         }
         String helperId = ensureHelperContainer();
         if (helperId != null) {
-            String script = "for f in /volumes/*.raw; do\n"
+            String script = SHELL_LOOP_FINDER
+                    + "for f in /volumes/*.raw; do\n"
                     + "  [ -f \"$f\" ] || continue\n"
                     + "  while true; do\n"
-                    + "    loop=$(losetup -a 2>/dev/null | grep -F \" $f\" | head -n1 | cut -d: -f1)\n"
+                    + "    loop=$(find_loops \"$f\" | head -n1)\n"
                     + "    [ -n \"$loop\" ] || break\n"
                     + "    losetup -d \"$loop\" 2>/dev/null || break\n"
                     + "  done\n"
