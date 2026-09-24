@@ -78,6 +78,7 @@ Broker scope:
 - Target real AWS IoT/device SDK style MQTT clients, not only handcrafted packet tests.
 - Support MQTT v3 and MQTT 5 CONNECT handling used by local compatibility tests.
 - Support QoS 0 and QoS 1 publish/subscribe behavior for the local AWS IoT slice.
+- Accept PUBLISH payloads up to 128 KB on 1883, 8883 and `/mqtt`, the AWS IoT Core quota (packets up to 146 KB including the variable header). A larger publish disconnects the client without acknowledgement, delivery or rule evaluation, as on AWS.
 - Serve MQTT over TLS on 8883 next to plaintext 1883 when TLS is enabled, and verify the device certificate and its `iot:Connect` permission there.
 - Keep the plaintext listener permissive; topic-level authorization (`Publish`, `Subscribe`, `Receive`) is follow-up scope.
 - Keep MQTT broker logging minimal.

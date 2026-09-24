@@ -489,6 +489,7 @@ class IotMqttEnabledIntegrationTest {
 
         static MqttTestClient connect(String clientId) throws MqttException {
             MqttClient client = new MqttClient(BROKER_URI, clientId, new MemoryPersistence());
+            client.setTimeToWait(10_000);
             MqttTestClient testClient = new MqttTestClient(client);
             client.setCallback(new MqttCallback() {
                 @Override

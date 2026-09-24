@@ -94,6 +94,12 @@ public class IotMqttBrokerService {
         }
     };
 
+    /** AWS IoT Core's MQTT payload quota; a larger PUBLISH disconnects the client unacknowledged. */
+    private static final int MAX_PAYLOAD_SIZE = 128 * 1024;
+
+    /** AWS IoT Core's MQTT packet quota, counted as Netty's decoder counts: variable header plus payload. */
+    private static final int MAX_PACKET_SIZE = 146 * 1024;
+
     private static final Pattern IPV4_LITERAL = Pattern.compile("\\d{1,3}(\\.\\d{1,3}){3}");
 
     private final EmulatorConfig config;
@@ -141,7 +147,8 @@ public class IotMqttBrokerService {
 
         MqttServer mqttServer = listen(new MqttServerOptions()
                 .setHost(config.services().iot().mqtt().host())
-                .setPort(config.services().iot().mqtt().port()), "IoT MQTT broker", false);
+                .setPort(config.services().iot().mqtt().port())
+                .setMaxMessageSize(MAX_PACKET_SIZE), "IoT MQTT broker", false);
         try {
             startTlsListener();
         } catch (RuntimeException e) {
@@ -176,6 +183,7 @@ public class IotMqttBrokerService {
         tlsServer = listen(new MqttServerOptions()
                 .setHost(config.services().iot().mqtt().host())
                 .setPort(tlsPort)
+                .setMaxMessageSize(MAX_PACKET_SIZE)
                 .setSsl(true)
                 .setKeyCertOptions(KeyCertOptions.wrap(manager))
                 .setTrustOptions(TrustOptions.wrap(ACCEPT_ANY_CLIENT_CERTIFICATE))
@@ -437,6 +445,12 @@ public class IotMqttBrokerService {
     }
 
     private void handlePublish(ClientSession session, MqttPublishMessage message) {
+        if (message.payload().length() > MAX_PAYLOAD_SIZE) {
+            LOG.debugv("IoT MQTT client {0} disconnected: {1} byte payload on {2} exceeds the AWS limit",
+                    session.clientId(), Integer.toString(message.payload().length()), message.topicName());
+            session.endpoint().close();
+            return;
+        }
         byte[] payload = message.payload().getBytes();
         if (message.qosLevel() == MqttQoS.EXACTLY_ONCE) {
             session.endpoint().close();

@@ -297,6 +297,7 @@ class IotMqttTlsIntegrationTest {
 
         static TlsClient connect(String clientId) throws Exception {
             MqttClient client = new MqttClient("ssl://127.0.0.1:" + TLS_PORT, clientId, new MemoryPersistence());
+            client.setTimeToWait(10_000);
             TlsClient tlsClient = new TlsClient(client);
             client.setCallback(new MqttCallback() {
                 @Override

@@ -398,6 +398,7 @@ public class IotMqttWebSocketIntegrationTest {
 
         static WsClient connect(String url, String clientId, String username, String password) throws Exception {
             MqttClient client = new MqttClient(url, clientId, new MemoryPersistence());
+            client.setTimeToWait(10_000);
             WsClient wsClient = new WsClient(client);
             client.setCallback(new MqttCallback() {
                 @Override
