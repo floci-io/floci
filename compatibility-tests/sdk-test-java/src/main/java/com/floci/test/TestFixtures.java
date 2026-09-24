@@ -114,6 +114,7 @@ import software.amazon.awssdk.services.scheduler.SchedulerClient;
 import software.amazon.awssdk.services.appconfig.AppConfigClient;
 import software.amazon.awssdk.services.appconfigdata.AppConfigDataClient;
 import software.amazon.awssdk.services.appintegrations.AppIntegrationsClient;
+import software.amazon.awssdk.services.dlm.DlmClient;
 import software.amazon.awssdk.services.datasync.DataSyncClient;
 import software.amazon.awssdk.services.autoscaling.AutoScalingClient;
 import software.amazon.awssdk.services.backup.BackupClient;
@@ -1214,6 +1215,14 @@ public final class TestFixtures {
 
     public static AppIntegrationsClient appIntegrationsClient() {
         return AppIntegrationsClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static DlmClient dlmClient() {
+        return DlmClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)

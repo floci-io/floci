@@ -158,6 +158,19 @@ services:
       - TagResourceByBody
       - TagResourcePut
       - UntagResourceByQuery
+  - service: dlm
+    doc: docs/services/dlm.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/dlm/DlmController.java, mode: rest }
+      - { path: src/main/java/io/github/hectorvent/floci/core/common/SharedTagsController.java, mode: rest }
+    rename_actions:
+      ListTags: ListTagsForResource
+      TagResourcePost: TagResource
+    exclude_actions:
+      - ListTagsByQuery
+      - TagResourceByBody
+      - TagResourcePut
+      - UntagResourceByQuery
   - service: connect
     doc: docs/services/connect.md
     sources:

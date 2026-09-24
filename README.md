@@ -302,7 +302,7 @@ Floci supports local emulation for application services, data services, eventing
 | Messaging and transfer | SES, Kinesis, MSK, Amazon MQ, Transfer Family, DataSync, IoT Core, Amazon Connect, Amazon AppIntegrations |
 | Security and governance | AWS Network Firewall, AWS RAM, Service Quotas, WAF v2, GuardDuty, Amazon Inspector, CloudTrail, CloudFront, Resource Groups Tagging API, Resource Explorer 2, CloudHSM v2, Organizations, AWS Account Management, IAM Access Analyzer, IAM Identity Center (SSO Admin, OIDC, Access Portal, SCIM), Identity Store, Amazon Macie, Amazon Detective, Security Hub, Amazon Verified Permissions, Control Catalog, Control Tower, Service Catalog, AWS Marketplace |
 | Cost and billing | AWS Budgets, Pricing, Cost Explorer, Cost and Usage Reports, BCM Pricing Calculator, BCM Data Exports |
-| Resilience, backup, and config | AWS FIS, AWS Backup, AWS Config, AppConfig, AppConfigData, CloudFormation, Cloud Control API |
+| Resilience, backup, and config | AWS FIS, AWS Backup, Amazon Data Lifecycle Manager, AWS Config, AppConfig, AppConfigData, CloudFormation, Cloud Control API |
 
 For operation-level compatibility, see the [Services Overview](https://floci.io/floci/services/).
 
@@ -376,6 +376,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | Application Auto Scaling | In-process | Scalable targets, target-tracking and step scaling policies, CloudWatch alarm creation, tagging (policies are stored but inert) |
 | Elastic Beanstalk | In-process | Applications, application versions, environments, configuration templates, platform and solution stack metadata |
 | AWS Backup | In-process | Vaults, backup plans, selections, simulated job lifecycle, recovery points |
+| Amazon Data Lifecycle Manager | In-process | Lifecycle policy and tag management; schedules are stored but do not create snapshots or AMIs |
 | AWS FIS | In-process | All 26 management APIs for templates, experiments, target accounts, action and target discovery, safety lever, tagging, and pagination; experiment execution is a safe control-plane simulation and does not inject faults into other services |
 | AWS Config | In-process | Config rules, evaluation-driven compliance (PutEvaluations, compliance details and summaries), configuration recorders, delivery channels, retention configuration, conformance packs, tagging |
 | Organizations | In-process | Organizations, roots, nested OUs, member accounts, all policy types with `FullAWSAccess` and effective-policy inheritance, trusted service access, delegated administrators, resource policy, and the full invitation/handshake flow; created accounts are usable Floci accounts and member accounts can read the organization they belong to |

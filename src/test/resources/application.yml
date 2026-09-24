@@ -489,6 +489,8 @@ floci:
       enabled: true
     appintegrations:
       enabled: true
+    dlm:
+      enabled: true
     cognitoidentity:
       enabled: true
     globalaccelerator:

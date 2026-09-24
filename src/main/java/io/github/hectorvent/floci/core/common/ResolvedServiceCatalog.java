@@ -58,6 +58,7 @@ import io.github.hectorvent.floci.services.securityhub.SecurityHubController;
 import io.github.hectorvent.floci.services.ssooidc.SsoOidcController;
 import io.github.hectorvent.floci.services.ssoportal.SsoPortalController;
 import io.github.hectorvent.floci.services.detective.DetectiveController;
+import io.github.hectorvent.floci.services.dlm.DlmController;
 import io.github.hectorvent.floci.services.aps.ApsController;
 import io.github.hectorvent.floci.services.controlcatalog.ControlCatalogController;
 import io.github.hectorvent.floci.services.controltower.ControlTowerControlController;
@@ -674,6 +675,10 @@ public class ResolvedServiceCatalog {
                         protocols(ServiceProtocol.REST_JSON),
                         Set.of(), Set.of("app-integrations"), Set.of(),
                         Set.of(io.github.hectorvent.floci.services.appintegrations.AppIntegrationsController.class)),
+                descriptor("dlm", "dlm", config.services().dlm().enabled(), true,
+                        "dlm", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("dlm"), Set.of(), Set.of(DlmController.class)),
                 descriptor("cognito-identity", "cognitoidentity",
                         config.services().cognitoidentity().enabled(), true,
                         "cognitoidentity", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,

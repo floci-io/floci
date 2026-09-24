@@ -89,7 +89,9 @@ public class TagDispatcher {
         } catch (AwsException e) {
             throw e;
         } catch (Exception e) {
-            String code = handler.strictTagValidation() ? "ValidationException" : "BadRequestException";
+            String code = handler.strictTagValidation()
+                    ? handler.tagValidationErrorCode()
+                    : "BadRequestException";
             throw new AwsException(code, e.getMessage(), 400);
         }
     }

@@ -599,6 +599,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>appintegrations</artifactId>
         </dependency>
+        <!-- Amazon Data Lifecycle Manager client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>dlm</artifactId>
+        </dependency>
         <!-- DataSync client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>

@@ -164,6 +164,7 @@ nav:
     - GuardDuty: services/guardduty.md
     - Connect: services/connect.md
     - AppIntegrations: services/appintegrations.md
+    - Amazon Data Lifecycle Manager: services/dlm.md
     - ACM: services/acm.md
     - ECS: services/ecs.md
     - ECR: services/ecr.md
