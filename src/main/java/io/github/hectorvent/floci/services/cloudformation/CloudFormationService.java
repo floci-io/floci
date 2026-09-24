@@ -1068,11 +1068,19 @@ public class CloudFormationService implements ResourceProvider {
 
     // ── DescribeStackEvents ───────────────────────────────────────────────────
 
+    /**
+     * The missing-stack message is the one AWS uses for this operation, {@code Stack [name] does
+     * not exist}, which differs from DescribeStacks' {@code Stack with id name does not exist}.
+     * Clients tell the two apart by text: the CDK's stack-event poller swallows exactly the
+     * bracketed form once a stack it is watching has been deleted (its stack lookup swallows the
+     * other), so any other wording escapes the poller and fails {@code cdk destroy --all} after
+     * the first stack.
+     */
     public List<StackEvent> describeStackEvents(String stackName, String region) {
         Stack stack = resolveStackForDescribe(stackName, region);
         if (stack == null) {
             throw new AwsException("ValidationError",
-                    "Stack with id " + stackName + " does not exist", 400);
+                    "Stack [" + stackName + "] does not exist", 400);
         }
         List<StackEvent> events = stack.eventsSnapshot();
         Collections.reverse(events);
