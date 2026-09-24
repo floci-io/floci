@@ -13,6 +13,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.time.Clock;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.util.List;
@@ -29,6 +30,7 @@ public class RuleScheduler implements Resettable {
     private final ObjectMapper objectMapper;
     private final String defaultAccountId;
     private final EventBridgeInvoker invoker;
+    private final Clock clock;
     private final ConcurrentHashMap<String, ScheduleContext> scheduleContexts = new ConcurrentHashMap<>();
 
     @Inject
@@ -36,10 +38,24 @@ public class RuleScheduler implements Resettable {
                           EmulatorConfig config,
                           ObjectMapper objectMapper,
                           EventBridgeInvoker invoker) {
+        this(vertx, config, objectMapper, invoker, Clock.systemUTC());
+    }
+
+    /**
+     * Test seam: lets cron next-fire computation be exercised deterministically instead
+     * of depending on wall-clock time. Production code always goes through the
+     * public/{@code @Inject} constructor, which pins the system clock.
+     */
+    RuleScheduler(Vertx vertx,
+                  EmulatorConfig config,
+                  ObjectMapper objectMapper,
+                  EventBridgeInvoker invoker,
+                  Clock clock) {
         this.vertx = vertx;
         this.objectMapper = objectMapper;
         this.defaultAccountId = config.defaultAccountId();
         this.invoker = invoker;
+        this.clock = clock;
     }
 
     @PreDestroy
@@ -92,7 +108,7 @@ public class RuleScheduler implements Resettable {
                                   Supplier<ScheduleData> dataSupplier) {
         long delayMs;
         try {
-            delayMs = ScheduleExpressionParser.millisUntilNextFire(scheduleExpr, ZonedDateTime.now());
+            delayMs = ScheduleExpressionParser.millisUntilNextFire(scheduleExpr, ZonedDateTime.now(clock));
         } catch (Exception e) {
             LOG.warnv("Failed to compute next fire time for rule {0}: {1}", ruleArn, e.getMessage());
             return;
@@ -100,8 +116,12 @@ public class RuleScheduler implements Resettable {
 
         long timerId = vertx.setTimer(delayMs, id -> {
             tick(dataSupplier);
-            scheduleContexts.remove(ruleArn);
-            scheduleCronFire(ruleArn, scheduleExpr, dataSupplier);
+            // Delivery can block. If DeleteRule, DisableRule or a restart replaced this timer
+            // meanwhile, end the chain instead of bringing the timer back.
+            ScheduleContext current = scheduleContexts.get(ruleArn);
+            if (current != null && current.timerId() == id && scheduleContexts.remove(ruleArn, current)) {
+                scheduleCronFire(ruleArn, scheduleExpr, dataSupplier);
+            }
         });
         scheduleContexts.put(ruleArn, new ScheduleContext(timerId, scheduleExpr));
         LOG.debugv("Scheduled cron fire for rule {0} in {1}ms", ruleArn, delayMs);
