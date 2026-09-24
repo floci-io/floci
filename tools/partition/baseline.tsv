@@ -35,7 +35,6 @@ arn-literal	src/main/java/io/github/hectorvent/floci/services/emrserverless/EmrS
 arn-literal	src/main/java/io/github/hectorvent/floci/services/guardduty/GuardDutyService.java	1
 arn-literal	src/main/java/io/github/hectorvent/floci/services/iam/AwsManagedPolicies.java	1
 arn-literal	src/main/java/io/github/hectorvent/floci/services/iam/IamPolicyEvaluator.java	4
-arn-literal	src/main/java/io/github/hectorvent/floci/services/iam/IamService.java	1
 arn-literal	src/main/java/io/github/hectorvent/floci/services/iam/SAMLAssertionVerifier.java	2
 arn-literal	src/main/java/io/github/hectorvent/floci/services/iam/SAMLProviderService.java	2
 arn-literal	src/main/java/io/github/hectorvent/floci/services/kinesisanalytics/KinesisAnalyticsV2JsonHandler.java	2
@@ -81,10 +80,8 @@ arn-regex-dialect	src/main/java/io/github/hectorvent/floci/services/apigateway/A
 arn-regex-dialect	src/main/java/io/github/hectorvent/floci/services/bedrockagentcorecontrol/BedrockAgentCoreGatewayRuleService.java	3
 arn-regex-dialect	src/main/java/io/github/hectorvent/floci/services/bedrockagentcorecontrol/BedrockAgentCoreToolsService.java	1
 arn-regex-dialect	src/main/java/io/github/hectorvent/floci/services/budgets/BudgetsService.java	2
-arn-regex-dialect	src/main/java/io/github/hectorvent/floci/services/ce/CostAnomalyService.java	1
 arn-regex-dialect	src/main/java/io/github/hectorvent/floci/services/controltower/ControlTowerControlService.java	1
 arn-regex-dialect	src/main/java/io/github/hectorvent/floci/services/controltower/ControlTowerService.java	1
-arn-regex-dialect	src/main/java/io/github/hectorvent/floci/services/ecr/EcrService.java	1
 arn-regex-dialect	src/main/java/io/github/hectorvent/floci/services/firehose/ProcessingConfigurationValidator.java	1
 arn-regex-dialect	src/main/java/io/github/hectorvent/floci/services/kms/KmsService.java	2
 arn-regex-dialect	src/main/java/io/github/hectorvent/floci/services/lambda/LambdaService.java	1
@@ -115,7 +112,6 @@ dns-suffix	src/main/java/io/github/hectorvent/floci/services/cloudtrail/CloudTra
 dns-suffix	src/main/java/io/github/hectorvent/floci/services/cloudtrail/CloudTrailService.java	5
 dns-suffix	src/main/java/io/github/hectorvent/floci/services/cognito/CognitoService.java	1
 dns-suffix	src/main/java/io/github/hectorvent/floci/services/connect/ConnectService.java	1
-dns-suffix	src/main/java/io/github/hectorvent/floci/services/ecr/EcrService.java	1
 dns-suffix	src/main/java/io/github/hectorvent/floci/services/eks/EksOidcService.java	2
 dns-suffix	src/main/java/io/github/hectorvent/floci/services/eks/EksPodIdentityCredentialsController.java	1
 dns-suffix	src/main/java/io/github/hectorvent/floci/services/eks/EksPodIdentityWebhook.java	2
