@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.appsync.graphql.SchemaCreationWorker;
 import io.github.hectorvent.floci.services.appsync.graphql.SchemaRegistry;
+import io.github.hectorvent.floci.services.appsync.graphql.auth.LambdaAuthorizerCache;
 import io.github.hectorvent.floci.services.appsync.model.*;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
@@ -57,6 +58,7 @@ public class AppSyncService {
     private final ObjectMapper objectMapper;
     private final Clock clock;
     private final String baseUrl;
+    private final LambdaAuthorizerCache lambdaAuthorizerCache;
 
     @Inject
     public AppSyncService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
@@ -64,7 +66,8 @@ public class AppSyncService {
                           Instance<RequestContext> requestContextInstance, ObjectMapper objectMapper,
                           AccountAwareStorageBackend<SchemaCreationStatus> schemaStatusStore,
                           AccountAwareStorageBackend<String> schemaStore,
-                          Clock clock) {
+                          Clock clock,
+                          LambdaAuthorizerCache lambdaAuthorizerCache) {
         this.apiStore = storageFactory.create("appsync", "appsync-apis.json", new TypeReference<>() {});
         this.schemaStore = schemaStore;
         this.schemaStatusStore = schemaStatusStore;
@@ -84,6 +87,7 @@ public class AppSyncService {
         this.objectMapper = objectMapper;
         this.clock = clock;
         this.baseUrl = trimTrailingSlash(config.effectiveBaseUrl());
+        this.lambdaAuthorizerCache = lambdaAuthorizerCache;
     }
 
     // ──────────────────────────── GraphQL API ────────────────────────────
@@ -228,6 +232,7 @@ public class AppSyncService {
         deleteApiKeysForApi(apiId);
         deleteChannelNamespacesForApi(apiId);
         deleteDomainAssociationsForApi(apiId);
+        lambdaAuthorizerCache.evictApi(apiId);
         LOG.infov("Deleted GraphQL API {0}", apiId);
     }
 

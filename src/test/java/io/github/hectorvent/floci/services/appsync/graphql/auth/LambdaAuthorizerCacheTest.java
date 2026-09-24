@@ -52,6 +52,51 @@ class LambdaAuthorizerCacheTest {
         assertTrue(cache.get("api-1", "tok").isEmpty());
     }
 
+    @Test
+    void distinctTokensNeverExceedCapacity() {
+        Clock clock = Clock.fixed(Instant.parse("2026-01-01T00:00:00Z"), ZoneOffset.UTC);
+        LambdaAuthorizerCache cache = new LambdaAuthorizerCache(clock);
+        LambdaAuthorizerResult result = new LambdaAuthorizerResult(true, List.of(), Map.of(), 300, 10);
+
+        for (int i = 0; i < LambdaAuthorizerCache.MAX_ENTRIES + 50; i++) {
+            cache.put("api-1", "tok-" + i, result, 300);
+        }
+
+        assertTrue(cache.size() <= LambdaAuthorizerCache.MAX_ENTRIES,
+                "cache grew to " + cache.size() + " entries, cap is " + LambdaAuthorizerCache.MAX_ENTRIES);
+    }
+
+    @Test
+    void expiredEntriesAreSweptOnPutEvenWithoutBeingRead() {
+        MutableClock clock = new MutableClock(Instant.parse("2026-01-01T00:00:00Z"));
+        LambdaAuthorizerCache cache = new LambdaAuthorizerCache(clock);
+        LambdaAuthorizerResult result = new LambdaAuthorizerResult(true, List.of(), Map.of(), 5, 10);
+        for (int i = 0; i < 10; i++) {
+            cache.put("api-1", "tok-" + i, result, 5);
+        }
+        assertEquals(10, cache.size());
+
+        clock.advance(Duration.ofSeconds(6));
+        cache.put("api-1", "tok-new", result, 5);
+
+        // The 10 short-lived entries expired without ever being read again; a put still sweeps
+        // them, so only the freshly-added entry remains.
+        assertEquals(1, cache.size());
+    }
+
+    @Test
+    void evictApiRemovesOnlyThatApisEntries() {
+        LambdaAuthorizerCache cache = new LambdaAuthorizerCache();
+        LambdaAuthorizerResult result = new LambdaAuthorizerResult(true, List.of(), Map.of(), 300, 10);
+        cache.put("api-1", "tok", result, 300);
+        cache.put("api-2", "tok", result, 300);
+
+        cache.evictApi("api-1");
+
+        assertTrue(cache.get("api-1", "tok").isEmpty());
+        assertTrue(cache.get("api-2", "tok").isPresent());
+    }
+
     private static final class MutableClock extends Clock {
         private Instant instant;
         private MutableClock(Instant instant) {
