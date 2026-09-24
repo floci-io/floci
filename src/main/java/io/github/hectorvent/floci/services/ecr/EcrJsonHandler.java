@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.ecr.model.Image;
 import io.github.hectorvent.floci.services.ecr.model.ImageDetail;
 import io.github.hectorvent.floci.services.ecr.model.ImageFailure;
 import io.github.hectorvent.floci.services.ecr.model.ImageIdentifier;
+import io.github.hectorvent.floci.services.ecr.model.PullThroughCacheRule;
 import io.github.hectorvent.floci.services.ecr.model.Repository;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -60,6 +61,9 @@ public class EcrJsonHandler {
             case "SetRepositoryPolicy" -> handleSetRepositoryPolicy(request, region);
             case "GetRepositoryPolicy" -> handleGetRepositoryPolicy(request, region);
             case "DeleteRepositoryPolicy" -> handleDeleteRepositoryPolicy(request, region);
+            case "CreatePullThroughCacheRule" -> handleCreatePullThroughCacheRule(request, region);
+            case "DeletePullThroughCacheRule" -> handleDeletePullThroughCacheRule(request, region);
+            case "DescribePullThroughCacheRules" -> handleDescribePullThroughCacheRules(request, region);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnsupportedOperation",
                             "Operation " + action + " is not supported."))
@@ -299,6 +303,42 @@ public class EcrJsonHandler {
     // ============================================================
     // Lifecycle + repository policies
     // ============================================================
+
+    // ── Pull through cache rules ────────────────────────────────────────────
+
+    private Response handleCreatePullThroughCacheRule(JsonNode request, String region) {
+        PullThroughCacheRule rule = service.createPullThroughCacheRule(region,
+                text(request, "registryId"),
+                text(request, "ecrRepositoryPrefix"),
+                text(request, "upstreamRegistryUrl"),
+                text(request, "upstreamRegistry"),
+                text(request, "credentialArn"),
+                text(request, "customRoleArn"),
+                text(request, "upstreamRepositoryPrefix"));
+        return Response.ok(rule).build();
+    }
+
+    private Response handleDeletePullThroughCacheRule(JsonNode request, String region) {
+        PullThroughCacheRule rule = service.deletePullThroughCacheRule(region,
+                text(request, "registryId"), text(request, "ecrRepositoryPrefix"));
+        return Response.ok(rule).build();
+    }
+
+    private Response handleDescribePullThroughCacheRules(JsonNode request, String region) {
+        List<String> prefixes = new ArrayList<>();
+        for (JsonNode prefix : request.path("ecrRepositoryPrefixes")) {
+            if (prefix.isTextual()) {
+                prefixes.add(prefix.asText());
+            }
+        }
+        List<PullThroughCacheRule> rules = service.describePullThroughCacheRules(
+                region, text(request, "registryId"), prefixes);
+        return Response.ok(Map.of("pullThroughCacheRules", rules)).build();
+    }
+
+    private static String text(JsonNode request, String field) {
+        return request.hasNonNull(field) ? request.get(field).asText() : null;
+    }
 
     private Response handlePutLifecyclePolicy(JsonNode request, String region) {
         String repo = request.path("repositoryName").asText(null);

@@ -66,6 +66,7 @@ class EcrServiceTest {
         service = new EcrService(
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
                 registryManager,
                 config,
                 regionResolver);
@@ -365,6 +366,7 @@ class EcrServiceTest {
         AccountAwareStorageBackend<Repository> repositories = AccountAwareStorageBackend.inMemory(ACCOUNT);
         EcrService accountAwareService = new EcrService(
                 repositories,
+                new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 registryManager,
                 Mockito.mock(EmulatorConfig.class),

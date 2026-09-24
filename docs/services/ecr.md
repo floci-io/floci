@@ -20,6 +20,7 @@
 | `TagResource` / `UntagResource` / `ListTagsForResource` | Resource tagging |
 | `PutLifecyclePolicy` / `GetLifecyclePolicy` / `DeleteLifecyclePolicy` | Lifecycle policy round-trip (stored, not enforced) |
 | `SetRepositoryPolicy` / `GetRepositoryPolicy` / `DeleteRepositoryPolicy` | Repository policy round-trip (stored, not enforced) |
+| `CreatePullThroughCacheRule` / `DescribePullThroughCacheRules` / `DeletePullThroughCacheRule` | Pull through cache rules (stored, nothing is proxied upstream) |
 
 ### Admin Endpoints
 

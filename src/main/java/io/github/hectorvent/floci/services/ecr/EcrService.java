@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.services.ecr.model.ImageFailure;
 import io.github.hectorvent.floci.services.ecr.model.ImageIdentifier;
 import io.github.hectorvent.floci.services.ecr.model.ImageMetadata;
 import io.github.hectorvent.floci.services.ecr.model.Image;
+import io.github.hectorvent.floci.services.ecr.model.PullThroughCacheRule;
 import io.github.hectorvent.floci.services.ecr.model.Repository;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.ecr.registry.RegistryHttpClient;
@@ -28,10 +29,12 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 @ApplicationScoped
 public class EcrService implements ResourceProvider {
@@ -43,6 +46,7 @@ public class EcrService implements ResourceProvider {
 
     private final StorageBackend<String, Repository> repoStore;
     private final StorageBackend<String, ImageMetadata> imageMetaStore;
+    private final StorageBackend<String, PullThroughCacheRule> pullThroughRuleStore;
     private final EcrRegistryManager registryManager;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
@@ -56,20 +60,163 @@ public class EcrService implements ResourceProvider {
                         new TypeReference<Map<String, Repository>>() {}),
                 factory.create("ecr", "image-metadata.json",
                         new TypeReference<Map<String, ImageMetadata>>() {}),
+                factory.create("ecr", "pull-through-cache-rules.json",
+                        new TypeReference<Map<String, PullThroughCacheRule>>() {}),
                 registryManager, config, regionResolver);
     }
 
     EcrService(StorageBackend<String, Repository> repoStore,
                StorageBackend<String, ImageMetadata> imageMetaStore,
+               StorageBackend<String, PullThroughCacheRule> pullThroughRuleStore,
                EcrRegistryManager registryManager,
                EmulatorConfig config,
                RegionResolver regionResolver) {
         this.repoStore = repoStore;
         this.imageMetaStore = imageMetaStore;
+        this.pullThroughRuleStore = pullThroughRuleStore;
         this.registryManager = registryManager;
         this.config = config;
         this.regionResolver = regionResolver;
         this.registryManager.setReconcileHook(this::reconcileFromCatalog);
+    }
+
+    // ── Pull through cache rules ────────────────────────────────────────────
+
+    /** The model's upstream registry enum, and the URL AWS documents for each. */
+    private static final Map<String, String> UPSTREAM_REGISTRY_URLS = Map.of(
+            "ecr-public", "public.ecr.aws",
+            "docker-hub", "registry-1.docker.io",
+            "github-container-registry", "ghcr.io",
+            "gitlab-container-registry", "registry.gitlab.com",
+            "k8s", "registry.k8s.io",
+            "quay", "quay.io");
+    private static final Set<String> UPSTREAM_REGISTRIES = Set.of(
+            "ecr", "ecr-public", "quay", "k8s", "docker-hub", "github-container-registry",
+            "azure-container-registry", "gitlab-container-registry", "chainguard");
+    private static final Pattern PREFIX = Pattern.compile(
+            "^([a-z0-9]+((\\.|_|__|-+)[a-z0-9]+)*(/[a-z0-9]+((\\.|_|__|-+)[a-z0-9]+)*)*/?|ROOT)$");
+    private static final int PREFIX_MIN = 2;
+    private static final int PREFIX_MAX = 30;
+    private static final int CUSTOM_ROLE_ARN_MAX = 2048;
+
+    /**
+     * Nothing is cached through these. The rule is stored and reported back, and a pull against the
+     * prefix is not proxied to the upstream registry, so an image only appears once it is pushed.
+     */
+    public PullThroughCacheRule createPullThroughCacheRule(String region, String registryId,
+                                                           String ecrRepositoryPrefix,
+                                                           String upstreamRegistryUrl,
+                                                           String upstreamRegistry,
+                                                           String credentialArn,
+                                                           String customRoleArn,
+                                                           String upstreamRepositoryPrefix) {
+        String prefix = normalizePrefix(ecrRepositoryPrefix);
+        validatePrefix(prefix);
+        if (upstreamRegistryUrl == null || upstreamRegistryUrl.isBlank()) {
+            throw new AwsException("InvalidParameterException",
+                    "upstreamRegistryUrl is required.", 400);
+        }
+        if (upstreamRegistry != null && !UPSTREAM_REGISTRIES.contains(upstreamRegistry)) {
+            throw new AwsException("UnsupportedUpstreamRegistryException",
+                    "The upstream registry " + upstreamRegistry + " is not supported.", 400);
+        }
+        if (customRoleArn != null && customRoleArn.length() > CUSTOM_ROLE_ARN_MAX) {
+            throw new AwsException("InvalidParameterException",
+                    "customRoleArn must be at most " + CUSTOM_ROLE_ARN_MAX + " characters.", 400);
+        }
+        String account = effectiveAccount(registryId);
+        String key = pullThroughKey(region, account, prefix);
+        if (pullThroughRuleStore.get(key).isPresent()) {
+            throw new AwsException("PullThroughCacheRuleAlreadyExistsException",
+                    "A pull through cache rule with the repository prefix " + prefix
+                            + " already exists.", 400);
+        }
+        PullThroughCacheRule rule = new PullThroughCacheRule();
+        rule.setEcrRepositoryPrefix(prefix);
+        rule.setUpstreamRegistryUrl(upstreamRegistryUrl);
+        rule.setUpstreamRegistry(upstreamRegistry != null ? upstreamRegistry
+                : registryNameForUrl(upstreamRegistryUrl));
+        rule.setRegistryId(account);
+        rule.setCredentialArn(credentialArn);
+        rule.setCustomRoleArn(customRoleArn);
+        rule.setUpstreamRepositoryPrefix(upstreamRepositoryPrefix);
+        rule.setCreatedAt(Instant.now().getEpochSecond());
+        pullThroughRuleStore.put(key, rule);
+        LOG.infov("Created pull through cache rule {0} -> {1}", prefix, upstreamRegistryUrl);
+        return rule;
+    }
+
+    public PullThroughCacheRule deletePullThroughCacheRule(String region, String registryId,
+                                                           String ecrRepositoryPrefix) {
+        String prefix = normalizePrefix(ecrRepositoryPrefix);
+        String account = effectiveAccount(registryId);
+        String key = pullThroughKey(region, account, prefix);
+        PullThroughCacheRule rule = pullThroughRuleStore.get(key)
+                .orElseThrow(() -> new AwsException("PullThroughCacheRuleNotFoundException",
+                        "The pull through cache rule with the repository prefix " + prefix
+                                + " does not exist.", 400));
+        pullThroughRuleStore.delete(key);
+        return rule;
+    }
+
+    /** Every rule in the registry, or only the named prefixes when the request lists some. */
+    public List<PullThroughCacheRule> describePullThroughCacheRules(String region, String registryId,
+                                                                    List<String> prefixes) {
+        String account = effectiveAccount(registryId);
+        String keyPrefix = pullThroughKeyPrefix(region, account);
+        List<PullThroughCacheRule> rules = pullThroughRuleStore.scan(k -> k.startsWith(keyPrefix));
+        if (prefixes == null || prefixes.isEmpty()) {
+            return rules.stream()
+                    .sorted(Comparator.comparing(PullThroughCacheRule::getEcrRepositoryPrefix))
+                    .toList();
+        }
+        Set<String> wanted = prefixes.stream().map(EcrService::normalizePrefix).collect(Collectors.toSet());
+        // A named prefix that has no rule is an error, not an omission from the list.
+        for (String wantedPrefix : wanted) {
+            if (rules.stream().noneMatch(r -> wantedPrefix.equals(r.getEcrRepositoryPrefix()))) {
+                throw new AwsException("PullThroughCacheRuleNotFoundException",
+                        "The pull through cache rule with the repository prefix " + wantedPrefix
+                                + " does not exist.", 400);
+            }
+        }
+        return rules.stream()
+                .filter(r -> wanted.contains(r.getEcrRepositoryPrefix()))
+                .sorted(Comparator.comparing(PullThroughCacheRule::getEcrRepositoryPrefix))
+                .toList();
+    }
+
+    /** The model documents an assumed trailing slash on the prefix, so it is never stored. */
+    private static String normalizePrefix(String prefix) {
+        if (prefix == null) {
+            return null;
+        }
+        String trimmed = prefix.trim();
+        return trimmed.endsWith("/") ? trimmed.substring(0, trimmed.length() - 1) : trimmed;
+    }
+
+    private static void validatePrefix(String prefix) {
+        if (prefix == null || prefix.length() < PREFIX_MIN || prefix.length() > PREFIX_MAX
+                || !PREFIX.matcher(prefix).matches()) {
+            throw new AwsException("InvalidParameterException",
+                    "ecrRepositoryPrefix must be " + PREFIX_MIN + " to " + PREFIX_MAX
+                            + " characters and match " + PREFIX.pattern(), 400);
+        }
+    }
+
+    private static String registryNameForUrl(String url) {
+        return UPSTREAM_REGISTRY_URLS.entrySet().stream()
+                .filter(e -> e.getValue().equals(url))
+                .map(Map.Entry::getKey)
+                .findFirst()
+                .orElse(null);
+    }
+
+    private static String pullThroughKeyPrefix(String region, String account) {
+        return "ptc::" + region + "::" + account + "::";
+    }
+
+    private static String pullThroughKey(String region, String account, String prefix) {
+        return pullThroughKeyPrefix(region, account) + prefix;
     }
 
     /**
