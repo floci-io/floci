@@ -8,7 +8,6 @@ import io.github.hectorvent.floci.services.eventbridge.model.Target;
 import io.vertx.core.Vertx;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
@@ -58,7 +57,6 @@ class RuleSchedulerTest {
     }
 
     @Test
-    @DisplayName("deleting a rule while its cron tick is delivering does not resurrect the timer")
     void deletedRuleDoesNotResurrectCronTimerDuringInFlightTick() throws InterruptedException {
         CountDownLatch invocationStarted = new CountDownLatch(1);
         CountDownLatch releaseInvocation = new CountDownLatch(1);
@@ -78,14 +76,15 @@ class RuleSchedulerTest {
 
         releaseInvocation.countDown();
 
-        await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
-                assertFalse(scheduler.isRunning(RULE_ARN),
-                        "deleted rule must not have its cron timer resurrected by the in-flight tick"));
-        assertEquals(1, invoker.invocationCount(), "target must not be invoked again after deletion");
+        // The clock sits one second before a cron fire, so a re-armed timer would deliver again
+        // within about a second. Hold the check past that window.
+        await().during(Duration.ofSeconds(2)).atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+            assertFalse(scheduler.isRunning(RULE_ARN), "deleted rule must not have its cron timer re-armed");
+            assertEquals(1, invoker.invocationCount(), "target must not be invoked again after deletion");
+        });
     }
 
     @Test
-    @DisplayName("disabling a rule while its cron tick is delivering does not resurrect the timer")
     void disabledRuleDoesNotResurrectCronTimerDuringInFlightTick() throws InterruptedException {
         CountDownLatch invocationStarted = new CountDownLatch(1);
         CountDownLatch releaseInvocation = new CountDownLatch(1);
@@ -105,10 +104,12 @@ class RuleSchedulerTest {
 
         releaseInvocation.countDown();
 
-        await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
-                assertFalse(scheduler.isRunning(RULE_ARN),
-                        "disabled rule must not have its cron timer resurrected by the in-flight tick"));
-        assertEquals(1, invoker.invocationCount(), "target must not be invoked again after disabling");
+        // The clock sits one second before a cron fire, so a re-armed timer would deliver again
+        // within about a second. Hold the check past that window.
+        await().during(Duration.ofSeconds(2)).atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+            assertFalse(scheduler.isRunning(RULE_ARN), "disabled rule must not have its cron timer re-armed");
+            assertEquals(1, invoker.invocationCount(), "target must not be invoked again after disabling");
+        });
     }
 
     private static RuleScheduler.ScheduleData toScheduleData(Rule rule) {

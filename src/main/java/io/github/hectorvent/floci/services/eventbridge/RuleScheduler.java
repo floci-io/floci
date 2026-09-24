@@ -85,7 +85,7 @@ public class RuleScheduler implements Resettable {
             if (ScheduleExpressionParser.isRateExpression(scheduleExpr)) {
                 startRateScheduler(ruleArn, scheduleExpr, dataSupplier);
             } else if (ScheduleExpressionParser.isCronExpression(scheduleExpr)) {
-                scheduleCronFire(ruleArn, scheduleExpr, dataSupplier);
+                scheduleCronFire(ruleArn, scheduleExpr, dataSupplier, null);
             } else {
                 LOG.warnv("Unknown schedule expression format for rule {0}: {1}", ruleArn, scheduleExpr);
             }
@@ -104,26 +104,39 @@ public class RuleScheduler implements Resettable {
         LOG.debugv("Started rate scheduler for rule {0} with interval {1}ms", ruleArn, intervalMs);
     }
 
+    /**
+     * Arms the next cron fire. {@code previous} is the context of the fire that is re-arming,
+     * or {@code null} when the rule is starting.
+     */
     private void scheduleCronFire(String ruleArn, String scheduleExpr,
-                                  Supplier<ScheduleData> dataSupplier) {
+                                  Supplier<ScheduleData> dataSupplier, ScheduleContext previous) {
         long delayMs;
         try {
             delayMs = ScheduleExpressionParser.millisUntilNextFire(scheduleExpr, ZonedDateTime.now(clock));
         } catch (Exception e) {
             LOG.warnv("Failed to compute next fire time for rule {0}: {1}", ruleArn, e.getMessage());
+            if (previous != null) {
+                scheduleContexts.remove(ruleArn, previous);
+            }
             return;
         }
 
         long timerId = vertx.setTimer(delayMs, id -> {
             tick(dataSupplier);
-            // Delivery can block. If DeleteRule, DisableRule or a restart replaced this timer
-            // meanwhile, end the chain instead of bringing the timer back.
             ScheduleContext current = scheduleContexts.get(ruleArn);
-            if (current != null && current.timerId() == id && scheduleContexts.remove(ruleArn, current)) {
-                scheduleCronFire(ruleArn, scheduleExpr, dataSupplier);
+            if (current != null && current.timerId() == id) {
+                scheduleCronFire(ruleArn, scheduleExpr, dataSupplier, current);
             }
         });
-        scheduleContexts.put(ruleArn, new ScheduleContext(timerId, scheduleExpr));
+        ScheduleContext next = new ScheduleContext(timerId, scheduleExpr);
+        if (previous == null) {
+            scheduleContexts.put(ruleArn, next);
+        } else if (!scheduleContexts.replace(ruleArn, previous, next)) {
+            // DeleteRule, DisableRule or a restart replaced this fire's context while it was
+            // delivering. Swapping in one step means a stop is either seen here or cancels next.
+            vertx.cancelTimer(timerId);
+            return;
+        }
         LOG.debugv("Scheduled cron fire for rule {0} in {1}ms", ruleArn, delayMs);
     }
 
