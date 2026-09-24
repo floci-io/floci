@@ -6,8 +6,13 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -60,6 +65,39 @@ class LambdaAuthorizerCacheTest {
 
         for (int i = 0; i < LambdaAuthorizerCache.MAX_ENTRIES + 50; i++) {
             cache.put("api-1", "tok-" + i, result, 300);
+        }
+
+        assertTrue(cache.size() <= LambdaAuthorizerCache.MAX_ENTRIES,
+                "cache grew to " + cache.size() + " entries, cap is " + LambdaAuthorizerCache.MAX_ENTRIES);
+    }
+
+    @Test
+    void concurrentDistinctTokensNeverExceedCapacity() throws Exception {
+        Clock clock = Clock.fixed(Instant.parse("2026-01-01T00:00:00Z"), ZoneOffset.UTC);
+        LambdaAuthorizerCache cache = new LambdaAuthorizerCache(clock);
+        LambdaAuthorizerResult result = new LambdaAuthorizerResult(true, List.of(), Map.of(), 300, 10);
+        int threads = 16;
+        int putsPerThread = 500;
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        try {
+            List<Future<?>> puts = new ArrayList<>();
+            for (int t = 0; t < threads; t++) {
+                int thread = t;
+                puts.add(pool.submit(() -> {
+                    start.await();
+                    for (int i = 0; i < putsPerThread; i++) {
+                        cache.put("api-1", "tok-" + thread + "-" + i, result, 300);
+                    }
+                    return null;
+                }));
+            }
+            start.countDown();
+            for (Future<?> put : puts) {
+                put.get();
+            }
+        } finally {
+            pool.shutdownNow();
         }
 
         assertTrue(cache.size() <= LambdaAuthorizerCache.MAX_ENTRIES,

@@ -43,7 +43,9 @@ public class LambdaAuthorizerCache {
         return Optional.of(entry.result);
     }
 
-    public void put(String apiId, String token, LambdaAuthorizerResult result, int ttlSeconds) {
+    // Synchronized so the sweep, capacity check, eviction and insert happen as one step;
+    // otherwise concurrent puts all see room (or evict the same entry) and overshoot the cap.
+    public synchronized void put(String apiId, String token, LambdaAuthorizerResult result, int ttlSeconds) {
         if (result == null || ttlSeconds <= 0 || result.responseSizeBytes() >= MAX_CACHEABLE_BYTES) {
             return;
         }
