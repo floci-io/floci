@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ec2;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
+import io.github.hectorvent.floci.testing.MutableClock;
 import io.vertx.core.Vertx;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -14,11 +15,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.time.Clock;
 import java.time.Duration;
-import java.time.Instant;
-import java.time.ZoneId;
-import java.time.ZoneOffset;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -36,7 +33,7 @@ class Ec2MetadataTokenTest {
     private static final String TTL_HEADER = "X-aws-ec2-metadata-token-ttl-seconds";
     private static final String TOKEN_HEADER = "X-aws-ec2-metadata-token";
 
-    private final MutableClock clock = new MutableClock(Instant.parse("2026-01-01T00:00:00Z"));
+    private final MutableClock clock = new MutableClock();
     private final HttpClient client = HttpClient.newHttpClient();
     private Vertx vertx;
     private Ec2MetadataServer server;
@@ -123,32 +120,5 @@ class Ec2MetadataTokenTest {
         return client.send(HttpRequest.newBuilder(URI.create(endpoint + "/latest/meta-data/instance-id"))
                         .header(TOKEN_HEADER, token).GET().build(),
                 HttpResponse.BodyHandlers.ofString());
-    }
-
-    private static final class MutableClock extends Clock {
-        private Instant now;
-
-        MutableClock(Instant start) {
-            this.now = start;
-        }
-
-        void advance(Duration duration) {
-            now = now.plus(duration);
-        }
-
-        @Override
-        public Instant instant() {
-            return now;
-        }
-
-        @Override
-        public ZoneId getZone() {
-            return ZoneOffset.UTC;
-        }
-
-        @Override
-        public Clock withZone(ZoneId zone) {
-            return this;
-        }
     }
 }
