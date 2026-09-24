@@ -149,16 +149,33 @@ public class OpenSearchService implements ResourceProvider {
 
         if (config.services().opensearch().mock()) {
             domain.setProcessing(false);
+            domain.setEndpoint(synthesizedEndpoint(domainName, region));
         } else {
             domain.setProcessing(true);
             if (!domainManager.tryStartDomain(domain)) {
                 domain.setProcessing(false);
+                domain.setEndpoint(synthesizedEndpoint(domainName, region));
             }
         }
 
         domainStore.put(domainName, domain);
         LOG.infov("Created OpenSearch domain: {0}", domainName);
         return domain;
+    }
+
+    /**
+     * The endpoint reported for a domain with no container behind it, either because the service is
+     * mocked or because the container could not be started.
+     *
+     * <p>A domain that reports {@code Processing false} with a blank endpoint is a domain the AWS
+     * SDK waiters never finish waiting on: they poll until the domain is active AND names an
+     * endpoint, so an empty one leaves a create hanging until the caller's own deadline. The shape
+     * is AWS's, {@code search-<domain>-<suffix>.<region>.es.amazonaws.com}, and the suffix is
+     * derived from the name so it survives a restart.
+     */
+    private static String synthesizedEndpoint(String domainName, String region) {
+        String suffix = Integer.toHexString(domainName.hashCode() & 0x7fffffff);
+        return "search-" + domainName + "-" + suffix + "." + region + ".es.amazonaws.com";
     }
 
     public Domain describeDomain(String domainName) {
