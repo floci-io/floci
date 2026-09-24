@@ -33,7 +33,12 @@ Floci Lambda runs your function code locally inside real Docker containers - clo
 | `GetPolicy` | Get the function resource policy |
 | `RemovePermission` | Remove a resource-policy statement |
 | `GetFunctionCodeSigningConfig` | Return code-signing config (always empty) |
-| `ListFunctionsByCodeSigningConfig` | Validates the ARN; no code-signing config can exist, so every well-formed ARN returns `ResourceNotFoundException` |
+| `ListFunctionsByCodeSigningConfig` | List functions carrying a config. Always empty, since nothing can attach one |
+| `CreateCodeSigningConfig` | Create a code signing configuration |
+| `GetCodeSigningConfig` | Read a code signing configuration |
+| `UpdateCodeSigningConfig` | Update the members the request names |
+| `DeleteCodeSigningConfig` | Delete a code signing configuration |
+| `ListCodeSigningConfigs` | List the configurations in the region |
 | `CreateFunctionUrlConfig` | Provision a function URL |
 | `GetFunctionUrlConfig` | Read function URL config |
 | `UpdateFunctionUrlConfig` | Update function URL config |
@@ -305,7 +310,13 @@ These AWS Lambda operations have no handler in Floci. Calls will return `404` or
 - Layer permissions (`AddLayerVersionPermission`, `RemoveLayerVersionPermission`, `GetLayerVersionPolicy`)
 - Provisioned concurrency (`PutProvisionedConcurrencyConfig`, `GetProvisionedConcurrencyConfig`, `ListProvisionedConcurrencyConfigs`, `DeleteProvisionedConcurrencyConfig`)
 - `InvokeWithResponseStream`
-- Code signing management (only `GetFunctionCodeSigningConfig` and `ListFunctionsByCodeSigningConfig` are wired; there is no `PutFunctionCodeSigningConfig` or `CreateCodeSigningConfig`, so no code-signing config can exist and `ListFunctionsByCodeSigningConfig` reports every well-formed ARN as `ResourceNotFoundException` — a malformed ARN or an out-of-range `MaxItems` is rejected with `InvalidParameterValueException` first)
+- Code signing enforcement. A configuration is created, read, updated, deleted and listed, and
+  nothing verifies a signature against it, so it never gates a deployment. Attaching one to a
+  function is not wired either: there is no `PutFunctionCodeSigningConfig`, so
+  `GetFunctionCodeSigningConfig` still reports an empty ARN and `ListFunctionsByCodeSigningConfig`
+  always reports no functions. An unknown configuration is `ResourceNotFoundException`, and a
+  malformed ARN or an out-of-range `MaxItems` is rejected with `InvalidParameterValueException`
+  first
 
 ## Configuration
 

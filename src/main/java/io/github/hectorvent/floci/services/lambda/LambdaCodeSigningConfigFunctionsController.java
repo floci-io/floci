@@ -1,19 +1,30 @@
 package io.github.hectorvent.floci.services.lambda;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.services.lambda.model.CodeSigningConfig;
+import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.GET;
+import jakarta.ws.rs.POST;
+import jakarta.ws.rs.PUT;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.QueryParam;
+import jakarta.ws.rs.core.Context;
+import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
+import java.util.List;
 import java.util.regex.Pattern;
 
 /**
- * ListFunctionsByCodeSigningConfig: GET /2020-04-22/code-signing-configs/{CodeSigningConfigArn}/functions.
+ * The code signing configuration resource, all under /2020-04-22/code-signing-configs.
  *
  * <p>A separate class from {@link LambdaCodeSigningController} because it lives
  * under a different API version prefix (/2020-04-22 vs /2020-06-30) — JAX-RS
@@ -21,16 +32,15 @@ import java.util.regex.Pattern;
  * one falls through to a more general catch-all route (S3's bucket-path matcher)
  * instead of matching here.</p>
  *
- * <p>Floci does not implement code signing config management — there is no
- * CreateCodeSigningConfig / PutFunctionCodeSigningConfig, so no code signing
- * config can ever exist. That does <em>not</em> make an unconditional empty list
- * the right answer: botocore models both {@code InvalidParameterValueException}
- * and {@code ResourceNotFoundException} for this operation, and the only resource
- * the path parameter can name is a code signing config. A malformed ARN is
- * therefore a 400 and a well-formed ARN is a 404, because every well-formed ARN
- * necessarily names a config that does not exist here. Returning 200 with an
- * empty list would tell a caller that the config exists and simply has no
- * functions attached, which is a different — and false — statement.</p>
+ * <p>Create, Get, Update, Delete and List manage the configuration itself.
+ * ListFunctionsByCodeSigningConfig reports which functions carry one, and always reports none:
+ * attaching a configuration to a function is PutFunctionCodeSigningConfig, which is not
+ * implemented, so nothing can be attached. It answers a configuration that does not exist with a
+ * 404 rather than an empty list, because an empty list would say the configuration exists and
+ * simply has no functions.</p>
+ *
+ * <p>Nothing here verifies a signature. Lambda's own code signing checks are not emulated, so a
+ * configuration never gates a deployment.</p>
  */
 @Path("/2020-04-22")
 @Produces(MediaType.APPLICATION_JSON)
@@ -51,6 +61,19 @@ public class LambdaCodeSigningConfigFunctionsController {
     private static final int MAX_ITEMS_MIN = 1;
     private static final int MAX_ITEMS_MAX = 10000;
 
+    private final LambdaCodeSigningConfigService service;
+    private final RegionResolver regionResolver;
+    private final ObjectMapper objectMapper;
+
+    @Inject
+    public LambdaCodeSigningConfigFunctionsController(LambdaCodeSigningConfigService service,
+                                                      RegionResolver regionResolver,
+                                                      ObjectMapper objectMapper) {
+        this.service = service;
+        this.regionResolver = regionResolver;
+        this.objectMapper = objectMapper;
+    }
+
     /**
      * Validation order matches AWS: request parameters are rejected before the
      * resource is resolved, so a bad {@code MaxItems} is reported as such rather
@@ -59,16 +82,95 @@ public class LambdaCodeSigningConfigFunctionsController {
     @GET
     @Path("/code-signing-configs/{codeSigningConfigArn}/functions")
     public Response listFunctionsByCodeSigningConfig(
+            @Context HttpHeaders headers,
             @PathParam("codeSigningConfigArn") String codeSigningConfigArn,
             @QueryParam("Marker") String marker,
             @QueryParam("MaxItems") String maxItems) {
         requireValidArn(codeSigningConfigArn);
         parseMaxItems(maxItems);
-        // Marker is accepted and carries no state: the result set is always empty,
-        // so any marker addresses a page past the end and NextMarker is never emitted.
+        // Resolving the config is what turns an unknown ARN into the 404. A known one has no
+        // functions, since PutFunctionCodeSigningConfig is not implemented, so Marker addresses a
+        // page past the end and NextMarker is never emitted.
+        service.get(regionResolver.resolveRegion(headers), codeSigningConfigArn);
 
-        throw new AwsException("ResourceNotFoundException",
-                "The code signing configuration " + codeSigningConfigArn + " does not exist.", 404);
+        ObjectNode root = objectMapper.createObjectNode();
+        root.putArray("FunctionArns");
+        return Response.ok(root).build();
+    }
+
+    @POST
+    @Path("/code-signing-configs")
+    public Response createCodeSigningConfig(@Context HttpHeaders headers, ObjectNode body) {
+        String region = regionResolver.resolveRegion(headers);
+        CodeSigningConfig config = service.create(region, regionResolver.getAccountId(),
+                text(body, "Description"), allowedPublishers(body), policies(body));
+        return Response.status(Response.Status.CREATED).entity(wrap(config)).build();
+    }
+
+    @GET
+    @Path("/code-signing-configs/{codeSigningConfigArn}")
+    public Response getCodeSigningConfig(@Context HttpHeaders headers,
+                                         @PathParam("codeSigningConfigArn") String codeSigningConfigArn) {
+        requireValidArn(codeSigningConfigArn);
+        return Response.ok(wrap(service.get(regionResolver.resolveRegion(headers), codeSigningConfigArn))).build();
+    }
+
+    @PUT
+    @Path("/code-signing-configs/{codeSigningConfigArn}")
+    public Response updateCodeSigningConfig(@Context HttpHeaders headers,
+                                            @PathParam("codeSigningConfigArn") String codeSigningConfigArn,
+                                            ObjectNode body) {
+        requireValidArn(codeSigningConfigArn);
+        CodeSigningConfig config = service.update(regionResolver.resolveRegion(headers), codeSigningConfigArn,
+                text(body, "Description"), allowedPublishers(body), policies(body));
+        return Response.ok(wrap(config)).build();
+    }
+
+    @DELETE
+    @Path("/code-signing-configs/{codeSigningConfigArn}")
+    public Response deleteCodeSigningConfig(@Context HttpHeaders headers,
+                                            @PathParam("codeSigningConfigArn") String codeSigningConfigArn) {
+        requireValidArn(codeSigningConfigArn);
+        service.delete(regionResolver.resolveRegion(headers), codeSigningConfigArn);
+        return Response.noContent().build();
+    }
+
+    @GET
+    @Path("/code-signing-configs")
+    public Response listCodeSigningConfigs(@Context HttpHeaders headers,
+                                           @QueryParam("Marker") String marker,
+                                           @QueryParam("MaxItems") String maxItems) {
+        parseMaxItems(maxItems);
+        List<CodeSigningConfig> configs = service.list(regionResolver.resolveRegion(headers));
+        ObjectNode root = objectMapper.createObjectNode();
+        root.set("CodeSigningConfigs", objectMapper.valueToTree(configs));
+        return Response.ok(root).build();
+    }
+
+    private ObjectNode wrap(CodeSigningConfig config) {
+        ObjectNode root = objectMapper.createObjectNode();
+        root.set("CodeSigningConfig", objectMapper.valueToTree(config));
+        return root;
+    }
+
+    private static String text(ObjectNode body, String field) {
+        return body == null || !body.hasNonNull(field) ? null : body.get(field).asText();
+    }
+
+    private CodeSigningConfig.AllowedPublishers allowedPublishers(ObjectNode body) {
+        if (body == null || !body.hasNonNull("AllowedPublishers")) {
+            return null;
+        }
+        return objectMapper.convertValue(body.get("AllowedPublishers"),
+                CodeSigningConfig.AllowedPublishers.class);
+    }
+
+    private CodeSigningConfig.CodeSigningPolicies policies(ObjectNode body) {
+        if (body == null || !body.hasNonNull("CodeSigningPolicies")) {
+            return null;
+        }
+        return objectMapper.convertValue(body.get("CodeSigningPolicies"),
+                CodeSigningConfig.CodeSigningPolicies.class);
     }
 
     private void requireValidArn(String arn) {
