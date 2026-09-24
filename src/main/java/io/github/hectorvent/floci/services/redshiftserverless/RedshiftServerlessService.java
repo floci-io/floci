@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.redshift.TempCredential;
 import io.github.hectorvent.floci.services.redshiftserverless.model.ConfigParameter;
 import io.github.hectorvent.floci.services.redshiftserverless.model.Namespace;
 import io.github.hectorvent.floci.services.redshiftserverless.model.PricePerformanceTarget;
+import io.github.hectorvent.floci.services.redshiftserverless.model.RedshiftServerlessSnapshot;
 import io.github.hectorvent.floci.services.redshiftserverless.model.Workgroup;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.annotation.Priority;
@@ -94,6 +95,7 @@ public class RedshiftServerlessService implements Resettable {
 
     private final AccountAwareStorageBackend<Namespace> namespaces;
     private final AccountAwareStorageBackend<Workgroup> workgroups;
+    private final AccountAwareStorageBackend<RedshiftServerlessSnapshot> snapshots;
     private final RegionResolver regionResolver;
     private final RedshiftServerlessEndpoints endpoints;
     private final RedshiftServerlessRuntime runtime;
@@ -105,6 +107,8 @@ public class RedshiftServerlessService implements Resettable {
                 new TypeReference<Map<String, Namespace>>() {});
         this.workgroups = storageFactory.create("redshiftserverless", "redshiftserverless-workgroups.json",
                 new TypeReference<Map<String, Workgroup>>() {});
+        this.snapshots = storageFactory.create("redshiftserverless", "redshiftserverless-snapshots.json",
+                new TypeReference<Map<String, RedshiftServerlessSnapshot>>() {});
         this.regionResolver = regionResolver;
         this.endpoints = endpoints;
         this.runtime = runtime;
@@ -331,6 +335,72 @@ public class RedshiftServerlessService implements Resettable {
         namespaces.delete(storageKey(region, namespaceName));
         deleted.setStatus("DELETING");
         return deleted;
+    }
+
+    /**
+     * Creates a snapshot directly in {@code region}. Real {@code CreateSnapshot} always creates
+     * in the source namespace's own region; a snapshot that should appear as a cross-region copy
+     * is created by calling this in the standby region, where it is immediately AVAILABLE.
+     */
+    public synchronized RedshiftServerlessSnapshot createSnapshot(String snapshotName, String namespaceName,
+                                                                  String region) {
+        if (snapshotName == null || snapshotName.isBlank()) {
+            throw validation("snapshotName is required.");
+        }
+        Namespace namespace = getNamespace(namespaceName, region);
+        String key = storageKey(region, snapshotName);
+        if (snapshots.get(key).isPresent()) {
+            throw new AwsException("ConflictException",
+                    "The snapshot " + snapshotName + " already exists.", 409);
+        }
+        RedshiftServerlessSnapshot snapshot = new RedshiftServerlessSnapshot();
+        snapshot.setSnapshotName(snapshotName);
+        snapshot.setNamespaceName(namespaceName);
+        snapshot.setNamespaceArn(namespace.getNamespaceArn());
+        snapshot.setRegion(region);
+        snapshot.setAccountId(regionResolver.getAccountId());
+        snapshot.setOwnerAccount(regionResolver.getAccountId());
+        snapshot.setSnapshotArn(regionResolver.buildArn("redshift-serverless", region, "snapshot/" + snapshotName));
+        snapshot.setStatus("AVAILABLE");
+        snapshot.setSnapshotCreateTime(Instant.now());
+        snapshots.put(key, snapshot);
+        return snapshot;
+    }
+
+    public RedshiftServerlessSnapshot getSnapshot(String snapshotName, String region) {
+        return snapshots.get(storageKey(region, snapshotName))
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "The snapshot " + snapshotName + " was not found.", 404));
+    }
+
+    public synchronized RedshiftServerlessSnapshot deleteSnapshot(String snapshotName, String region) {
+        RedshiftServerlessSnapshot deleted = getSnapshot(snapshotName, region);
+        snapshots.delete(storageKey(region, snapshotName));
+        return deleted;
+    }
+
+    public PaginatedResult<RedshiftServerlessSnapshot> listSnapshots(String namespaceName, String region,
+                                                                     Integer maxResults, String nextToken) {
+        List<RedshiftServerlessSnapshot> all = snapshots.scan(key -> key.startsWith(region + "::")).stream()
+                .filter(snapshot -> namespaceName == null || namespaceName.isBlank()
+                        || namespaceName.equals(snapshot.getNamespaceName()))
+                .toList();
+        return Pagination.paginate(all, RedshiftServerlessSnapshot::getSnapshotName, maxResults, nextToken,
+                100, 100, "ValidationException");
+    }
+
+    /**
+     * Restores into the already-existing namespace and workgroup in {@code region} and never
+     * creates either, mirroring real {@code RestoreFromSnapshot}.
+     */
+    public synchronized Namespace restoreFromSnapshot(String namespaceName, String workgroupName,
+                                                      String snapshotName, String region) {
+        getSnapshot(snapshotName, region);
+        getWorkgroup(workgroupName, region);
+        Namespace restored = new Namespace(getNamespace(namespaceName, region));
+        restored.setStatus("AVAILABLE");
+        namespaces.put(storageKey(region, namespaceName), restored);
+        return restored;
     }
 
     public Map<String, String> listTagsForResource(String resourceArn, String region) {
@@ -665,6 +735,7 @@ public class RedshiftServerlessService implements Resettable {
         }
         namespaces.clear();
         workgroups.clear();
+        snapshots.clear();
     }
 
     private static void validateNamespaceName(String namespaceName) {

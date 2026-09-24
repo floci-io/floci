@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.services.redshift.TempCredential;
 import io.github.hectorvent.floci.services.redshiftserverless.model.ConfigParameter;
 import io.github.hectorvent.floci.services.redshiftserverless.model.Namespace;
 import io.github.hectorvent.floci.services.redshiftserverless.model.PricePerformanceTarget;
+import io.github.hectorvent.floci.services.redshiftserverless.model.RedshiftServerlessSnapshot;
 import io.github.hectorvent.floci.services.redshiftserverless.model.Workgroup;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -76,6 +77,11 @@ public class RedshiftServerlessJsonHandler {
                 case "ListWorkgroups" -> handleListWorkgroups(request, region);
                 case "UpdateWorkgroup" -> handleUpdateWorkgroup(request, region);
                 case "DeleteWorkgroup" -> handleDeleteWorkgroup(request, region);
+                case "CreateSnapshot" -> handleCreateSnapshot(request, region);
+                case "GetSnapshot" -> handleGetSnapshot(request, region);
+                case "ListSnapshots" -> handleListSnapshots(request, region);
+                case "DeleteSnapshot" -> handleDeleteSnapshot(request, region);
+                case "RestoreFromSnapshot" -> handleRestoreFromSnapshot(request, region);
                 case "GetCredentials" -> handleGetCredentials(request, region, authorizationHeader);
                 case "ListTagsForResource" -> handleListTagsForResource(request, region);
                 case "TagResource" -> handleTagResource(request, region);
@@ -199,6 +205,51 @@ public class RedshiftServerlessJsonHandler {
         return Response.ok(response).build();
     }
 
+    private Response handleCreateSnapshot(JsonNode request, String region) {
+        return snapshotResponse(service.createSnapshot(
+                text(request, "snapshotName"), text(request, "namespaceName"), region));
+    }
+
+    /**
+     * GetSnapshot also accepts {@code snapshotArn}. Floci's snapshot ARNs end in the snapshot
+     * name, so the name is recovered from the ARN rather than tracked in a second index.
+     */
+    private Response handleGetSnapshot(JsonNode request, String region) {
+        String snapshotName = text(request, "snapshotName");
+        if (snapshotName == null) {
+            String arn = text(request, "snapshotArn");
+            snapshotName = arn != null && arn.contains("/") ? arn.substring(arn.lastIndexOf('/') + 1) : null;
+        }
+        return snapshotResponse(service.getSnapshot(snapshotName, region));
+    }
+
+    private Response handleListSnapshots(JsonNode request, String region) {
+        PaginatedResult<RedshiftServerlessSnapshot> page = service.listSnapshots(
+                text(request, "namespaceName"), region, parseMaxResults(request), text(request, "nextToken"));
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode items = response.putArray("snapshots");
+        page.items().forEach(snapshot -> items.add(snapshotNode(snapshot)));
+        if (page.nextToken() != null) {
+            response.put("nextToken", page.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleDeleteSnapshot(JsonNode request, String region) {
+        return snapshotResponse(service.deleteSnapshot(text(request, "snapshotName"), region));
+    }
+
+    private Response handleRestoreFromSnapshot(JsonNode request, String region) {
+        String snapshotName = text(request, "snapshotName");
+        Namespace namespace = service.restoreFromSnapshot(
+                text(request, "namespaceName"), text(request, "workgroupName"), snapshotName, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("namespace", namespaceNode(namespace));
+        response.put("ownerAccount", service.getSnapshot(snapshotName, region).getOwnerAccount());
+        response.put("snapshotName", snapshotName);
+        return Response.ok(response).build();
+    }
+
     private Response handleListTagsForResource(JsonNode request, String region) {
         Map<String, String> tags = service.listTagsForResource(text(request, "resourceArn"), region);
         ObjectNode response = objectMapper.createObjectNode();
@@ -257,6 +308,26 @@ public class RedshiftServerlessJsonHandler {
         namespace.getIamRoles().forEach(iamRoles::add);
         ArrayNode logExports = node.putArray("logExports");
         namespace.getLogExports().forEach(logExports::add);
+        return node;
+    }
+
+    private Response snapshotResponse(RedshiftServerlessSnapshot snapshot) {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("snapshot", snapshotNode(snapshot));
+        return Response.ok(response).build();
+    }
+
+    private ObjectNode snapshotNode(RedshiftServerlessSnapshot snapshot) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("snapshotName", snapshot.getSnapshotName());
+        node.put("snapshotArn", snapshot.getSnapshotArn());
+        node.put("namespaceName", snapshot.getNamespaceName());
+        node.put("namespaceArn", snapshot.getNamespaceArn());
+        node.put("ownerAccount", snapshot.getOwnerAccount());
+        node.put("status", snapshot.getStatus());
+        if (snapshot.getSnapshotCreateTime() != null) {
+            node.put("snapshotCreateTime", CREATION_DATE_FORMAT.format(snapshot.getSnapshotCreateTime()));
+        }
         return node;
     }
 
