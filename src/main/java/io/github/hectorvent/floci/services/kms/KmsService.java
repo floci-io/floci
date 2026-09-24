@@ -152,7 +152,7 @@ public class KmsService implements ResourceProvider {
         KmsKey key = new KmsKey();
         key.setKeyId(keyId);
         key.setArn(arn);
-        key.setDescription(description);
+        key.setDescription(description == null ? "" : description);
         key.setKeyUsage(effectiveUsage);
         key.setKeySpec(effectiveSpec);
         key.setPolicy(policy != null ? policy : buildDefaultKeyPolicy());

@@ -126,6 +126,34 @@ class KmsIntegrationTest {
     }
 
     @Test
+    void createKeyWithoutDescriptionReturnsEmptyDescription() {
+        String keyId = given()
+            .header("X-Amz-Target", "TrentService.CreateKey")
+            .contentType(KMS_CONTENT_TYPE)
+            .body("{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("KeyMetadata.Description", equalTo(""))
+            .extract().path("KeyMetadata.KeyId");
+
+        given()
+            .header("X-Amz-Target", "TrentService.DescribeKey")
+            .contentType(KMS_CONTENT_TYPE)
+            .body("""
+                {
+                    "KeyId": "%s"
+                }
+                """.formatted(keyId))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("KeyMetadata.Description", equalTo(""));
+    }
+
+    @Test
     void updateKeyDescriptionRoundTripThroughJsonHandler() {
         var key = given()
             .header("X-Amz-Target", "TrentService.CreateKey")
