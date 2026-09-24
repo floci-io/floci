@@ -105,22 +105,54 @@ class RdsEventSubscriptionIntegrationTest {
 
     @Test
     void describeHonoursMaxRecordsAndMarker() {
+        // The model bounds MaxRecords at 20, so a meaningful page needs more than 20 rows.
         String prefix = "page-" + Long.toString(System.nanoTime(), 36);
-        for (String suffix : new String[]{"a", "b", "c"}) {
-            rds("CreateEventSubscription", "SubscriptionName", prefix + "-" + suffix,
+        for (int i = 0; i < 21; i++) {
+            rds("CreateEventSubscription", "SubscriptionName", String.format("%s-%02d", prefix, i),
                     "SnsTopicArn", TOPIC).statusCode(200);
         }
 
-        String first = rds("DescribeEventSubscriptions", "MaxRecords", "1")
+        String marker = rds("DescribeEventSubscriptions", "MaxRecords", "20")
             .statusCode(200)
             .extract().path("DescribeEventSubscriptionsResponse"
                     + ".DescribeEventSubscriptionsResult.Marker");
-        assertNotNull(first, "a bounded page short of the end carries a Marker");
+        assertNotNull(marker, "a bounded page short of the end carries a Marker");
 
-        // Continuing from the marker must not repeat the row it names.
-        rds("DescribeEventSubscriptions", "MaxRecords", "1", "Marker", first)
+        rds("DescribeEventSubscriptions", "MaxRecords", "20", "Marker", marker)
             .statusCode(200)
-            .body(not(containsString("<CustSubscriptionId>" + first + "</CustSubscriptionId>")));
+            .body(not(containsString("<CustSubscriptionId>" + marker + "</CustSubscriptionId>")));
+    }
+
+    @Test
+    void anOutOfRangeMaxRecordsIsRefused() {
+        // 0 used to build an empty page and then read its last element.
+        rds("DescribeEventSubscriptions", "MaxRecords", "0").statusCode(400)
+            .body(containsString("InvalidParameterValue"));
+        rds("DescribeEventSubscriptions", "MaxRecords", "-5").statusCode(400);
+        rds("DescribeEventSubscriptions", "MaxRecords", "19").statusCode(400);
+        rds("DescribeEventSubscriptions", "MaxRecords", "101").statusCode(400);
+        rds("DescribeEventSubscriptions", "MaxRecords", "20").statusCode(200);
+    }
+
+    @Test
+    void aMarkerWhoseSubscriptionIsGoneDoesNotRestartTheWalk() {
+        String prefix = "gone-" + Long.toString(System.nanoTime(), 36);
+        for (int i = 0; i < 21; i++) {
+            rds("CreateEventSubscription", "SubscriptionName", String.format("%s-%02d", prefix, i),
+                    "SnsTopicArn", TOPIC).statusCode(200);
+        }
+        String marker = rds("DescribeEventSubscriptions", "MaxRecords", "20")
+            .statusCode(200)
+            .extract().path("DescribeEventSubscriptionsResponse"
+                    + ".DescribeEventSubscriptionsResult.Marker");
+        assertNotNull(marker);
+
+        rds("DeleteEventSubscription", "SubscriptionName", marker).statusCode(200);
+
+        // Resuming from a name that no longer exists must not hand back the first page again.
+        rds("DescribeEventSubscriptions", "MaxRecords", "20", "Marker", marker)
+            .statusCode(200)
+            .body(not(containsString("<CustSubscriptionId>" + prefix + "-00</CustSubscriptionId>")));
     }
 
     @Test

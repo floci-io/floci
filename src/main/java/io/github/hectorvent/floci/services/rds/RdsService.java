@@ -8496,6 +8496,10 @@ public class RdsService implements Resettable, ResourceProvider {
             "db-cluster-snapshot", "db-proxy", "zero-etl", "custom-engine-version",
             "blue-green-deployment");
     private static final int MAX_SUBSCRIPTION_NAME = 255;
+    /** The model documents MaxRecords as minimum 20, maximum 100, default 100. */
+    private static final int MIN_MAX_RECORDS = 20;
+    private static final int MAX_MAX_RECORDS = 100;
+    private static final int DEFAULT_MAX_RECORDS = 100;
 
     /**
      * Nothing is published to the topic. The subscription is stored and reported back so a client
@@ -8600,25 +8604,29 @@ public class RdsService implements Resettable, ResourceProvider {
             return new EventSubscriptionPage(
                     List.of(requireEventSubscription(region, subscriptionName)), null);
         }
+        if (maxRecords != null && (maxRecords < MIN_MAX_RECORDS || maxRecords > MAX_MAX_RECORDS)) {
+            throw new AwsException("InvalidParameterValue",
+                    "MaxRecords must be between " + MIN_MAX_RECORDS + " and " + MAX_MAX_RECORDS + ".", 400);
+        }
         String prefix = eventSubscriptionKey(region, "");
         List<EventSubscription> all = eventSubscriptions.scan(k -> k.startsWith(prefix)).stream()
                 .sorted(Comparator.comparing(EventSubscription::getCustSubscriptionId))
                 .toList();
-        // The marker is the last name of the previous page, so the next starts after it. Sorting by
-        // name is what makes that stable across calls.
+        // The marker is the last name of the previous page and the next page starts after it.
+        // Resuming at the first name strictly greater than the marker rather than at the marker's
+        // own index means a subscription deleted between calls does not restart the walk, which an
+        // exact-match lookup would do by silently leaving the offset at zero.
         int from = 0;
         if (marker != null && !marker.isBlank()) {
-            for (int i = 0; i < all.size(); i++) {
-                if (marker.equals(all.get(i).getCustSubscriptionId())) {
-                    from = i + 1;
-                    break;
-                }
+            while (from < all.size() && all.get(from).getCustSubscriptionId().compareTo(marker) <= 0) {
+                from++;
             }
         }
-        int limit = maxRecords == null ? all.size() : maxRecords;
+        int limit = maxRecords == null ? DEFAULT_MAX_RECORDS : maxRecords;
         int to = Math.min(all.size(), from + limit);
         List<EventSubscription> page = all.subList(Math.min(from, all.size()), to);
-        String next = to < all.size() ? page.get(page.size() - 1).getCustSubscriptionId() : null;
+        String next = to < all.size() && !page.isEmpty()
+                ? page.get(page.size() - 1).getCustSubscriptionId() : null;
         return new EventSubscriptionPage(page, next);
     }
 
