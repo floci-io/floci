@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.athena;
 
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.glue.GlueService;
+import io.github.hectorvent.floci.services.glue.GlueTableResolver;
 import io.github.hectorvent.floci.services.glue.model.Column;
 import io.github.hectorvent.floci.services.glue.model.Database;
 import io.github.hectorvent.floci.services.glue.model.StorageDescriptor;
@@ -368,21 +369,21 @@ class GlueViewDdlBuilderTest {
 
     @Test
     void testIsIcebergTableDetection() {
-        assertFalse(GlueViewDdlBuilder.isIcebergTable(null));
-        assertFalse(GlueViewDdlBuilder.isIcebergTable(createTable("t", "s3://b/t", null, null)));
+        assertFalse(GlueTableResolver.isIcebergTable(null));
+        assertFalse(GlueTableResolver.isIcebergTable(createTable("t", "s3://b/t", null, null)));
 
         Table table = createTable("t", "s3://b/t", null, null);
         table.setParameters(Map.of("table_type", "iceberg"));
-        assertTrue(GlueViewDdlBuilder.isIcebergTable(table), "table_type comparison should be case-insensitive");
+        assertTrue(GlueTableResolver.isIcebergTable(table), "table_type comparison should be case-insensitive");
 
         table.setParameters(Map.of("table_type", "EXTERNAL_TABLE"));
-        assertFalse(GlueViewDdlBuilder.isIcebergTable(table));
+        assertFalse(GlueTableResolver.isIcebergTable(table));
     }
 
     @Test
     void testIcebergReadExpressionEscapesSingleQuotes() {
         assertEquals("iceberg_scan('s3://bucket/it''s-a-table/metadata/x.json')",
-                GlueViewDdlBuilder.icebergReadExpression("s3://bucket/it's-a-table/metadata/x.json"));
+                GlueTableResolver.icebergReadExpression("s3://bucket/it's-a-table/metadata/x.json"));
     }
 }
 
