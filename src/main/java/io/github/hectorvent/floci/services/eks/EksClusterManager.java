@@ -1443,12 +1443,9 @@ public class EksClusterManager implements ClusterNodeInstanceProvider {
                 return;
             }
         }
-        List<String> regions = new ArrayList<>(AwsRegions.advertised(AwsRegions.partitionFor(config.defaultRegion())));
-        if (!regions.contains(config.defaultRegion())) {
-            regions.add(config.defaultRegion());
-        }
-        String endpoint = "http://" + dockerHostResolver.resolve() + ":" + config.port();
-        boolean tlsUri = config.services().ecr().tlsUri() && config.tls().enabled();
+        List<String> regions = ecrRegistryRegions();
+        String endpoint = ecrRegistryEndpoint();
+        boolean tlsUri = ecrTlsUriEnabled();
         String content = buildRegistriesYaml(
                 config.defaultAccountId(), regions, config.port(), endpoint, tlsUri, callerHosts);
         writeLocalCopy(Paths.get(config.services().eks().dataPath(), "registries", clusterName,
@@ -1615,29 +1612,28 @@ public class EksClusterManager implements ClusterNodeInstanceProvider {
     static String buildRegistriesYaml(String accountId, List<String> regions, int dataPlanePort,
                                       String endpoint, boolean tlsUri, Set<String> excludedHosts) {
         StringBuilder yaml = new StringBuilder("mirrors:\n");
-        for (String region : regions) {
-            String host = accountId + ".dkr.ecr." + region + ".localhost:" + dataPlanePort;
+        for (String host : buildEcrRegistryMirrorHosts(accountId, regions, dataPlanePort, tlsUri)) {
             if (!excludedHosts.contains(host)) {
                 appendMirror(yaml, host, endpoint);
             }
-            if (tlsUri) {
-                String tlsHost = accountId + ".dkr.ecr." + region + ".localhost.floci.io:" + dataPlanePort;
-                if (!excludedHosts.contains(tlsHost)) {
-                    appendMirror(yaml, tlsHost, endpoint);
-                }
-            }
-        }
-        String pathStyleHost = "localhost:" + dataPlanePort;
-        if (!excludedHosts.contains(pathStyleHost)) {
-            appendMirror(yaml, pathStyleHost, endpoint);
-        }
-        if (tlsUri) {
-            String tlsPathStyleHost = "localhost.floci.io:" + dataPlanePort;
-            if (!excludedHosts.contains(tlsPathStyleHost)) {
-                appendMirror(yaml, tlsPathStyleHost, endpoint);
-            }
         }
         return yaml.toString();
+    }
+
+    private static Set<String> buildEcrRegistryMirrorHosts(String accountId, List<String> regions,
+                                                           int dataPlanePort, boolean tlsUri) {
+        Set<String> hosts = new LinkedHashSet<>();
+        for (String region : regions) {
+            hosts.add(accountId + ".dkr.ecr." + region + ".localhost:" + dataPlanePort);
+            if (tlsUri) {
+                hosts.add(accountId + ".dkr.ecr." + region + ".localhost.floci.io:" + dataPlanePort);
+            }
+        }
+        hosts.add("localhost:" + dataPlanePort);
+        if (tlsUri) {
+            hosts.add("localhost.floci.io:" + dataPlanePort);
+        }
+        return hosts;
     }
 
     private static void appendMirror(StringBuilder yaml, String host, String endpoint) {
@@ -1670,6 +1666,7 @@ public class EksClusterManager implements ClusterNodeInstanceProvider {
         removedHosts.removeAll(currentHosts);
         for (String host : removedHosts) {
             removeRegistryHost(containerId, cluster.getName(), host);
+            restoreEcrRegistryHost(containerId, cluster.getName(), host);
         }
 
         injectRegistryHosts(containerId, cluster);
@@ -1693,18 +1690,52 @@ public class EksClusterManager implements ClusterNodeInstanceProvider {
             String content = buildHostsToml(hostConfig);
             writeLocalCopy(Paths.get(config.services().eks().dataPath(), "registries", clusterName,
                     hostConfig.host(), "hosts.toml"), content, clusterName);
-            String tarEntry = CONTAINERD_CERTS_DIR + "/" + hostConfig.host() + "/hosts.toml";
-            try {
-                lifecycleManager.getDockerClient()
-                        .copyArchiveToContainerCmd(containerId)
-                        .withTarInputStream(new ByteArrayInputStream(tarSingleFile(tarEntry, content)))
-                        .withRemotePath(K3S_DATA_DIR)
-                        .exec();
-                LOG.infov("Injected registry host {0} for k3s cluster {1}", hostConfig.host(), clusterName);
-            } catch (Exception e) {
-                LOG.warnv("EKS cluster {0} registry host {1} is not configured: could not copy "
-                        + "hosts.toml into the k3s container: {2}", clusterName, hostConfig.host(), e.getMessage());
-            }
+            copyRegistryHostsToml(containerId, clusterName, hostConfig.host(), content);
+        }
+    }
+
+    private void restoreEcrRegistryHost(String containerId, String clusterName, String host) {
+        if (!config.services().eks().ecrRegistryMirror() || !config.services().ecr().enabled()) {
+            return;
+        }
+        if (!buildEcrRegistryMirrorHosts(config.defaultAccountId(), ecrRegistryRegions(), config.port(),
+                ecrTlsUriEnabled()).contains(host)) {
+            return;
+        }
+
+        RegistryHostConfig mirror = new RegistryHostConfig(host,
+                List.of(new RegistryEndpoint(ecrRegistryEndpoint(), null)), null, null);
+        copyRegistryHostsToml(containerId, clusterName, host, buildHostsToml(mirror));
+    }
+
+    private List<String> ecrRegistryRegions() {
+        List<String> regions = new ArrayList<>(AwsRegions.advertised(AwsRegions.partitionFor(config.defaultRegion())));
+        if (!regions.contains(config.defaultRegion())) {
+            regions.add(config.defaultRegion());
+        }
+        return regions;
+    }
+
+    private boolean ecrTlsUriEnabled() {
+        return config.services().ecr().tlsUri() && config.tls().enabled();
+    }
+
+    private String ecrRegistryEndpoint() {
+        return "http://" + dockerHostResolver.resolve() + ":" + config.port();
+    }
+
+    private void copyRegistryHostsToml(String containerId, String clusterName, String host, String content) {
+        String tarEntry = CONTAINERD_CERTS_DIR + "/" + host + "/hosts.toml";
+        try {
+            lifecycleManager.getDockerClient()
+                    .copyArchiveToContainerCmd(containerId)
+                    .withTarInputStream(new ByteArrayInputStream(tarSingleFile(tarEntry, content)))
+                    .withRemotePath(K3S_DATA_DIR)
+                    .exec();
+            LOG.infov("Injected registry host {0} for k3s cluster {1}", host, clusterName);
+        } catch (Exception e) {
+            LOG.warnv("EKS cluster {0} registry host {1} is not configured: could not copy "
+                    + "hosts.toml into the k3s container: {2}", clusterName, host, e.getMessage());
         }
     }
 

@@ -41,6 +41,8 @@ import io.github.hectorvent.floci.services.eks.model.OidcIdentity;
 import io.github.hectorvent.floci.services.eks.model.RegistryEndpoint;
 import io.github.hectorvent.floci.services.eks.model.RegistryHostConfig;
 import io.github.hectorvent.floci.services.eks.model.ResourcesVpcConfig;
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -49,6 +51,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
 import java.io.Closeable;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -854,6 +857,18 @@ class EksClusterManagerTest {
             yaml = Files.readString(tempDir.resolve("registries/demo/registries.yaml"));
             assertTrue(yaml.contains("\"" + host + "\":"));
             assertFalse(Files.exists(localHostsToml));
+
+            ArgumentCaptor<InputStream> archives = ArgumentCaptor.forClass(InputStream.class);
+            verify(copyCmd, times(4)).withTarInputStream(archives.capture());
+            try (TarArchiveInputStream tar = new TarArchiveInputStream(archives.getAllValues().get(3))) {
+                TarArchiveEntry entry = tar.getNextEntry();
+                assertEquals("agent/etc/containerd/certs.d/" + host + "/hosts.toml", entry.getName());
+                String hostsToml = new String(tar.readAllBytes(), StandardCharsets.UTF_8);
+                assertTrue(hostsToml.contains("server = \"https://" + host + "\""));
+                assertTrue(hostsToml.contains("[host.\"http://floci:4566\"]"));
+                assertTrue(hostsToml.contains("capabilities = [\"pull\", \"resolve\"]"));
+            }
+
             ArgumentCaptor<String[]> command = ArgumentCaptor.forClass(String[].class);
             verify(execCreate).withCmd(command.capture());
             assertTrue(Arrays.equals(new String[] {"rm", "-rf", "--",
