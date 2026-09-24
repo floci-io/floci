@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.rds.model.DbEndpoint;
 import io.github.hectorvent.floci.services.docdb.DocDbQueryHandler;
 import io.github.hectorvent.floci.services.neptune.NeptuneQueryHandler;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
+import io.github.hectorvent.floci.services.rds.model.EventSubscription;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceScalingChanges;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceSettings;
 import io.github.hectorvent.floci.services.rds.model.LogExportChanges;
@@ -90,6 +91,10 @@ public class RdsQueryHandler {
                 case "PromoteReadReplicaDBCluster" -> handlePromoteReadReplicaDbCluster(params, region);
                 case "DescribeOrderableDBInstanceOptions" -> handleDescribeOrderableDbInstanceOptions(params);
                 case "DescribeEvents" -> handleDescribeEvents(params, region);
+                case "CreateEventSubscription" -> handleCreateEventSubscription(params, region);
+                case "DescribeEventSubscriptions" -> handleDescribeEventSubscriptions(params, region);
+                case "ModifyEventSubscription" -> handleModifyEventSubscription(params, region);
+                case "DeleteEventSubscription" -> handleDeleteEventSubscription(params, region);
                 case "CreateDBSubnetGroup" -> handleCreateDbSubnetGroup(params, region);
                 case "DescribeDBSubnetGroups" -> handleDescribeDbSubnetGroups(params, region);
                 case "ModifyDBSubnetGroup" -> handleModifyDbSubnetGroup(params, region);
@@ -275,6 +280,75 @@ public class RdsQueryHandler {
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
         }
+    }
+
+    // ── Event notification subscriptions ────────────────────────────────────
+
+    private Response handleCreateEventSubscription(MultivaluedMap<String, String> params, String region) {
+        EventSubscription subscription = service.createEventSubscription(region,
+                params.getFirst("SubscriptionName"),
+                params.getFirst("SnsTopicArn"),
+                params.getFirst("SourceType"),
+                memberList(params, "SourceIds"),
+                memberList(params, "EventCategories"),
+                optionalBoolean(params.getFirst("Enabled")));
+        return Response.ok(AwsQueryResponse.envelope("CreateEventSubscription", AwsNamespaces.RDS,
+                new XmlBuilder().raw(eventSubscriptionXml(subscription)).build())).build();
+    }
+
+    private Response handleModifyEventSubscription(MultivaluedMap<String, String> params, String region) {
+        EventSubscription subscription = service.modifyEventSubscription(region,
+                params.getFirst("SubscriptionName"),
+                params.getFirst("SnsTopicArn"),
+                params.getFirst("SourceType"),
+                memberList(params, "EventCategories"),
+                optionalBoolean(params.getFirst("Enabled")));
+        return Response.ok(AwsQueryResponse.envelope("ModifyEventSubscription", AwsNamespaces.RDS,
+                new XmlBuilder().raw(eventSubscriptionXml(subscription)).build())).build();
+    }
+
+    private Response handleDeleteEventSubscription(MultivaluedMap<String, String> params, String region) {
+        EventSubscription subscription = service.deleteEventSubscription(region,
+                params.getFirst("SubscriptionName"));
+        return Response.ok(AwsQueryResponse.envelope("DeleteEventSubscription", AwsNamespaces.RDS,
+                new XmlBuilder().raw(eventSubscriptionXml(subscription)).build())).build();
+    }
+
+    private Response handleDescribeEventSubscriptions(MultivaluedMap<String, String> params, String region) {
+        List<EventSubscription> subscriptions = service.describeEventSubscriptions(region,
+                params.getFirst("SubscriptionName"));
+        XmlBuilder xml = new XmlBuilder().start("EventSubscriptionsList");
+        for (EventSubscription subscription : subscriptions) {
+            xml.raw(eventSubscriptionXml(subscription));
+        }
+        xml.end("EventSubscriptionsList");
+        return Response.ok(AwsQueryResponse.envelope("DescribeEventSubscriptions", AwsNamespaces.RDS,
+                xml.build())).build();
+    }
+
+    private static String eventSubscriptionXml(EventSubscription s) {
+        XmlBuilder xml = new XmlBuilder().start("EventSubscription")
+                .elem("CustomerAwsId", s.getCustomerAwsId())
+                .elem("CustSubscriptionId", s.getCustSubscriptionId())
+                .elem("SnsTopicArn", s.getSnsTopicArn())
+                .elem("Status", s.getStatus())
+                .elem("SubscriptionCreationTime", s.getSubscriptionCreationTime())
+                .elem("Enabled", String.valueOf(s.isEnabled()))
+                .elem("EventSubscriptionArn", s.getEventSubscriptionArn());
+        if (s.getSourceType() != null) {
+            xml.elem("SourceType", s.getSourceType());
+        }
+        xml.start("SourceIdsList");
+        for (String id : s.getSourceIdsList()) {
+            xml.elem("SourceId", id);
+        }
+        xml.end("SourceIdsList");
+        xml.start("EventCategoriesList");
+        for (String category : s.getEventCategoriesList()) {
+            xml.elem("EventCategory", category);
+        }
+        xml.end("EventCategoriesList");
+        return xml.end("EventSubscription").build();
     }
 
     private Response handleDescribeEvents(MultivaluedMap<String, String> params, String region) {

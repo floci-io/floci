@@ -29,6 +29,10 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `PromoteReadReplicaDBCluster` | Refused with `InvalidDBClusterStateFault`: no cluster is created as a replica of an instance |
 | `DescribeOrderableDBInstanceOptions` | List deterministic instance class options |
 | `DescribeEvents` | - |
+| `CreateEventSubscription` | Create an event notification subscription (stored, nothing is published) |
+| `DescribeEventSubscriptions` | List subscriptions, or the one the request names |
+| `ModifyEventSubscription` | Update the members the request names |
+| `DeleteEventSubscription` | Delete a subscription |
 | `CreateDBSubnetGroup` | Create a DB subnet group; tags given here are readable through `ListTagsForResource` |
 | `DescribeDBSubnetGroups` | List DB subnet groups |
 | `ModifyDBSubnetGroup` | Update DB subnet group description and subnet list |
@@ -134,6 +138,16 @@ checked against the instance's other window. Modifications apply immediately —
     `Copy`, `Delete` and the `restore` attribute behave as they do for instance snapshots, under
     `arn:aws:rds:<region>:<account>:cluster-snapshot:<name>`. RDS reserved instances aren't
     modeled (there's no reserved-instance API), so tagging doesn't apply to them.
+
+## Event notification subscriptions
+
+The four subscription actions manage the resource itself. **Nothing is published to the topic.**
+A subscription is stored and reported back so a client can manage it. No RDS event reaches SNS
+through it, so an SNS subscriber sees nothing.
+
+`SnsTopicArn` is required and is not resolved against the SNS service. `SourceType` is checked
+against the model's valid values, and a request naming `SourceIds` must also name the `SourceType`
+they belong to, as the model requires. An omitted `Enabled` activates the subscription.
 
 ## Configuration
 

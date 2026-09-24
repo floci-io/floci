@@ -35,6 +35,7 @@ import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbClusterSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbEndpoint;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
+import io.github.hectorvent.floci.services.rds.model.EventSubscription;
 import io.github.hectorvent.floci.services.kms.KmsService;
 import io.github.hectorvent.floci.services.kms.model.KmsKey;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceScalingChanges;
@@ -167,6 +168,7 @@ public class RdsService implements Resettable, ResourceProvider {
     private final StorageBackend<String, GlobalCluster> globalClusters;
     private final StorageBackend<String, String> snapshotData;
     private StorageBackend<String, RdsEvent> events = new InMemoryStorage<>();
+    private final StorageBackend<String, EventSubscription> eventSubscriptions;
     private final RdsContainerManager containerManager;
     private final RdsProxyManager proxyManager;
     // CreateDBCluster/CreateDBInstance register the new resource only after the
@@ -237,6 +239,8 @@ public class RdsService implements Resettable, ResourceProvider {
         this.metricsService = metricsService;
         this.instances = storageFactory.create("rds", "rds-instances.json",
                 new TypeReference<Map<String, DbInstance>>() {});
+        this.eventSubscriptions = storageFactory.create("rds", "rds-event-subscriptions.json",
+                new TypeReference<Map<String, EventSubscription>>() {});
         this.clusters = storageFactory.create("rds", "rds-clusters.json",
                 new TypeReference<Map<String, DbCluster>>() {});
         this.parameterGroups = storageFactory.create("rds", "rds-parameter-groups.json",
@@ -397,6 +401,7 @@ public class RdsService implements Resettable, ResourceProvider {
         this.snapshots = new io.github.hectorvent.floci.core.storage.InMemoryStorage<>();
         this.clusterSnapshots = new InMemoryStorage<>();
         this.snapshotData = new io.github.hectorvent.floci.core.storage.InMemoryStorage<>();
+        this.eventSubscriptions = new InMemoryStorage<>();
     }
 
     public void restorePersistedRuntime() {
@@ -8473,4 +8478,119 @@ public class RdsService implements Resettable, ResourceProvider {
                 new SupportedResourceType("rds:db", "rds", true),
                 new SupportedResourceType("rds:cluster", "rds", true));
     }
+    // ── Event notification subscriptions ────────────────────────────────────
+
+    /** The model's SourceType valid values. */
+    private static final Set<String> EVENT_SOURCE_TYPES = Set.of(
+            "db-instance", "db-cluster", "db-parameter-group", "db-security-group", "db-snapshot",
+            "db-cluster-snapshot", "db-proxy", "zero-etl", "custom-engine-version",
+            "blue-green-deployment");
+    private static final int MAX_SUBSCRIPTION_NAME = 255;
+
+    /**
+     * Nothing is published to the topic. The subscription is stored and reported back so a client
+     * can manage it, and no RDS event reaches SNS through it.
+     */
+    public EventSubscription createEventSubscription(String region, String subscriptionName,
+                                                     String snsTopicArn, String sourceType,
+                                                     List<String> sourceIds,
+                                                     List<String> eventCategories, Boolean enabled) {
+        if (subscriptionName == null || subscriptionName.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "SubscriptionName is required.", 400);
+        }
+        if (subscriptionName.length() >= MAX_SUBSCRIPTION_NAME) {
+            throw new AwsException("InvalidParameterValue",
+                    "SubscriptionName must be less than " + MAX_SUBSCRIPTION_NAME + " characters.", 400);
+        }
+        if (snsTopicArn == null || snsTopicArn.isBlank()) {
+            throw new AwsException("SNSTopicArnNotFound",
+                    "SnsTopicArn is required and must name an existing topic.", 404);
+        }
+        if (sourceType != null && !EVENT_SOURCE_TYPES.contains(sourceType)) {
+            throw new AwsException("InvalidParameterValue",
+                    "SourceType must be one of " + EVENT_SOURCE_TYPES + ".", 400);
+        }
+        // The model states this coupling directly: a request naming SourceIds must also name the
+        // SourceType they belong to, because an id alone does not say what kind of source it is.
+        if (sourceIds != null && !sourceIds.isEmpty() && (sourceType == null || sourceType.isBlank())) {
+            throw new AwsException("InvalidParameterCombination",
+                    "SourceType must be provided when SourceIds are supplied.", 400);
+        }
+        String key = eventSubscriptionKey(region, subscriptionName);
+        if (eventSubscriptions.get(key).isPresent()) {
+            throw new AwsException("SubscriptionAlreadyExist",
+                    "Subscription " + subscriptionName + " already exists.", 400);
+        }
+        String accountId = regionResolver.getAccountId();
+        EventSubscription subscription = new EventSubscription();
+        subscription.setCustomerAwsId(accountId);
+        subscription.setCustSubscriptionId(subscriptionName);
+        subscription.setSnsTopicArn(snsTopicArn);
+        subscription.setStatus("active");
+        subscription.setSubscriptionCreationTime(Instant.now().toString());
+        subscription.setSourceType(sourceType);
+        subscription.setSourceIdsList(sourceIds == null ? new ArrayList<>() : new ArrayList<>(sourceIds));
+        subscription.setEventCategoriesList(
+                eventCategories == null ? new ArrayList<>() : new ArrayList<>(eventCategories));
+        // The model documents the subscription as created but inactive when Enabled is false, and
+        // says nothing about a default, so an omitted Enabled activates it as the console does.
+        subscription.setEnabled(enabled == null || enabled);
+        subscription.setEventSubscriptionArn(AwsArnUtils.Arn.of("rds", region, accountId,
+                "es:" + subscriptionName).toString());
+        eventSubscriptions.put(key, subscription);
+        return subscription;
+    }
+
+    /** ModifyEventSubscription applies only the members the request names. */
+    public EventSubscription modifyEventSubscription(String region, String subscriptionName,
+                                                     String snsTopicArn, String sourceType,
+                                                     List<String> eventCategories, Boolean enabled) {
+        EventSubscription subscription = requireEventSubscription(region, subscriptionName);
+        if (snsTopicArn != null && !snsTopicArn.isBlank()) {
+            subscription.setSnsTopicArn(snsTopicArn);
+        }
+        if (sourceType != null && !sourceType.isBlank()) {
+            if (!EVENT_SOURCE_TYPES.contains(sourceType)) {
+                throw new AwsException("InvalidParameterValue",
+                        "SourceType must be one of " + EVENT_SOURCE_TYPES + ".", 400);
+            }
+            subscription.setSourceType(sourceType);
+        }
+        if (eventCategories != null && !eventCategories.isEmpty()) {
+            subscription.setEventCategoriesList(new ArrayList<>(eventCategories));
+        }
+        if (enabled != null) {
+            subscription.setEnabled(enabled);
+        }
+        eventSubscriptions.put(eventSubscriptionKey(region, subscriptionName), subscription);
+        return subscription;
+    }
+
+    public EventSubscription deleteEventSubscription(String region, String subscriptionName) {
+        EventSubscription subscription = requireEventSubscription(region, subscriptionName);
+        eventSubscriptions.delete(eventSubscriptionKey(region, subscriptionName));
+        return subscription;
+    }
+
+    /** Every subscription in the region, or the one the request names. */
+    public List<EventSubscription> describeEventSubscriptions(String region, String subscriptionName) {
+        if (subscriptionName != null && !subscriptionName.isBlank()) {
+            return List.of(requireEventSubscription(region, subscriptionName));
+        }
+        String prefix = eventSubscriptionKey(region, "");
+        return eventSubscriptions.scan(k -> k.startsWith(prefix)).stream()
+                .sorted(Comparator.comparing(EventSubscription::getCustSubscriptionId))
+                .toList();
+    }
+
+    private EventSubscription requireEventSubscription(String region, String subscriptionName) {
+        return eventSubscriptions.get(eventSubscriptionKey(region, subscriptionName))
+                .orElseThrow(() -> new AwsException("SubscriptionNotFound",
+                        "Subscription " + subscriptionName + " not found.", 404));
+    }
+
+    private static String eventSubscriptionKey(String region, String subscriptionName) {
+        return "es::" + region + "::" + subscriptionName;
+    }
+
 }
