@@ -1,13 +1,19 @@
 package io.github.hectorvent.floci.services.lambda;
 
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbStreamService;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.json.JsonPath;
 import io.restassured.path.json.config.JsonPathConfig;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
@@ -44,6 +50,9 @@ class EsmIntegrationTest {
             "http://localhost:4566/" + NON_DEFAULT_ACCOUNT + "/" + MULTI_ACCOUNT_QUEUE_NAME;
 
     private static String esmUuid;
+
+    @Inject
+    EsmStore esmStore;
 
     @Test
     @Order(1)
@@ -255,6 +264,68 @@ class EsmIntegrationTest {
                 .delete(LAMBDA_BASE + "/event-source-mappings/" + uuid)
                 .then()
                 .statusCode(202);
+    }
+
+    @Test
+    void createLatestDynamoDbMappingStartsAfterTheNewestRecord() {
+        String tableName = "esm-latest-" + UUID.randomUUID();
+        String streamArn = dynamoDb("DynamoDB_20120810.CreateTable", """
+                {
+                  "TableName": "%s",
+                  "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                  "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                  "BillingMode": "PAY_PER_REQUEST",
+                  "StreamSpecification": {"StreamEnabled": true, "StreamViewType": "NEW_IMAGE"}
+                }
+                """.formatted(tableName)).getString("TableDescription.LatestStreamArn");
+        for (String pk : List.of("before-1", "before-2")) {
+            dynamoDb("DynamoDB_20120810.PutItem", """
+                    {"TableName": "%s", "Item": {"pk": {"S": "%s"}}}
+                    """.formatted(tableName, pk));
+        }
+        String iterator = dynamoDb("DynamoDBStreams_20120810.GetShardIterator", """
+                {"StreamArn": "%s", "ShardId": "%s", "ShardIteratorType": "TRIM_HORIZON"}
+                """.formatted(streamArn, DynamoDbStreamService.SHARD_ID)).getString("ShardIterator");
+        String newestSequence = dynamoDb("DynamoDBStreams_20120810.GetRecords", """
+                {"ShardIterator": "%s"}
+                """.formatted(iterator)).getString("Records[-1].dynamodb.SequenceNumber");
+
+        // Disabled so nothing polls: only the starting point captured at creation is under test.
+        String uuid = given()
+                .contentType("application/json")
+                .body("""
+                        {
+                          "FunctionName": "%s",
+                          "EventSourceArn": "%s",
+                          "StartingPosition": "LATEST",
+                          "Enabled": false
+                        }
+                        """.formatted(FUNCTION_NAME, streamArn))
+                .when()
+                .post(LAMBDA_BASE + "/event-source-mappings/")
+                .then()
+                .statusCode(202)
+                .extract()
+                .path("UUID");
+
+        assertEquals(newestSequence, esmStore.getForAccount(ACCOUNT_ID, uuid).orElseThrow()
+                .getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+
+        given().delete(LAMBDA_BASE + "/event-source-mappings/" + uuid).then().statusCode(202);
+        dynamoDb("DynamoDB_20120810.DeleteTable", "{\"TableName\": \"%s\"}".formatted(tableName));
+    }
+
+    private static JsonPath dynamoDb(String target, String body) {
+        return given()
+                .header("X-Amz-Target", target)
+                .contentType("application/x-amz-json-1.0")
+                .body(body.getBytes(StandardCharsets.UTF_8))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .extract()
+                .jsonPath();
     }
 
     @Test

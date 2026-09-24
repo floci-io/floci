@@ -1283,6 +1283,9 @@ public class LambdaService implements ResourceProvider {
         esm.setSourceAccessConfigurations(sourceAccessConfigurations);
         esm.setLastModified(System.currentTimeMillis());
 
+        if (eventSourceArn != null && eventSourceArn.contains(":dynamodb:")) {
+            dynamodbStreamsPoller.initializeStartingPosition(esm);
+        }
         esmStore.save(esm);
         if (enabled) {
             startPollingHelper(esm);
@@ -1861,6 +1864,9 @@ public class LambdaService implements ResourceProvider {
         EventSourceMapping esm = getEventSourceMapping(uuid); // throws 404 if not found
         stopPollingHelper(esm);
         esmStore.delete(uuid);
+        if (esm.getEventSourceArn() != null && esm.getEventSourceArn().contains(":dynamodb:")) {
+            dynamodbStreamsPoller.mappingDeleted(uuid);
+        }
         LOG.infov("Deleted ESM {0}", uuid);
     }
 

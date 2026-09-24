@@ -285,6 +285,18 @@ public class DynamoDbStreamService {
 
     public record GetRecordsResult(List<DynamoDbStreamRecord> records, String nextShardIterator) {}
 
+    /** Sequence number of the newest record still retained, or null when the stream holds none. */
+    public String latestSequenceNumber(String streamArn) {
+        ConcurrentLinkedDeque<DynamoDbStreamRecord> deque = records.get(streamArn);
+        if (deque == null) {
+            return null;
+        }
+        synchronized (deque) {
+            DynamoDbStreamRecord last = deque.peekLast();
+            return last == null ? null : last.getSequenceNumber();
+        }
+    }
+
     public GetRecordsResult getRecords(String shardIterator, Integer limit) {
         String[] parts = decodeIterator(shardIterator);
         String streamArn = parts[0];

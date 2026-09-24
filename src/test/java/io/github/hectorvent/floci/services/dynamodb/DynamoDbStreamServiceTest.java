@@ -250,6 +250,26 @@ class DynamoDbStreamServiceTest {
     }
 
     @Test
+    void latestSequenceNumberIsNullForAnUnknownOrEmptyStream() {
+        TableDefinition table = createTestTableWithStream();
+
+        assertNull(service.latestSequenceNumber(TABLE_ARN + "/stream/unknown"));
+        assertNull(service.latestSequenceNumber(table.getStreamArn()));
+    }
+
+    @Test
+    void latestSequenceNumberIsTheNewestRetainedRecord() throws Exception {
+        TableDefinition table = createTestTableWithStream();
+        service.enableStream(table.getTableName(), TABLE_ARN, "NEW_IMAGE", "us-east-1");
+        JsonNode item = mapper.readTree("{\"userId\":{\"S\":\"u1\"}}");
+
+        service.captureEvent(table.getTableName(), "INSERT", null, item, table, "us-east-1");
+        service.captureEvent(table.getTableName(), "MODIFY", item, item, table, "us-east-1");
+
+        assertEquals("000000000000000000002", service.latestSequenceNumber(table.getStreamArn()));
+    }
+
+    @Test
     void requiresASequenceNumberForSequenceBasedIterators() {
         var table = createTestTableWithStream();
 

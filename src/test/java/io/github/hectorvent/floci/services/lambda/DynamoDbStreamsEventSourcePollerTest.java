@@ -12,7 +12,10 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbStreamService;
+import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.DynamoDbStreamRecord;
+import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
+import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.lambda.model.EventSourceMapping;
@@ -47,6 +50,8 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -66,6 +71,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -156,6 +162,38 @@ class DynamoDbStreamsEventSourcePollerTest {
     }
 
     @Test
+    void startPersistedPollersDiscardsDisabledMappingCheckpointsWithoutPolling() {
+        EventSourceMapping esm = persistedStreamsEsmWithStaleCheckpoint();
+        esm.setEnabled(false);
+        esmStore.saveForAccount(ACCOUNT_ID, esm);
+        Vertx vertx = mock(Vertx.class);
+        DynamoDbStreamsEventSourcePoller p = new DynamoDbStreamsEventSourcePoller(
+                vertx, streamService, executorService, new LambdaTargetResolver(functionStore, aliasStore),
+                esmStore, OBJECT_MAPPER, config, filterMatcher, sqsService, snsService, s3Service, clock::get);
+
+        p.startPersistedPollers();
+
+        EventSourceMapping reloaded = esmStore.getForAccount(ACCOUNT_ID, "esm-1").orElseThrow();
+        assertTrue(reloaded.getShardSequenceNumbers().isEmpty(),
+                "a disabled mapping's checkpoint is just as stale after restart, and enabling it later "
+                        + "would otherwise skip every new record");
+        verifyNoInteractions(vertx);
+    }
+
+    @Test
+    void startPersistedPollersSkipsADisabledMappingWithoutAnEventSourceArn() {
+        EventSourceMapping kafka = new EventSourceMapping();
+        kafka.setUuid("esm-kafka");
+        kafka.setAccountId(ACCOUNT_ID);
+        kafka.setEnabled(false);
+        esmStore.saveForAccount(ACCOUNT_ID, kafka);
+
+        poller.startPersistedPollers();
+
+        assertTrue(esmStore.getForAccount(ACCOUNT_ID, "esm-kafka").isPresent());
+    }
+
+    @Test
     void pollerDeliversPostRestartRecordAfterStartupCheckpointReset() {
         persistedStreamsEsmWithStaleCheckpoint();
 
@@ -198,6 +236,9 @@ class DynamoDbStreamsEventSourcePollerTest {
     // ──────────────────────────── FilterCriteria ────────────────────────────
 
     private DynamoDbStreamsEventSourcePoller pollerWith(EsmStore store) {
+        // The mock records writes for verification; reads see what filterEsm stored, as a real store would.
+        when(store.getForAccount(anyString(), anyString()))
+                .thenAnswer(inv -> esmStore.getForAccount(inv.getArgument(0), inv.getArgument(1)));
         return new DynamoDbStreamsEventSourcePoller(
                 mock(Vertx.class), streamService, executorService, new LambdaTargetResolver(functionStore, aliasStore),
                 store, OBJECT_MAPPER, config, filterMatcher, sqsService, snsService, s3Service, clock::get);
@@ -252,6 +293,7 @@ class DynamoDbStreamsEventSourcePollerTest {
             fc.setFilters(filters);
             esm.setFilterCriteria(fc);
         }
+        esmStore.saveForAccount(ACCOUNT_ID, esm);
         return esm;
     }
 
@@ -1617,6 +1659,403 @@ class DynamoDbStreamsEventSourcePollerTest {
         pollOnce(p, esm);
 
         assertEquals("s1", checkpoint(esm));
+    }
+
+    // ──────────────────── StartingPosition and mapping lifecycle (#4311) ────────────────────
+
+    private static final String TABLE_ARN = "arn:aws:dynamodb:us-east-1:000000000000:table/t";
+
+    private DynamoDbStreamService realStream() {
+        DynamoDbStreamService streams = new DynamoDbStreamService(OBJECT_MAPPER, mock(StorageFactory.class));
+        streams.enableStream("t", TABLE_ARN, "NEW_AND_OLD_IMAGES", "us-east-1", STREAM_ARN);
+        return streams;
+    }
+
+    private void write(DynamoDbStreamService streams, String pk) {
+        TableDefinition table = new TableDefinition("t", List.of(new KeySchemaElement("pk", "HASH")),
+                List.of(new AttributeDefinition("pk", "S")), "us-east-1", ACCOUNT_ID);
+        ObjectNode item = OBJECT_MAPPER.createObjectNode();
+        item.putObject("pk").put("S", pk);
+        streams.captureEvent("t", "INSERT", null, item, table, "us-east-1");
+    }
+
+    private DynamoDbStreamsEventSourcePoller pollerOver(DynamoDbStreamService streams) {
+        return new DynamoDbStreamsEventSourcePoller(
+                mock(Vertx.class), streams, executorService, new LambdaTargetResolver(functionStore, aliasStore),
+                esmStore, OBJECT_MAPPER, config, filterMatcher, sqsService, snsService, s3Service, clock::get);
+    }
+
+    private EventSourceMapping streamsEsm(String uuid, String startingPosition) {
+        EventSourceMapping esm = new EventSourceMapping();
+        esm.setUuid(uuid);
+        esm.setAccountId(ACCOUNT_ID);
+        esm.setRegion("us-east-1");
+        esm.setFunctionName("fn");
+        esm.setEventSourceArn(STREAM_ARN);
+        esm.setBatchSize(10);
+        esm.setEnabled(true);
+        esm.setStartingPosition(startingPosition);
+        return esm;
+    }
+
+    private void stubFunctionSucceeds() {
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("fn");
+        when(functionStore.getForAccount(ACCOUNT_ID, "us-east-1", "fn")).thenReturn(Optional.of(fn));
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(new InvokeResult());
+    }
+
+    private List<String> deliveredKeys(byte[] payload) {
+        List<String> keys = new ArrayList<>();
+        for (JsonNode rec : readRecords(payload)) {
+            keys.add(rec.path("dynamodb").path("Keys").path("pk").path("S").asText());
+        }
+        return keys;
+    }
+
+    /** One-record read that signals {@code reading} and then holds until {@code release} opens. */
+    private void stubBlockingRead(CountDownLatch reading, CountDownLatch release) {
+        stubTrimHorizon(List.of());
+        when(streamService.getRecords("it", 10)).thenAnswer(inv -> {
+            reading.countDown();
+            release.await(5, TimeUnit.SECONDS);
+            return new DynamoDbStreamService.GetRecordsResult(List.of(ddbRecord("s1", "INSERT", "{}")), "it");
+        });
+    }
+
+    /** Invocation that signals {@code invoking} and then holds until {@code release} opens. */
+    private void stubBlockingInvoke(CountDownLatch invoking, CountDownLatch release, InvokeResult result) {
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenAnswer(inv -> {
+                    invoking.countDown();
+                    release.await(5, TimeUnit.SECONDS);
+                    return result;
+                });
+    }
+
+    @Test
+    void latestMappingDeliversOnlyRecordsWrittenAfterItWasCreated() {
+        DynamoDbStreamService streams = realStream();
+        write(streams, "old-1");
+        write(streams, "old-2");
+        stubFunctionSucceeds();
+        DynamoDbStreamsEventSourcePoller p = pollerOver(streams);
+        EventSourceMapping esm = streamsEsm("esm-latest", "LATEST");
+        p.initializeStartingPosition(esm);
+        esmStore.saveForAccount(ACCOUNT_ID, esm);
+
+        write(streams, "new");
+        p.pollAndInvoke(esm);
+
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(executorService, timeout(2000)).invoke(any(), payload.capture(), eq(InvocationType.RequestResponse));
+        assertEquals(List.of("new"), deliveredKeys(payload.getValue()));
+    }
+
+    @Test
+    void latestMappingOnAnEmptyStreamDeliversEveryLaterRecord() throws Exception {
+        DynamoDbStreamService streams = realStream();
+        stubFunctionSucceeds();
+        DynamoDbStreamsEventSourcePoller p = pollerOver(streams);
+        EventSourceMapping esm = streamsEsm("esm-latest", "LATEST");
+        p.initializeStartingPosition(esm);
+        esmStore.saveForAccount(ACCOUNT_ID, esm);
+        assertTrue(esm.getShardSequenceNumbers().isEmpty(), "an empty stream has no record to start after");
+
+        p.pollAndInvoke(esm);
+        awaitPollCompleted(p);
+        assertTrue(esm.getShardSequenceNumbers().isEmpty(), "an empty poll must not pin the cursor");
+        verify(executorService, never()).invoke(any(), any(byte[].class), any());
+
+        write(streams, "first");
+        p.pollAndInvoke(esm);
+
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(executorService, timeout(2000)).invoke(any(), payload.capture(), eq(InvocationType.RequestResponse));
+        assertEquals(List.of("first"), deliveredKeys(payload.getValue()));
+    }
+
+    @Test
+    void trimHorizonMappingIsNotPinnedAtCreation() {
+        DynamoDbStreamService streams = realStream();
+        write(streams, "old");
+        EventSourceMapping esm = streamsEsm("esm-trim", "TRIM_HORIZON");
+
+        pollerOver(streams).initializeStartingPosition(esm);
+
+        assertTrue(esm.getShardSequenceNumbers().isEmpty());
+    }
+
+    @Test
+    void reEnabledMappingResumesAfterItsLastProcessedRecord() throws Exception {
+        DynamoDbStreamService streams = realStream();
+        write(streams, "old");
+        stubFunctionSucceeds();
+        DynamoDbStreamsEventSourcePoller p = pollerOver(streams);
+        EventSourceMapping esm = streamsEsm("esm-latest", "LATEST");
+        p.initializeStartingPosition(esm);
+        esmStore.saveForAccount(ACCOUNT_ID, esm);
+        write(streams, "a");
+        p.pollAndInvoke(esm);
+        verify(executorService, timeout(2000)).invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse));
+        awaitPollCompleted(p);
+
+        esm.setEnabled(false);
+        esmStore.saveForAccount(ACCOUNT_ID, esm);
+        p.stopPolling(esm.getUuid());
+        write(streams, "b");
+        esm.setEnabled(true);
+        esmStore.saveForAccount(ACCOUNT_ID, esm);
+        p.startPolling(esm);
+        p.pollAndInvoke(esm);
+
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(executorService, timeout(2000).times(2))
+                .invoke(any(), payload.capture(), eq(InvocationType.RequestResponse));
+        assertEquals(List.of("a"), deliveredKeys(payload.getAllValues().get(0)));
+        assertEquals(List.of("b"), deliveredKeys(payload.getAllValues().get(1)),
+                "re-enabling resumes after the last processed record, neither from the trim horizon nor LATEST");
+    }
+
+    @Test
+    void mappingDeletedDuringABlockedReadIsNotInvokedOrResurrected() throws Exception {
+        CountDownLatch reading = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        stubBlockingRead(reading, release);
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(new InvokeResult());
+        EventSourceMapping esm = streamsEsm("esm-live", null);
+        esmStore.saveForAccount(ACCOUNT_ID, esm);
+
+        poller.pollAndInvoke(esm);
+        assertTrue(reading.await(2, TimeUnit.SECONDS));
+        poller.stopPolling(esm.getUuid());
+        esmStore.delete(esm.getUuid());
+        release.countDown();
+        awaitPollCompleted(poller);
+
+        verify(executorService, never()).invoke(any(), any(byte[].class), any());
+        assertTrue(esmStore.getForAccount(ACCOUNT_ID, esm.getUuid()).isEmpty(),
+                "a deleted mapping must not reappear in List/Get");
+    }
+
+    @Test
+    void mappingDisabledDuringABlockedReadIsNotInvoked() throws Exception {
+        CountDownLatch reading = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        stubBlockingRead(reading, release);
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(new InvokeResult());
+        EventSourceMapping esm = streamsEsm("esm-live", null);
+        esmStore.saveForAccount(ACCOUNT_ID, esm);
+
+        poller.pollAndInvoke(esm);
+        assertTrue(reading.await(2, TimeUnit.SECONDS));
+        esm.setEnabled(false);
+        esmStore.saveForAccount(ACCOUNT_ID, esm);
+        poller.stopPolling(esm.getUuid());
+        release.countDown();
+        awaitPollCompleted(poller);
+
+        verify(executorService, never()).invoke(any(), any(byte[].class), any());
+    }
+
+    @Test
+    void mappingDeletedDuringASuccessfulInvokeDropsTheResult() throws Exception {
+        assertDeletionDuringInvokeDropsTheResult(new InvokeResult());
+    }
+
+    @Test
+    void mappingDeletedDuringAFailedInvokeSendsNothingToItsDestination() throws Exception {
+        InvokeResult error = new InvokeResult();
+        error.setFunctionError("Unhandled");
+        assertDeletionDuringInvokeDropsTheResult(error);
+    }
+
+    private void assertDeletionDuringInvokeDropsTheResult(InvokeResult result) throws Exception {
+        stubTrimHorizon(List.of(ddbRecord("s1", "INSERT", "{}")));
+        CountDownLatch invoking = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        stubBlockingInvoke(invoking, release, result);
+        EventSourceMapping esm = streamsEsm("esm-live", null);
+        esm.setMaximumRetryAttempts(0);
+        EventSourceMapping.OnFailure onFailure = new EventSourceMapping.OnFailure();
+        onFailure.setDestination("arn:aws:sqs:us-east-1:000000000000:my-dlq");
+        EventSourceMapping.DestinationConfig destinationConfig = new EventSourceMapping.DestinationConfig();
+        destinationConfig.setOnFailure(onFailure);
+        esm.setDestinationConfig(destinationConfig);
+        esmStore.saveForAccount(ACCOUNT_ID, esm);
+
+        poller.pollAndInvoke(esm);
+        assertTrue(invoking.await(2, TimeUnit.SECONDS));
+        poller.stopPolling(esm.getUuid());
+        esmStore.delete(esm.getUuid());
+        release.countDown();
+        awaitPollCompleted(poller);
+
+        assertTrue(esmStore.getForAccount(ACCOUNT_ID, esm.getUuid()).isEmpty(),
+                "a deleted mapping must not reappear in List/Get");
+        assertTrue(esm.getShardSequenceNumbers().isEmpty(), "no checkpoint is written for a deleted mapping");
+        verify(sqsService, never()).sendMessage(anyString(), anyString(), anyInt(), anyString());
+    }
+
+    @Test
+    void mappingDeletedDuringABisectingFailedInvokeLeavesNoBisectStateOrDestinationSend() throws Exception {
+        stubStream("s1", "s2", "s3", "s4");
+        EventSourceMapping esm = esmWithDlq(0);
+        esm.setBisectBatchOnFunctionError(true);
+        DynamoDbStreamsEventSourcePoller p = pollerWith(mock(EsmStore.class));
+        List<List<String>> invocations = recordInvocations(seqs -> {
+            p.stopPolling(esm.getUuid());
+            esmStore.delete(esm.getUuid());
+            InvokeResult error = new InvokeResult();
+            error.setFunctionError("Unhandled");
+            return error;
+        });
+
+        pollOnce(p, esm);
+        pollOnce(p, esm);
+
+        assertEquals(List.of(List.of("s1", "s2", "s3", "s4")), invocations);
+        // A recorded bisect would halve the next fetch; both fetches must still use the full batch size.
+        verify(streamService, times(2)).getRecords(anyString(), eq(10));
+        assertNull(checkpoint(esm));
+        verify(sqsService, never()).sendMessage(anyString(), anyString(), anyInt(), anyString());
+    }
+
+    @Test
+    void parkedFailureIsNotResentOnceTheMappingIsStopped() throws Exception {
+        stubStream("s1");
+        List<List<String>> invocations = failInvocationsContaining("s1");
+        refuseSqsSends(1);
+        EventSourceMapping esm = esmWithDlq(0);
+        DynamoDbStreamsEventSourcePoller p = pollerWith(mock(EsmStore.class));
+        pollOnce(p, esm);
+        assertNull(checkpoint(esm));
+        // A worker that loaded the parked entry before stopPolling cleared it sees only the tombstone.
+        p.stopped.add(esm.getUuid());
+
+        advancePastRetry(p);
+        pollOnce(p, esm);
+
+        verify(sqsService, times(1)).sendMessage(anyString(), anyString(), anyInt(), anyString());
+        assertNull(checkpoint(esm));
+        assertEquals(List.of(List.of("s1")), invocations);
+    }
+
+    @Test
+    void checkpointIsNotSavedWhileAResetIsInProgress() throws Exception {
+        stubStream("s1");
+        EventSourceMapping esm = filterEsm();
+        EsmStore store = mock(EsmStore.class);
+        DynamoDbStreamsEventSourcePoller p = pollerWith(store);
+        AtomicBoolean resetDuringInvoke = new AtomicBoolean(true);
+        List<List<String>> invocations = recordInvocations(seqs -> {
+            if (resetDuringInvoke.getAndSet(false)) {
+                p.beforeReset();
+            }
+            return new InvokeResult();
+        });
+
+        pollOnce(p, esm);
+        assertNull(checkpoint(esm));
+        verify(store, never()).saveForAccount(anyString(), any());
+
+        p.afterReset();
+        pollOnce(p, esm);
+
+        assertEquals(List.of(List.of("s1"), List.of("s1")), invocations);
+        assertEquals("s1", checkpoint(esm));
+        verify(store).saveForAccount(eq(ACCOUNT_ID), any());
+    }
+
+    @Test
+    void pollDuringAResetDoesNotInvokeUntilTheResetEnds() throws Exception {
+        stubStream("s1");
+        List<List<String>> invocations = recordInvocations(seqs -> new InvokeResult());
+        EventSourceMapping esm = filterEsm();
+        DynamoDbStreamsEventSourcePoller p = pollerWith(mock(EsmStore.class));
+
+        p.beforeReset();
+        pollOnce(p, esm);
+        assertTrue(invocations.isEmpty(), "a poll during a reset must not invoke the function");
+
+        p.afterReset();
+        pollOnce(p, esm);
+
+        assertEquals(List.of(List.of("s1")), invocations);
+        assertEquals("s1", checkpoint(esm));
+    }
+
+    @Test
+    void stopPollingDuringAnInvocationBlocksItsCheckpointWrite() throws Exception {
+        stubTrimHorizon(List.of(ddbRecord("s1", "INSERT", "{}")));
+        EsmStore store = mock(EsmStore.class);
+        EventSourceMapping esm = filterEsm();
+        DynamoDbStreamsEventSourcePoller p = pollerWith(store);
+        // A delete has stopped the poller but has not reached the store yet, so the mapping still exists.
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenAnswer(inv -> {
+                    p.stopPolling(esm.getUuid());
+                    return new InvokeResult();
+                });
+
+        p.pollAndInvoke(esm);
+        verify(executorService, timeout(2000)).invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse));
+        awaitPollCompleted(p);
+
+        verify(store, never()).saveForAccount(anyString(), any());
+    }
+
+    @Test
+    void startPollingAfterStopPollingLetsTheCheckpointAdvanceAgain() {
+        stubTrimHorizon(List.of(ddbRecord("s1", "INSERT", "{}")));
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(new InvokeResult());
+        EsmStore store = mock(EsmStore.class);
+        EventSourceMapping esm = filterEsm();
+        DynamoDbStreamsEventSourcePoller p = pollerWith(store);
+
+        p.stopPolling(esm.getUuid());
+        p.startPolling(esm);
+        p.pollAndInvoke(esm);
+
+        verify(store, timeout(2000)).saveForAccount(eq(ACCOUNT_ID), any());
+        assertEquals("s1", esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+    }
+
+    @Test
+    void mappingDeletedReleasesItsStopTombstone() {
+        poller.stopPolling("esm-gone");
+
+        poller.mappingDeleted("esm-gone");
+
+        assertTrue(poller.stopped.isEmpty());
+    }
+
+    @Test
+    void resetMappingsInFlightInvokeDoesNotResurrectIt() throws Exception {
+        stubTrimHorizon(List.of(ddbRecord("s1", "INSERT", "{}")));
+        CountDownLatch invoking = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        stubBlockingInvoke(invoking, release, new InvokeResult());
+        EventSourceMapping old = streamsEsm("esm-old", null);
+        esmStore.saveForAccount(ACCOUNT_ID, old);
+
+        poller.pollAndInvoke(old);
+        assertTrue(invoking.await(2, TimeUnit.SECONDS));
+        esmStore.delete(old.getUuid());
+        poller.clear();
+        EventSourceMapping recreated = streamsEsm("esm-new", null);
+        esmStore.saveForAccount(ACCOUNT_ID, recreated);
+        // clear() forgot the in-flight poll; re-mark it so awaitPollCompleted waits for the old worker.
+        poller.activePolls.put(old.getUuid(), Boolean.TRUE);
+        release.countDown();
+        awaitPollCompleted(poller);
+
+        assertTrue(esmStore.getForAccount(ACCOUNT_ID, old.getUuid()).isEmpty(),
+                "a mapping wiped by a reset must not be written back by its in-flight poll");
     }
 
     private void awaitPollCompleted(DynamoDbStreamsEventSourcePoller poller) throws InterruptedException {
