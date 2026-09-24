@@ -1,6 +1,9 @@
 package io.github.hectorvent.floci.services.redshift.spectrum;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.model.CallerContext;
+import io.github.hectorvent.floci.services.redshift.proxy.RedshiftRoleAccess;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.junit.jupiter.api.Test;
@@ -11,8 +14,10 @@ import java.util.Arrays;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class SpectrumS3ReaderTest {
@@ -107,8 +112,81 @@ class SpectrumS3ReaderTest {
         assertEquals("42501", exception.sqlState());
     }
 
+    @Test
+    void deniesRoleGetObjectBeforeFetchingTheObject() {
+        S3Service s3 = mock(S3Service.class);
+        when(s3.isAuthEnforced()).thenReturn(true);
+        S3Object data = object("events/data.csv", "value\n");
+        when(s3.listObjectsWithPrefixes("warehouse", "events/", "", 1000, null, null))
+                .thenReturn(new S3Service.ListObjectsResult(List.of(data), List.of(), false, null));
+        IamService iam = mock(IamService.class);
+        String role = "arn:aws:iam::000000000000:role/Reader";
+        when(iam.resolvePrincipalContext(role)).thenReturn(CallerContext.of(List.of(policy(
+                "s3:ListBucket", RedshiftRoleAccess.bucketArn("warehouse")))));
+
+        SpectrumReadException exception = assertThrows(SpectrumReadException.class,
+                () -> new SpectrumS3Reader(s3, iam).read(session(role), schema(role), table(
+                        SpectrumColumn.Type.VARCHAR)).toList());
+
+        assertEquals("42501", exception.sqlState());
+        verify(s3, never()).getObject("warehouse", "events/data.csv");
+        verify(s3, never()).authorizeAnonymousGetObject("warehouse", "events/data.csv");
+    }
+
+    @Test
+    void readsRowsWhenTheBoundRoleAllowsListingAndObjectReads() {
+        S3Service s3 = mock(S3Service.class);
+        when(s3.isAuthEnforced()).thenReturn(true);
+        S3Object data = object("events/data.csv", "hello\n");
+        when(s3.listObjectsWithPrefixes("warehouse", "events/", "", 1000, null, null))
+                .thenReturn(new S3Service.ListObjectsResult(List.of(data), List.of(), false, null));
+        when(s3.getObject("warehouse", "events/data.csv")).thenReturn(data);
+        IamService iam = mock(IamService.class);
+        String role = "arn:aws:iam::000000000000:role/Reader";
+        when(iam.resolvePrincipalContext(role)).thenReturn(CallerContext.of(List.of(
+                policy("s3:ListBucket", RedshiftRoleAccess.bucketArn("warehouse")),
+                policy("s3:GetObject", RedshiftRoleAccess.objectArn("warehouse", "events/data.csv")))));
+
+        List<SpectrumRow> rows = new SpectrumS3Reader(s3, iam)
+                .read(session(role), schema(role), table(SpectrumColumn.Type.VARCHAR)).toList();
+
+        assertEquals(List.of(new SpectrumRow(List.of("hello"))), rows);
+        verify(s3, never()).authorizeAnonymousListBucket("warehouse");
+        verify(s3, never()).authorizeAnonymousGetObject("warehouse", "events/data.csv");
+    }
+
+    @Test
+    void deniesRoleListBucketBeforeListingObjects() {
+        S3Service s3 = mock(S3Service.class);
+        when(s3.isAuthEnforced()).thenReturn(true);
+        IamService iam = mock(IamService.class);
+        String role = "arn:aws:iam::000000000000:role/Reader";
+        when(iam.resolvePrincipalContext(role)).thenReturn(CallerContext.of(List.of(policy(
+                "s3:GetObject", RedshiftRoleAccess.objectArn("warehouse", "events/data.csv")))));
+
+        SpectrumReadException exception = assertThrows(SpectrumReadException.class,
+                () -> new SpectrumS3Reader(s3, iam).read(session(role), schema(role), table(
+                        SpectrumColumn.Type.VARCHAR)).toList());
+
+        assertEquals("42501", exception.sqlState());
+        verify(s3, never()).listObjectsWithPrefixes("warehouse", "events/", "", 1000, null, null);
+    }
+
     private static SpectrumExternalSchema schema() {
         return new SpectrumExternalSchema("000000000000", "dev", "analytics", "s3://warehouse/root/", null);
+    }
+
+    private static SpectrumExternalSchema schema(String role) {
+        return new SpectrumExternalSchema("000000000000", "dev", "analytics", "s3://warehouse/root/", role);
+    }
+
+    private static SpectrumSession session(String role) {
+        return new SpectrumSession("000000000000", "cluster-1", "dev", List.of(role), false);
+    }
+
+    private static String policy(String action, String resource) {
+        return "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\""
+                + action + "\",\"Resource\":\"" + resource + "\"}]}";
     }
 
     private static SpectrumExternalTable table(SpectrumColumn.Type type) {

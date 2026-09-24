@@ -2,6 +2,8 @@ package io.github.hectorvent.floci.services.redshift.spectrum;
 
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.redshift.proxy.RedshiftRoleAccess;
+import io.github.hectorvent.floci.services.redshift.proxy.S3CopySimulator;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -41,9 +43,32 @@ public final class SpectrumS3Reader {
     }
 
     public Stream<SpectrumRow> read(SpectrumExternalSchema schema, SpectrumExternalTable table) {
+        return read(schema, table, schema.iamRoleArn());
+    }
+
+    public Stream<SpectrumRow> read(SpectrumSession session, SpectrumExternalSchema schema,
+                                    SpectrumExternalTable table) {
+        if (session == null || !session.accountId().equals(schema.accountId())
+                || !session.databaseName().equals(table.databaseName())) {
+            throw new SpectrumReadException(SQLSTATE_AUTHORIZATION, "Spectrum session does not match external table");
+        }
+        String roleArn = schema.iamRoleArn();
+        if (roleArn != null && !session.iamRoleArns().contains(roleArn)) {
+            throw new SpectrumReadException(SQLSTATE_AUTHORIZATION,
+                    "Spectrum IAM role is not associated with the Redshift cluster");
+        }
+        return read(schema, table, roleArn);
+    }
+
+    private Stream<SpectrumRow> read(SpectrumExternalSchema schema, SpectrumExternalTable table, String roleArn) {
         Location location = Location.parse(table.location());
         try {
-            s3Service.authorizeAnonymousListBucket(location.bucket());
+            if (roleArn == null) {
+                s3Service.authorizeAnonymousListBucket(location.bucket());
+            } else {
+                RedshiftRoleAccess.authorizeRoleAction(s3Service, iamService, roleArn, "s3:ListBucket",
+                        RedshiftRoleAccess.bucketArn(location.bucket()));
+            }
             List<S3Object> objects = new ArrayList<>();
             String continuationToken = null;
             do {
@@ -54,10 +79,16 @@ public final class SpectrumS3Reader {
             } while (continuationToken != null);
             List<String> keys = objects.stream().map(S3Object::getKey).sorted(Comparator.naturalOrder()).toList();
             return StreamSupport.stream(Spliterators.spliteratorUnknownSize(
-                    new RowIterator(location.bucket(), keys.iterator(), table), 0), false);
+                    new RowIterator(location.bucket(), keys.iterator(), table, roleArn), 0), false);
+        } catch (S3CopySimulator.S3TransferException exception) {
+            throw mapRoleException(exception);
         } catch (AwsException exception) {
             throw mapAwsException(location, exception);
         }
+    }
+
+    private static SpectrumReadException mapRoleException(S3CopySimulator.S3TransferException exception) {
+        return new SpectrumReadException(exception.sqlState(), "Unable to read Spectrum data with IAM role", exception);
     }
 
     private SpectrumReadException mapAwsException(Location location, AwsException exception) {
@@ -72,15 +103,17 @@ public final class SpectrumS3Reader {
         private final String bucket;
         private final Iterator<String> keys;
         private final SpectrumExternalTable table;
+        private final String roleArn;
         private BufferedReader reader;
         private SpectrumRow next;
         private boolean finished;
         private String currentKey;
 
-        private RowIterator(String bucket, Iterator<String> keys, SpectrumExternalTable table) {
+        private RowIterator(String bucket, Iterator<String> keys, SpectrumExternalTable table, String roleArn) {
             this.bucket = bucket;
             this.keys = keys;
             this.table = table;
+            this.roleArn = roleArn;
         }
 
         @Override
@@ -110,7 +143,12 @@ public final class SpectrumS3Reader {
                             return;
                         }
                         currentKey = keys.next();
-                        s3Service.authorizeAnonymousGetObject(bucket, currentKey);
+                        if (roleArn == null) {
+                            s3Service.authorizeAnonymousGetObject(bucket, currentKey);
+                        } else {
+                            RedshiftRoleAccess.authorizeRoleAction(s3Service, iamService, roleArn, "s3:GetObject",
+                                    RedshiftRoleAccess.objectArn(bucket, currentKey));
+                        }
                         S3Object object = s3Service.getObject(bucket, currentKey);
                         reader = new BufferedReader(new InputStreamReader(
                                 new ByteArrayInputStream(object.getData()), StandardCharsets.UTF_8));
@@ -127,6 +165,8 @@ public final class SpectrumS3Reader {
                         return;
                     }
                 }
+            } catch (S3CopySimulator.S3TransferException exception) {
+                throw mapRoleException(exception);
             } catch (AwsException exception) {
                 throw mapAwsException(new Location(bucket, currentKey), exception);
             } catch (IOException exception) {
