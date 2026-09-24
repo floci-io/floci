@@ -66,6 +66,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 
 /**
  * Manages the Docker lifecycle of k3s containers for real-mode EKS clusters.
@@ -133,6 +134,11 @@ public class EksClusterManager implements ClusterNodeInstanceProvider {
     private final ContainerLogStreamer logStreamer;
     private final Map<String, ClusterNodeRecord> clusterNodeInstances = new ConcurrentHashMap<>();
     private final Map<String, Closeable> clusterLogHandles = new ConcurrentHashMap<>();
+    private volatile Consumer<Instance> nodeRegistrationListener;
+
+    public void setNodeRegistrationListener(Consumer<Instance> listener) {
+        this.nodeRegistrationListener = listener;
+    }
 
     record ClusterNodeRecord(String accountId, String region, Instance instance) {}
 
@@ -1646,6 +1652,15 @@ public class EksClusterManager implements ClusterNodeInstanceProvider {
             Instance nodeInstance = synthesizeClusterNodeInstance(cluster, containerIps.primaryIp(), region, accountId);
             nodeInstance.setDockerContainerId(containerId);
             clusterNodeInstances.put(clusterResourceName(cluster), new ClusterNodeRecord(accountId, region, nodeInstance));
+            Consumer<Instance> listener = nodeRegistrationListener;
+            if (listener != null) {
+                try {
+                    listener.accept(nodeInstance);
+                } catch (Exception e) {
+                    LOG.warnv("Node registration listener failed for cluster {0}: {1}",
+                            cluster.getName(), e.getMessage());
+                }
+            }
         } catch (Exception e) {
             LOG.warnv("Could not register cluster node instance for EKS cluster {0}: {1}",
                     cluster.getName(), e.getMessage());

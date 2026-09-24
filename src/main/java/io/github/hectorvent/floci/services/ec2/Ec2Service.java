@@ -620,7 +620,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         }
     }
 
-    private void restoreAttachedVolumesForInstance(String region, Instance inst) {
+    public void restoreAttachedVolumesForInstance(String region, Instance inst) {
         if (volumeBlockDeviceManager == null || inst == null) {
             return;
         }
@@ -644,7 +644,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             }
             for (VolumeAttachment att : vol.getAttachments()) {
                 if (inst.getInstanceId().equals(att.getInstanceId())
-                        && !att.getDevice().equals(inst.getRootDeviceName())) {
+                        && (inst.getRootDeviceName() == null || !att.getDevice().equals(inst.getRootDeviceName()))) {
                     volumeBlockDeviceManager.attachVolume(vol, inst, att.getDevice());
                 }
             }
@@ -8480,8 +8480,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             throw new AwsException("VolumeInUse",
                     "Volume " + volumeId + " is currently attached to an instance", 400);
         }
-        if (volumeBlockDeviceManager != null) {
-            volumeBlockDeviceManager.deleteVolume(volumeId);
+        if (volumeBlockDeviceManager != null && volumeBlockDeviceManager.isAvailable()) {
+            if (!volumeBlockDeviceManager.deleteVolume(volumeId)) {
+                throw new AwsException("InternalError",
+                        "Failed to delete backing storage for volume " + volumeId, 500);
+            }
         }
         volumes.delete(key(region, volumeId));
     }

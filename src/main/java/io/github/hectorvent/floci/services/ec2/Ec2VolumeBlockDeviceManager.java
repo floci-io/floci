@@ -7,6 +7,7 @@ import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Frame;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
@@ -27,6 +28,7 @@ import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
+import java.util.regex.Pattern;
 
 /**
  * Manages backing files and block device attachments for EC2 EBS volumes.
@@ -37,7 +39,7 @@ import java.util.function.Function;
  * created inside the target container at the requested path.
  */
 @ApplicationScoped
-public class Ec2VolumeBlockDeviceManager {
+public class Ec2VolumeBlockDeviceManager implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(Ec2VolumeBlockDeviceManager.class);
     private static final int DEFAULT_TIMEOUT_SECONDS = 30;
@@ -112,8 +114,8 @@ public class Ec2VolumeBlockDeviceManager {
         }
     }
 
-    private static final java.util.regex.Pattern VALID_DEVICE_PATTERN =
-            java.util.regex.Pattern.compile("^(/dev/)?[a-zA-Z0-9/_-]+$");
+    private static final Pattern VALID_DEVICE_PATTERN =
+            Pattern.compile("^(/dev/)?[a-zA-Z0-9/_-]+$");
 
     private final Object loopAllocationLock = new Object();
 
@@ -131,13 +133,15 @@ public class Ec2VolumeBlockDeviceManager {
             return false;
         }
         String rawFile = "/volumes/" + volumeId + ".raw";
-        String script = "while true; do\n"
-                + "  loop=$(losetup -a 2>/dev/null | grep '" + rawFile + "' | head -n1 | cut -d: -f1)\n"
+        String script = "raw=\"$1\"\n"
+                + "while true; do\n"
+                + "  loop=$(losetup -a 2>/dev/null | grep \"$raw\" | head -n1 | cut -d: -f1)\n"
                 + "  [ -n \"$loop\" ] || break\n"
                 + "  losetup -d \"$loop\" 2>/dev/null || break\n"
                 + "done\n"
-                + "rm -f " + rawFile;
-        ContainerExecResult result = execInContainer(helperId, new String[]{"sh", "-c", script}, DEFAULT_TIMEOUT_SECONDS);
+                + "rm -f \"$raw\"";
+        ContainerExecResult result = execInContainer(helperId,
+                new String[]{"sh", "-c", script, "delete", rawFile}, DEFAULT_TIMEOUT_SECONDS);
         activeLoopDevices.remove(volumeId);
         return result.exitCode() == 0;
     }
@@ -268,12 +272,14 @@ public class Ec2VolumeBlockDeviceManager {
         String helperId = ensureHelperContainer();
         if (helperId != null) {
             String rawFile = "/volumes/" + volume.getVolumeId() + ".raw";
-            String script = "while true; do\n"
-                    + "  loop=$(losetup -a 2>/dev/null | grep '" + rawFile + "' | head -n1 | cut -d: -f1)\n"
+            String script = "raw=\"$1\"\n"
+                    + "while true; do\n"
+                    + "  loop=$(losetup -a 2>/dev/null | grep \"$raw\" | head -n1 | cut -d: -f1)\n"
                     + "  [ -n \"$loop\" ] || break\n"
                     + "  losetup -d \"$loop\" 2>/dev/null || break\n"
                     + "done";
-            execInContainer(helperId, new String[]{"sh", "-c", script}, DEFAULT_TIMEOUT_SECONDS);
+            execInContainer(helperId,
+                    new String[]{"sh", "-c", script, "detach", rawFile}, DEFAULT_TIMEOUT_SECONDS);
         }
         activeLoopDevices.remove(volume.getVolumeId());
     }
@@ -366,6 +372,23 @@ public class Ec2VolumeBlockDeviceManager {
         } catch (Exception e) {
             return new ContainerExecResult(-1, e.getMessage());
         }
+    }
+
+    @Override
+    public void clear() {
+        if (!isAvailable()) {
+            activeLoopDevices.clear();
+            return;
+        }
+        String helperId = ensureHelperContainer();
+        if (helperId != null) {
+            String script = "for loop in $(losetup -a 2>/dev/null | grep '/volumes/' | cut -d: -f1); do\n"
+                    + "  losetup -d \"$loop\" 2>/dev/null || true\n"
+                    + "done\n"
+                    + "rm -f /volumes/*.raw";
+            execInContainer(helperId, new String[]{"sh", "-c", script}, DEFAULT_TIMEOUT_SECONDS);
+        }
+        activeLoopDevices.clear();
     }
 
     public record ContainerExecResult(long exitCode, String output) {
