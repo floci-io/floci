@@ -1,4 +1,4 @@
-package io.github.hectorvent.floci.services.athena;
+package io.github.hectorvent.floci.services.glue;
 
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.glue.model.Column;
@@ -16,7 +16,7 @@ import java.util.regex.Pattern;
  * Partition projection: the table properties describing where a table's partitions live and what
  * values they take, so the partitions need not be listed from the catalog or from storage.
  */
-final class PartitionProjection {
+public final class PartitionProjection {
 
     /** Table property switching partition projection on. */
     private static final String ENABLED = "projection.enabled";
@@ -80,7 +80,7 @@ final class PartitionProjection {
      * them to the partitions a query actually needs requires that query's predicates, so the read
      * stays wide and the query itself does the filtering.
      */
-    static String readPath(Table table, String normalizedLocation) {
+    public static String readPath(Table table, String normalizedLocation) {
         if (!enabled(table)) {
             return normalizedLocation;
         }
@@ -123,7 +123,7 @@ final class PartitionProjection {
      * or a {@code GROUP BY}, so {@code SELECT tenant, count(*) FROM audit_events GROUP BY tenant}
      * would pass while filtering nothing at all - exactly the case this exists to catch.
      */
-    static void assertInjectedColumnsFiltered(String query, List<Table> tables) {
+    public static void assertInjectedColumnsFiltered(String query, List<Table> tables) {
         if (query == null || tables == null) {
             return;
         }
