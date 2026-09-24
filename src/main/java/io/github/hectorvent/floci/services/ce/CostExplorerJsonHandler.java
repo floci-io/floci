@@ -45,23 +45,23 @@ public class CostExplorerJsonHandler {
             case "UpdateAnomalyMonitor" -> Response.ok(anomalies.updateMonitor(request)).build();
             case "DeleteAnomalyMonitor" -> {
                 anomalies.deleteMonitor(request);
-                yield Response.ok().build();
+                yield Response.ok("{}").build();
             }
             case "CreateAnomalySubscription" -> Response.ok(anomalies.createSubscription(request)).build();
             case "GetAnomalySubscriptions" -> Response.ok(anomalies.getSubscriptions(request)).build();
             case "UpdateAnomalySubscription" -> Response.ok(anomalies.updateSubscription(request)).build();
             case "DeleteAnomalySubscription" -> {
                 anomalies.deleteSubscription(request);
-                yield Response.ok().build();
+                yield Response.ok("{}").build();
             }
             case "ListTagsForResource" -> Response.ok(anomalies.listTags(request)).build();
             case "TagResource" -> {
                 anomalies.tagResource(request);
-                yield Response.ok().build();
+                yield Response.ok("{}").build();
             }
             case "UntagResource" -> {
                 anomalies.untagResource(request);
-                yield Response.ok().build();
+                yield Response.ok("{}").build();
             }
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnknownOperationException",

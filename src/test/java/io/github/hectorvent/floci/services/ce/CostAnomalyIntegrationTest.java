@@ -74,14 +74,15 @@ class CostAnomalyIntegrationTest {
                     .body("ResourceTags[0].Value", equalTo("test"));
             request(account, REGION, "TagResource", Map.of("ResourceArn", resourceArn,
                     "ResourceTags", List.of(Map.of("Key", "Environment", "Value", "production"),
-                            Map.of("Key", "Owner", "Value", "billing")))).statusCode(200);
+                            Map.of("Key", "Owner", "Value", "billing"))))
+                    .statusCode(200).body(equalTo("{}"));
             request(account, REGION, "ListTagsForResource", Map.of("ResourceArn", resourceArn))
                     .statusCode(200)
                     .body("ResourceTags", hasSize(2))
                     .body("ResourceTags.find { it.Key == 'Environment' }.Value", equalTo("production"))
                     .body("ResourceTags.find { it.Key == 'Owner' }.Value", equalTo("billing"));
             request(account, REGION, "UntagResource", Map.of("ResourceArn", resourceArn,
-                    "ResourceTagKeys", List.of("Owner"))).statusCode(200);
+                    "ResourceTagKeys", List.of("Owner"))).statusCode(200).body(equalTo("{}"));
             request(account, REGION, "ListTagsForResource", Map.of("ResourceArn", resourceArn))
                     .statusCode(200)
                     .body("ResourceTags.Key", contains("Environment"));
@@ -115,8 +116,9 @@ class CostAnomalyIntegrationTest {
                 .body("AnomalySubscriptions[0].MonitorArnList", contains(monitorArn));
 
         request(account, REGION, "DeleteAnomalySubscription", Map.of("SubscriptionArn", subscriptionArn))
-                .statusCode(200);
-        request(account, REGION, "DeleteAnomalyMonitor", Map.of("MonitorArn", monitorArn)).statusCode(200);
+                .statusCode(200).body(equalTo("{}"));
+        request(account, REGION, "DeleteAnomalyMonitor", Map.of("MonitorArn", monitorArn))
+                .statusCode(200).body(equalTo("{}"));
         request(account, REGION, "GetAnomalySubscriptions", Map.of())
                 .statusCode(200).body("AnomalySubscriptions", hasSize(0));
         request(account, REGION, "GetAnomalyMonitors", Map.of())
