@@ -967,9 +967,19 @@ public class Ec2ContainerManager {
      * Updates instance state through pending → running.
      */
     public void start(Instance instance) {
+        start(instance, null);
+    }
+
+    /**
+     * Starts a previously stopped container, executing postStart once the container is running.
+     */
+    public void start(Instance instance, Runnable postStart) {
         String containerId = instance.getDockerContainerId();
         if (containerId == null) {
             instance.setState(InstanceState.running());
+            if (postStart != null) {
+                postStart.run();
+            }
             return;
         }
         instance.setState(InstanceState.pending());
@@ -1016,6 +1026,14 @@ public class Ec2ContainerManager {
                 return;
             }
             instance.setState(InstanceState.running());
+            if (postStart != null) {
+                try {
+                    postStart.run();
+                } catch (Exception e) {
+                    LOG.warnv("Error in post-start hook for instance {0}: {1}",
+                            instance.getInstanceId(), e.getMessage());
+                }
+            }
         });
     }
 

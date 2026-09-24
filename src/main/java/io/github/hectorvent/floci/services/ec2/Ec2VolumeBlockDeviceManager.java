@@ -112,16 +112,23 @@ public class Ec2VolumeBlockDeviceManager {
         }
     }
 
+    private static final java.util.regex.Pattern VALID_DEVICE_PATTERN =
+            java.util.regex.Pattern.compile("^(/dev/)?[a-zA-Z0-9/_-]+$");
+
+    private final Object loopAllocationLock = new Object();
+
     /**
      * Deletes the volume's backing file and releases any associated loop device.
      */
-    public void deleteVolume(String volumeId) {
+    public boolean deleteVolume(String volumeId) {
         if (!isAvailable()) {
-            return;
+            return false;
         }
         String helperId = ensureHelperContainer();
         if (helperId == null) {
-            return;
+            LOG.warnv("EC2 volume helper container unavailable; backing file for volume {0} could not be deleted",
+                    volumeId);
+            return false;
         }
         String rawFile = "/volumes/" + volumeId + ".raw";
         String script = "while true; do\n"
@@ -130,8 +137,9 @@ public class Ec2VolumeBlockDeviceManager {
                 + "  losetup -d \"$loop\" 2>/dev/null || break\n"
                 + "done\n"
                 + "rm -f " + rawFile;
-        execInContainer(helperId, new String[]{"sh", "-c", script}, DEFAULT_TIMEOUT_SECONDS);
+        ContainerExecResult result = execInContainer(helperId, new String[]{"sh", "-c", script}, DEFAULT_TIMEOUT_SECONDS);
         activeLoopDevices.remove(volumeId);
+        return result.exitCode() == 0;
     }
 
     /**
@@ -146,9 +154,14 @@ public class Ec2VolumeBlockDeviceManager {
                     volume.getVolumeId());
             return Optional.empty();
         }
-        if (instance == null) {
+        if (instance == null || requestedDevice == null || requestedDevice.isBlank()) {
             return Optional.empty();
         }
+        if (!VALID_DEVICE_PATTERN.matcher(requestedDevice).matches() || requestedDevice.contains("..")) {
+            LOG.warnv("Rejecting invalid device path {0} for volume {1}", requestedDevice, volume.getVolumeId());
+            return Optional.empty();
+        }
+
         String targetContainerId = instance.getDockerContainerId();
         if (targetContainerId == null || targetContainerId.isBlank()) {
             LOG.warnv("Instance {0} has no Docker container ID; volume {1} attached as metadata only",
@@ -170,8 +183,9 @@ public class Ec2VolumeBlockDeviceManager {
 
         int effectiveSize = volume.getSize() > 0 ? volume.getSize() : 8;
         String rawFile = "/volumes/" + volume.getVolumeId() + ".raw";
-        String helperScript = "file=\"" + rawFile + "\"\n"
-                + "[ -f \"$file\" ] || truncate -s " + effectiveSize + "G \"$file\"\n"
+        String helperScript = "file=\"$1\"\n"
+                + "size=\"$2\"\n"
+                + "[ -f \"$file\" ] || truncate -s \"${size}G\" \"$file\"\n"
                 + "loop=$(losetup -a 2>/dev/null | grep \"$file\" | head -n1 | cut -d: -f1)\n"
                 + "if [ -z \"$loop\" ]; then\n"
                 + "  loop=$(losetup -f 2>/dev/null)\n"
@@ -187,8 +201,12 @@ public class Ec2VolumeBlockDeviceManager {
                 + "fi\n"
                 + "echo \"$loop\"";
 
-        ContainerExecResult helperResult = execInContainer(helperId, new String[]{"sh", "-c", helperScript},
-                DEFAULT_TIMEOUT_SECONDS);
+        ContainerExecResult helperResult;
+        synchronized (loopAllocationLock) {
+            helperResult = execInContainer(helperId,
+                    new String[]{"sh", "-c", helperScript, "helper", rawFile, String.valueOf(effectiveSize)},
+                    DEFAULT_TIMEOUT_SECONDS);
+        }
         if (helperResult.exitCode() != 0) {
             LOG.warnv("Failed to allocate loop device for volume {0} in helper: {1}",
                     volume.getVolumeId(), helperResult.summary());
@@ -205,16 +223,19 @@ public class Ec2VolumeBlockDeviceManager {
         String minorStr = loopDev.replaceAll("[^0-9]", "");
         String normalizedDevice = requestedDevice.startsWith("/") ? requestedDevice : "/dev/" + requestedDevice;
 
-        String targetScript = "mkdir -p $(dirname \"" + normalizedDevice + "\")\n"
-                + "minor=\"" + minorStr + "\"\n"
+        String targetScript = "dev=\"$1\"\n"
+                + "loop=\"$2\"\n"
+                + "minor=\"$3\"\n"
+                + "mkdir -p $(dirname \"$dev\")\n"
                 + "if [ -n \"$minor\" ]; then\n"
-                + "  mknod \"" + normalizedDevice + "\" b 7 \"$minor\" 2>/dev/null || ln -sf \"" + loopDev + "\" \"" + normalizedDevice + "\"\n"
+                + "  mknod \"$dev\" b 7 \"$minor\" 2>/dev/null || ln -sf \"$loop\" \"$dev\"\n"
                 + "else\n"
-                + "  ln -sf \"" + loopDev + "\" \"" + normalizedDevice + "\"\n"
+                + "  ln -sf \"$loop\" \"$dev\"\n"
                 + "fi\n"
-                + "[ -b \"" + normalizedDevice + "\" ] || [ -L \"" + normalizedDevice + "\" ]";
+                + "[ -b \"$dev\" ]";
 
-        ContainerExecResult targetResult = execInContainer(targetContainerId, new String[]{"sh", "-c", targetScript},
+        ContainerExecResult targetResult = execInContainer(targetContainerId,
+                new String[]{"sh", "-c", targetScript, "target", normalizedDevice, loopDev, minorStr},
                 DEFAULT_TIMEOUT_SECONDS);
         if (targetResult.exitCode() != 0) {
             LOG.warnv("Failed to create block device {0} in container {1} for volume {2}: {3}",
@@ -234,7 +255,8 @@ public class Ec2VolumeBlockDeviceManager {
         if (!isAvailable()) {
             return;
         }
-        if (instance != null) {
+        if (instance != null && requestedDevice != null && !requestedDevice.isBlank()
+                && VALID_DEVICE_PATTERN.matcher(requestedDevice).matches() && !requestedDevice.contains("..")) {
             String targetContainerId = instance.getDockerContainerId();
             if (targetContainerId != null && !targetContainerId.isBlank()
                     && lifecycleManager.isContainerRunning(targetContainerId)) {

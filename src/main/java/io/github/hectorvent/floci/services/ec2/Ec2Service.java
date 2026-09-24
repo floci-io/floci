@@ -145,6 +145,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     private static final String AWS_MARKETPLACE_OWNER_ID = "679593333241";
     // The ASN AWS assigns when CreateTransitGateway omits Options.AmazonSideAsn.
     private static final long DEFAULT_AMAZON_SIDE_ASN = 64512L;
+    private static final Pattern DEVICE_NAME_PATTERN = Pattern.compile("^(/dev/)?[a-zA-Z0-9/_-]+$");
     private static final Pattern TRANSIT_GATEWAY_ID_PATTERN = Pattern.compile("^tgw-[0-9a-f]{8}([0-9a-f]{9})?$");
     private static final Pattern TRANSIT_GATEWAY_ROUTE_TABLE_ID_PATTERN =
             Pattern.compile("^tgw-rtb-[0-9a-f]{8}([0-9a-f]{9})?$");
@@ -581,18 +582,37 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     }
 
     private void restoreAttachedVolumesOnStartup() {
-        for (String k : volumes.keys()) {
-            Volume vol = volumes.get(k).orElse(null);
+        Map<String, Volume> allVolumes;
+        if (volumes instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<Volume> accountAware = (AccountAwareStorageBackend<Volume>) rawAccountAware;
+            allVolumes = accountAware.scanAllAccountsAsMap();
+        } else {
+            allVolumes = new LinkedHashMap<>();
+            for (String k : volumes.keys()) {
+                volumes.get(k).ifPresent(v -> allVolumes.put(k, v));
+            }
+        }
+
+        for (Volume vol : allVolumes.values()) {
             if (vol == null || !"in-use".equals(vol.getState()) || vol.getAttachments().isEmpty()) {
                 continue;
             }
             for (VolumeAttachment att : vol.getAttachments()) {
                 String reg = vol.getRegion() != null ? vol.getRegion() : config.defaultRegion();
-                Instance inst = instances.get(key(reg, att.getInstanceId())).orElse(null);
+                Instance inst = findAnyInstance(key(reg, att.getInstanceId())).orElse(null);
                 if (inst == null) {
                     inst = findExternalInstance(defaultAccountId, reg, att.getInstanceId()).orElse(null);
                 }
-                if (inst != null && inst.getDockerContainerId() != null
+                if (inst == null) {
+                    continue;
+                }
+                // Root volume backing is purely logical (Docker container rootfs overlayfs)
+                if (vol.getVolumeId().equals(inst.getRootVolumeId())
+                        || att.getDevice().equals(inst.getRootDeviceName())) {
+                    continue;
+                }
+                if (inst.getDockerContainerId() != null
                         && containerManager.isContainerRunning(inst.getDockerContainerId())) {
                     volumeBlockDeviceManager.attachVolume(vol, inst, att.getDevice());
                 }
@@ -604,13 +624,27 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         if (volumeBlockDeviceManager == null || inst == null) {
             return;
         }
-        for (String k : volumes.keys()) {
-            Volume vol = volumes.get(k).orElse(null);
+        Map<String, Volume> allVolumes;
+        if (volumes instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<Volume> accountAware = (AccountAwareStorageBackend<Volume>) rawAccountAware;
+            allVolumes = accountAware.scanAllAccountsAsMap();
+        } else {
+            allVolumes = new LinkedHashMap<>();
+            for (String k : volumes.keys()) {
+                volumes.get(k).ifPresent(v -> allVolumes.put(k, v));
+            }
+        }
+        for (Volume vol : allVolumes.values()) {
             if (vol == null || !region.equals(vol.getRegion()) || vol.getAttachments().isEmpty()) {
                 continue;
             }
+            if (vol.getVolumeId().equals(inst.getRootVolumeId())) {
+                continue;
+            }
             for (VolumeAttachment att : vol.getAttachments()) {
-                if (inst.getInstanceId().equals(att.getInstanceId())) {
+                if (inst.getInstanceId().equals(att.getInstanceId())
+                        && !att.getDevice().equals(inst.getRootDeviceName())) {
                     volumeBlockDeviceManager.attachVolume(vol, inst, att.getDevice());
                 }
             }
@@ -3237,10 +3271,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             }
             // Delete root volume if deleteOnTermination (matches real AWS behavior)
             if (inst.getRootVolumeId() != null) {
-                if (volumeBlockDeviceManager != null) {
-                    volumeBlockDeviceManager.deleteVolume(inst.getRootVolumeId());
+                Volume rootVol = volumes.get(key(region, inst.getRootVolumeId())).orElse(null);
+                if (rootVol != null) {
+                    boolean attachedElsewhere = rootVol.getAttachments().stream()
+                            .anyMatch(a -> !inst.getInstanceId().equals(a.getInstanceId()));
+                    if (!attachedElsewhere) {
+                        if (volumeBlockDeviceManager != null) {
+                            volumeBlockDeviceManager.deleteVolume(inst.getRootVolumeId());
+                        }
+                        volumes.delete(key(region, inst.getRootVolumeId()));
+                    }
                 }
-                volumes.delete(key(region, inst.getRootVolumeId()));
             }
             detachAttachedVolumesOnTermination(region, inst);
             releaseStandaloneInterfacesOnTermination(region, inst);
@@ -3365,8 +3406,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 inst.setState(InstanceState.running());
             } else {
                 restoreInstanceFirewall(inst);
-                containerManager.start(inst);
-                restoreAttachedVolumesForInstance(region, inst);
+                String accountId = callerAccountId();
+                containerManager.start(inst, () ->
+                        RequestScopes.runAs(accountId, () -> restoreAttachedVolumesForInstance(region, inst)));
             }
             instances.put(key(region, id), inst);
             Map<String, String> entry = new LinkedHashMap<>();
@@ -8577,6 +8619,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             throw new AwsException("MissingParameter",
                     "The parameter Device is missing", 400);
         }
+        if (!DEVICE_NAME_PATTERN.matcher(device).matches() || device.contains("..")) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value '" + device + "' for parameter device is invalid.", 400);
+        }
         Volume volume = getRequiredVolume(region, volumeId);
         Instance inst = getRequiredInstance(region, instanceId);
         if (!List.of("running", "stopped").contains(inst.getState().getName())) {
@@ -8593,6 +8639,24 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         if (!"available".equals(volume.getState())) {
             throw new AwsException("VolumeInUse",
                     "Volume '" + volumeId + "' is already attached", 400);
+        }
+        // Check if instance already has an attached volume using this device name
+        String normalizedReqDev = device.startsWith("/") ? device : "/dev/" + device;
+        for (String k : volumes.keys()) {
+            Volume v = volumes.get(k).orElse(null);
+            if (v == null || !region.equals(v.getRegion()) || v.getAttachments().isEmpty()) {
+                continue;
+            }
+            for (VolumeAttachment existingAtt : v.getAttachments()) {
+                if (inst.getInstanceId().equals(existingAtt.getInstanceId())) {
+                    String existingDev = existingAtt.getDevice() != null && existingAtt.getDevice().startsWith("/")
+                            ? existingAtt.getDevice() : "/dev/" + existingAtt.getDevice();
+                    if (normalizedReqDev.equals(existingDev)) {
+                        throw new AwsException("InvalidParameterValue",
+                                "The device '" + device + "' is already in use by volume '" + v.getVolumeId() + "'", 400);
+                    }
+                }
+            }
         }
 
         VolumeAttachment attachment = new VolumeAttachment();

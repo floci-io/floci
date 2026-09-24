@@ -4,12 +4,12 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.ExecCreateCmdResponse;
 import com.github.dockerjava.api.model.Frame;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
-import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InstanceState;
 import io.github.hectorvent.floci.services.ec2.model.Placement;
@@ -19,6 +19,7 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
@@ -33,7 +34,6 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -70,6 +70,8 @@ class Ec2VolumeBlockDeviceDockerIntegrationTest {
     @Inject
     EmulatorConfig config;
 
+    private static final Logger LOG = Logger.getLogger(Ec2VolumeBlockDeviceDockerIntegrationTest.class);
+
     private final List<String> containersToClean = new ArrayList<>();
     private final List<String> volumesToClean = new ArrayList<>();
 
@@ -88,15 +90,18 @@ class Ec2VolumeBlockDeviceDockerIntegrationTest {
                     for (VolumeAttachment att : vol.getAttachments()) {
                         try {
                             ec2Service.detachVolume("us-east-1", att.getVolumeId(), att.getInstanceId(), att.getDevice(), true);
-                        } catch (Exception ignored) {
+                        } catch (Exception e) {
+                            LOG.debugv("Ignoring detach volume error during test cleanup: {0}", e.getMessage());
                         }
                     }
                 }
-            } catch (Exception ignored) {
+            } catch (Exception e) {
+                LOG.debugv("Ignoring describe volume error during test cleanup: {0}", e.getMessage());
             }
             try {
                 ec2Service.deleteVolume("us-east-1", volId);
-            } catch (Exception ignored) {
+            } catch (Exception e) {
+                LOG.debugv("Ignoring delete volume error during test cleanup: {0}", e.getMessage());
             }
         }
         volumesToClean.clear();
@@ -105,11 +110,13 @@ class Ec2VolumeBlockDeviceDockerIntegrationTest {
         for (String cid : containersToClean) {
             try {
                 dockerClient.stopContainerCmd(cid).withTimeout(2).exec();
-            } catch (Exception ignored) {
+            } catch (Exception e) {
+                LOG.debugv("Ignoring stop container error during test cleanup: {0}", e.getMessage());
             }
             try {
                 dockerClient.removeContainerCmd(cid).withForce(true).exec();
-            } catch (Exception ignored) {
+            } catch (Exception e) {
+                LOG.debugv("Ignoring remove container error during test cleanup: {0}", e.getMessage());
             }
         }
         containersToClean.clear();
@@ -352,6 +359,41 @@ class Ec2VolumeBlockDeviceDockerIntegrationTest {
         VolumeAttachment att = ec2Service.attachVolume("us-east-1", volume.getVolumeId(), instance.getInstanceId(), "/dev/xvdf");
         assertNotNull(att);
         assertEquals("attached", att.getState());
+    }
+
+    @Test
+    void attachVolumeRejectsInvalidDeviceName() {
+        String suffix = UUID.randomUUID().toString().replace("-", "").substring(0, 10);
+        Instance instance = createRunningTestInstance(suffix);
+
+        Volume volume = ec2Service.createVolume("us-east-1", "us-east-1a", "gp3", 1, false, 3000, 125, null, null);
+        volumesToClean.add(volume.getVolumeId());
+
+        AwsException ex1 = assertThrows(AwsException.class, () ->
+                ec2Service.attachVolume("us-east-1", volume.getVolumeId(), instance.getInstanceId(), "/dev/xvdf$(touch /tmp/bad)"));
+        assertEquals("InvalidParameterValue", ex1.getErrorCode());
+
+        AwsException ex2 = assertThrows(AwsException.class, () ->
+                ec2Service.attachVolume("us-east-1", volume.getVolumeId(), instance.getInstanceId(), "/dev/../etc/passwd"));
+        assertEquals("InvalidParameterValue", ex2.getErrorCode());
+    }
+
+    @Test
+    void attachVolumeRejectsDuplicateDeviceName() {
+        String suffix = UUID.randomUUID().toString().replace("-", "").substring(0, 10);
+        Instance instance = createRunningTestInstance(suffix);
+
+        Volume vol1 = ec2Service.createVolume("us-east-1", "us-east-1a", "gp3", 1, false, 3000, 125, null, null);
+        volumesToClean.add(vol1.getVolumeId());
+        Volume vol2 = ec2Service.createVolume("us-east-1", "us-east-1a", "gp3", 1, false, 3000, 125, null, null);
+        volumesToClean.add(vol2.getVolumeId());
+
+        ec2Service.attachVolume("us-east-1", vol1.getVolumeId(), instance.getInstanceId(), "/dev/xvdf");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                ec2Service.attachVolume("us-east-1", vol2.getVolumeId(), instance.getInstanceId(), "/dev/xvdf"));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("already in use by volume"));
     }
 
     private ExecResult execIn(String containerIdOrName, String command) {
