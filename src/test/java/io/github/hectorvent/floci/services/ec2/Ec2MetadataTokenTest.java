@@ -26,16 +26,18 @@ import static org.mockito.Mockito.when;
 /**
  * IMDSv2 session tokens, as documented in the EC2 User Guide: the PUT must carry a TTL between
  * 1 and 21,600 seconds (otherwise 400), and a GET that presents an invalid or expired token gets
- * 401 so the caller fetches a new token.
+ * 401 so the caller fetches a new token. A token is not valid on other instances.
  */
 class Ec2MetadataTokenTest {
 
     private static final String TTL_HEADER = "X-aws-ec2-metadata-token-ttl-seconds";
     private static final String TOKEN_HEADER = "X-aws-ec2-metadata-token";
+    private static final String CALLER_IP = "127.0.0.1";
 
     private final MutableClock clock = new MutableClock();
     private final HttpClient client = HttpClient.newHttpClient();
     private Vertx vertx;
+    private Instance instance;
     private Ec2MetadataServer server;
     private String endpoint;
 
@@ -52,9 +54,8 @@ class Ec2MetadataTokenTest {
         server.start().get(10, TimeUnit.SECONDS);
         endpoint = "http://127.0.0.1:" + port;
 
-        Instance instance = new Instance();
-        instance.setInstanceId("i-0123456789abcdef0");
-        server.registerContainer("127.0.0.1", instance.getInstanceId(), instance);
+        instance = instance("i-0123456789abcdef0");
+        server.registerContainer(CALLER_IP, instance.getInstanceId(), instance);
     }
 
     @AfterEach
@@ -102,12 +103,39 @@ class Ec2MetadataTokenTest {
     }
 
     @Test
+    void tokenPresentedFromAnotherInstanceIsRejectedAsUnauthorized() throws Exception {
+        String token = putToken("60").body();
+        Instance other = instance("i-0fedcba9876543210");
+        server.unregisterContainer(CALLER_IP, instance);
+        server.registerContainer(CALLER_IP, other.getInstanceId(), other);
+
+        assertEquals(401, getInstanceId(token).statusCode());
+    }
+
+    @Test
+    void tokenIdentifiesItsInstanceWhenTheCallerIpIsNotRegistered() throws Exception {
+        String token = putToken("60").body();
+        server.unregisterContainer(CALLER_IP, instance);
+
+        HttpResponse<String> response = getInstanceId(token);
+
+        assertEquals(200, response.statusCode());
+        assertEquals("i-0123456789abcdef0", response.body());
+    }
+
+    @Test
     void requestWithoutTokenStillUsesImdsV1() throws Exception {
         HttpResponse<String> response = client.send(
                 HttpRequest.newBuilder(URI.create(endpoint + "/latest/meta-data/instance-id")).GET().build(),
                 HttpResponse.BodyHandlers.ofString());
 
         assertEquals(200, response.statusCode());
+    }
+
+    private static Instance instance(String instanceId) {
+        Instance instance = new Instance();
+        instance.setInstanceId(instanceId);
+        return instance;
     }
 
     private HttpResponse<String> putToken(String ttl) throws Exception {

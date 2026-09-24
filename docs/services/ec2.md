@@ -128,7 +128,7 @@ curl -s -H "x-aws-ec2-metadata-token: $TOKEN" \
   http://169.254.169.254/latest/meta-data/instance-id
 ```
 
-As on AWS, the token TTL must be an integer from 1 to 21600 seconds, or the `PUT` returns `400`. A metadata request that presents an unknown or expired token returns `401`, which tells the SDK to fetch a new token. A request without a token header still uses IMDSv1; Floci does not enforce `HttpTokens=required`.
+As on AWS, the token TTL must be an integer from 1 to 21600 seconds, or the `PUT` returns `400`. A metadata request that presents an unknown or expired token returns `401`, which tells the SDK to fetch a new token. A token is valid only on the instance that requested it: presenting it from another instance returns `401`. A request without a token header still uses IMDSv1; Floci does not enforce `HttpTokens=required`.
 
 ### Supported IMDS endpoints
 

@@ -22,6 +22,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -404,11 +405,17 @@ public class Ec2MetadataServer {
         Instance inst = containerIpToInstance.get(remoteIp);
 
         // IMDSv2: a presented token must be valid; an invalid or expired one gets 401 so the
-        // caller fetches a new token. Requests without a token fall back to IMDSv1.
+        // caller fetches a new token. A token is not valid on another instance, so a caller whose
+        // IP maps to a different instance also gets 401; an unregistered IP defers to the token.
+        // Requests without a token fall back to IMDSv1.
         String token = ctx.request().getHeader("x-aws-ec2-metadata-token");
         if (token != null && !token.isBlank()) {
             SessionToken session = tokens.get(token);
             if (session != null && !session.isExpiredAt(clock.instant())) {
+                if (inst != null && !Objects.equals(inst.getInstanceId(), session.instance().getInstanceId())) {
+                    ctx.response().setStatusCode(401).end();
+                    return null;
+                }
                 return session.instance();
             }
             if (session != null) {
