@@ -675,6 +675,60 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
         getItem("ranges").body("Item.t", nullValue());
     }
 
+    @Test
+    @Order(30)
+    void filtersAnUnkeyedIndexReadOnTheIndexView() {
+        request("DynamoDB_20120810.CreateTable", """
+                {
+                  "TableName": "partiql-edge-cases-index-view",
+                  "AttributeDefinitions": [
+                    {"AttributeName":"pk","AttributeType":"S"},
+                    {"AttributeName":"sk","AttributeType":"S"},
+                    {"AttributeName":"gsiPk","AttributeType":"S"},
+                    {"AttributeName":"lsiSk","AttributeType":"S"}
+                  ],
+                  "KeySchema": [
+                    {"AttributeName":"pk","KeyType":"HASH"},
+                    {"AttributeName":"sk","KeyType":"RANGE"}
+                  ],
+                  "GlobalSecondaryIndexes": [{
+                    "IndexName": "gsi-inc",
+                    "KeySchema": [{"AttributeName":"gsiPk","KeyType":"HASH"}],
+                    "Projection": {"ProjectionType":"INCLUDE","NonKeyAttributes":["projattr"]}
+                  }],
+                  "LocalSecondaryIndexes": [{
+                    "IndexName": "lsi-keys",
+                    "KeySchema": [
+                      {"AttributeName":"pk","KeyType":"HASH"},
+                      {"AttributeName":"lsiSk","KeyType":"RANGE"}
+                    ],
+                    "Projection": {"ProjectionType":"KEYS_ONLY"}
+                  }],
+                  "BillingMode": "PAY_PER_REQUEST"
+                }
+                """)
+            .statusCode(200);
+        for (String item : List.of(
+                "\"sk\":{\"S\":\"s1\"},\"gsiPk\":{\"S\":\"y\"},\"lsiSk\":{\"S\":\"k1\"},\"nonproj\":{\"S\":\"np1\"}",
+                "\"sk\":{\"S\":\"s2\"},\"gsiPk\":{\"S\":\"y2\"},\"lsiSk\":{\"S\":\"k2\"},\"nonproj\":{\"S\":\"np2\"}")) {
+            request("DynamoDB_20120810.PutItem",
+                    "{\"TableName\":\"partiql-edge-cases-index-view\",\"Item\":{\"pk\":{\"S\":\"p\"}," + item + "}}")
+                .statusCode(200);
+        }
+        String gsi = "SELECT sk FROM \"partiql-edge-cases-index-view\".\"gsi-inc\" WHERE ";
+        String lsi = "SELECT sk FROM \"partiql-edge-cases-index-view\".\"lsi-keys\" WHERE ";
+
+        statement(gsi + "nonproj='np1'").statusCode(200).body("Items.size()", equalTo(0));
+        statement(lsi + "nonproj='np1'").statusCode(200).body("Items.size()", equalTo(0));
+        statement(gsi + "NOT nonproj='np1'").statusCode(200).body("Items.sk.S", containsInAnyOrder("s1", "s2"));
+        statement(gsi + "(gsiPk='y' AND nonproj='np1') OR (gsiPk='y2')")
+            .statusCode(200)
+            .body("Items.sk.S", containsInAnyOrder("s2"));
+        statement("SELECT sk FROM \"partiql-edge-cases-index-view\" WHERE nonproj='np1'")
+            .statusCode(200)
+            .body("Items.sk.S", containsInAnyOrder("s1"));
+    }
+
     private static ValidatableResponse getItem(String pk) {
         return request("DynamoDB_20120810.GetItem", """
                 {"TableName":"%s","Key":{"pk":{"S":"%s"},"sk":{"S":"1"}},"ConsistentRead":true}

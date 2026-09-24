@@ -17,6 +17,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.*;
 import java.util.Base64;
 import java.util.function.Supplier;
+import java.util.function.UnaryOperator;
 import java.util.stream.Collectors;
 
 class DynamoDbPartiQLHandler {
@@ -212,14 +213,18 @@ class DynamoDbPartiQLHandler {
             if (skCond != null) {
                 scanFilters.add(skCond);
             }
-            String fe = buildFe(scanFilters, eav, ean);
+            boolean partialProjection = !"ALL".equals(accessPath.projectionType());
+            String fe = partialProjection ? null : buildFe(scanFilters, eav, ean);
             JsonNode exclusiveStartKey = startKey.get();
             DynamoDbAccessPathValidator.validateExclusiveStartKey(exclusiveStartKey, table, accessPath, true);
             DynamoDbService.ScanResult result = service.scan(stmt.table(), fe,
                     ean.isEmpty() ? null : ean.toNode(mapper),
                     eav.isEmpty() ? null : eav.toNode(mapper),
                     null, limit, exclusiveStartKey, accessPath.indexName(), region);
-            return new Page(result.items(), result.lastEvaluatedKey(), result.scannedBytes(), result.scannedItems());
+            List<JsonNode> matching = partialProjection
+                    ? matchingIndexView(result.items(), scanFilters, accessPath, table)
+                    : result.items();
+            return new Page(matching, result.lastEvaluatedKey(), result.scannedBytes(), result.scannedItems());
         }
         if (accessPath.kind() == DynamoDbAccessPath.Kind.TABLE && skName == null
                 && skCond == null && filterConds.isEmpty()) {
@@ -253,15 +258,31 @@ class DynamoDbPartiQLHandler {
         DynamoDbAccessPathValidator.validateExclusiveStartKey(exclusiveStartKey, table, accessPath, false);
         DynamoDbService.QueryResult result = service.query(stmt.table(), null, eav.toNode(mapper), kce, null,
                 limit, null, accessPath.indexName(), exclusiveStartKey, ean.toNode(mapper), region);
+        List<JsonNode> matching = matchingIndexView(result.items(), routing.filterConds(), accessPath, table);
+        return new Page(matching, result.lastEvaluatedKey(), result.scannedBytes(), result.items());
+    }
+
+    // The WHERE clause of an index read sees only what the index stores, so an
+    // attribute it does not project is missing even though the base item has it.
+    private List<JsonNode> matchingIndexView(List<JsonNode> items, List<Cond> conds,
+                                             DynamoDbAccessPath accessPath, TableDefinition table) {
         ExprAttrBuilder filterValues = new ExprAttrBuilder();
         ExprAttrNameBuilder filterNames = new ExprAttrNameBuilder();
-        ExpressionEvaluator.Expr filter = ExpressionEvaluator.parse(buildFe(routing.filterConds(), filterValues, filterNames));
+        ExpressionEvaluator.Expr filter = ExpressionEvaluator.parse(buildFe(conds, filterValues, filterNames));
         JsonNode names = filterNames.isEmpty() ? null : filterNames.toNode(mapper);
         JsonNode values = filterValues.isEmpty() ? null : filterValues.toNode(mapper);
-        List<JsonNode> matching = result.items().stream()
-                .filter(item -> ExpressionEvaluator.evaluate(filter, item, names, values))
+        UnaryOperator<JsonNode> view = indexView(accessPath, table);
+        return items.stream()
+                .filter(item -> ExpressionEvaluator.evaluate(filter, view.apply(item), names, values))
                 .toList();
-        return new Page(matching, result.lastEvaluatedKey(), result.scannedBytes(), result.items());
+    }
+
+    private static UnaryOperator<JsonNode> indexView(DynamoDbAccessPath accessPath, TableDefinition table) {
+        if ("ALL".equals(accessPath.projectionType())) {
+            return UnaryOperator.identity();
+        }
+        Set<String> projected = accessPath.projectedAttributeNames(table);
+        return item -> ProjectionEvaluator.trimToAttributes((ObjectNode) item, projected);
     }
 
     private Page readOrdered(Stmt.Select stmt, TableDefinition table, DynamoDbAccessPath accessPath,
