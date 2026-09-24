@@ -36,6 +36,7 @@ import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsPartition;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.CidrCanonicalizer;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
@@ -7836,8 +7837,16 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         return zones;
     }
 
-    public List<String> describeRegions() {
-        return AwsRegions.ALL;
+    /**
+     * The regions DescribeRegions lists for {@code partition}: the enabled ones by default, which
+     * on AWS means every region that needs no opt-in, or all published regions with
+     * {@code AllRegions}. Nothing in this emulator opts a region in, so the opt-in ones only ever
+     * report {@code not-opted-in}.
+     */
+    public List<AwsPartition.Region> describeRegions(AwsPartition partition, boolean allRegions) {
+        return partition.regions().stream()
+                .filter(region -> allRegions || !region.optIn())
+                .toList();
     }
 
     public Map<String, String> describeAccountAttributes(String region) {

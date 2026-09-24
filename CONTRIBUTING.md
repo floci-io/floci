@@ -330,6 +330,11 @@ DNS suffix; a literal that really is partition-invariant goes in
 `tools/partition/allowlist.yaml` with a reason, or ends its line with
 `// partition-literal: <reason>`.
 
+The partition catalog itself (`src/main/resources/aws/partitions.json`: ids, DNS suffixes,
+regions, opt-in flags, global endpoints) is generated from botocore's published data by
+`make aws-data-sync` and checked by `make aws-data-check` in CI; never hand-edit it. Bump
+`tools/aws/requirements.txt` when regenerating from a newer botocore.
+
 ## Reporting Security Issues
 
 Please do **not** open public issues for security vulnerabilities. Report them privately by emailing the maintainer or using [GitHub private vulnerability reporting](https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing/privately-reporting-a-security-vulnerability).

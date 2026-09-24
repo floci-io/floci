@@ -38,8 +38,10 @@ The block below mirrors `src/main/resources/application.yml`, it's the effective
 floci:
   base-url: "http://localhost:4566"  # Used to build response URLs (SQS QueueUrl, SNS endpoints, etc.)
   # hostname: ""                     # When set, overrides the host in base-url for multi-container Docker
-  default-region: us-east-1
+  default-region: us-east-1           # Also selects the partition (cn-north-1 -> aws-cn)
   default-account-id: "000000000000"
+  partitions:
+    # id: aws                         # Pin the partition explicitly; derived from default-region when unset
 
   storage:
     mode: memory                      # memory | persistent | hybrid | wal

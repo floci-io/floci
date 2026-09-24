@@ -11,6 +11,7 @@ import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -170,6 +171,65 @@ class RegionResolverTest {
     void resolveRegionFromHost_nullOrEmpty_returnsNull() {
         assertNull(resolver.resolveRegionFromHost(null));
         assertNull(resolver.resolveRegionFromHost(""));
+    }
+
+    @Test
+    void theDeploymentPartitionFollowsTheDefaultRegion() {
+        assertEquals("aws", resolver.getDefaultPartition());
+        assertEquals("aws-cn", new RegionResolver("cn-north-1", "000000000000").getDefaultPartition());
+        assertEquals("aws-us-gov", new RegionResolver("us-gov-west-1", "000000000000").getDefaultPartition());
+        assertEquals("aws-iso-b", new RegionResolver("us-isob-east-1", "000000000000", "aws-iso-b").getDefaultPartition());
+    }
+
+    @Test
+    void anExplicitPartitionIdOverridesTheRegionDerivedOne() {
+        assertEquals("aws-cn", RegionResolver.effectivePartition("cn-north-1", Optional.empty()));
+        assertEquals("aws-us-gov", RegionResolver.effectivePartition("us-east-1", Optional.of(" AWS-US-GOV ")));
+        assertEquals("aws", RegionResolver.effectivePartition("us-east-1", Optional.of("  ")));
+    }
+
+    /**
+     * The request's partition comes from its signing region. A blank region (no credential) is
+     * the deployment's partition, never a literal {@code aws}; a pseudo-region resolves to its
+     * partition; and a region the catalog cannot place stays local rather than commercial.
+     */
+    @Test
+    void partitionForRegionScopesARequest() {
+        RegionResolver china = new RegionResolver("cn-north-1", "000000000000");
+        assertEquals("aws-cn", china.partitionForRegion(null));
+        assertEquals("aws-cn", china.partitionForRegion(""));
+        assertEquals("aws-cn", china.partitionForRegion("xx-nowhere-9"));
+        assertEquals("aws", china.partitionForRegion("us-east-1"));
+        assertEquals("aws-us-gov", china.partitionForRegion("us-gov-west-1"));
+        assertEquals("aws-eusc", china.partitionForRegion("eusc-de-east-1"));
+        assertEquals("aws-cn", resolver.partitionForRegion("aws-cn-global"));
+        assertEquals("aws-iso", resolver.partitionForRegion("aws-iso-global"));
+        assertEquals("aws", resolver.partitionForRegion("aws-global"));
+    }
+
+    @Test
+    void getPartitionOutsideARequestIsTheDeploymentPartition() {
+        assertEquals("aws", resolver.getPartition());
+        assertEquals("aws-cn", new RegionResolver("cn-north-1", "000000000000").getPartition());
+    }
+
+    @Test
+    void buildArnRoutesABlankRegionToTheDeploymentPartition() {
+        RegionResolver govCloud = new RegionResolver("us-gov-west-1", "000000000000");
+        assertEquals("arn:aws-us-gov:iam::000000000000:role/r", govCloud.buildArn("iam", "", "role/r"));
+        assertEquals("arn:aws-us-gov:iam::000000000000:role/r", govCloud.buildArn("iam", null, "role/r"));
+        assertEquals("arn:aws-us-gov:s3:::bucket", govCloud.buildGlobalArn("s3", "", "bucket"));
+        assertEquals("arn:aws-us-gov:sqs:us-gov-west-1:000000000000:q", govCloud.buildArn("sqs", "us-gov-west-1", "q"));
+        assertEquals("arn:aws:iam::000000000000:role/r", resolver.buildArn("iam", "", "role/r"));
+    }
+
+    @Test
+    void resolveRegionFromHostAcceptsEveryPartitionsShapeButOnlyPublishedIds() {
+        assertEquals("eusc-de-east-1", resolver.resolveRegionFromHost("abc123.execute-api.eusc-de-east-1.localhost:4566"));
+        assertEquals("us-isob-east-1", resolver.resolveRegionFromHost("abc123.execute-api.us-isob-east-1.localhost"));
+        assertEquals("cn-north-1", resolver.resolveRegionFromHost("abc123.execute-api.cn-north-1.amazonaws.com.cn"));
+        assertNull(resolver.resolveRegionFromHost("abc123.execute-api.xx-nowhere-9.localhost:4566"));
+        assertNull(resolver.resolveRegionFromHost("abc123.execute-api.my-cd-1.localhost:4566"));
     }
 
     private static HttpHeaders stubHeaders(String authorizationValue) {

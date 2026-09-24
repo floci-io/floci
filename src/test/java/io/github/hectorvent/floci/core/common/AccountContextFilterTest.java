@@ -72,6 +72,46 @@ class AccountContextFilterTest {
         filter.filter(ctx);
         assertEquals(DEFAULT_ACCOUNT, requestContext.getAccountId());
         assertEquals(DEFAULT_REGION, requestContext.getRegion());
+        assertEquals("aws", requestContext.getPartition());
+    }
+
+    /** The signing region carries the partition: a China-signed request is a China request. */
+    @Test
+    void partitionFollowsTheSigningRegionOfTheAuthorizationHeader() {
+        filter.filter(mockContext(
+            "AWS4-HMAC-SHA256 Credential=000000000001/20260617/cn-north-1/iam/aws4_request, SignedHeaders=host, Signature=abc",
+            null));
+        assertEquals("cn-north-1", requestContext.getRegion());
+        assertEquals("aws-cn", requestContext.getPartition());
+
+        filter.filter(mockContext(
+            "AWS4-HMAC-SHA256 Credential=000000000001/20260617/eusc-de-east-1/sqs/aws4_request, SignedHeaders=host, Signature=abc",
+            null));
+        assertEquals("aws-eusc", requestContext.getPartition());
+
+        filter.filter(mockContext(
+            "AWS4-HMAC-SHA256 Credential=000000000001/20260617/aws-cn-global/iam/aws4_request, SignedHeaders=host, Signature=abc",
+            null));
+        assertEquals("aws-cn-global", requestContext.getRegion());
+        assertEquals("aws-cn", requestContext.getPartition());
+    }
+
+    @Test
+    void partitionFollowsThePresignedCredentialRegion() {
+        filter.filter(mockContext(null, "000000000002/20260617/us-gov-west-1/s3/aws4_request"));
+        assertEquals("us-gov-west-1", requestContext.getRegion());
+        assertEquals("aws-us-gov", requestContext.getPartition());
+    }
+
+    /** With no credential the request belongs to the deployment's partition, whatever it is. */
+    @Test
+    void anUnsignedRequestGetsTheDeploymentPartition() {
+        RegionResolver china = new RegionResolver("cn-north-1", DEFAULT_ACCOUNT);
+        AccountContextFilter chinaFilter = new AccountContextFilter(accountResolver, china, requestContext,
+                akid -> Optional.empty());
+        chinaFilter.filter(mockContext(null, null));
+        assertEquals("cn-north-1", requestContext.getRegion());
+        assertEquals("aws-cn", requestContext.getPartition());
     }
 
     @Test

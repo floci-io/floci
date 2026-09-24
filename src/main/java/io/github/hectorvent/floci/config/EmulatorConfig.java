@@ -64,6 +64,17 @@ public interface EmulatorConfig {
     @WithDefault("000000000000")
     String defaultAccountId();
 
+    PartitionsConfig partitions();
+
+    /**
+     * Which AWS partition the deployment serves. Normally derived from {@link #defaultRegion()}
+     * ({@code cn-north-1} means {@code aws-cn}); {@code id} pins it explicitly, and startup
+     * refuses a value that names no partition or contradicts the default region.
+     */
+    interface PartitionsConfig {
+        Optional<String> id();
+    }
+
     /**
      * Path to a shared mock-response configuration file used by the fixed-stub AI services
      * (Textract, Comprehend, Rekognition) to return a caller-configured response instead of

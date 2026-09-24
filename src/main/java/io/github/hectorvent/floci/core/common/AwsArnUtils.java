@@ -26,14 +26,24 @@ public final class AwsArnUtils {
          * gets {@code aws-us-gov}, and everything else gets {@code aws}. See
          * {@link AwsRegions#partitionFor}.
          *
-         * <p>Global services pass an empty region and therefore keep {@code aws}. That is a known
-         * gap rather than a decision: an IAM ARN in a GovCloud deployment really is
-         * {@code arn:aws-us-gov:iam::…}, but nothing in the region argument can say so. Those call
-         * sites need a partition from the deployment, not from the resource, and they are left
-         * alone until there is one.
+         * <p>Global services pass an empty region, and nothing in that argument can say which
+         * partition they belong to, so this keeps {@code aws} for them. A call site that knows the
+         * request's partition mints those through {@link #global} (or
+         * {@link RegionResolver#buildGlobalArn}); the fallback here stays only until every
+         * regionless call site has moved, after which a blank region becomes an error.
          */
         public static Arn of(String service, String region, String accountId, String resource) {
             return new Arn(AwsRegions.partitionFor(region), service, region, accountId, resource);
+        }
+
+        /**
+         * Factory for the ARN of a global service, which carries no region and whose partition
+         * is the caller's: {@code arn:<partition>:<service>::<accountId>:<resource>}. The
+         * partition is taken as given and never derived; a static utility must not reach into
+         * the request scope, or the same call would mint different ARNs depending on the thread.
+         */
+        public static Arn global(String partition, String service, String accountId, String resource) {
+            return new Arn(partition, service, "", accountId, resource);
         }
 
         @Override
@@ -130,21 +140,17 @@ public final class AwsArnUtils {
     }
 
     /**
-     * True when the ARN names a partition other than {@code aws}, the only one Floci emulates.
-     * An empty partition field is not foreign: callers that omit it are naming a local
-     * resource.
-     *
-     * <p>Deliberately a literal {@code aws} rather than {@link #PARTITION_REGEX}. That constant
-     * exists to recognise a legal ARN in any partition; this asks the opposite question, whether
-     * the ARN names a partition this emulator can serve, and the answer is only ever the
-     * commercial one.
+     * True when the ARN names a partition other than {@code localPartition}, the one the current
+     * request belongs to ({@link RegionResolver#getPartition()}). An empty partition field is
+     * not foreign: callers that omit it are naming a local resource. Mirrors
+     * {@link #isForeignAccount}: foreign is relative to the caller, never to a fixed {@code aws}.
      */
-    public static boolean isForeignPartition(Arn arn) {
+    public static boolean isForeignPartition(Arn arn, String localPartition) {
         if (arn == null) {
             return false;
         }
         String partition = arn.partition();
-        return partition != null && !partition.isEmpty() && !"aws".equals(partition);
+        return partition != null && !partition.isEmpty() && !partition.equals(localPartition);
     }
 
     /**

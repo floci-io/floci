@@ -9,6 +9,9 @@
 # Partition literals: hardcoded arn:aws: prefixes, amazonaws.com hosts and hosted-zone
 # ids in src/main are inventoried against tools/partition/baseline.tsv so the
 # commercial-partition assumption can only shrink. See tools/partition/.
+#
+# AWS partition data: src/main/resources/aws/partitions.json is generated from botocore's
+# published partition metadata (plus two CDK region rules) by tools/aws/regen_partitions.py.
 
 PYTHON ?= python3
 
@@ -38,7 +41,8 @@ PREFIX ?= $(HOME)/.local
 
 .DEFAULT_GOAL := help
 .PHONY: help dev build test native native-host run-native native-install native-image native-up native-down native-logs clean-sidecars clean-volumes compat docker-tests \
-        docs-sync docs-check docs-test partition-check partition-baseline partition-audit partition-test
+        docs-sync docs-check docs-test partition-check partition-baseline partition-audit partition-test \
+        aws-data-sync aws-data-check aws-data-test
 
 help: ## List the targets below
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
@@ -166,3 +170,17 @@ partition-audit: ## Print the per-package table of remaining partition literals
 
 partition-test: ## Run the partition tooling's unit tests
 	$(PYTHON) -m pytest tools/partition -q
+
+aws-data-sync: ## Regenerate src/main/resources/aws/partitions.json from botocore (commit the result)
+	$(PYTHON) tools/aws/regen_partitions.py
+
+aws-data-check: ## CI gate: the vendored partition data must match a fresh generation
+	@$(PYTHON) tools/aws/regen_partitions.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/aws/partitions.json is out of date."; \
+		echo "       Run 'make aws-data-sync' and commit the result."; \
+		exit 1; \
+	}
+
+aws-data-test: ## Run the partition-data generator's unit tests
+	$(PYTHON) -m pytest tools/aws -q

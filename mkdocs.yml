@@ -86,6 +86,7 @@ nav:
     - Docker Configuration: configuration/docker.md
     - Ports Reference: configuration/ports.md
     - Multi-Account Isolation: configuration/multi-account.md
+    - AWS Partitions: configuration/partitions.md
     - Storage Modes: configuration/storage.md
     - TLS / HTTPS: configuration/tls.md
     - Initialization Hooks: configuration/initialization-hooks.md

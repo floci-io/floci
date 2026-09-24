@@ -21,20 +21,29 @@ class AwsArnOwnershipTest {
     @Test
     void awsPartitionIsNotForeign() {
         assertFalse(AwsArnUtils.isForeignPartition(
-                arn("arn:aws:lambda:us-east-1:000000000000:layer:l:1")));
+                arn("arn:aws:lambda:us-east-1:000000000000:layer:l:1"), "aws"));
     }
 
     @Test
     void otherPartitionsAreForeign() {
         assertTrue(AwsArnUtils.isForeignPartition(
-                arn("arn:aws-cn:lambda:cn-north-1:000000000000:layer:l:1")));
+                arn("arn:aws-cn:lambda:cn-north-1:000000000000:layer:l:1"), "aws"));
         assertTrue(AwsArnUtils.isForeignPartition(
-                arn("arn:aws-us-gov:lambda:us-gov-west-1:000000000000:layer:l:1")));
+                arn("arn:aws-us-gov:lambda:us-gov-west-1:000000000000:layer:l:1"), "aws"));
+    }
+
+    /** Foreign is relative to the caller's partition: a China ARN is local to a China request. */
+    @Test
+    void theCallersOwnPartitionIsNotForeign() {
+        assertFalse(AwsArnUtils.isForeignPartition(
+                arn("arn:aws-cn:lambda:cn-north-1:000000000000:layer:l:1"), "aws-cn"));
+        assertTrue(AwsArnUtils.isForeignPartition(
+                arn("arn:aws:lambda:us-east-1:000000000000:layer:l:1"), "aws-cn"));
     }
 
     @Test
     void anEmptyPartitionIsNotForeign() {
-        assertFalse(AwsArnUtils.isForeignPartition(arn("arn::lambda:us-east-1:000000000000:layer:l:1")));
+        assertFalse(AwsArnUtils.isForeignPartition(arn("arn::lambda:us-east-1:000000000000:layer:l:1"), "aws"));
     }
 
     @Test
@@ -58,7 +67,7 @@ class AwsArnOwnershipTest {
 
     @Test
     void nullIsNotForeign() {
-        assertFalse(AwsArnUtils.isForeignPartition(null));
+        assertFalse(AwsArnUtils.isForeignPartition(null, "aws"));
         assertFalse(AwsArnUtils.isForeignAccount(null, LOCAL));
     }
 }

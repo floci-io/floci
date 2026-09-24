@@ -1402,7 +1402,7 @@ public class EksClusterManager implements ClusterNodeInstanceProvider {
                     clusterName, e.getMessage());
             return;
         }
-        List<String> regions = new ArrayList<>(AwsRegions.ALL);
+        List<String> regions = new ArrayList<>(AwsRegions.advertised(AwsRegions.partitionFor(config.defaultRegion())));
         if (!regions.contains(config.defaultRegion())) {
             regions.add(config.defaultRegion());
         }

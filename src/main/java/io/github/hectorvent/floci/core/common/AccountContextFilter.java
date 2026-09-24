@@ -54,26 +54,36 @@ public class AccountContextFilter implements ContainerRequestFilter {
         Object pinnedAccount = ctx.getProperty(PINNED_ACCOUNT_PROPERTY);
         if (pinnedAccount != null) {
             requestContext.setAccountId(pinnedAccount.toString());
-            requestContext.setRegion(regionResolver.resolveRegionFromAuth(null));
+            applyRegion(regionResolver.resolveRegionFromAuth(null));
             return;
         }
         String auth = ctx.getHeaderString("Authorization");
         if (auth != null && !auth.isEmpty()) {
             String akid = accountResolver.extractAccessKeyId(auth);
             requestContext.setAccountId(resolveAccount(akid, accountResolver.resolve(auth)));
-            requestContext.setRegion(regionResolver.resolveRegionFromAuth(auth));
+            applyRegion(regionResolver.resolveRegionFromAuth(auth));
         } else {
             String credential = ctx.getUriInfo().getQueryParameters().getFirst("X-Amz-Credential");
             if (credential != null && !credential.isEmpty()) {
                 String akid = accountResolver.extractPresignedAccessKeyId(credential);
                 requestContext.setAccountId(
                         resolveAccount(akid, accountResolver.resolveFromPresignedCredential(credential)));
-                requestContext.setRegion(regionResolver.resolveRegionFromPresignedCredential(credential));
+                applyRegion(regionResolver.resolveRegionFromPresignedCredential(credential));
             } else {
                 requestContext.setAccountId(accountResolver.resolve(null));
-                requestContext.setRegion(regionResolver.resolveRegionFromAuth(null));
+                applyRegion(regionResolver.resolveRegionFromAuth(null));
             }
         }
+    }
+
+    /**
+     * The region and its partition travel together: the SigV4 credential scope is the only
+     * place a request says which partition it belongs to (a China client signs {@code cn-north-1}
+     * even for IAM), so the partition is derived here, once, from the same value.
+     */
+    private void applyRegion(String region) {
+        requestContext.setRegion(region);
+        requestContext.setPartition(regionResolver.partitionForRegion(region));
     }
 
     /**

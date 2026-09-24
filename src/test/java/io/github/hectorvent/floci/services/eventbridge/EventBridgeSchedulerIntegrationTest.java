@@ -296,6 +296,8 @@ class EventBridgeSchedulerIntegrationTest {
             @Override
             public String defaultAccountId() { return ACCOUNT; }
             @Override
+            public PartitionsConfig partitions() { return Optional::empty; }
+            @Override
             public Optional<String> aiMockConfigFile() { return Optional.empty(); }
             @Override
             public StorageConfig storage() { return null; }

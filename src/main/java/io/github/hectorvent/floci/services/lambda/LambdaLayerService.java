@@ -455,9 +455,9 @@ public class LambdaLayerService {
                             + " constraint: Member must satisfy regular expression pattern: "
                             + LAYER_VERSION_ARN_PATTERN, 400);
         }
-        // Floci emulates the aws partition; the live service rejects the others outright, and
-        // with a different error than an unresolvable ARN, so this precedes the lookup.
-        if (AwsArnUtils.isForeignPartition(AwsArnUtils.parse(layerVersionArn))) {
+        // The live service rejects a layer from another partition outright, and with a different
+        // error than an unresolvable ARN, so this precedes the lookup.
+        if (AwsArnUtils.isForeignPartition(AwsArnUtils.parse(layerVersionArn), regionResolver.getPartition())) {
             throw new AwsException("InvalidParameterValueException",
                     "Invalid layer version " + layerVersionArn, 400);
         }
@@ -526,7 +526,7 @@ public class LambdaLayerService {
      * to reject too, or Floci would persist an ARN its own lookup path calls invalid.
      */
     public boolean isForeignPartitionLayerArn(String layerVersionArn) {
-        return AwsArnUtils.isForeignPartition(parseLayerVersionArn(layerVersionArn));
+        return AwsArnUtils.isForeignPartition(parseLayerVersionArn(layerVersionArn), regionResolver.getPartition());
     }
 
     private AwsArnUtils.Arn parseLayerVersionArn(String layerVersionArn) {
@@ -544,7 +544,7 @@ public class LambdaLayerService {
     }
 
     private boolean isForeignLayerArn(AwsArnUtils.Arn arn) {
-        return AwsArnUtils.isForeignPartition(arn)
+        return AwsArnUtils.isForeignPartition(arn, regionResolver.getPartition())
                 || AwsArnUtils.isForeignAccount(arn, regionResolver.getAccountId());
     }
 

@@ -5,14 +5,18 @@ name: Partition Literals
 # hardcoded arn:aws: prefixes, amazonaws.com hosts, hosted-zone ids and hand-rolled
 # partition regexes in src/main/java against the checked-in per-file baseline: a
 # literal in a new file fails, growth in an existing file fails, and a drop fails until
-# the baseline is regenerated so the remaining count stays exact. Python-only, so it is
-# fast and independent of the Java build job.
+# the baseline is regenerated so the remaining count stays exact. The second job checks
+# that the vendored partition data (src/main/resources/aws/partitions.json) still matches
+# what tools/aws/regen_partitions.py produces from the pinned botocore release. Python-only,
+# so both are fast and independent of the Java build job.
 
 on:
   pull_request:
     paths:
       - 'src/main/java/**'
+      - 'src/main/resources/aws/**'
       - 'tools/partition/**'
+      - 'tools/aws/**'
       - 'Makefile'
       - '.github/workflows/partition-literals.yml'
   push:
@@ -20,7 +24,9 @@ on:
       - main
     paths:
       - 'src/main/java/**'
+      - 'src/main/resources/aws/**'
       - 'tools/partition/**'
+      - 'tools/aws/**'
       - 'Makefile'
       - '.github/workflows/partition-literals.yml'
 
@@ -56,3 +62,24 @@ jobs:
       - name: Print the remaining-literal audit
         if: always()
         run: make partition-audit
+
+  aws-data:
+    name: Vendored partition data in sync
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.x"
+
+      - name: Install the pinned botocore
+        run: pip install -r tools/aws/requirements.txt
+
+      - name: Run generator tests
+        run: make aws-data-test
+
+      - name: Check partitions.json against a fresh generation
+        run: make aws-data-check

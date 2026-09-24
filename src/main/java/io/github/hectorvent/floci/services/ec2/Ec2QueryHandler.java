@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.ec2;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
+import io.github.hectorvent.floci.core.common.AwsPartition;
+import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.ec2.model.*;
@@ -4075,16 +4077,21 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDescribeRegions(MultivaluedMap<String, String> p, String region) {
-        List<String> regions = service.describeRegions();
+        AwsPartition partition = AwsPartitions.forRegionOrCommercial(region);
+        boolean allRegions = Boolean.parseBoolean(p.getFirst("AllRegions"));
+        Set<String> requested = new HashSet<>(getList(p, "RegionName"));
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeRegionsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
                 .start("regionInfo");
-        for (String r : regions) {
+        for (AwsPartition.Region r : service.describeRegions(partition, allRegions || !requested.isEmpty())) {
+            if (!requested.isEmpty() && !requested.contains(r.id())) {
+                continue;
+            }
             xml.start("item")
-                    .elem("regionName", r)
-                    .elem("regionEndpoint", "ec2." + r + ".amazonaws.com")
-                    .elem("optInStatus", "opt-in-not-required")
+                    .elem("regionName", r.id())
+                    .elem("regionEndpoint", partition.regionalHostname("ec2", r.id()))
+                    .elem("optInStatus", r.optIn() ? "not-opted-in" : "opt-in-not-required")
                     .end("item");
         }
         xml.end("regionInfo").end("DescribeRegionsResponse");

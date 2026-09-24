@@ -59,6 +59,7 @@ quarkus:
         - ec2/*.yaml
         - sagemaker/*.yaml
         - eks/*.json
+        - aws/*.json
         - i18n/*.properties
         - org/apache/velocity/runtime/defaults/*.properties
         # DriverManager finds the JDBC drivers through ServiceLoader, and the MySQL
@@ -134,6 +135,9 @@ floci:
                    # Needed for multi-container Docker setups. Example: FLOCI_HOSTNAME=floci
   default-region: us-east-1
   default-account-id: "000000000000"
+  partitions:
+    # id: aws  # Partition served (aws, aws-cn, aws-us-gov, aws-iso, aws-iso-b, aws-iso-e, aws-iso-f, aws-eusc).
+               # Derived from default-region when unset. Env: FLOCI_PARTITIONS_ID
   # Shared mock-response config for Textract/Comprehend/Rekognition/Translate. See AiMockConfigLoader.
   ai-mock-config-file: ${AI_MOCK_CONFIG:}
   storage:

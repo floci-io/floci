@@ -4,8 +4,11 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
+import io.github.hectorvent.floci.core.common.AwsPartition;
+import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.CsvParser;
 import io.github.hectorvent.floci.core.common.CustomResourceLiveness;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHandler;
@@ -1289,10 +1292,12 @@ public class AslExecutor {
     private JsonNode invokeAwsSdkEc2DescribeRegions() {
         ObjectNode result = objectMapper.createObjectNode();
         ArrayNode regions = objectMapper.createArrayNode();
-        for (String name : ec2Service.describeRegions()) {
+        AwsPartition partition = AwsPartitions.byId(
+                RegionResolver.effectivePartition(config.defaultRegion(), config.partitions().id()));
+        for (AwsPartition.Region name : ec2Service.describeRegions(partition, false)) {
             ObjectNode region = objectMapper.createObjectNode();
-            region.put("RegionName", name);
-            region.put("Endpoint", "ec2." + name + ".amazonaws.com");
+            region.put("RegionName", name.id());
+            region.put("Endpoint", partition.regionalHostname("ec2", name.id()));
             region.put("OptInStatus", "opt-in-not-required");
             regions.add(region);
         }

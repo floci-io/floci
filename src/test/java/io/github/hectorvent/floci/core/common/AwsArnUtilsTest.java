@@ -2,7 +2,10 @@ package io.github.hectorvent.floci.core.common;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import io.github.hectorvent.floci.testing.PartitionMatrix;
+import io.github.hectorvent.floci.testing.PartitionMatrix.PartitionCase;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -140,13 +143,27 @@ class AwsArnUtilsTest {
     }
 
     /**
-     * Global services pass no region, and they keep the commercial partition. Thirty call sites
-     * do this; anything else would rewrite every IAM, S3 and CloudFront ARN the emulator mints.
+     * A regionless {@code Arn.of} keeps the commercial partition: nothing in the region argument
+     * can say otherwise. Call sites that know the request's partition use {@link AwsArnUtils.Arn#global}.
      */
     @Test
     void aRegionlessArnStaysInTheCommercialPartition() {
         assertEquals("arn:aws:iam::000000000000:role/r",
                 AwsArnUtils.Arn.of("iam", "", "000000000000", "role/r").toString());
+    }
+
+    @ParameterizedTest
+    @MethodSource("io.github.hectorvent.floci.testing.PartitionMatrix#cases")
+    void aGlobalArnCarriesTheGivenPartitionAndNoRegion(PartitionCase partitionCase) {
+        AwsArnUtils.Arn arn = AwsArnUtils.Arn.global(partitionCase.partition(), "iam", "000000000000", "role/r");
+        assertEquals("arn:" + partitionCase.partition() + ":iam::000000000000:role/r", arn.toString());
+        PartitionMatrix.assertGlobalArnIn(partitionCase, arn.toString());
+    }
+
+    @Test
+    void aPseudoRegionResolvesToItsPartitionWhenMinting() {
+        assertEquals("arn:aws-cn:sqs:aws-cn-global:000000000000:q",
+                AwsArnUtils.Arn.of("sqs", "aws-cn-global", "000000000000", "q").toString());
     }
 
     /** A region AWS has not launched yet must not fail closed. */
