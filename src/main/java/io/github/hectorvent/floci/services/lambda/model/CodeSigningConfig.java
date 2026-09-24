@@ -2,11 +2,13 @@ package io.github.hectorvent.floci.services.lambda.model;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.util.ArrayList;
 import java.util.List;
 
 /** A Lambda code signing configuration, as CreateCodeSigningConfig returns it. */
+@RegisterForReflection
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public class CodeSigningConfig {
 
@@ -41,6 +43,7 @@ public class CodeSigningConfig {
     public String getLastModified() { return lastModified; }
     public void setLastModified(String lastModified) { this.lastModified = lastModified; }
 
+    @RegisterForReflection
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public static class AllowedPublishers {
         @JsonProperty("SigningProfileVersionArns")
@@ -52,6 +55,7 @@ public class CodeSigningConfig {
         }
     }
 
+    @RegisterForReflection
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public static class CodeSigningPolicies {
         @JsonProperty("UntrustedArtifactOnDeployment")
