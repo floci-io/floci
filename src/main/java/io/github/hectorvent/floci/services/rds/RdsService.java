@@ -8491,7 +8491,7 @@ public class RdsService implements Resettable, ResourceProvider {
      * Nothing is published to the topic. The subscription is stored and reported back so a client
      * can manage it, and no RDS event reaches SNS through it.
      */
-    public EventSubscription createEventSubscription(String region, String subscriptionName,
+    public synchronized EventSubscription createEventSubscription(String region, String subscriptionName,
                                                      String snsTopicArn, String sourceType,
                                                      List<String> sourceIds,
                                                      List<String> eventCategories, Boolean enabled) {
@@ -8510,8 +8510,11 @@ public class RdsService implements Resettable, ResourceProvider {
             throw new AwsException("InvalidParameterValue",
                     "SourceType must be one of " + EVENT_SOURCE_TYPES + ".", 400);
         }
-        // The model states this coupling directly: a request naming SourceIds must also name the
-        // SourceType they belong to, because an id alone does not say what kind of source it is.
+        // CreateEventSubscriptionMessage.SourceIds carries the coupling in its own member
+        // documentation, not in the operation's: "Constraints: If SourceIds are supplied,
+        // SourceType must also be provided." The operation docs walk through both specified,
+        // SourceType alone, and neither, and never mention SourceIds alone, so the member doc is
+        // the only place it is stated.
         if (sourceIds != null && !sourceIds.isEmpty() && (sourceType == null || sourceType.isBlank())) {
             throw new AwsException("InvalidParameterCombination",
                     "SourceType must be provided when SourceIds are supplied.", 400);
@@ -8542,7 +8545,7 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     /** ModifyEventSubscription applies only the members the request names. */
-    public EventSubscription modifyEventSubscription(String region, String subscriptionName,
+    public synchronized EventSubscription modifyEventSubscription(String region, String subscriptionName,
                                                      String snsTopicArn, String sourceType,
                                                      List<String> eventCategories, Boolean enabled) {
         EventSubscription subscription = requireEventSubscription(region, subscriptionName);
@@ -8566,14 +8569,14 @@ public class RdsService implements Resettable, ResourceProvider {
         return subscription;
     }
 
-    public EventSubscription deleteEventSubscription(String region, String subscriptionName) {
+    public synchronized EventSubscription deleteEventSubscription(String region, String subscriptionName) {
         EventSubscription subscription = requireEventSubscription(region, subscriptionName);
         eventSubscriptions.delete(eventSubscriptionKey(region, subscriptionName));
         return subscription;
     }
 
     /** Every subscription in the region, or the one the request names. */
-    public List<EventSubscription> describeEventSubscriptions(String region, String subscriptionName) {
+    public synchronized List<EventSubscription> describeEventSubscriptions(String region, String subscriptionName) {
         if (subscriptionName != null && !subscriptionName.isBlank()) {
             return List.of(requireEventSubscription(region, subscriptionName));
         }
