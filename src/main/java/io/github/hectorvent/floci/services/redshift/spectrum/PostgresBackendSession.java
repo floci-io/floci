@@ -47,7 +47,11 @@ public final class PostgresBackendSession implements BackendSql {
                 }
             } catch (IOException exception) {
                 writeCopyFail(output, exception.getMessage());
-                awaitReady(decoder);
+                try {
+                    awaitReady(decoder);
+                } catch (IOException | SpectrumReadException backendFailure) {
+                    exception.addSuppressed(backendFailure);
+                }
                 throw exception;
             }
             output.write('c');

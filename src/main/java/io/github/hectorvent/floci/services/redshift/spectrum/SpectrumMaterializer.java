@@ -1,10 +1,10 @@
 package io.github.hectorvent.floci.services.redshift.spectrum;
 
+import io.github.hectorvent.floci.services.redshift.proxy.PostgresWireDecoder;
 import jakarta.enterprise.context.ApplicationScoped;
 
-import io.github.hectorvent.floci.services.redshift.proxy.PostgresWireDecoder;
-
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
@@ -12,6 +12,7 @@ import java.security.SecureRandom;
 import java.util.HexFormat;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Objects;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -61,6 +62,33 @@ public final class SpectrumMaterializer {
         }
     }
 
+    public Materialization materialize(BackendSql backend, SpectrumSession session, SpectrumExternalSchema schema,
+                                       SpectrumExternalTable table, SpectrumS3Reader reader, String identifier) {
+        Materialization materialization = new Materialization(identifier, table.columns());
+        boolean tableCreated = false;
+        try {
+            backend.execute(createTableSql(identifier, table));
+            tableCreated = true;
+            try (Stream<SpectrumRow> rows = reader.read(session, schema, table);
+                 SpectrumRowInputStream input = new SpectrumRowInputStream(rows.iterator())) {
+                backend.copyIn(copySql(identifier, table), input);
+            }
+            return materialization;
+        } catch (SpectrumReadException failure) {
+            SpectrumReadException original = findRowFailure(failure);
+            if (original == null) {
+                original = failure;
+            }
+            cleanupAfterFailure(backend, materialization, tableCreated, original);
+            throw original;
+        } catch (RuntimeException failure) {
+            SpectrumReadException readFailure = new SpectrumReadException(
+                    SQLSTATE_DATA, "Unable to materialize Spectrum rows", failure);
+            cleanupAfterFailure(backend, materialization, tableCreated, readFailure);
+            throw readFailure;
+        }
+    }
+
     public String nextIdentifier() {
         return "spectrum_tmp_" + HexFormat.of().formatHex(randomBytes(12));
     }
@@ -73,6 +101,38 @@ public final class SpectrumMaterializer {
         } catch (IOException exception) {
             throw new SpectrumReadException(SQLSTATE_DATA, "Unable to clean up Spectrum materialization", exception);
         }
+    }
+
+    public void cleanup(BackendSql backend, Materialization materialization) {
+        backend.execute(dropTableSql(materialization.identifier()));
+    }
+
+    private static String dropTableSql(String identifier) {
+        return "DROP TABLE IF EXISTS \"" + quoteIdentifier(identifier) + "\"";
+    }
+
+    private void cleanupAfterFailure(BackendSql backend, Materialization materialization, boolean tableCreated,
+                                    SpectrumReadException original) {
+        if (tableCreated) {
+            try {
+                cleanup(backend, materialization);
+            } catch (RuntimeException cleanupFailure) {
+                original.addSuppressed(cleanupFailure);
+            }
+        }
+    }
+
+    private static SpectrumReadException findRowFailure(Throwable failure) {
+        Throwable current = failure;
+        while (current != null) {
+            if (current instanceof SpectrumReadException readException) {
+                if (readException != failure) {
+                    return readException;
+                }
+            }
+            current = current.getCause();
+        }
+        return null;
     }
 
     private static String createTableSql(String identifier, SpectrumExternalTable table) {
@@ -109,6 +169,50 @@ public final class SpectrumMaterializer {
         }
         line.append('\n');
         return line.toString().getBytes(StandardCharsets.UTF_8);
+    }
+
+    private static final class SpectrumRowInputStream extends InputStream {
+        private final Iterator<SpectrumRow> rows;
+        private byte[] currentRow = new byte[0];
+        private int offset;
+
+        private SpectrumRowInputStream(Iterator<SpectrumRow> rows) {
+            this.rows = rows;
+        }
+
+        @Override
+        public int read() throws IOException {
+            byte[] value = new byte[1];
+            int count = read(value, 0, 1);
+            return count < 0 ? -1 : value[0] & 0xff;
+        }
+
+        @Override
+        public int read(byte[] bytes, int start, int length) throws IOException {
+            Objects.checkFromIndexSize(start, length, bytes.length);
+            if (length == 0) {
+                return 0;
+            }
+            if (offset >= currentRow.length) {
+                try {
+                    if (!rows.hasNext()) {
+                        return -1;
+                    }
+                    currentRow = encodeRow(rows.next());
+                    offset = 0;
+                } catch (RuntimeException exception) {
+                    throw new IOException("Unable to read Spectrum row", exception);
+                }
+            }
+            int count = Math.min(length, currentRow.length - offset);
+            System.arraycopy(currentRow, offset, bytes, start, count);
+            offset += count;
+            return count;
+        }
+
+        @Override
+        public void close() {
+        }
     }
 
     private static void sendQuery(OutputStream output, String sql) throws IOException {

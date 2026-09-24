@@ -9,6 +9,7 @@ import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Arrays;
 import java.util.concurrent.ExecutorService;
@@ -16,12 +17,85 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.stream.Stream;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class SpectrumMaterializerTest {
+
+    @Test
+    void materializesThroughBackendSqlWithoutBufferingRowsInTheCaller() throws Exception {
+        SpectrumS3Reader reader = mock(SpectrumS3Reader.class);
+        when(reader.read(org.mockito.ArgumentMatchers.any(SpectrumSession.class),
+                org.mockito.ArgumentMatchers.any(SpectrumExternalSchema.class),
+                org.mockito.ArgumentMatchers.any(SpectrumExternalTable.class)))
+                .thenReturn(Stream.of(new SpectrumRow(List.of("1", "Alice\nSmith")),
+                        new SpectrumRow(Arrays.asList("2", null))));
+        SpectrumExternalTable table = new SpectrumExternalTable("000000000000", "dev", "analytics", "events",
+                List.of(new SpectrumColumn("id", SpectrumColumn.Type.INTEGER),
+                        new SpectrumColumn("name", SpectrumColumn.Type.VARCHAR)),
+                "s3://warehouse/events/", ',', '"', '\\', "\\N", 0);
+        CapturingBackendSql backend = new CapturingBackendSql();
+
+        SpectrumMaterializer.Materialization materialized = new SpectrumMaterializer().materialize(
+                backend, new SpectrumSession("000000000000", "cluster-1", "dev", List.of(), false),
+                schema(), table, reader, "spectrum_tmp_test");
+
+        assertEquals("spectrum_tmp_test", materialized.identifier());
+        assertEquals(List.of(
+                "CREATE TEMP TABLE \"spectrum_tmp_test\" (\"id\" INTEGER, \"name\" VARCHAR)",
+                "COPY \"spectrum_tmp_test\" (\"id\", \"name\") FROM STDIN"), backend.commands);
+        assertEquals("1\tAlice\\nSmith\n2\t\\N\n",
+                new String(backend.copiedInput, StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void copyFailureDropsTemporaryTableAndPreservesBackendSqlState() {
+        SpectrumS3Reader reader = mock(SpectrumS3Reader.class);
+        when(reader.read(org.mockito.ArgumentMatchers.any(SpectrumSession.class),
+                org.mockito.ArgumentMatchers.any(SpectrumExternalSchema.class),
+                org.mockito.ArgumentMatchers.any(SpectrumExternalTable.class)))
+                .thenReturn(Stream.of(new SpectrumRow(List.of("1"))));
+        SpectrumReadException backendFailure = new SpectrumReadException("42501", "COPY denied");
+        CapturingBackendSql backend = new CapturingBackendSql(backendFailure);
+
+        SpectrumReadException thrown = assertThrows(SpectrumReadException.class,
+                () -> new SpectrumMaterializer().materialize(backend, session(), schema(), oneColumnTable(), reader,
+                        "spectrum_tmp_test"));
+
+        assertSame(backendFailure, thrown);
+        assertEquals(List.of(
+                "CREATE TEMP TABLE \"spectrum_tmp_test\" (\"id\" INTEGER)",
+                "COPY \"spectrum_tmp_test\" (\"id\") FROM STDIN",
+                "DROP TABLE IF EXISTS \"spectrum_tmp_test\""), backend.commands);
+    }
+
+    @Test
+    void rowReadFailurePreservesSqlStateAndDropsTemporaryTable() {
+        SpectrumS3Reader reader = mock(SpectrumS3Reader.class);
+        SpectrumReadException rowFailure = new SpectrumReadException("22000", "bad CSV row");
+        when(reader.read(org.mockito.ArgumentMatchers.any(SpectrumSession.class),
+                org.mockito.ArgumentMatchers.any(SpectrumExternalSchema.class),
+                org.mockito.ArgumentMatchers.any(SpectrumExternalTable.class)))
+                .thenReturn(Stream.generate(() -> {
+                    throw rowFailure;
+                }));
+        CapturingBackendSql backend = new CapturingBackendSql();
+
+        SpectrumReadException thrown = assertThrows(SpectrumReadException.class,
+                () -> new SpectrumMaterializer().materialize(backend, session(), schema(), oneColumnTable(), reader,
+                        "spectrum_tmp_test"));
+
+        assertSame(rowFailure, thrown);
+        assertEquals(List.of(
+                "CREATE TEMP TABLE \"spectrum_tmp_test\" (\"id\" INTEGER)",
+                "COPY \"spectrum_tmp_test\" (\"id\") FROM STDIN",
+                "DROP TABLE IF EXISTS \"spectrum_tmp_test\""), backend.commands);
+    }
 
     @Test
     void materializesRowsWithGeneratedIdentifierAndCopyFraming() throws Exception {
@@ -106,5 +180,52 @@ class SpectrumMaterializerTest {
     }
 
     private record Frame(char type, byte[] body) {
+    }
+
+    private static SpectrumExternalSchema schema() {
+        return new SpectrumExternalSchema("000000000000", "dev", "analytics", "s3://warehouse/root/", null);
+    }
+
+    private static SpectrumSession session() {
+        return new SpectrumSession("000000000000", "cluster-1", "dev", List.of(), false);
+    }
+
+    private static SpectrumExternalTable oneColumnTable() {
+        return new SpectrumExternalTable("000000000000", "dev", "analytics", "events",
+                List.of(new SpectrumColumn("id", SpectrumColumn.Type.INTEGER)),
+                "s3://warehouse/events/", ',', '"', '\\', "\\N", 0);
+    }
+
+    private static final class CapturingBackendSql implements BackendSql {
+        private final ArrayList<String> commands = new ArrayList<>();
+        private final SpectrumReadException copyFailure;
+        private byte[] copiedInput;
+
+        private CapturingBackendSql() {
+            this(null);
+        }
+
+        private CapturingBackendSql(SpectrumReadException copyFailure) {
+            this.copyFailure = copyFailure;
+        }
+
+        @Override
+        public void execute(String sql) {
+            commands.add(sql);
+        }
+
+        @Override
+        public long copyIn(String copySql, InputStream data) {
+            commands.add(copySql);
+            if (copyFailure != null) {
+                throw copyFailure;
+            }
+            try {
+                copiedInput = data.readAllBytes();
+            } catch (IOException exception) {
+                throw new SpectrumReadException("22000", "Unable to capture Spectrum rows", exception);
+            }
+            return 2;
+        }
     }
 }
