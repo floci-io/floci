@@ -13,7 +13,6 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.Ipv4Cidrs;
 import io.github.hectorvent.floci.services.ec2.SecurityGroupPolicy;
-import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.IpPermission;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
@@ -150,7 +149,7 @@ public class EksService implements TagHandler, ResourceProvider {
         backfillClusterSecurityGroups();
         backfillLogging();
         if (clusterManager != null && ec2Service != null) {
-            clusterManager.setNodeRegistrationListener(nodeInst -> {
+            clusterManager.addNodeRegistrationListener(nodeInst -> {
                 String reg = nodeInst.getRegion() != null ? nodeInst.getRegion() : regionResolver.getRegion();
                 ec2Service.restoreAttachedVolumesForInstance(reg, nodeInst);
             });
@@ -203,13 +202,6 @@ public class EksService implements TagHandler, ResourceProvider {
                 cluster.setStatus(ClusterStatus.CREATING);
                 cluster.setPodCidr(EksClusterManager.DEFAULT_POD_CIDR);
                 clusterManager.restoreCluster(cluster);
-                if (ec2Service != null) {
-                    Instance nodeInst = clusterManager.getRegisteredClusterNodeInstance(cluster);
-                    if (nodeInst != null) {
-                        String region = clusterManager.clusterRegion(cluster);
-                        ec2Service.restoreAttachedVolumesForInstance(region, nodeInst);
-                    }
-                }
             } catch (Exception e) {
                 if (!clusterManager.isDockerReachable()) {
                     // Same degradation as create: a restored cluster is metadata that stands on

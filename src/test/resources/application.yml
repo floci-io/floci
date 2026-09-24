@@ -298,6 +298,8 @@ floci:
       app-port-range-end: 30999
       max-published-ports-per-instance: 20
       socat-image: alpine/socat
+      volume-block-devices: false
+      volume-helper-image: alpine:3.21
       mock: true
       instance-resource-limits: true
       aws-faithful-private-ip: false

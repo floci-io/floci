@@ -135,7 +135,7 @@ public class Ec2VolumeBlockDeviceManager implements Resettable {
         String rawFile = "/volumes/" + volumeId + ".raw";
         String script = "raw=\"$1\"\n"
                 + "while true; do\n"
-                + "  loop=$(losetup -a 2>/dev/null | grep \"$raw\" | head -n1 | cut -d: -f1)\n"
+                + "  loop=$(losetup -a 2>/dev/null | grep -F \" $raw\" | head -n1 | cut -d: -f1)\n"
                 + "  [ -n \"$loop\" ] || break\n"
                 + "  losetup -d \"$loop\" 2>/dev/null || break\n"
                 + "done\n"
@@ -190,7 +190,7 @@ public class Ec2VolumeBlockDeviceManager implements Resettable {
         String helperScript = "file=\"$1\"\n"
                 + "size=\"$2\"\n"
                 + "[ -f \"$file\" ] || truncate -s \"${size}G\" \"$file\"\n"
-                + "loop=$(losetup -a 2>/dev/null | grep \"$file\" | head -n1 | cut -d: -f1)\n"
+                + "loop=$(losetup -a 2>/dev/null | grep -F \" $file\" | head -n1 | cut -d: -f1)\n"
                 + "if [ -z \"$loop\" ]; then\n"
                 + "  loop=$(losetup -f 2>/dev/null)\n"
                 + "  if [ -n \"$loop\" ]; then\n"
@@ -231,12 +231,15 @@ public class Ec2VolumeBlockDeviceManager implements Resettable {
                 + "loop=\"$2\"\n"
                 + "minor=\"$3\"\n"
                 + "mkdir -p $(dirname \"$dev\")\n"
+                + "if [ -e \"$dev\" ] || [ -L \"$dev\" ]; then\n"
+                + "  rm -f \"$dev\"\n"
+                + "fi\n"
                 + "if [ -n \"$minor\" ]; then\n"
                 + "  mknod \"$dev\" b 7 \"$minor\" 2>/dev/null || ln -sf \"$loop\" \"$dev\"\n"
                 + "else\n"
                 + "  ln -sf \"$loop\" \"$dev\"\n"
                 + "fi\n"
-                + "[ -b \"$dev\" ]";
+                + "[ -b \"$dev\" ] || [ -L \"$dev\" ]";
 
         ContainerExecResult targetResult = execInContainer(targetContainerId,
                 new String[]{"sh", "-c", targetScript, "target", normalizedDevice, loopDev, minorStr},
@@ -274,7 +277,7 @@ public class Ec2VolumeBlockDeviceManager implements Resettable {
             String rawFile = "/volumes/" + volume.getVolumeId() + ".raw";
             String script = "raw=\"$1\"\n"
                     + "while true; do\n"
-                    + "  loop=$(losetup -a 2>/dev/null | grep \"$raw\" | head -n1 | cut -d: -f1)\n"
+                    + "  loop=$(losetup -a 2>/dev/null | grep -F \" $raw\" | head -n1 | cut -d: -f1)\n"
                     + "  [ -n \"$loop\" ] || break\n"
                     + "  losetup -d \"$loop\" 2>/dev/null || break\n"
                     + "done";
@@ -382,10 +385,15 @@ public class Ec2VolumeBlockDeviceManager implements Resettable {
         }
         String helperId = ensureHelperContainer();
         if (helperId != null) {
-            String script = "for loop in $(losetup -a 2>/dev/null | grep '/volumes/' | cut -d: -f1); do\n"
-                    + "  losetup -d \"$loop\" 2>/dev/null || true\n"
-                    + "done\n"
-                    + "rm -f /volumes/*.raw";
+            String script = "for f in /volumes/*.raw; do\n"
+                    + "  [ -f \"$f\" ] || continue\n"
+                    + "  while true; do\n"
+                    + "    loop=$(losetup -a 2>/dev/null | grep -F \" $f\" | head -n1 | cut -d: -f1)\n"
+                    + "    [ -n \"$loop\" ] || break\n"
+                    + "    losetup -d \"$loop\" 2>/dev/null || break\n"
+                    + "  done\n"
+                    + "  rm -f \"$f\"\n"
+                    + "done";
             execInContainer(helperId, new String[]{"sh", "-c", script}, DEFAULT_TIMEOUT_SECONDS);
         }
         activeLoopDevices.clear();

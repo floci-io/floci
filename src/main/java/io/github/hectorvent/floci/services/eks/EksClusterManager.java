@@ -65,6 +65,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
@@ -134,10 +135,10 @@ public class EksClusterManager implements ClusterNodeInstanceProvider {
     private final ContainerLogStreamer logStreamer;
     private final Map<String, ClusterNodeRecord> clusterNodeInstances = new ConcurrentHashMap<>();
     private final Map<String, Closeable> clusterLogHandles = new ConcurrentHashMap<>();
-    private volatile Consumer<Instance> nodeRegistrationListener;
+    private final List<Consumer<Instance>> nodeRegistrationListeners = new CopyOnWriteArrayList<>();
 
-    public void setNodeRegistrationListener(Consumer<Instance> listener) {
-        this.nodeRegistrationListener = listener;
+    public void addNodeRegistrationListener(Consumer<Instance> listener) {
+        this.nodeRegistrationListeners.add(listener);
     }
 
     record ClusterNodeRecord(String accountId, String region, Instance instance) {}
@@ -1652,8 +1653,7 @@ public class EksClusterManager implements ClusterNodeInstanceProvider {
             Instance nodeInstance = synthesizeClusterNodeInstance(cluster, containerIps.primaryIp(), region, accountId);
             nodeInstance.setDockerContainerId(containerId);
             clusterNodeInstances.put(clusterResourceName(cluster), new ClusterNodeRecord(accountId, region, nodeInstance));
-            Consumer<Instance> listener = nodeRegistrationListener;
-            if (listener != null) {
+            for (Consumer<Instance> listener : nodeRegistrationListeners) {
                 try {
                     listener.accept(nodeInstance);
                 } catch (Exception e) {

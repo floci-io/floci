@@ -604,7 +604,7 @@ class EksClusterManagerTest {
         void startClusterRegistersNodeInstanceAndNotifiesListener() {
             stubFreshStart("cid-new", 6440);
             List<Instance> registered = new ArrayList<>();
-            manager.setNodeRegistrationListener(registered::add);
+            manager.addNodeRegistrationListener(registered::add);
 
             Cluster cluster = cluster();
             manager.startCluster(cluster);
@@ -624,7 +624,7 @@ class EksClusterManagerTest {
                     .thenReturn(new ContainerInfo("cid-1", Map.of(), Map.of(6443, 6512)));
 
             List<Instance> registered = new ArrayList<>();
-            manager.setNodeRegistrationListener(registered::add);
+            manager.addNodeRegistrationListener(registered::add);
 
             Cluster cluster = cluster();
             manager.restoreCluster(cluster);
