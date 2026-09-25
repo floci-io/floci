@@ -18,7 +18,6 @@ import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
@@ -116,12 +115,7 @@ public class SesTemplateService {
 
     public List<EmailTemplate> listTemplates(String region) {
         String prefix = "template::" + region + "::";
-        List<EmailTemplate> all = new ArrayList<>(templateStore.scan(k -> k.startsWith(prefix)));
-        all.sort(Comparator.comparing(EmailTemplate::getCreatedTimestamp,
-                        Comparator.nullsLast(Comparator.naturalOrder()))
-                .thenComparing(EmailTemplate::getTemplateName,
-                        Comparator.nullsLast(Comparator.naturalOrder())));
-        return all;
+        return templateStore.scan(k -> k.startsWith(prefix));
     }
 
     /**
