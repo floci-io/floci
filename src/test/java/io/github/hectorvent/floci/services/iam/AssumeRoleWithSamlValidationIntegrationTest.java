@@ -152,6 +152,17 @@ class AssumeRoleWithSamlValidationIntegrationTest {
     }
 
     @Test
+    void envelopedAndExclusiveCanonicalizationWithCommentsTransformsAreAccepted() {
+        String role = createRole(true);
+        assume(role, assertion(role, PROVIDER, Instant.now().plusSeconds(300), AUDIENCE, ISSUER, true, false,
+                factory -> List.of(enveloped(factory),
+                        transform(factory, CanonicalizationMethod.EXCLUSIVE_WITH_COMMENTS, null))),
+                PROVIDER)
+                .statusCode(200)
+                .body("AssumeRoleWithSAMLResponse.AssumeRoleWithSAMLResult.Credentials.AccessKeyId", startsWith("ASIA"));
+    }
+
+    @Test
     void wrongRoleAndPrincipalPairIsRejected() {
         String role = createRole(true);
         String otherRole = "arn:aws:iam::" + ACCOUNT + ":role/not-the-requested-role";
