@@ -885,7 +885,9 @@ final class CognitoAuthFlowHandler {
                                                        Map<String, String> clientMetadata) {
         if (session == null) throw new AwsException("InvalidParameterException", "Session is required", 400);
         CustomAuthToken token = customAuthSessions.get(session);
-        if (token == null) throw new AwsException("NotAuthorizedException", "Session not found", 400);
+        if (token == null) {
+            throw new AwsException("NotAuthorizedException", "Session not found", 400);
+        }
         if (sessionExpired(token.issuedAt())) {
             customAuthSessions.remove(session);
             throw sessionExpiredException();
