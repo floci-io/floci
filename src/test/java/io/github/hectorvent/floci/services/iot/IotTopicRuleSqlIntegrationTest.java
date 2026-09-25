@@ -155,7 +155,8 @@ class IotTopicRuleSqlIntegrationTest {
     void clientidIsTheMqttClientWhenThePublishCarriesOne() {
         createRule("sqlClientIdRule", "SELECT clientid() AS client FROM 'sqltest/clientid/+'", "sqltest/clientid-out");
 
-        iotService.handlePublish("sqltest/clientid/a", "{}".getBytes(StandardCharsets.UTF_8), true, REGION, "sensor-9");
+        iotService.handlePublish("sqltest/clientid/a", "{}".getBytes(StandardCharsets.UTF_8), true, REGION, "sensor-9",
+                Runnable::run);
 
         assertEquals(List.of("{\"client\":\"sensor-9\"}"), republished("sqltest/clientid-out"));
     }
@@ -225,7 +226,7 @@ class IotTopicRuleSqlIntegrationTest {
     }
 
     private void publish(String topic, String payload) {
-        iotService.handlePublish(topic, payload.getBytes(StandardCharsets.UTF_8), true, REGION, null);
+        iotService.handlePublish(topic, payload.getBytes(StandardCharsets.UTF_8), true, REGION, null, Runnable::run);
     }
 
     private List<String> republished(String targetTopic) {
