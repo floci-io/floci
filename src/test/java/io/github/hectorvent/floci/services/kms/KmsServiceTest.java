@@ -15,10 +15,15 @@ import io.github.hectorvent.floci.services.kms.model.KmsKeyUsage;
 import io.github.hectorvent.floci.services.kms.model.KmsMessageType;
 import jakarta.ws.rs.core.Response;
 import org.bouncycastle.asn1.ASN1Encodable;
+import org.bouncycastle.asn1.ASN1EncodableVector;
+import org.bouncycastle.asn1.ASN1Integer;
 import org.bouncycastle.asn1.DERBitString;
+import org.bouncycastle.asn1.DEROctetString;
+import org.bouncycastle.asn1.DERSequence;
+import org.bouncycastle.asn1.DERTaggedObject;
 import org.bouncycastle.asn1.pkcs.PrivateKeyInfo;
-import org.bouncycastle.asn1.sec.SECObjectIdentifiers;
 import org.bouncycastle.asn1.sec.ECPrivateKey;
+import org.bouncycastle.asn1.sec.SECObjectIdentifiers;
 import org.bouncycastle.asn1.x509.AlgorithmIdentifier;
 import org.bouncycastle.asn1.x509.SubjectPublicKeyInfo;
 import org.bouncycastle.asn1.x9.ECNamedCurveTable;
@@ -2503,6 +2508,16 @@ class KmsServiceTest {
             return new PrivateKeyInfo(algorithm, ecPrivateKey).getEncoded();
         }
 
+        /** A P-256 PKCS#8 key whose RFC 5915 fields after the version are given as-is, malformed or not. */
+        private byte[] ecPkcs8WithRawFields(ASN1Encodable... fieldsAfterVersion) throws Exception {
+            ASN1EncodableVector fields = new ASN1EncodableVector();
+            fields.add(new ASN1Integer(1));
+            for (ASN1Encodable field : fieldsAfterVersion) {
+                fields.add(field);
+            }
+            return new PrivateKeyInfo(p256NamedCurve(), new DERSequence(fields)).getEncoded();
+        }
+
         private AlgorithmIdentifier p256NamedCurve() {
             return new AlgorithmIdentifier(X9ObjectIdentifiers.id_ecPublicKey, X9ObjectIdentifiers.prime256v1);
         }
@@ -3092,6 +3107,44 @@ class KmsServiceTest {
             KeyPair keyPair = ecKeyPair("ECC_NIST_P256");
             byte[] material = ecPkcs8(keyPair, "secp256r1", p256NamedCurve(), ecPublicPoint(keyPair),
                     new X962Parameters(ECNamedCurveTable.getByName("secp256r1")));
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    importInto(key, material, RSA_AES_SHA_256));
+
+            assertEquals("IncorrectKeyMaterialException", ex.getErrorCode());
+            assertEquals("PendingImport", kmsService.describeKey(key.getKeyId(), REGION).getKeyState());
+        }
+
+        @Test
+        void eccImportRejectsAMalformedPrivateKeyField() throws Exception {
+            KmsKey key = externalKey("ECC_NIST_P256", "SIGN_VERIFY");
+            byte[] material = ecPkcs8WithRawFields(new ASN1Integer(7));
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    importInto(key, material, RSA_AES_SHA_256));
+
+            assertEquals("IncorrectKeyMaterialException", ex.getErrorCode());
+            assertEquals("PendingImport", kmsService.describeKey(key.getKeyId(), REGION).getKeyState());
+        }
+
+        @Test
+        void eccImportRejectsMalformedInnerParameters() throws Exception {
+            KmsKey key = externalKey("ECC_NIST_P256", "SIGN_VERIFY");
+            byte[] material = ecPkcs8WithRawFields(new DEROctetString(new byte[] {1}),
+                    new DERTaggedObject(false, 0, new DERSequence(new ASN1Integer(3))));
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    importInto(key, material, RSA_AES_SHA_256));
+
+            assertEquals("IncorrectKeyMaterialException", ex.getErrorCode());
+            assertEquals("PendingImport", kmsService.describeKey(key.getKeyId(), REGION).getKeyState());
+        }
+
+        @Test
+        void eccImportRejectsAMalformedEmbeddedPublicKeyField() throws Exception {
+            KmsKey key = externalKey("ECC_NIST_P256", "SIGN_VERIFY");
+            byte[] material = ecPkcs8WithRawFields(new DEROctetString(new byte[] {1}),
+                    new DERTaggedObject(true, 1, new ASN1Integer(5)));
 
             AwsException ex = assertThrows(AwsException.class, () ->
                     importInto(key, material, RSA_AES_SHA_256));

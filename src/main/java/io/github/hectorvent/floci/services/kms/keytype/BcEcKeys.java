@@ -79,11 +79,18 @@ final class BcEcKeys {
 
     private static ImportedEcKey parseImportedPrivateKey(byte[] material, String curveName)
             throws InvalidKeySpecException {
+        // BouncyCastle decodes the ECPrivateKey fields lazily, so a malformed field only fails when it
+        // is read: read them all here, where a failure maps to IncorrectKeyMaterialException.
         PrivateKeyInfo privateKeyInfo;
-        ECPrivateKey ecPrivateKey;
+        BigInteger privateScalar;
+        ASN1Object innerParameters;
+        ASN1BitString embeddedPublicKey;
         try {
             privateKeyInfo = PrivateKeyInfo.getInstance(material);
-            ecPrivateKey = ECPrivateKey.getInstance(privateKeyInfo.parsePrivateKey());
+            ECPrivateKey ecPrivateKey = ECPrivateKey.getInstance(privateKeyInfo.parsePrivateKey());
+            privateScalar = ecPrivateKey.getKey();
+            innerParameters = ecPrivateKey.getParametersObject();
+            embeddedPublicKey = ecPrivateKey.getPublicKey();
         } catch (IOException | RuntimeException e) {
             throw new InvalidKeySpecException("the material is not a PKCS#8 EC private key", e);
         }
@@ -96,19 +103,17 @@ final class BcEcKeys {
         if (!curveOid.equals(algorithm.getParameters())) {
             throw new InvalidKeySpecException("the material must name the " + curveName + " curve");
         }
-        ASN1Object innerParameters = ecPrivateKey.getParametersObject();
         if (innerParameters != null && !curveOid.equals(innerParameters)) {
             throw new InvalidKeySpecException("the EC private key's own parameters must also name the "
                     + curveName + " curve");
         }
 
         ECNamedCurveParameterSpec spec = ECNamedCurveTable.getParameterSpec(curveName);
-        BigInteger privateScalar = ecPrivateKey.getKey();
         if (privateScalar.signum() <= 0 || privateScalar.compareTo(spec.getN()) >= 0) {
             throw new InvalidKeySpecException("the private key is out of range for " + curveName);
         }
         ECPoint publicPoint = spec.getG().multiply(privateScalar).normalize();
-        requireMatchingEmbeddedPublicKey(ecPrivateKey.getPublicKey(), publicPoint, spec);
+        requireMatchingEmbeddedPublicKey(embeddedPublicKey, publicPoint, spec);
 
         try {
             SubjectPublicKeyInfo publicKeyInfo = new SubjectPublicKeyInfo(
