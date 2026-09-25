@@ -31,6 +31,10 @@ public class ExportJob {
     @JsonProperty("Region")
     private String region;
 
+    /** The account that created the job, which keeps its export bucket inside that account. */
+    @JsonProperty("AccountId")
+    private String accountId;
+
     @JsonProperty("ExportSourceType")
     private String exportSourceType;
 
@@ -73,6 +77,9 @@ public class ExportJob {
 
     public String getRegion() { return region; }
     public void setRegion(String region) { this.region = region; }
+
+    public String getAccountId() { return accountId; }
+    public void setAccountId(String accountId) { this.accountId = accountId; }
 
     public String getExportSourceType() { return exportSourceType; }
     public void setExportSourceType(String exportSourceType) { this.exportSourceType = exportSourceType; }

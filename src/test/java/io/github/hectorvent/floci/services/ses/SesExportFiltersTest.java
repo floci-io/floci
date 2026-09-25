@@ -83,6 +83,15 @@ class SesExportFiltersTest {
     }
 
     @Test
+    void anExcludeCarryingNoValuesKeepsEveryRow() {
+        // Every member is absent, so the block constrains nothing. Read as a match it would empty
+        // the file, which is the one direction where "no constraint" is not harmless.
+        assertEquals(3, SesExportFilters.apply(ROWS, source("{\"Exclude\": {}}")).size());
+        assertEquals(3, SesExportFilters.apply(ROWS,
+                source("{\"Exclude\": {\"TenantName\": []}}")).size());
+    }
+
+    @Test
     void maxResultsTruncatesAfterFiltering() {
         List<SesExportPayloads.InsightsRow> kept = SesExportFilters.apply(ROWS,
                 source("{\"Exclude\": {\"TenantName\": [\"blue\"]}, \"MaxResults\": 1}"));

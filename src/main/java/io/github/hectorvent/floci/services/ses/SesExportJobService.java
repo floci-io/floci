@@ -175,6 +175,7 @@ public class SesExportJobService implements Resettable {
         ExportJob job = new ExportJob();
         job.setJobId(UUID.randomUUID().toString());
         job.setRegion(region);
+        job.setAccountId(accountId);
         job.setExportSourceType(metrics.isObject()
                 ? ExportJob.SOURCE_METRICS : ExportJob.SOURCE_MESSAGE_INSIGHTS);
         job.setDataFormat(dataFormat);
@@ -261,7 +262,7 @@ public class SesExportJobService implements Resettable {
                 LOG.infov("SES export job {0} abandoned by an emulator reset", jobId);
                 return;
             }
-            String bucket = ensureExportBucket(region);
+            String bucket = ensureExportBucket(job);
             String objectKey = objectKey(job);
             s3Service.putObject(bucket, objectKey, payload, contentType(job.getDataFormat()),
                     Map.of());
@@ -372,7 +373,7 @@ public class SesExportJobService implements Resettable {
             return Optional.empty();
         }
         return Optional.of(preSignedUrlGenerator.generatePresignedUrl(baseUrl,
-                exportBucket(job.getRegion()), job.getObjectKey(), "GET",
+                exportBucket(job.getAccountId(), job.getRegion()), job.getObjectKey(), "GET",
                 PRESIGNED_URL_EXPIRY_SECONDS));
     }
 
@@ -486,13 +487,13 @@ public class SesExportJobService implements Resettable {
      * Two workers can reach an empty region together, and outside us-east-1 the second
      * {@code createBucket} answers {@code BucketAlreadyOwnedByYou}, which would fail that export.
      */
-    private String ensureExportBucket(String region) {
-        String bucket = exportBucket(region);
+    private String ensureExportBucket(ExportJob job) {
+        String bucket = exportBucket(job.getAccountId(), job.getRegion());
         if (s3Service.bucketExists(bucket)) {
             return bucket;
         }
         try {
-            s3Service.createBucket(bucket, region);
+            s3Service.createBucket(bucket, job.getRegion());
         } catch (AwsException e) {
             if (!"BucketAlreadyOwnedByYou".equals(e.getErrorCode())) {
                 throw e;
@@ -502,8 +503,13 @@ public class SesExportJobService implements Resettable {
         return bucket;
     }
 
-    static String exportBucket(String region) {
-        return "floci-" + region + EXPORT_BUCKET_SUFFIX;
+    /**
+     * The account is part of the name because an object write resolves its bucket across accounts
+     * when {@code global-bucket-namespace} is on, and would then land one account's export in
+     * another account's partition, where its owner could read it.
+     */
+    static String exportBucket(String accountId, String region) {
+        return "floci-" + accountId + "-" + region + EXPORT_BUCKET_SUFFIX;
     }
 
     /**

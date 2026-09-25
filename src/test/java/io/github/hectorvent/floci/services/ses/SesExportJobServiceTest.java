@@ -102,7 +102,7 @@ class SesExportJobServiceTest {
         ExportJob stored = service.getExportJob(REGION, job.getJobId());
         assertEquals(ExportJob.STATUS_CANCELLED, stored.getJobStatus());
         assertNull(stored.getObjectKey(), "a cancelled job points at nothing");
-        verify(s3Service).deleteObject(eq(SesExportJobService.exportBucket(REGION)), anyString());
+        verify(s3Service).deleteObject(eq(SesExportJobService.exportBucket(ACCOUNT, REGION)), anyString());
     }
 
     @Test
@@ -262,6 +262,32 @@ class SesExportJobServiceTest {
         creator.join(5_000);
 
         assertTrue(admitted.get(), "afterReset must release the waiting create");
+    }
+
+    @Test
+    void theExportBucketIsScopedToTheJobsAccount() {
+        // An object write resolves its bucket across accounts under global-bucket-namespace, so a
+        // shared name would put this account's export in whichever account created the bucket.
+        createJob();
+
+        tasks.forEach(Runnable::run);
+
+        ArgumentCaptor<String> bucket = ArgumentCaptor.forClass(String.class);
+        verify(s3Service).putObject(bucket.capture(), anyString(), any(), anyString(), any());
+        assertEquals("floci-" + ACCOUNT + "-" + REGION + "-ses-export-files", bucket.getValue());
+    }
+
+    @Test
+    void identitiesDifferingOnlyInCaseShareOneRow() throws Exception {
+        // The aggregator matches identities without regard to case, so two rows would each count
+        // both sends and the export would disagree with a BatchGetMetricData query.
+        recordSend(Instant.parse("2026-09-23T10:00:00Z"), "a@example.com");
+        recordSend(Instant.parse("2026-09-23T11:00:00Z"), "A@example.com");
+
+        String csv = runMetricsExport("{\"EMAIL_IDENTITY\": [\"*\"]}",
+                Instant.parse("2026-09-23T00:00:00Z"), Instant.parse("2026-09-24T00:00:00Z"));
+
+        assertEquals("EMAIL_IDENTITY,SEND_VOLUME\na@example.com,2.0000\n", csv);
     }
 
     @Test

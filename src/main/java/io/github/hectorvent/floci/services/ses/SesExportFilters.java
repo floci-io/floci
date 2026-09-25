@@ -39,7 +39,7 @@ final class SesExportFilters {
             if (include.isObject() && !matches(row, include)) {
                 continue;
             }
-            if (exclude.isObject() && matches(row, exclude)) {
+            if (exclude.isObject() && hasConstraint(exclude) && matches(row, exclude)) {
                 continue;
             }
             kept.add(row);
@@ -117,6 +117,21 @@ final class SesExportFilters {
                         + "equal to " + member.maxValues);
             }
         }
+    }
+
+    /**
+     * A member with no values constrains nothing, so a block carrying none matches every row. That
+     * reading is harmless for {@code Include} and empties the file for {@code Exclude}, which is
+     * why the exclude side asks first whether there is anything to exclude on.
+     */
+    private static boolean hasConstraint(JsonNode filters) {
+        for (Member member : Member.values()) {
+            JsonNode values = filters.path(member.wireName);
+            if (values.isArray() && !values.isEmpty()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static boolean matches(SesExportPayloads.InsightsRow row, JsonNode filters) {

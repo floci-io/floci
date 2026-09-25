@@ -12,6 +12,7 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -300,10 +301,11 @@ final class SesExportMetrics {
     private static String dimensionValue(String name, SentEmail email, EmailInsights recipient) {
         return switch (name) {
             case "ISP" -> recipient.isp();
-            // The bare address, not the stored Source: a display name would key a row that the
-            // identity matching behind the counts then refuses, leaving every value at zero.
+            // The bare address, lower-cased, not the stored Source: a display name would key a row
+            // that the identity matching behind the counts then refuses, leaving every value at
+            // zero, and that matching ignores case, so two spellings would each count both sends.
             case "EMAIL_IDENTITY" -> email.getSource() == null
-                    ? null : SesService.extractEmailAddress(email.getSource());
+                    ? null : SesService.extractEmailAddress(email.getSource()).toLowerCase(Locale.ROOT);
             case "CONFIGURATION_SET" -> email.getConfigurationSetName();
             case "TENANT_NAME" -> email.getTenantName();
             default -> null;
