@@ -1240,6 +1240,9 @@ public class CloudFormationService implements ResourceProvider {
         boolean updateCommitted = false;
         Set<String> attemptedResourceIds = new LinkedHashSet<>();
         try {
+            Set<String> changedResourceIds = isCreate
+                    ? Set.of()
+                    : changedResourceIds(stack, templateBody, params, region);
             JsonNode template = parseTemplate(templateBody);
             stack.setOriginalTemplateBody(templateBody);
 
@@ -1298,6 +1301,9 @@ public class CloudFormationService implements ResourceProvider {
                 List<String> sortedLogicalIds = topologicalSort(resources, conditions);
 
                 for (String logicalId : sortedLogicalIds) {
+                    if (!isCreate && !changedResourceIds.contains(logicalId)) {
+                        continue;
+                    }
                     JsonNode resDef = resources.get(logicalId);
                     String type = resDef.path("Type").asText();
                     String deletionPolicy = resDef.path("DeletionPolicy").asText(null);
@@ -1505,6 +1511,24 @@ public class CloudFormationService implements ResourceProvider {
                         stack, region, previousState, attemptedResourceIds, e.getMessage());
             }
         }
+    }
+
+    private Set<String> changedResourceIds(Stack stack, String templateBody, Map<String, String> params,
+                                           String region) {
+        ChangeSet changeSet = new ChangeSet();
+        changeSet.setStackName(stack.getStackName());
+        changeSet.setStackId(stack.getStackId());
+        changeSet.setChangeSetType("UPDATE");
+        changeSet.setTemplateBody(templateBody);
+        changeSet.setParameters(params);
+
+        Set<String> changedResourceIds = new LinkedHashSet<>();
+        for (ResourceChange change : computeChangeSetChanges(changeSet, region)) {
+            if ("Add".equals(change.action()) || "Modify".equals(change.action())) {
+                changedResourceIds.add(change.logicalResourceId());
+            }
+        }
+        return changedResourceIds;
     }
 
     /**

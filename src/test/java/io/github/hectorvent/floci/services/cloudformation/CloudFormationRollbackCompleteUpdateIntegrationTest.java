@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * A create that fails rolls its resources back and leaves the stack in ROLLBACK_COMPLETE, which
@@ -163,6 +164,84 @@ class CloudFormationRollbackCompleteUpdateIntegrationTest {
             .statusCode(200);
         assertStackStatus(stackName, "UPDATE_COMPLETE");
 
+        deleteStack(stackName);
+    }
+
+    @Test
+    void failedUpdateDoesNotRollbackUnchangedResourcesWithoutRollbackSupport() {
+        assertFailedUpdateDoesNotRollbackUnchangedResources(false);
+    }
+
+    @Test
+    void failedExecutedChangeSetDoesNotRollbackUnchangedResourcesWithoutRollbackSupport() {
+        assertFailedUpdateDoesNotRollbackUnchangedResources(true);
+    }
+
+    private void assertFailedUpdateDoesNotRollbackUnchangedResources(boolean executeChangeSet) {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = (executeChangeSet ? "unchanged-resource-cs-" : "unchanged-resource-update-") + suffix;
+        String changeSetName = "failed-update-" + suffix;
+        String initialTemplate = """
+                {"Resources":{
+                  "LogGroup":{"Type":"AWS::Logs::LogGroup","Properties":{"LogGroupName":"/cfn/rollback-%s"}},
+                  "Bucket":{"Type":"AWS::S3::Bucket","Properties":{"BucketName":"cfn-rollback-%s"}}
+                }}
+                """.formatted(suffix, suffix);
+        String failingTemplate = """
+                {"Resources":{
+                  "LogGroup":{"Type":"AWS::Logs::LogGroup","Properties":{"LogGroupName":"/cfn/rollback-%s"}},
+                  "Bucket":{"Type":"AWS::S3::Bucket","Properties":{"BucketName":"cfn-rollback-%s"}},
+                  "ZFail":{"Type":"AWS::CloudFormation::Stack","Properties":{}}
+                }}
+                """.formatted(suffix, suffix);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", initialTemplate)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+        assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+
+        if (executeChangeSet) {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "CreateChangeSet")
+                .formParam("StackName", stackName)
+                .formParam("ChangeSetName", changeSetName)
+                .formParam("ChangeSetType", "UPDATE")
+                .formParam("TemplateBody", failingTemplate)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "ExecuteChangeSet")
+                .formParam("StackName", stackName)
+                .formParam("ChangeSetName", changeSetName)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+        } else {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "UpdateStack")
+                .formParam("StackName", stackName)
+                .formParam("TemplateBody", failingTemplate)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+        }
+
+        CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(stackName);
+        assertEquals("UPDATE_ROLLBACK_COMPLETE", state.status(), state.reason());
         deleteStack(stackName);
     }
 
