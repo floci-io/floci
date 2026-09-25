@@ -103,7 +103,7 @@ class DynamoDbStreamViewTypeDurabilityTest {
         // The restart itself: a fresh stream service rebuilds streams from the persisted table.
         StorageBackend<String, TableDefinition> reopened = diskStore(file);
         DynamoDbStreamService afterRestart = new DynamoDbStreamService(mapper, reopened);
-        StreamDescription sd = afterRestart.listStreams(TABLE, REGION).get(0);
+        StreamDescription sd = afterRestart.listStreams(TABLE, "000000000000", REGION).get(0);
         assertEquals("KEYS_ONLY", sd.getStreamViewType(),
                 "a restarted stream must not resume the old image shape");
     }

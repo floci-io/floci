@@ -795,7 +795,7 @@ public class DynamoDbService {
         if (streamService == null) {
             return table;
         }
-        streamService.disableStream(table.getTableName(), region);
+        streamService.disableStream(table.getTableArn());
         table.setStreamEnabled(false);
         persistTable(tableName, table, region);
         return table;
@@ -820,7 +820,7 @@ public class DynamoDbService {
             itemStore.delete(storageKey);
         }
         if (streamService != null) {
-            streamService.deleteStream(canonicalTableName, region);
+            streamService.deleteStream(table.getTableArn());
         }
         if (kinesisForwarder != null) {
             // Discard any buffered CDC records and stop draining: the destination stream is gone.
@@ -948,7 +948,7 @@ public class DynamoDbService {
             String ownerAccountId = regionResolver.getAccountId();
             Runnable streamEvent = () -> {
                 if (streamService != null) {
-                    streamService.captureEvent(canonicalTableName, eventName, existing, item, table, region);
+                    streamService.captureEvent(eventName, existing, item, table, region);
                 }
                 if (kinesisForwarder != null) {
                     kinesisForwarder.forward(eventName, existing, item, table, region, ownerAccountId);
@@ -1050,7 +1050,7 @@ public class DynamoDbService {
                 String ownerAccountId = regionResolver.getAccountId();
                 Runnable streamEvent = () -> {
                     if (streamService != null) {
-                        streamService.captureEvent(canonicalTableName, "REMOVE", removed, null, table, region);
+                        streamService.captureEvent("REMOVE", removed, null, table, region);
                     }
                     if (kinesisForwarder != null) {
                         kinesisForwarder.forward("REMOVE", removed, null, table, region, ownerAccountId);
@@ -1265,7 +1265,7 @@ public class DynamoDbService {
             String ownerAccountId = regionResolver.getAccountId();
             Runnable streamEvent = () -> {
                 if (streamService != null) {
-                    streamService.captureEvent(canonicalTableName, "MODIFY", existing, item, table, region);
+                    streamService.captureEvent("MODIFY", existing, item, table, region);
                 }
                 if (kinesisForwarder != null) {
                     kinesisForwarder.forward("MODIFY", existing, item, table, region, ownerAccountId);
@@ -2753,8 +2753,7 @@ public class DynamoDbService {
                 }
                 deletedForTable++;
                 if (streamService != null) {
-                    streamService.captureEvent(scan.table().getTableName(), "REMOVE", removed, null,
-                            scan.table(), scan.region());
+                    streamService.captureEvent("REMOVE", removed, null, scan.table(), scan.region());
                 }
                 if (kinesisForwarder != null) {
                     // Out of request scope here: pass the table owner's account explicitly so the CDC

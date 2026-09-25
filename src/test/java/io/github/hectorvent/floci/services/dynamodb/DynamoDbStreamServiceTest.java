@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.dynamodb;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
@@ -20,6 +21,9 @@ class DynamoDbStreamServiceTest {
 
     private static final String TABLE_ARN =
             "arn:aws:dynamodb:us-east-1:000000000000:table/ViewTypeTable";
+    private static final String SHARED_TABLE = "Shared";
+    private static final String ACCOUNT_A = "111111111111";
+    private static final String ACCOUNT_B = "222222222222";
 
     private DynamoDbStreamService service;
     private ObjectMapper mapper;
@@ -74,7 +78,7 @@ class DynamoDbStreamServiceTest {
                 service.enableStream("ViewTypeTable", TABLE_ARN, "KEYS_ONLY", "us-east-1");
 
         JsonNode item = mapper.readTree("{\"userId\":{\"S\":\"u1\"},\"name\":{\"S\":\"a\"}}");
-        service.captureEvent("ViewTypeTable", "INSERT", null, item, table, "us-east-1");
+        service.captureEvent("INSERT", null, item, table, "us-east-1");
 
         String iterator = service.getShardIterator(
                 sd.getStreamArn(), "shardId-000000000000", "TRIM_HORIZON", null);
@@ -88,7 +92,7 @@ class DynamoDbStreamServiceTest {
 
     @Test
     void loadsStreamOnStartup() {
-        var streams = service.listStreams(null, null);
+        List<StreamDescription> streams = service.listStreams(null, "000000000000", "us-west-2");
         assertEquals(1, streams.size());
         StreamDescription stream = streams.get(0);
         assertEquals("TestTable", stream.getTableName());
@@ -96,17 +100,35 @@ class DynamoDbStreamServiceTest {
     }
 
     @Test
+    void loadsPersistedStreamsOfEveryAccountOnStartup() {
+        AccountAwareStorageBackend<TableDefinition> tables = AccountAwareStorageBackend.inMemory(ACCOUNT_A);
+        TableDefinition tableA = sharedNameTable(ACCOUNT_A);
+        TableDefinition tableB = sharedNameTable(ACCOUNT_B);
+        tableA.setStreamArn(tableA.getTableArn() + "/stream/2026-01-01T00:00:00.000");
+        tableB.setStreamArn(tableB.getTableArn() + "/stream/2026-01-02T00:00:00.000");
+        tables.putForAccount(ACCOUNT_A, "us-east-1::" + SHARED_TABLE, tableA);
+        tables.putForAccount(ACCOUNT_B, "us-east-1::" + SHARED_TABLE, tableB);
+
+        DynamoDbStreamService restarted = new DynamoDbStreamService(mapper, tables);
+
+        assertEquals(List.of(tableA.getStreamArn()),
+                streamArns(restarted.listStreams(null, ACCOUNT_A, "us-east-1")));
+        assertEquals(List.of(tableB.getStreamArn()),
+                streamArns(restarted.listStreams(null, ACCOUNT_B, "us-east-1")));
+    }
+
+    @Test
     void rejectsAnIteratorWhenItsSequenceNumberHasBeenTrimmed() throws Exception {
         var table = createTestTableWithStream();
-        service.enableStream(table.getTableName(), TABLE_ARN, "NEW_IMAGE", "us-east-1");
+        service.enableStream(table.getTableName(), table.getTableArn(), "NEW_IMAGE", "us-east-1");
         JsonNode item = mapper.readTree("{\"userId\":{\"S\":\"u1\"}}");
 
-        service.captureEvent(table.getTableName(), "INSERT", null, item, table, "us-east-1");
+        service.captureEvent("INSERT", null, item, table, "us-east-1");
         String iterator = service.getShardIterator(
                 table.getStreamArn(), DynamoDbStreamService.SHARD_ID, "AT_SEQUENCE_NUMBER", "000000000000000000001");
 
         for (int i = 0; i < DynamoDbStreamService.MAX_RECORDS; i++) {
-            service.captureEvent(table.getTableName(), "INSERT", null, item, table, "us-east-1");
+            service.captureEvent("INSERT", null, item, table, "us-east-1");
         }
 
         AwsException exception = assertThrows(AwsException.class,
@@ -123,13 +145,13 @@ class DynamoDbStreamServiceTest {
                 "us-east-1", "000000000000");
         table.setStreamEnabled(true);
         StreamDescription stream = service.enableStream(
-                table.getTableName(), TABLE_ARN, "NEW_IMAGE", "us-east-1");
+                table.getTableName(), table.getTableArn(), "NEW_IMAGE", "us-east-1");
         JsonNode item = mapper.readTree("{\"userId\":{\"S\":\"u1\"}}");
         String iterator = service.getShardIterator(
                 stream.getStreamArn(), DynamoDbStreamService.SHARD_ID, "TRIM_HORIZON", null);
 
         for (int i = 0; i <= DynamoDbStreamService.MAX_RECORDS; i++) {
-            service.captureEvent(table.getTableName(), "INSERT", null, item, table, "us-east-1");
+            service.captureEvent("INSERT", null, item, table, "us-east-1");
         }
 
         AwsException exception = assertThrows(AwsException.class,
@@ -146,13 +168,13 @@ class DynamoDbStreamServiceTest {
                 "us-east-1", "000000000000");
         table.setStreamEnabled(true);
         StreamDescription stream = service.enableStream(
-                table.getTableName(), TABLE_ARN, "NEW_IMAGE", "us-east-1");
+                table.getTableName(), table.getTableArn(), "NEW_IMAGE", "us-east-1");
         JsonNode item = mapper.readTree("{\"userId\":{\"S\":\"u1\"}}");
         String iterator = service.getShardIterator(
                 stream.getStreamArn(), DynamoDbStreamService.SHARD_ID, "LATEST", null);
 
         for (int i = 0; i <= DynamoDbStreamService.MAX_RECORDS; i++) {
-            service.captureEvent(table.getTableName(), "INSERT", null, item, table, "us-east-1");
+            service.captureEvent("INSERT", null, item, table, "us-east-1");
         }
 
         AwsException exception = assertThrows(AwsException.class,
@@ -169,13 +191,13 @@ class DynamoDbStreamServiceTest {
                 "us-east-1", "000000000000");
         table.setStreamEnabled(true);
         StreamDescription stream = service.enableStream(
-                table.getTableName(), TABLE_ARN, "NEW_IMAGE", "us-east-1");
+                table.getTableName(), table.getTableArn(), "NEW_IMAGE", "us-east-1");
         JsonNode item = mapper.readTree("{\"userId\":{\"S\":\"u1\"}}");
         String iterator = service.getShardIterator(
                 stream.getStreamArn(), DynamoDbStreamService.SHARD_ID, "TRIM_HORIZON", null);
 
         for (int i = 0; i < DynamoDbStreamService.MAX_RECORDS; i++) {
-            service.captureEvent(table.getTableName(), "INSERT", null, item, table, "us-east-1");
+            service.captureEvent("INSERT", null, item, table, "us-east-1");
         }
 
         var result = service.getRecords(iterator, 1);
@@ -187,11 +209,11 @@ class DynamoDbStreamServiceTest {
     @Test
     void appliesInclusiveAndExclusiveSequencePositions() throws Exception {
         var table = createTestTableWithStream();
-        service.enableStream(table.getTableName(), TABLE_ARN, "NEW_IMAGE", "us-east-1");
+        service.enableStream(table.getTableName(), table.getTableArn(), "NEW_IMAGE", "us-east-1");
         JsonNode item = mapper.readTree("{\"userId\":{\"S\":\"u1\"}}");
 
-        service.captureEvent(table.getTableName(), "INSERT", null, item, table, "us-east-1");
-        service.captureEvent(table.getTableName(), "MODIFY", item, item, table, "us-east-1");
+        service.captureEvent("INSERT", null, item, table, "us-east-1");
+        service.captureEvent("MODIFY", item, item, table, "us-east-1");
 
         String at = service.getShardIterator(
                 table.getStreamArn(), DynamoDbStreamService.SHARD_ID,
@@ -211,17 +233,17 @@ class DynamoDbStreamServiceTest {
     @Test
     void resumesAtTheRetainedSequenceAfterTheHeadIsTrimmed() throws Exception {
         var table = createTestTableWithStream();
-        service.enableStream(table.getTableName(), TABLE_ARN, "NEW_IMAGE", "us-east-1");
+        service.enableStream(table.getTableName(), table.getTableArn(), "NEW_IMAGE", "us-east-1");
         JsonNode item = mapper.readTree("{\"userId\":{\"S\":\"u1\"}}");
 
-        service.captureEvent(table.getTableName(), "EVENT_1", null, item, table, "us-east-1");
-        service.captureEvent(table.getTableName(), "EVENT_2", null, item, table, "us-east-1");
+        service.captureEvent("EVENT_1", null, item, table, "us-east-1");
+        service.captureEvent("EVENT_2", null, item, table, "us-east-1");
         String iterator = service.getShardIterator(
                 table.getStreamArn(), DynamoDbStreamService.SHARD_ID,
                 "AT_SEQUENCE_NUMBER", "000000000000000000002");
 
         for (int i = 3; i <= DynamoDbStreamService.MAX_RECORDS + 1; i++) {
-            service.captureEvent(table.getTableName(), "EVENT_" + i, null, item, table, "us-east-1");
+            service.captureEvent("EVENT_" + i, null, item, table, "us-east-1");
         }
 
         var records = service.getRecords(iterator, 1).records();
@@ -233,11 +255,11 @@ class DynamoDbStreamServiceTest {
     @Test
     void advancesToTheNextSequenceWithoutDuplicatingRecords() throws Exception {
         var table = createTestTableWithStream();
-        service.enableStream(table.getTableName(), TABLE_ARN, "NEW_IMAGE", "us-east-1");
+        service.enableStream(table.getTableName(), table.getTableArn(), "NEW_IMAGE", "us-east-1");
         JsonNode item = mapper.readTree("{\"userId\":{\"S\":\"u1\"}}");
 
-        service.captureEvent(table.getTableName(), "EVENT_1", null, item, table, "us-east-1");
-        service.captureEvent(table.getTableName(), "EVENT_2", null, item, table, "us-east-1");
+        service.captureEvent("EVENT_1", null, item, table, "us-east-1");
+        service.captureEvent("EVENT_2", null, item, table, "us-east-1");
         String iterator = service.getShardIterator(
                 table.getStreamArn(), DynamoDbStreamService.SHARD_ID,
                 "TRIM_HORIZON", null);
@@ -260,13 +282,72 @@ class DynamoDbStreamServiceTest {
     @Test
     void latestSequenceNumberIsTheNewestRetainedRecord() throws Exception {
         TableDefinition table = createTestTableWithStream();
-        service.enableStream(table.getTableName(), TABLE_ARN, "NEW_IMAGE", "us-east-1");
+        service.enableStream(table.getTableName(), table.getTableArn(), "NEW_IMAGE", "us-east-1");
         JsonNode item = mapper.readTree("{\"userId\":{\"S\":\"u1\"}}");
 
-        service.captureEvent(table.getTableName(), "INSERT", null, item, table, "us-east-1");
-        service.captureEvent(table.getTableName(), "MODIFY", item, item, table, "us-east-1");
+        service.captureEvent("INSERT", null, item, table, "us-east-1");
+        service.captureEvent("MODIFY", item, item, table, "us-east-1");
 
         assertEquals("000000000000000000002", service.latestSequenceNumber(table.getStreamArn()));
+    }
+
+    private TableDefinition sharedNameTable(String accountId) {
+        TableDefinition table = new TableDefinition(SHARED_TABLE,
+                List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")),
+                "us-east-1", accountId);
+        table.setStreamEnabled(true);
+        return table;
+    }
+
+    private List<String> userIdsIn(String streamArn) {
+        String iterator = service.getShardIterator(streamArn, DynamoDbStreamService.SHARD_ID, "TRIM_HORIZON", null);
+        return service.getRecords(iterator, 100).records().stream()
+                .map(record -> record.getKeys().path("userId").path("S").asText())
+                .toList();
+    }
+
+    private static List<String> streamArns(List<StreamDescription> streams) {
+        return streams.stream().map(StreamDescription::getStreamArn).toList();
+    }
+
+    @Test
+    void sameNamedTablesInTwoAccountsKeepSeparateStreams() throws Exception {
+        TableDefinition tableA = sharedNameTable(ACCOUNT_A);
+        TableDefinition tableB = sharedNameTable(ACCOUNT_B);
+        StreamDescription streamA = service.enableStream(SHARED_TABLE, tableA.getTableArn(), "NEW_IMAGE", "us-east-1");
+        StreamDescription streamB = service.enableStream(SHARED_TABLE, tableB.getTableArn(), "NEW_IMAGE", "us-east-1");
+
+        service.captureEvent("INSERT", null, mapper.readTree("{\"userId\":{\"S\":\"a\"}}"),
+                tableA, "us-east-1");
+        service.captureEvent("INSERT", null, mapper.readTree("{\"userId\":{\"S\":\"b\"}}"),
+                tableB, "us-east-1");
+
+        assertNotEquals(streamA.getStreamArn(), streamB.getStreamArn());
+        assertEquals(List.of(streamA.getStreamArn()),
+                streamArns(service.listStreams(SHARED_TABLE, ACCOUNT_A, "us-east-1")));
+        assertEquals(List.of(streamB.getStreamArn()),
+                streamArns(service.listStreams(null, ACCOUNT_B, "us-east-1")));
+        assertEquals(List.of("a"), userIdsIn(streamA.getStreamArn()));
+        assertEquals(List.of("b"), userIdsIn(streamB.getStreamArn()));
+    }
+
+    @Test
+    void disablingOrDeletingOneAccountsStreamLeavesTheOtherEnabled() {
+        TableDefinition tableA = sharedNameTable(ACCOUNT_A);
+        TableDefinition tableB = sharedNameTable(ACCOUNT_B);
+        StreamDescription streamA = service.enableStream(SHARED_TABLE, tableA.getTableArn(), "NEW_IMAGE", "us-east-1");
+        StreamDescription streamB = service.enableStream(SHARED_TABLE, tableB.getTableArn(), "NEW_IMAGE", "us-east-1");
+
+        service.disableStream(tableA.getTableArn());
+
+        assertEquals("DISABLED", service.describeStream(streamA.getStreamArn()).getStreamStatus());
+        assertEquals("ENABLED", service.describeStream(streamB.getStreamArn()).getStreamStatus());
+
+        service.deleteStream(tableA.getTableArn());
+
+        assertThrows(AwsException.class, () -> service.describeStream(streamA.getStreamArn()));
+        assertEquals("ENABLED", service.describeStream(streamB.getStreamArn()).getStreamStatus());
     }
 
     @Test

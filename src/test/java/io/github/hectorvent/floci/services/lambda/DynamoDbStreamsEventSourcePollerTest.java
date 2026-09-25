@@ -1701,7 +1701,7 @@ class DynamoDbStreamsEventSourcePollerTest {
                 List.of(new AttributeDefinition("pk", "S")), "us-east-1", ACCOUNT_ID);
         ObjectNode item = OBJECT_MAPPER.createObjectNode();
         item.putObject("pk").put("S", pk);
-        streams.captureEvent("t", "INSERT", null, item, table, "us-east-1");
+        streams.captureEvent("INSERT", null, item, table, "us-east-1");
     }
 
     private DynamoDbStreamsEventSourcePoller pollerOver(DynamoDbStreamService streams) {

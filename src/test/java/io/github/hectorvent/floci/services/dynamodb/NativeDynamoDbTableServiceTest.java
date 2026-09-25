@@ -133,7 +133,7 @@ class NativeDynamoDbTableServiceTest {
 
     private void assertNoTableAndNoStream() {
         assertTrue(dynamoDbService.findTable(TABLE, REGION).isEmpty(), "no table may be left behind");
-        assertTrue(streams.listStreams(TABLE, REGION).isEmpty(), "no stream may be left behind");
+        assertTrue(streams.listStreams(TABLE, ACCOUNT, REGION).isEmpty(), "no stream may be left behind");
     }
 
     @Test
@@ -206,7 +206,7 @@ class NativeDynamoDbTableServiceTest {
                 persisted.getKmsMasterKeyArn());
 
         StreamDescription stream = new DynamoDbStreamService(mapper, diskStore(file))
-                .listStreams(TABLE, REGION).get(0);
+                .listStreams(TABLE, ACCOUNT, REGION).get(0);
         assertEquals("NEW_IMAGE", stream.getStreamViewType(),
                 "a restarted stream must come back with the persisted view type");
     }
@@ -270,7 +270,7 @@ class NativeDynamoDbTableServiceTest {
         assertNull(persisted.getKmsMasterKeyArn());
 
         StreamDescription stream = new DynamoDbStreamService(mapper, diskStore(file))
-                .listStreams(TABLE, REGION).get(0);
+                .listStreams(TABLE, ACCOUNT, REGION).get(0);
         assertEquals("NEW_IMAGE", stream.getStreamViewType(),
                 "a restarted stream must not resume the old image shape");
     }
@@ -283,7 +283,7 @@ class NativeDynamoDbTableServiceTest {
         tableService.updateTable(updateRequest(List.of(), List.of(), settings(null, false, null, null, null)), REGION);
 
         assertFalse(reloadFromDisk().isStreamEnabled());
-        assertEquals("DISABLED", streams.listStreams(TABLE, REGION).get(0).getStreamStatus());
+        assertEquals("DISABLED", streams.listStreams(TABLE, ACCOUNT, REGION).get(0).getStreamStatus());
     }
 
     @Test
@@ -330,7 +330,7 @@ class NativeDynamoDbTableServiceTest {
         assertFalse(persisted.isDeletionProtectionEnabled());
         assertNull(persisted.getTableClass());
         assertFalse(persisted.isStreamEnabled());
-        assertTrue(streams.listStreams(TABLE, REGION).isEmpty(), "the rejected update must not enable a stream");
+        assertTrue(streams.listStreams(TABLE, ACCOUNT, REGION).isEmpty(), "the rejected update must not enable a stream");
     }
 
     @Test
