@@ -235,6 +235,28 @@ class CognitoManagedLoginIntegrationTest {
                 "the trigger's claim should reach the access token");
     }
 
+    /**
+     * The authorize endpoint stores the scopes the request named without checking them against the
+     * client's AllowedOAuthScopes, so a request can carry one the client may not use. A V2 trigger can
+     * grant claims or scopes from what it is told was requested, so an unallowed scope must not reach it.
+     */
+    @Test
+    void aScopeTheClientIsNotAllowedDoesNotReachTheTrigger() throws Exception {
+        Pool pool = newPoolWithPreTokenGenerationTrigger();
+        Map<String, String> query = authorizeRequest(pool.clientId());
+        query.put("scope", "openid email admin/superuser");
+        ArgumentCaptor<byte[]> event = ArgumentCaptor.forClass(byte[].class);
+        when(lambdaService.invoke(anyString(), eq(PRE_TOKEN_GENERATION_ARN), event.capture(), any()))
+                .thenReturn(triggerResponse(Map.of()));
+
+        Response tokens = redeem(null, pool.clientId(), code(signIn(null, pool, query)), VERIFIER);
+
+        tokens.then().statusCode(200);
+        assertEquals(List.of("openid", "email"),
+                MAPPER.convertValue(MAPPER.readTree(event.getValue()).path("request").path("scopes"), List.class),
+                "admin/superuser is not in the client's AllowedOAuthScopes, so the trigger never sees it");
+    }
+
     @Test
     void codeIsRefusedWithAWrongOrMissingVerifierAndAWrongOneSpendsIt() throws Exception {
         Pool pool = newPool();

@@ -105,6 +105,13 @@ class CognitoLambdaTriggersTest {
                 null, null, List.of(), null, null);
     }
 
+    /** An OAuth client for the authorization-code flow, allowed exactly {@code allowedScopes}. */
+    private UserPoolClient createOAuthClient(UserPool pool, List<String> allowedScopes) {
+        return service.createUserPoolClient(pool.getId(), "oauth", false, true, List.of("code"), allowedScopes,
+                null, List.of("https://application.example.test/callback"), null, AUTH_FLOWS, null, null,
+                List.of(), null, List.of(), null, null, null, List.of(), null, null);
+    }
+
     private void seedUser(UserPool pool, String username, String password) {
         service.adminCreateUser(pool.getId(), username,
                 Map.of("email", username + "@example.com"), null);
@@ -705,7 +712,7 @@ class CognitoLambdaTriggersTest {
     void preTokenGenerationFiresWhenTheTokenEndpointRedeemsAnAuthorizationCode() {
         UserPool pool = createPoolWithLambdaConfig(Map.of("PreTokenGeneration", "arn:aws:lambda:::pre-token"));
         seedUser(pool, "alice", "Perm1234!");
-        UserPoolClient client = createClient(pool);
+        UserPoolClient client = createOAuthClient(pool, List.of("openid", "email"));
         CognitoUser user = service.adminGetUser(pool.getId(), "alice");
 
         ArgumentCaptor<byte[]> payloadCap = ArgumentCaptor.forClass(byte[].class);
@@ -735,6 +742,58 @@ class CognitoLambdaTriggersTest {
         assertEquals("acme", accessClaims.get("tenant"), "the trigger's claims should reach the access token");
         assertEquals(List.of("admins"), accessClaims.get("cognito:groups"),
                 "groupOverrideDetails should apply on redemption as it does on InitiateAuth");
+    }
+
+    /**
+     * Nothing checks an authorization request's scopes against the client's AllowedOAuthScopes when the
+     * code is issued, so the stored code can name a scope the client may not use. A V2 trigger may grant
+     * claims or scopes from what it is told was requested, so it must never be told about one.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void aScopeTheClientIsNotAllowedNeverReachesTheTrigger() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreTokenGeneration", "arn:aws:lambda:::pre-token"));
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = createOAuthClient(pool, List.of("openid", "email"));
+        CognitoUser user = service.adminGetUser(pool.getId(), "alice");
+        ArgumentCaptor<byte[]> payloadCap = ArgumentCaptor.forClass(byte[].class);
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-token"), payloadCap.capture(), any()))
+                .thenReturn(ok(Map.of()));
+
+        service.generateAuthResultForHostedAuth(user, pool, client, null,
+                List.of("openid", "admin/superuser", "email"));
+
+        Map<String, Object> event;
+        try {
+            event = MAPPER.readValue(payloadCap.getValue(), new TypeReference<>() {});
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+        assertEquals(List.of("openid", "email"), ((Map<String, Object>) event.get("request")).get("scopes"),
+                "an unallowed scope must be dropped, so a trigger cannot grant entitlements from it");
+    }
+
+    @Test
+    void anOAuthClientWithNoAllowedScopesSendsTheTriggerNone() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreTokenGeneration", "arn:aws:lambda:::pre-token"));
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = createOAuthClient(pool, List.of());
+        CognitoUser user = service.adminGetUser(pool.getId(), "alice");
+        ArgumentCaptor<byte[]> payloadCap = ArgumentCaptor.forClass(byte[].class);
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-token"), payloadCap.capture(), any()))
+                .thenReturn(ok(Map.of()));
+
+        service.generateAuthResultForHostedAuth(user, pool, client, null, List.of("openid"));
+
+        Map<String, Object> event;
+        try {
+            event = MAPPER.readValue(payloadCap.getValue(), new TypeReference<>() {});
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+        @SuppressWarnings("unchecked")
+        Object scopes = ((Map<String, Object>) event.get("request")).get("scopes");
+        assertEquals(List.of(), scopes, "a client allowed no scopes grants the trigger none");
     }
 
     /**

@@ -3235,13 +3235,42 @@ public class CognitoService implements ResourceProvider {
      * <p>{@code protocolClaims} carries claims the OIDC flow itself owns, currently the request's
      * {@code nonce}. They are applied <em>after</em> the trigger's, so a trigger cannot displace them:
      * AWS likewise refuses to let this trigger override {@code nonce} and the other reserved claims.
-     * Passing {@code null} for either side leaves the other's claims untouched. {@code scopes} are the
-     * scopes the authorization request asked for, passed to the trigger so a V2 lambda can branch on them.
+     * Passing {@code null} for either side leaves the other's claims untouched. {@code requestedScopes}
+     * are the scopes the authorization request asked for, narrowed to the ones the client may actually
+     * use before the trigger is told about them.
      */
     Map<String, Object> generateAuthResultForHostedAuth(CognitoUser user, UserPool pool, UserPoolClient client,
-                                                        ClaimsOverride protocolClaims, List<String> scopes) {
-        ClaimsOverride trigger = authFlowHandler.preTokenGenerationForHostedAuth(pool, client, user, scopes);
+                                                        ClaimsOverride protocolClaims, List<String> requestedScopes) {
+        ClaimsOverride trigger = authFlowHandler.preTokenGenerationForHostedAuth(pool, client, user,
+                scopesAllowedForClient(client, requestedScopes));
         return generateAuthResult(user, pool, client, mergeUnderProtocolClaims(trigger, protocolClaims));
+    }
+
+    /**
+     * The requested scopes the client is allowed to use, in the order requested and without duplicates.
+     *
+     * <p>An authorization request names its own scopes, and nothing checks them against the client's
+     * AllowedOAuthScopes when the code is issued, so the stored code can carry a scope the client may
+     * not use. A V2 trigger is free to grant claims or add scopes based on what it is told was
+     * requested, so it is told only what the client was entitled to ask for. An unallowed scope is
+     * dropped rather than refused, which is how AWS treats a scope that is not associated with the
+     * client.
+     */
+    private static List<String> scopesAllowedForClient(UserPoolClient client, List<String> requestedScopes) {
+        if (requestedScopes == null || requestedScopes.isEmpty()) {
+            return List.of();
+        }
+        List<String> allowed = client.getAllowedOAuthScopes();
+        if (allowed == null || allowed.isEmpty()) {
+            return List.of();
+        }
+        List<String> kept = new ArrayList<>();
+        for (String scope : requestedScopes) {
+            if (allowed.contains(scope) && !kept.contains(scope)) {
+                kept.add(scope);
+            }
+        }
+        return List.copyOf(kept);
     }
 
     /**

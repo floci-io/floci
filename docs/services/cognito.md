@@ -343,10 +343,11 @@ the callback in `CallbackURLs`. No domain is needed; on a custom domain the same
    (one hour) and redirects to the callback with `code` and `state`. A wrong password shows
    the form again with `Incorrect username or password.`; an unknown user reads the same.
 4. `POST /cognito-idp/oauth2/token` redeems the code. It invokes the pre token generation
-   trigger with triggerSource `TokenGeneration_HostedAuth` and the request's scopes, as AWS
-   does for a hosted-UI sign-in, so a pool that customises its claims gets the same tokens
-   here as from `InitiateAuth`. The ID token carries the request's `nonce`, which the trigger
-   cannot override.
+   trigger with triggerSource `TokenGeneration_HostedAuth`, as AWS does for a hosted-UI
+   sign-in, so a pool that customises its claims gets the same tokens here as from
+   `InitiateAuth`. The trigger is told the scopes the request asked for, narrowed to the
+   client's `AllowedOAuthScopes`, since the authorize endpoint does not check them itself. The
+   ID token carries the request's `nonce`, which the trigger cannot override.
 5. `GET /cognito-idp/logout?client_id=...&logout_uri=...` ends the session and redirects to
    `logout_uri`, which must be one of the client's `LogoutURLs`. With `redirect_uri` and
    `response_type=code` instead of `logout_uri`, it ends the session and redirects to the
