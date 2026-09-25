@@ -533,7 +533,8 @@ public class AwsQueryController {
     private static final Set<String> ELASTICACHE_ACTIONS = Set.of(
             "ValidateIamAuthToken",
             "CreateReplicationGroup", "DescribeReplicationGroups", "ModifyReplicationGroup", "DeleteReplicationGroup",
-            "CreateUser", "DescribeUsers", "ModifyUser", "DeleteUser"
+            "CreateUser", "DescribeUsers", "ModifyUser", "DeleteUser",
+            "CreateUserGroup", "DescribeUserGroups", "ModifyUserGroup", "DeleteUserGroup"
     );
 
     private static final Set<String> CLOUDWATCH_ACTIONS = Set.of(

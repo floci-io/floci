@@ -40,7 +40,7 @@ public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
             }
             return true;
         }
-        return authMode != AuthMode.NO_AUTH;
+        return currentAuthMode() != AuthMode.NO_AUTH;
     }
 
     @Override
@@ -74,11 +74,17 @@ public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
             return false;
         }
 
-        return switch (authMode) {
+        return switch (currentAuthMode()) {
             case IAM -> sigV4Validator.validate(password, groupId, effectiveUser);
             case PASSWORD -> passwordValidator.validatePassword(username, password);
             case NO_AUTH -> true;
         };
+    }
+
+    // read per connection: removing a cache's last user group changes it while the proxy runs
+    private AuthMode currentAuthMode() {
+        AuthMode current = passwordValidator.authMode();
+        return current != null ? current : authMode;
     }
 
     @Override
@@ -109,6 +115,11 @@ public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
         }
 
         default AuthMode memberAuthMode(String username) {
+            return null;
+        }
+
+        /** The cache's auth mode now, or null to keep the one the proxy started with. */
+        default AuthMode authMode() {
             return null;
         }
     }
