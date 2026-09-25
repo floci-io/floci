@@ -134,7 +134,7 @@ Floci supports the EKS cluster addon management plane for AWS SDKs and Terraform
 
 ### Supported operations
 
-- **Creation**: `CreateAddon` creates an addon on an ACTIVE cluster. Supported addons include `vpc-cni`, `coredns`, `kube-proxy`, and `eks-pod-identity-agent`. If `addonVersion` is omitted, the default version compatible with the cluster Kubernetes version is resolved automatically. Referenced `serviceAccountRoleArn` must exist in IAM. Idempotency is supported via `clientRequestToken`.
+- **Creation**: `CreateAddon` creates an addon on an ACTIVE cluster. Supported addons include `vpc-cni`, `coredns`, `kube-proxy`, `eks-pod-identity-agent`, and `aws-ebs-csi-driver`. If `addonVersion` is omitted, the default version compatible with the cluster Kubernetes version is resolved automatically. Referenced `serviceAccountRoleArn` must exist in IAM. Idempotency is supported via `clientRequestToken`.
 - **Retrieval**: `DescribeAddon` returns the complete addon resource shape, including ARN, cluster name, version, status (`ACTIVE`), health issues, tags, service account role ARN, configuration values, pod identity associations, owner, and publisher.
 - **Listing**: `ListAddons` lists installed addon names with pagination (`maxResults` and `nextToken`).
 - **Updating**: `UpdateAddon` updates the addon version, configuration values, service account role ARN, or resolve-conflicts strategy. It returns an `Update` tracking object and updates the addon metadata.
@@ -144,7 +144,7 @@ Floci supports the EKS cluster addon management plane for AWS SDKs and Terraform
 
 ### Metadata recording only
 
-Addons in Floci are recorded metadata only. Creating or updating an addon does not install or reconcile Kubernetes DaemonSets, Deployments, or custom resources inside the cluster container.
+Addons in Floci are recorded metadata only. Creating or updating an addon does not install or reconcile Kubernetes DaemonSets, Deployments, or custom resources inside the cluster container. In particular, creating the EBS CSI addon records metadata and installs no driver, so a cluster needs the driver installed separately for storage to work.
 
 ## Cluster security group
 

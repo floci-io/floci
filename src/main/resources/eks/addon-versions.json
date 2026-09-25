@@ -255,6 +255,99 @@
           "requiresIamPermissions": false
         }
       ]
+    },
+    {
+      "addonName": "aws-ebs-csi-driver",
+      "type": "storage",
+      "owner": "aws",
+      "publisher": "eks",
+      "addonVersions": [
+        {
+          "addonVersion": "v1.38.1-eksbuild.1",
+          "architecture": ["amd64", "arm64"],
+          "compatibilities": [
+            {
+              "clusterVersion": "1.32",
+              "platformVersions": ["*"],
+              "defaultVersion": true
+            },
+            {
+              "clusterVersion": "1.31",
+              "platformVersions": ["*"],
+              "defaultVersion": false
+            }
+          ],
+          "requiresConfiguration": false,
+          "requiresIamPermissions": true
+        },
+        {
+          "addonVersion": "v1.35.0-eksbuild.1",
+          "architecture": ["amd64", "arm64"],
+          "compatibilities": [
+            {
+              "clusterVersion": "1.31",
+              "platformVersions": ["*"],
+              "defaultVersion": true
+            },
+            {
+              "clusterVersion": "1.30",
+              "platformVersions": ["*"],
+              "defaultVersion": false
+            }
+          ],
+          "requiresConfiguration": false,
+          "requiresIamPermissions": true
+        },
+        {
+          "addonVersion": "v1.31.0-eksbuild.1",
+          "architecture": ["amd64", "arm64"],
+          "compatibilities": [
+            {
+              "clusterVersion": "1.30",
+              "platformVersions": ["*"],
+              "defaultVersion": true
+            },
+            {
+              "clusterVersion": "1.29",
+              "platformVersions": ["*"],
+              "defaultVersion": false
+            }
+          ],
+          "requiresConfiguration": false,
+          "requiresIamPermissions": true
+        },
+        {
+          "addonVersion": "v1.28.0-eksbuild.1",
+          "architecture": ["amd64", "arm64"],
+          "compatibilities": [
+            {
+              "clusterVersion": "1.29",
+              "platformVersions": ["*"],
+              "defaultVersion": true
+            },
+            {
+              "clusterVersion": "1.28",
+              "platformVersions": ["*"],
+              "defaultVersion": false
+            }
+          ],
+          "requiresConfiguration": false,
+          "requiresIamPermissions": true
+        },
+        {
+          "addonVersion": "v1.26.1-eksbuild.1",
+          "architecture": ["amd64", "arm64"],
+          "compatibilities": [
+            {
+              "clusterVersion": "1.28",
+              "platformVersions": ["*"],
+              "defaultVersion": true
+            }
+          ],
+          "requiresConfiguration": false,
+          "requiresIamPermissions": true
+        }
+      ]
     }
   ]
 }

@@ -566,6 +566,73 @@ class EksAddonServiceTest {
         assertTrue(exTags.getMessage().contains("Too many tags"));
     }
 
+    @Test
+    void ebsCsiDriverAddonSupportedAcrossClusterVersions() {
+        Fixture fixture = fixture();
+
+        // The default version resolves for each cluster version the catalog covers
+        Map<String, String> expectedDefaults = Map.of(
+                "1.28", "v1.26.1-eksbuild.1",
+                "1.29", "v1.28.0-eksbuild.1",
+                "1.30", "v1.31.0-eksbuild.1",
+                "1.31", "v1.35.0-eksbuild.1",
+                "1.32", "v1.38.1-eksbuild.1"
+        );
+        for (Map.Entry<String, String> entry : expectedDefaults.entrySet()) {
+            fixture.cluster.setVersion(entry.getKey());
+            assertEquals(Optional.of(entry.getValue()),
+                    fixture.catalog.resolveDefaultVersion("aws-ebs-csi-driver", entry.getKey()));
+        }
+
+        // CreateAddon for aws-ebs-csi-driver succeeds and DescribeAddon returns it
+        fixture.cluster.setVersion("1.30");
+        CreateAddonRequest req = new CreateAddonRequest(
+                "aws-ebs-csi-driver", null, ROLE, null, null, null, null, null);
+        Addon created = fixture.service.create(fixture.cluster, req);
+        assertEquals("aws-ebs-csi-driver", created.addonName());
+        assertEquals("v1.31.0-eksbuild.1", created.addonVersion());
+        assertEquals("ACTIVE", created.status());
+        assertEquals("aws", created.owner());
+        assertEquals("eks", created.publisher());
+
+        Addon described = fixture.service.describe(fixture.cluster, "aws-ebs-csi-driver");
+        assertEquals(created, described);
+
+        // DescribeAddonVersions returns the new addon with its versions and compatibilities
+        EksAddonService.AddonVersionsPage byName = fixture.service.describeAddonVersions(
+                "aws-ebs-csi-driver", null, null, null, null, null, null);
+        assertEquals(1, byName.addons().size());
+        AddonInfo addonInfo = byName.addons().getFirst();
+        assertEquals("aws-ebs-csi-driver", addonInfo.addonName());
+        assertEquals("storage", addonInfo.type());
+        assertEquals("aws", addonInfo.owner());
+        assertEquals("eks", addonInfo.publisher());
+        assertEquals(5, addonInfo.addonVersions().size());
+
+        // Filtering by addon name and cluster version works
+        EksAddonService.AddonVersionsPage byCluster = fixture.service.describeAddonVersions(
+                "aws-ebs-csi-driver", "1.32", null, null, null, null, null);
+        assertEquals(1, byCluster.addons().size());
+        assertEquals(1, byCluster.addons().getFirst().addonVersions().size());
+        assertEquals("v1.38.1-eksbuild.1", byCluster.addons().getFirst().addonVersions().getFirst().addonVersion());
+
+        // The four existing addons are unchanged
+        for (String existing : List.of("vpc-cni", "coredns", "kube-proxy", "eks-pod-identity-agent")) {
+            assertTrue(fixture.catalog.isKnownAddon(existing));
+            assertNotNull(fixture.catalog.findAddon(existing).orElse(null));
+        }
+
+        // An addon name that is still not in the catalog is rejected exactly as before
+        assertFalse(fixture.catalog.isKnownAddon("unsupported-addon"));
+        CreateAddonRequest unsupportedReq = new CreateAddonRequest(
+                "unsupported-addon", null, null, null, null, null, null, null);
+        AwsException ex = assertThrows(AwsException.class, () ->
+                fixture.service.create(fixture.cluster, unsupportedReq));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertTrue(ex.getMessage().contains("unsupported-addon"));
+    }
+
     private static Fixture fixture() {
         Cluster cluster = new Cluster();
         cluster.setName("test-cluster");
