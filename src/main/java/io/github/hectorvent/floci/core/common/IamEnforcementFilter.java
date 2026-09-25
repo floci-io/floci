@@ -222,7 +222,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             caller = caller.withScpLevels(scpLevels);
         }
 
-        List<String> resources = arnBuilder.buildResources(credentialScope, ctx, region, accountId);
+        List<String> resources = resolveResourceArns(credentialScope,
+                arnBuilder.buildResources(credentialScope, ctx, region, accountId));
 
         Map<String, List<String>> conditionContext = conditionContextResolver.resolve(credentialScope, action, ctx);
         // A request naming several resources is authorized once per resource, as on AWS, so a
@@ -655,6 +656,25 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
      *   <li>everything else (JSON 1.x, REST-JSON) → keep the historical JSON shape</li>
      * </ul>
      */
+    /**
+     * The request's resource ARNs as the resources are actually named, so that a policy written
+     * against a resource living in another partition than the request's still matches it.
+     */
+    private List<String> resolveResourceArns(String credentialScope, List<String> resourceArns) {
+        if (resourcePolicyProviders == null || resourcePolicyProviders.isUnsatisfied()) {
+            return resourceArns;
+        }
+        List<String> resolved = new ArrayList<>(resourceArns.size());
+        for (String resourceArn : resourceArns) {
+            String arn = resourceArn;
+            for (ResourcePolicyProvider provider : resourcePolicyProviders) {
+                arn = provider.resolveResourceArn(credentialScope, arn);
+            }
+            resolved.add(arn);
+        }
+        return resolved;
+    }
+
     private List<ResourcePolicyProvider.ResourcePolicy> resolveResourcePolicies(String credentialScope, String resourceArn) {
         if (resourcePolicyProviders == null || resourcePolicyProviders.isUnsatisfied()) {
             return List.of();

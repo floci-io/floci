@@ -35,6 +35,19 @@ public class S3ResourcePolicyProvider implements ResourcePolicyProvider {
                 .orElseGet(List::of);
     }
 
+    @Override
+    public String resolveResourceArn(String credentialScope, String resourceArn) {
+        if (!"s3".equalsIgnoreCase(credentialScope) || resourceArn == null) {
+            return resourceArn;
+        }
+        String bucketName = extractBucketName(resourceArn);
+        if (bucketName == null || bucketName.isEmpty() || "*".equals(bucketName)) {
+            return resourceArn;
+        }
+        String resource = AwsArnUtils.resourceIfArnFor(resourceArn, "s3").orElseThrow();
+        return AwsArnUtils.Arn.global(s3Service.bucketPartition(bucketName), "s3", "", resource).toString();
+    }
+
     /**
      * The bucket of an S3 ARN in any partition. Keyed on a literal {@code arn:aws:} this found
      * no policy for a China or GovCloud bucket, which silently changed the access decision.

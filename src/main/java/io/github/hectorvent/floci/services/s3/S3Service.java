@@ -823,8 +823,7 @@ public class S3Service implements Resettable, ResourceProvider {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() ->
                         new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
-        String resourceArn = S3PublicAccessEvaluator.objectArn(
-                AwsRegions.partitionFor(bucket.getRegion()), bucketName, key);
+        String resourceArn = S3PublicAccessEvaluator.objectArn(bucketPartition(bucketName), bucketName, key);
         S3PublicAccessEvaluator.PublicAccessDecision decision =
                 S3PublicAccessEvaluator.principalPolicyDecision(
                         objectMapper,
@@ -887,7 +886,7 @@ public class S3Service implements Resettable, ResourceProvider {
             throw accessDeniedException(bucketName, null);
         }
 
-        String bucketArn = S3PublicAccessEvaluator.bucketArn(AwsRegions.partitionFor(bucket.getRegion()), bucketName);
+        String bucketArn = S3PublicAccessEvaluator.bucketArn(bucketPartition(bucketName), bucketName);
         S3PublicAccessEvaluator.PublicAccessDecision policyDecision =
                 S3PublicAccessEvaluator.publicPolicyDecision(objectMapper, bucket.getPolicy(), action, bucketArn);
         if (policyDecision == S3PublicAccessEvaluator.PublicAccessDecision.DENY) {
@@ -935,8 +934,7 @@ public class S3Service implements Resettable, ResourceProvider {
         S3BlockPublicAccessSettings blockPublicAccess =
                 blockPublicAccessFor(bucket, ownedBucket.account());
 
-        String objectArn = S3PublicAccessEvaluator.objectArn(
-                AwsRegions.partitionFor(bucket.getRegion()), bucketName, key);
+        String objectArn = S3PublicAccessEvaluator.objectArn(bucketPartition(bucketName), bucketName, key);
         S3PublicAccessEvaluator.PublicAccessDecision policyDecision =
                 S3PublicAccessEvaluator.publicPolicyDecision(objectMapper, bucket.getPolicy(), action, objectArn);
         if (policyDecision == S3PublicAccessEvaluator.PublicAccessDecision.DENY) {
@@ -4739,17 +4737,25 @@ public class S3Service implements Resettable, ResourceProvider {
      * cross-account); otherwise it stays scoped to the calling account. Write-side ownership
      * checks (CreateBucket, delete) intentionally do not use this — they remain account-scoped.
      */
-    /**
-     * The partition a bucket's policy names it in, taken from the bucket's own region rather than
-     * the request's: bucket names are one namespace here, so a request signed for another partition
-     * can still reach the bucket, and its policy must match as written.
-     */
-    private String bucketPartition(String bucketName) {
-        return AwsRegions.partitionFor(resolveBucket(bucketName).map(Bucket::getRegion).orElse(null));
-    }
-
     private Optional<Bucket> resolveBucket(String bucketName) {
         return resolveBucketEntry(bucketName).map(AccountAwareStorageBackend.OwnedEntry::value);
+    }
+
+    /**
+     * The partition a bucket's ARN is written in: the partition of the bucket's own region, not
+     * the request's. Bucket names are one namespace here, so a request signed for another
+     * partition can still reach the bucket, and a policy naming it must match as written. A
+     * bucket that does not exist yet takes the request's partition, where it would be created.
+     */
+    String bucketPartition(String bucketName) {
+        return resolveBucket(bucketName)
+                .map(Bucket::getRegion)
+                .map(AwsRegions::partitionFor)
+                .orElseGet(this::requestPartition);
+    }
+
+    private String requestPartition() {
+        return regionResolver != null ? regionResolver.getPartition() : AwsRegions.partitionFor(null);
     }
 
     private Optional<AccountAwareStorageBackend.OwnedEntry<Bucket>> resolveBucketEntry(String bucketName) {

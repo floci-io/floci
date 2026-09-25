@@ -1308,7 +1308,7 @@ class IamEnforcementFilterTest {
         Instance<ResourcePolicyProvider> providers =
                 mock(Instance.class);
         when(providers.isUnsatisfied()).thenReturn(false);
-        when(providers.iterator()).thenReturn(List.of(provider).iterator());
+        when(providers.iterator()).thenAnswer(invocation -> List.of(provider).iterator());
         @SuppressWarnings("unchecked")
         Instance<ScpProvider> scpProvider =
                 mock(Instance.class);

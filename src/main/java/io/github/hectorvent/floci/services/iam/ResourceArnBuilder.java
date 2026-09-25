@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.iam;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.container.ContainerRequestContext;
@@ -49,7 +50,7 @@ public class ResourceArnBuilder {
         }
         String path = ctx.getUriInfo().getPath();
         return switch (credentialScope) {
-            case "s3"             -> List.of(buildS3Arn(path));
+            case "s3"             -> List.of(buildS3Arn(path, region));
             case "lambda"         -> List.of(buildLambdaArn(path, region, accountId));
             case "sqs"            -> List.of(buildSqsArn(ctx, region, accountId));
             case "sns"            -> List.of(buildSnsArn(ctx, region, accountId));
@@ -63,22 +64,25 @@ public class ResourceArnBuilder {
     }
 
     // ── S3 ──────────────────────────────────────────────────────────────────────
-    private String buildS3Arn(String path) {
+    // Minted in the request's partition; IamEnforcementFilter re-mints an existing bucket's ARN
+    // in the bucket's own partition through S3ResourcePolicyProvider before any policy sees it.
+    private String buildS3Arn(String path, String region) {
         // path: /bucket or /bucket/key
+        String partition = AwsRegions.partitionFor(region);
         String stripped = path.startsWith("/") ? path.substring(1) : path;
         if (stripped.isEmpty()) {
-            return AwsArnUtils.Arn.of("s3", "", "", "*").toString();
+            return AwsArnUtils.Arn.global(partition, "s3", "", "*").toString();
         }
         // S3VirtualHostFilter rewrites a bucket-level virtual-hosted request (GET /) to
         // /bucket/, and the empty key after that separator is not part of the resource.
-        // A policy names the bucket as arn:aws:s3:::bucket, so the trailing slash has to
+        // A policy names the bucket as arn:<partition>:s3:::bucket, so the trailing slash has to
         // go or a bucket-level ARN never matches. A key that itself ends in a slash
         // (a folder marker such as folder/) keeps it, because there the slash is key data.
         int firstSlash = stripped.indexOf('/');
         if (firstSlash == stripped.length() - 1) {
             stripped = stripped.substring(0, firstSlash);
         }
-        return AwsArnUtils.Arn.of("s3", "", "", stripped).toString();
+        return AwsArnUtils.Arn.global(partition, "s3", "", stripped).toString();
     }
 
     // ── Lambda ──────────────────────────────────────────────────────────────────
