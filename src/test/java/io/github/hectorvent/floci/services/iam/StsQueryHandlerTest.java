@@ -9,6 +9,8 @@ import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -69,6 +71,42 @@ class StsQueryHandlerTest {
 
         assertNotEquals(extract(SECRET_ACCESS_KEY, firstBody), extract(SECRET_ACCESS_KEY, secondBody));
         assertNotEquals(extract(SESSION_TOKEN, firstBody), extract(SESSION_TOKEN, secondBody));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"900", "43200"})
+    void assumeRoleAcceptsDurationSecondsAtTheLimits(String durationSeconds) {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("RoleArn", "arn:aws:iam::000000000000:role/TestRole");
+        params.putSingle("RoleSessionName", "test-session");
+        params.putSingle("DurationSeconds", durationSeconds);
+
+        Response response = newHandler().handle("AssumeRole", params);
+
+        assertEquals(200, response.getStatus(), (String) response.getEntity());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"900", "129600"})
+    void getSessionTokenAcceptsDurationSecondsAtTheLimits(String durationSeconds) {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("DurationSeconds", durationSeconds);
+
+        Response response = newHandler().handle("GetSessionToken", params);
+
+        assertEquals(200, response.getStatus(), (String) response.getEntity());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"900", "129600"})
+    void getFederationTokenAcceptsDurationSecondsAtTheLimits(String durationSeconds) {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("Name", "test-user");
+        params.putSingle("DurationSeconds", durationSeconds);
+
+        Response response = newHandler().handle("GetFederationToken", params);
+
+        assertEquals(200, response.getStatus(), (String) response.getEntity());
     }
 
     @Test
