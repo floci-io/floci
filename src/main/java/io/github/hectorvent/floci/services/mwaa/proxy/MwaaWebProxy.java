@@ -50,10 +50,10 @@ public class MwaaWebProxy {
     private final int backendPort;
     private final CliTokenValidator tokenValidator;
     private final CliExecutor cliExecutor;
+    private final WorkerExecutor cliWorkers;
 
     private HttpServer server;
     private HttpClient client;
-    private WorkerExecutor cliWorkers;
 
     public MwaaWebProxy(String environmentName, Vertx vertx, String backendHost, int backendPort,
                         CliTokenValidator tokenValidator, CliExecutor cliExecutor) {
@@ -63,11 +63,11 @@ public class MwaaWebProxy {
         this.backendPort = backendPort;
         this.tokenValidator = tokenValidator;
         this.cliExecutor = cliExecutor;
+        this.cliWorkers = vertx.createSharedWorkerExecutor(CLI_WORKER_POOL_NAME, CLI_WORKER_POOL_SIZE);
     }
 
     /** Starts listening on {@code proxyPort}, blocking until bound (or throwing on failure). */
     public void start(int proxyPort) throws Exception {
-        cliWorkers = vertx.createSharedWorkerExecutor(CLI_WORKER_POOL_NAME, CLI_WORKER_POOL_SIZE);
         client = vertx.createHttpClient(new HttpClientOptions()
                 .setConnectTimeout(5000)
                 .setKeepAlive(true));
@@ -78,9 +78,12 @@ public class MwaaWebProxy {
         try {
             server.listen().toCompletionStage().toCompletableFuture().get(10, TimeUnit.SECONDS);
         } catch (ExecutionException e) {
+            // The manager only tracks proxies that started, so release what this one holds here.
+            stop();
             throw new IllegalStateException("Could not bind MWAA web proxy for environment "
                     + environmentName + " on port " + proxyPort, e.getCause() != null ? e.getCause() : e);
         } catch (TimeoutException e) {
+            stop();
             throw new IllegalStateException("Timed out binding MWAA web proxy for environment "
                     + environmentName + " on port " + proxyPort, e);
         }
@@ -95,9 +98,7 @@ public class MwaaWebProxy {
         if (client != null) {
             client.close();
         }
-        if (cliWorkers != null) {
-            cliWorkers.close();
-        }
+        cliWorkers.close();
     }
 
     private void handleRequest(HttpServerRequest req) {
