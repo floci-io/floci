@@ -450,6 +450,30 @@
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-checkstyle-plugin</artifactId>
+                <version>3.6.0</version>
+                <dependencies>
+                    <dependency>
+                        <groupId>com.puppycrawl.tools</groupId>
+                        <artifactId>checkstyle</artifactId>
+                        <version>14.1.0</version>
+                    </dependency>
+                </dependencies>
+                <configuration>
+                    <configLocation>tools/checkstyle/checkstyle.xml</configLocation>
+                    <suppressionsLocation>tools/checkstyle/suppressions.xml</suppressionsLocation>
+                    <!-- compatibility-tests is checked from here because its Docker image builds on JDK 17. -->
+                    <sourceDirectories>
+                        <sourceDirectory>${project.basedir}/src/main/java</sourceDirectory>
+                        <sourceDirectory>${project.basedir}/src/test/java</sourceDirectory>
+                        <sourceDirectory>${project.basedir}/compatibility-tests/sdk-test-java/src/main/java</sourceDirectory>
+                        <sourceDirectory>${project.basedir}/compatibility-tests/sdk-test-java/src/test/java</sourceDirectory>
+                    </sourceDirectories>
+                    <consoleOutput>true</consoleOutput>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-enforcer-plugin</artifactId>
                 <version>3.6.3</version>
                 <executions>
