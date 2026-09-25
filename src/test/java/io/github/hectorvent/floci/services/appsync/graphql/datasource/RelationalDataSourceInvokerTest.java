@@ -111,6 +111,7 @@ class RelationalDataSourceInvokerTest {
         answersOneRow();
 
         invoker.invoke(dataSource(), Map.of(
+                "version", "2018-05-29",
                 "statements", List.of("SELECT id FROM messages WHERE org_no = :orgNo"),
                 "variableMap", Map.of(":orgNo", "556677")), "eu-west-1");
 

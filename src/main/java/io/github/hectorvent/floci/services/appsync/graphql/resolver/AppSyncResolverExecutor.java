@@ -25,6 +25,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Runs the resolver attached to a field: its handlers, its data source, and, for a PIPELINE
@@ -57,6 +58,11 @@ public class AppSyncResolverExecutor {
     private static final Logger LOG = Logger.getLogger(AppSyncResolverExecutor.class);
     private static final String REQUEST = "request";
     private static final String RESPONSE = "response";
+    private static final Set<String> NONE_VTL_REQUEST_MEMBERS = Set.of("version", "payload");
+    private static final Set<String> LAMBDA_VTL_REQUEST_MEMBERS =
+            Set.of("version", "operation", "payload", "invocationType");
+    private static final Set<String> DYNAMODB_VTL_OPERATIONS =
+            Set.of("GetItem", "PutItem", "UpdateItem", "DeleteItem", "Query", "Scan");
 
     private final AppSyncService appSyncService;
     private final AppSyncJsRuntime jsRuntime;
@@ -185,13 +191,14 @@ public class AppSyncResolverExecutor {
         private ResolverOutcome runUnit() {
             Stage stage = Stage.of(resolver);
             DataSource vtlDataSource = stage.vtl()
-                    ? requireVtlNoneDataSource(resolver.getDataSourceName()) : null;
+                    ? requireVtlDataSource(resolver.getDataSourceName()) : null;
             Object request = callHandler(stage, REQUEST, null, null, null);
             if (returned) {
                 return result(earlyReturnValue);
             }
             Invocation invocation = stage.vtl()
-                    ? invokeDataSource(vtlDataSource, normalizeVtlNoneRequest(request))
+                    ? invokeDataSource(vtlDataSource,
+                            prepareVtlDataSourceRequest(vtlDataSource, request))
                     : invokeDataSource(resolver.getDataSourceName(), request);
             Object response = callHandler(stage, RESPONSE,
                     invocation.result(), invocation.error(), invocation.result());
@@ -275,18 +282,17 @@ public class AppSyncResolverExecutor {
             }
         }
 
-        private DataSource requireVtlNoneDataSource(String dataSourceName) {
+        private DataSource requireVtlDataSource(String dataSourceName) {
             if (dataSourceName == null || dataSourceName.isBlank()) {
                 throw new AwsException("UnsupportedOperation",
-                        "Floci currently executes VTL UNIT resolvers only with NONE data sources", 400);
+                        "A VTL UNIT resolver must name a supported data source", 400);
             }
             DataSource dataSource = dataSource(dataSourceName);
-            if (dataSource.getType() != DataSourceType.NONE) {
-                throw new AwsException("UnsupportedOperation",
-                        "Floci currently executes VTL UNIT resolvers only with NONE data sources; "
-                                + dataSourceName + " uses " + dataSource.getType(), 400);
-            }
-            return dataSource;
+            DataSourceType type = dataSource.getType();
+            return switch (type) {
+                case NONE, AMAZON_DYNAMODB, AWS_LAMBDA, RELATIONAL_DATABASE -> dataSource;
+                default -> throw unsupportedVtlDataSource(type, dataSourceName);
+            };
         }
 
         private Invocation invokeDataSource(String dataSourceName, Object request) {
@@ -330,11 +336,104 @@ public class AppSyncResolverExecutor {
             }
         }
 
-        private Object normalizeVtlNoneRequest(Object request) {
-            if (request instanceof Map<?, ?> map && !map.containsKey("payload")) {
-                return null;
+        private Object prepareVtlDataSourceRequest(DataSource dataSource, Object request) {
+            if (!(request instanceof Map<?, ?> map)) {
+                throw mappingTemplateError("VTL request mapping template must render a JSON object");
+            }
+            return switch (dataSource.getType()) {
+                case NONE -> prepareVtlNoneRequest(map);
+                case AMAZON_DYNAMODB -> prepareVtlDynamoDbRequest(map);
+                case AWS_LAMBDA -> prepareVtlLambdaRequest(map);
+                case RELATIONAL_DATABASE -> prepareVtlRdsRequest(map);
+                default -> throw unsupportedVtlDataSource(dataSource.getType(), dataSource.getName());
+            };
+        }
+
+        private Object prepareVtlNoneRequest(Map<?, ?> request) {
+            validateVtlRequestMembers(request, NONE_VTL_REQUEST_MEMBERS, "NONE");
+            return request.containsKey("payload") ? request : null;
+        }
+
+        private Object prepareVtlDynamoDbRequest(Map<?, ?> request) {
+            String operation = requireVtlOperation(request, "DynamoDB");
+            if (!DYNAMODB_VTL_OPERATIONS.contains(operation)) {
+                throw new AwsException("UnsupportedOperation",
+                        "Floci's AppSync VTL DynamoDB data source does not implement the "
+                                + operation + " operation yet", 400);
             }
             return request;
+        }
+
+        private Object prepareVtlLambdaRequest(Map<?, ?> request) {
+            validateVtlRequestMembers(request, LAMBDA_VTL_REQUEST_MEMBERS, "Lambda");
+            String operation = requireVtlOperation(request, "Lambda");
+            if (!"Invoke".equals(operation) && !"BatchInvoke".equals(operation)) {
+                throw new AwsException("UnsupportedOperation",
+                        "Floci's AppSync VTL Lambda data source does not implement the "
+                                + operation + " operation", 400);
+            }
+            Object invocationType = request.get("invocationType");
+            if (invocationType != null && !(invocationType instanceof String)) {
+                throw mappingTemplateError("VTL Lambda invocationType must be a string");
+            }
+            if ("Event".equals(invocationType)) {
+                throw new AwsException("UnsupportedOperation",
+                        "Floci's AppSync Lambda data source does not implement Event invocation yet", 400);
+            }
+            if (invocationType != null && !"RequestResponse".equals(invocationType)) {
+                throw mappingTemplateError(
+                        "VTL Lambda invocationType must be RequestResponse or Event");
+            }
+            return request;
+        }
+
+        private Object prepareVtlRdsRequest(Map<?, ?> request) {
+            Object statements = request.get("statements");
+            if (!(statements instanceof List<?> list) || list.isEmpty()) {
+                throw mappingTemplateError("VTL RDS request must contain a non-empty statements array");
+            }
+            if (list.size() > 2) {
+                throw mappingTemplateError("VTL RDS request supports at most two statements");
+            }
+            if (list.stream().anyMatch(statement -> !(statement instanceof String))) {
+                throw mappingTemplateError("VTL RDS statements must be strings");
+            }
+            validateOptionalMap(request, "variableMap", "VTL RDS variableMap must be an object");
+            validateOptionalMap(request, "variableTypeHintMap",
+                    "VTL RDS variableTypeHintMap must be an object");
+            return request;
+        }
+
+        private String requireVtlOperation(Map<?, ?> request, String dataSourceType) {
+            Object operation = request.get("operation");
+            if (!(operation instanceof String text) || text.isBlank()) {
+                throw mappingTemplateError(
+                        "VTL " + dataSourceType + " request must contain a non-empty operation");
+            }
+            return text;
+        }
+
+        private void validateVtlRequestMembers(Map<?, ?> request, Set<String> allowed,
+                                               String dataSourceType) {
+            for (Object key : request.keySet()) {
+                if (!(key instanceof String name) || !allowed.contains(name)) {
+                    throw mappingTemplateError("VTL " + dataSourceType
+                            + " request contains unsupported member " + key);
+                }
+            }
+        }
+
+        private void validateOptionalMap(Map<?, ?> request, String member, String message) {
+            Object value = request.get(member);
+            if (value != null && !(value instanceof Map<?, ?>)) {
+                throw mappingTemplateError(message);
+            }
+        }
+
+        private AwsException unsupportedVtlDataSource(DataSourceType type, String name) {
+            return new AwsException("UnsupportedOperation",
+                    "Floci does not yet execute VTL UNIT resolvers over " + type
+                            + " data sources (data source " + name + ")", 400);
         }
 
         /**
@@ -491,11 +590,6 @@ public class AppSyncResolverExecutor {
             Object version = map.get("version");
             if (!"2018-05-29".equals(version)) {
                 throw mappingTemplateError("VTL request mapping template must use version 2018-05-29");
-            }
-            for (Object key : map.keySet()) {
-                if (!"version".equals(key) && !"payload".equals(key)) {
-                    throw mappingTemplateError("VTL NONE request mapping template supports only version and payload");
-                }
             }
         }
 

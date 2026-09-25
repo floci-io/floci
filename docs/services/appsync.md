@@ -274,9 +274,9 @@ Duplicate `API_KEY` / `AWS_IAM` / `AWS_LAMBDA` (and the same Cognito pool or OID
 
 A field with an `APPSYNC_JS` resolver is executed, not stubbed: the resolver's own code runs, its
 data source is called, and the field gets the value the code returned. Floci also executes
-`2018-05-29` VTL request and response templates for UNIT resolvers backed by a `NONE` data source.
-VTL pipeline stages and VTL resolvers over other data sources remain explicit unsupported
-operations rather than silently resolving to `null`.
+`2018-05-29` VTL request and response templates for UNIT resolvers backed by `NONE`, DynamoDB,
+Lambda, or RDS data sources. VTL pipeline stages and VTL resolvers over other data sources remain
+explicit unsupported operations rather than silently resolving to `null`.
 
 ### How a resolver gets called
 
@@ -339,10 +339,23 @@ than running.
 
 ### VTL UNIT resolvers
 
-A VTL UNIT resolver over `NONE` evaluates the request mapping template, unwraps the request's
-`payload`, and evaluates the response mapping template with that value in `ctx.result`. Request
-templates must render a JSON object with `version: "2018-05-29"`; invalid JSON and unsupported
-versions fail the field with `errorType: MappingTemplate`.
+A VTL UNIT resolver evaluates the request mapping template, sends the rendered request through the
+same data source invoker used by APPSYNC_JS, and evaluates the response mapping template with the
+answer in `ctx.result`. Request templates must render a JSON object with
+`version: "2018-05-29"`; invalid JSON, unsupported versions, and malformed data source requests
+fail the field with `errorType: MappingTemplate`.
+
+Supported request documents are:
+
+- `NONE`: `version` plus an optional `payload`, which is unwrapped into `ctx.result`.
+- DynamoDB: `GetItem`, `PutItem`, `UpdateItem`, `DeleteItem`, `Query`, and `Scan` requests.
+- Lambda: `Invoke` and `BatchInvoke` with synchronous `RequestResponse` invocation.
+- RDS: one or two `statements`, with optional `variableMap` and `variableTypeHintMap`.
+
+A backing-service failure is exposed as `ctx.error` in the response template. The template may
+raise it, append it beside response data, or return a value and suppress it, matching the existing
+APPSYNC_JS execution path. Valid AppSync operations that the invoker does not implement fail with
+`errorType: UnsupportedOperation` instead of running with altered semantics.
 
 The VTL context includes `ctx.arguments` / `ctx.args`, `ctx.source`, `ctx.stash`, `ctx.result`,
 `ctx.error`, `ctx.identity`, `ctx.request`, `ctx.info`, and `ctx.prev`. Stash mutations survive from
@@ -352,8 +365,8 @@ selected type and details, and
 `$util.appendError` reports an error beside the returned data.
 
 The existing VTL loop, output-size, timeout, and reflection-sandbox limits apply. The
-`2017-02-28` template version, VTL pipeline functions, and VTL-backed DynamoDB, Lambda, RDS, and
-other data sources are not included in this first execution slice.
+`2017-02-28` template version, VTL pipeline functions, and VTL-backed HTTP, EventBridge,
+OpenSearch, and Bedrock data sources are not included.
 
 | Setting | Env | Default |
 |---|---|---|
@@ -406,9 +419,9 @@ environment variables). `ctx.request.headers` is empty: the GraphQL context does
 | Type | Behaviour |
 |---|---|
 | `NONE` | The request is the result; a `payload` member is unwrapped, as on AWS. Supports APPSYNC_JS and `2018-05-29` VTL UNIT resolvers. |
-| `AWS_LAMBDA` | `Invoke` and `BatchInvoke`. Only `payload` reaches the function. A function error fails the field rather than resolving to the error object. |
-| `RELATIONAL_DATABASE` | Statements run over the RDS Data API against `rdsHttpEndpointConfig`. Accepts `{statements, variableMap}`, the `{statement, parameters}` the `/rds` helpers build, a list of either, or a bare SQL string. `variableTypeHintMap` is honoured, without it a bound date binds as text and PostgreSQL refuses the comparison (`operator does not exist: timestamp with time zone >= character varying`), so a resolver's date filters need it. The result is wrapped as `{sqlStatementResults: […]}`, which is what `toJsonObject()` reads. |
-| `AMAZON_DYNAMODB` | `GetItem`, `PutItem`, `UpdateItem`, `DeleteItem`, `Query`, `Scan`, through the native DynamoDB path so expressions, conditions and indexes all apply. Items come back as **plain JSON**, not attribute values, as AppSync returns them. `nextToken` is an opaque encoding of `LastEvaluatedKey`. `BatchGetItem`, `TransactWriteItems` and `Sync` are not implemented and say so. |
+| `AWS_LAMBDA` | `Invoke` and `BatchInvoke`. Only `payload` reaches the function. A function error fails the field rather than resolving to the error object. Supports APPSYNC_JS and `2018-05-29` VTL UNIT resolvers. |
+| `RELATIONAL_DATABASE` | Statements run over the RDS Data API against `rdsHttpEndpointConfig`. Accepts `{statements, variableMap}`, the `{statement, parameters}` the `/rds` helpers build, a list of either, or a bare SQL string. `variableTypeHintMap` is honoured, without it a bound date binds as text and PostgreSQL refuses the comparison (`operator does not exist: timestamp with time zone >= character varying`), so a resolver's date filters need it. The result is wrapped as `{sqlStatementResults: […]}`, which is what `toJsonObject()` reads. Supports APPSYNC_JS and `2018-05-29` VTL UNIT resolvers. |
+| `AMAZON_DYNAMODB` | `GetItem`, `PutItem`, `UpdateItem`, `DeleteItem`, `Query`, `Scan`, through the native DynamoDB path so expressions, conditions and indexes all apply. Items come back as **plain JSON**, not attribute values, as AppSync returns them. `nextToken` is an opaque encoding of `LastEvaluatedKey`. `BatchGetItem`, `TransactWriteItems` and `Sync` are not implemented and say so. Supports APPSYNC_JS and `2018-05-29` VTL UNIT resolvers. |
 | `HTTP`, `AMAZON_EVENTBRIDGE`, `AMAZON_OPENSEARCH_SERVICE`, `AMAZON_BEDROCK_RUNTIME` | Not implemented; a resolver using one fails its field naming the type. |
 
 A field with no resolver falls back to reading its value off the parent object, which is how the
@@ -457,8 +470,8 @@ This matches AWS behavior where deleting an API removes its entire configuration
 
 These AWS AppSync capabilities are not yet implemented and are tracked in future phases:
 
-- **VTL resolver expansion**: pipeline functions, the `2017-02-28` version, and data sources beyond `NONE`
-- **Data source adapters** (Phase 9): DynamoDB, Lambda, HTTP, EventBridge, OpenSearch, RDS connectors
+- **VTL resolver expansion**: pipeline functions, the `2017-02-28` version, and the remaining data sources
+- **Data source adapters**: HTTP, EventBridge, OpenSearch, and Bedrock connectors
 - **Guardrails** (Phase 10): query depth / complexity limits and related errors
 - **Realtime subscriptions** (Phase 11+): WebSocket real-time subscriptions
 - **Caching**: API-level and per-resolver caching
