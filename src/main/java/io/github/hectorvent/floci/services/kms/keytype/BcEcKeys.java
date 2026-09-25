@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.kms.model.KmsKey;
 import org.bouncycastle.asn1.ASN1BitString;
 import org.bouncycastle.asn1.ASN1Encoding;
+import org.bouncycastle.asn1.ASN1Object;
 import org.bouncycastle.asn1.ASN1ObjectIdentifier;
 import org.bouncycastle.asn1.pkcs.PrivateKeyInfo;
 import org.bouncycastle.asn1.sec.ECPrivateKey;
@@ -94,6 +95,11 @@ final class BcEcKeys {
         ASN1ObjectIdentifier curveOid = ECUtil.getNamedCurveOid(curveName);
         if (!curveOid.equals(algorithm.getParameters())) {
             throw new InvalidKeySpecException("the material must name the " + curveName + " curve");
+        }
+        ASN1Object innerParameters = ecPrivateKey.getParametersObject();
+        if (innerParameters != null && !curveOid.equals(innerParameters)) {
+            throw new InvalidKeySpecException("the EC private key's own parameters must also name the "
+                    + curveName + " curve");
         }
 
         ECNamedCurveParameterSpec spec = ECNamedCurveTable.getParameterSpec(curveName);

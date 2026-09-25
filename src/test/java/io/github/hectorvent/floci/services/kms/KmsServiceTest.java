@@ -14,8 +14,10 @@ import io.github.hectorvent.floci.services.kms.model.KmsKeySpec;
 import io.github.hectorvent.floci.services.kms.model.KmsKeyUsage;
 import io.github.hectorvent.floci.services.kms.model.KmsMessageType;
 import jakarta.ws.rs.core.Response;
+import org.bouncycastle.asn1.ASN1Encodable;
 import org.bouncycastle.asn1.DERBitString;
 import org.bouncycastle.asn1.pkcs.PrivateKeyInfo;
+import org.bouncycastle.asn1.sec.SECObjectIdentifiers;
 import org.bouncycastle.asn1.sec.ECPrivateKey;
 import org.bouncycastle.asn1.x509.AlgorithmIdentifier;
 import org.bouncycastle.asn1.x509.SubjectPublicKeyInfo;
@@ -2487,11 +2489,17 @@ class KmsServiceTest {
         /** Re-encodes an EC private key with the given algorithm identifier and embedded public point. */
         private byte[] ecPkcs8(KeyPair keyPair, String curveName, AlgorithmIdentifier algorithm,
                                byte[] embeddedPublicPoint) throws Exception {
+            return ecPkcs8(keyPair, curveName, algorithm, embeddedPublicPoint, null);
+        }
+
+        /** As above, also setting the RFC 5915 ECPrivateKey's own optional curve parameters. */
+        private byte[] ecPkcs8(KeyPair keyPair, String curveName, AlgorithmIdentifier algorithm,
+                               byte[] embeddedPublicPoint, ASN1Encodable innerParameters) throws Exception {
             BigInteger privateScalar = ECPrivateKey.getInstance(
                     PrivateKeyInfo.getInstance(keyPair.getPrivate().getEncoded()).parsePrivateKey()).getKey();
             int orderBits = ECNamedCurveTable.getByName(curveName).getN().bitLength();
             ECPrivateKey ecPrivateKey = new ECPrivateKey(orderBits, privateScalar,
-                    new DERBitString(embeddedPublicPoint), null);
+                    new DERBitString(embeddedPublicPoint), innerParameters);
             return new PrivateKeyInfo(algorithm, ecPrivateKey).getEncoded();
         }
 
@@ -3044,6 +3052,46 @@ class KmsServiceTest {
             AlgorithmIdentifier explicitCurve = new AlgorithmIdentifier(X9ObjectIdentifiers.id_ecPublicKey,
                     new X962Parameters(ECNamedCurveTable.getByName("secp256r1")));
             byte[] material = ecPkcs8(keyPair, "secp256r1", explicitCurve, ecPublicPoint(keyPair));
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    importInto(key, material, RSA_AES_SHA_256));
+
+            assertEquals("IncorrectKeyMaterialException", ex.getErrorCode());
+            assertEquals("PendingImport", kmsService.describeKey(key.getKeyId(), REGION).getKeyState());
+        }
+
+        @Test
+        void eccImportAcceptsInnerParametersNamingTheSameCurve() throws Exception {
+            KmsKey key = externalKey("ECC_NIST_P256", "SIGN_VERIFY");
+            KeyPair keyPair = ecKeyPair("ECC_NIST_P256");
+            byte[] material = ecPkcs8(keyPair, "secp256r1", p256NamedCurve(), ecPublicPoint(keyPair),
+                    X9ObjectIdentifiers.prime256v1);
+
+            KmsKey imported = importInto(key, material, RSA_AES_SHA_256);
+
+            assertEquals("Enabled", imported.getKeyState());
+        }
+
+        @Test
+        void eccImportRejectsInnerParametersNamingAnotherCurve() throws Exception {
+            KmsKey key = externalKey("ECC_NIST_P256", "SIGN_VERIFY");
+            KeyPair keyPair = ecKeyPair("ECC_NIST_P256");
+            byte[] material = ecPkcs8(keyPair, "secp256r1", p256NamedCurve(), ecPublicPoint(keyPair),
+                    SECObjectIdentifiers.secp384r1);
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    importInto(key, material, RSA_AES_SHA_256));
+
+            assertEquals("IncorrectKeyMaterialException", ex.getErrorCode());
+            assertEquals("PendingImport", kmsService.describeKey(key.getKeyId(), REGION).getKeyState());
+        }
+
+        @Test
+        void eccImportRejectsExplicitInnerCurveParameters() throws Exception {
+            KmsKey key = externalKey("ECC_NIST_P256", "SIGN_VERIFY");
+            KeyPair keyPair = ecKeyPair("ECC_NIST_P256");
+            byte[] material = ecPkcs8(keyPair, "secp256r1", p256NamedCurve(), ecPublicPoint(keyPair),
+                    new X962Parameters(ECNamedCurveTable.getByName("secp256r1")));
 
             AwsException ex = assertThrows(AwsException.class, () ->
                     importInto(key, material, RSA_AES_SHA_256));
