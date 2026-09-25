@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
 
 /**
@@ -38,38 +39,40 @@ class Ec2FlowLogFormatIntegrationTest {
             .statusCode(200).extract().path("CreateVpcResponse.vpc.vpcId");
     }
 
+    /** DescribeFlowLogs serves no filters, so every assertion here names the flow log by id. */
+    private static String createFlowLog(String vpcId, String... extraParams) {
+        String[] params = {
+            "ResourceId.1", vpcId,
+            "ResourceType", "VPC",
+            "TrafficType", "ALL",
+            "LogDestinationType", "s3",
+            "LogDestination", "arn:aws:s3:::flow-logs-bucket"
+        };
+        String[] all = new String[params.length + extraParams.length];
+        System.arraycopy(params, 0, all, 0, params.length);
+        System.arraycopy(extraParams, 0, all, params.length, extraParams.length);
+        return ec2("CreateFlowLogs", all)
+            .statusCode(200).extract().path("CreateFlowLogsResponse.flowLogIdSet.item");
+    }
+
     @Test
     void aCustomLogFormatSurvivesTheRoundTrip() {
-        String vpcId = vpc();
-        ec2("CreateFlowLogs",
-                "ResourceId.1", vpcId,
-                "ResourceType", "VPC",
-                "TrafficType", "ALL",
-                "LogDestinationType", "s3",
-                "LogDestination", "arn:aws:s3:::flow-logs-bucket",
-                "LogFormat", FORMAT)
-            .statusCode(200);
+        String flowLogId = createFlowLog(vpc(), "LogFormat", FORMAT);
 
-        ec2("DescribeFlowLogs", "Filter.1.Name", "resource-id", "Filter.1.Value.1", vpcId)
+        ec2("DescribeFlowLogs", "FlowLogId.1", flowLogId)
             .statusCode(200)
-            .body(containsString("<logFormat>"))
-            .body(containsString("${srcaddr}"));
+            .body("DescribeFlowLogsResponse.flowLogSet.item.flowLogId", equalTo(flowLogId))
+            .body("DescribeFlowLogsResponse.flowLogSet.item.logFormat", equalTo(FORMAT));
     }
 
     /** A flow log created without one reports no logFormat rather than an empty element. */
     @Test
     void noCustomFormatReportsNoElement() {
-        String vpcId = vpc();
-        ec2("CreateFlowLogs",
-                "ResourceId.1", vpcId,
-                "ResourceType", "VPC",
-                "TrafficType", "ALL",
-                "LogDestinationType", "s3",
-                "LogDestination", "arn:aws:s3:::flow-logs-bucket")
-            .statusCode(200);
+        String flowLogId = createFlowLog(vpc());
 
-        ec2("DescribeFlowLogs", "Filter.1.Name", "resource-id", "Filter.1.Value.1", vpcId)
+        ec2("DescribeFlowLogs", "FlowLogId.1", flowLogId)
             .statusCode(200)
+            .body("DescribeFlowLogsResponse.flowLogSet.item.flowLogId", equalTo(flowLogId))
             .body(not(containsString("<logFormat>")));
     }
 }
