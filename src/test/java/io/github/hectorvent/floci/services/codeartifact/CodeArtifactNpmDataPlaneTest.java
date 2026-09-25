@@ -4,9 +4,9 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.ServiceConfigAccess;
 import io.github.hectorvent.floci.services.codeartifact.CodeArtifactService.AuthorizationTokenScope;
+import io.vertx.core.Future;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpClient;
-import io.vertx.core.http.HttpClientRequest;
 import io.vertx.core.http.HttpClientResponse;
 import io.vertx.core.http.HttpMethod;
 import io.vertx.core.http.HttpServer;
@@ -230,25 +230,41 @@ class CodeArtifactNpmDataPlaneTest {
         return request(HttpMethod.PUT, path, bearerToken, body);
     }
 
+    /**
+     * Composes request, send and body-read into one Vert.x future chain rather than blocking with
+     * {@code .get()} between each step: blocking to obtain the response and only then calling
+     * {@link HttpClientResponse#body()} leaves a window, between the response arriving on the
+     * event loop and this JUnit thread waking back up and attaching to it, where a small, fast
+     * local response (this fake upstream's whole body arrives in one write) can finish delivering
+     * before anything is listening for it, so {@code body()} sees an already-ended stream with
+     * nothing left to replay. Chaining with {@code compose} attaches the body read from inside the
+     * same event-loop callback that receives the response, before that window can ever open, and
+     * leaves exactly one blocking {@code .get()} at the very end.
+     */
     private HttpResponse request(HttpMethod method, String path, String bearerToken, String body) throws Exception {
         RequestOptions options = new RequestOptions()
                 .setHost("127.0.0.1")
                 .setPort(dataPlane.actualPort())
                 .setMethod(method)
                 .setURI(path);
-        HttpClientRequest req = client.request(options).toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
-        if (bearerToken != null) {
-            req.putHeader("Authorization", "Bearer " + bearerToken);
-        }
-        HttpClientResponse resp = (body != null
-                ? req.send(body)
-                : req.send())
-                .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
-        String responseBody = resp.body().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS)
-                .toString(StandardCharsets.UTF_8);
-        Map<String, String> headers = new HashMap<>();
-        resp.headers().forEach(h -> headers.put(h.getKey().toLowerCase(), h.getValue()));
-        return new HttpResponse(resp.statusCode(), responseBody, headers);
+        Future<HttpResponse> responseFuture = client.request(options)
+                .compose(req -> {
+                    if (bearerToken != null) {
+                        req.putHeader("Authorization", "Bearer " + bearerToken);
+                    }
+                    return body != null ? req.send(body) : req.send();
+                })
+                .compose(resp -> resp.body().map(buffer -> {
+                    Map<String, String> headers = new HashMap<>();
+                    resp.headers().forEach(h -> headers.put(h.getKey().toLowerCase(), h.getValue()));
+                    return new HttpResponse(resp.statusCode(), buffer.toString(StandardCharsets.UTF_8), headers);
+                }));
+        // 6 seconds, not the 2 used elsewhere in this file: this single wait now covers every
+        // stage of the chain above (request creation, send, body read) rather than one stage each
+        // getting its own 2-second budget the way three separate blocking calls used to, so it
+        // needs the combined allowance to avoid trading the body-read flake this replaced for a
+        // tighter timeout on a busy runner.
+        return responseFuture.toCompletionStage().toCompletableFuture().get(6, TimeUnit.SECONDS);
     }
 
     private record HttpResponse(int statusCode, String body, Map<String, String> headers) {}
