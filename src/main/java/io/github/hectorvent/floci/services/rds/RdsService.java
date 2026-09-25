@@ -898,10 +898,17 @@ public class RdsService implements Resettable, ResourceProvider {
             throw new AwsException("InvalidDBSnapshotState",
                     "DBSnapshot " + source.getDbSnapshotIdentifier() + " is not in an available state.", 400);
         }
+        if (crossRegion && source.isStorageEncrypted()
+                && (kmsKeyId == null || kmsKeyId.isBlank())) {
+            throw new AwsException("InvalidParameterCombination",
+                    "KmsKeyId is required when copying an encrypted DBSnapshot across Regions.", 400);
+        }
         if (findSnapshotForScope(accountId, targetRegion, targetIdentifier) != null) {
             throw new AwsException("DBSnapshotAlreadyExists",
                     "DBSnapshot " + targetIdentifier + " already exists.", 400);
         }
+        String targetKmsKeyId = crossRegion && kmsKeyId != null && !kmsKeyId.isBlank()
+                ? resolveKmsKeyArn(kmsKeyId, targetRegion) : kmsKeyId;
         String sourceData = getSnapshotDataForScope(
                 sourceReference.accountId(), sourceReference.region(), source.getDbSnapshotIdentifier())
                 .orElseThrow(() -> new AwsException("DBSnapshotNotFound",
@@ -917,8 +924,9 @@ public class RdsService implements Resettable, ResourceProvider {
         copy.setOptionGroupName(optionGroupName != null && !optionGroupName.isBlank()
                 ? optionGroupName : source.getOptionGroupName());
         copy.setStorageEncrypted(source.isStorageEncrypted()
-                || (kmsKeyId != null && !kmsKeyId.isBlank()));
-        copy.setKmsKeyId(kmsKeyId != null && !kmsKeyId.isBlank() ? kmsKeyId : source.getKmsKeyId());
+                || (targetKmsKeyId != null && !targetKmsKeyId.isBlank()));
+        copy.setKmsKeyId(targetKmsKeyId != null && !targetKmsKeyId.isBlank()
+                ? targetKmsKeyId : source.getKmsKeyId());
         copy.setRestoreAccountIds(new ArrayList<>());
         Map<String, String> copiedTags = new LinkedHashMap<>();
         if (copyTags) {

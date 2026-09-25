@@ -3407,6 +3407,42 @@ class RdsServiceTest {
     }
 
     @Test
+    void copyEncryptedDbSnapshotAcrossRegionsRequiresDestinationKmsKey() {
+        KmsKey sourceKey = new KmsKey();
+        sourceKey.setArn("arn:aws:kms:us-west-2:123456789012:key/source");
+        sourceKey.setEnabled(true);
+        sourceKey.setKeyState("Enabled");
+        doReturn(sourceKey).when(kmsService).describeKey("source-key", "us-west-2");
+        rdsService.createDbInstance("source-db", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false, false, null,
+                Map.of(), List.of(), null, "us-west-2", true,
+                new DbInstanceSettings(true, "source-key", null, null, null, null));
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
+        DbSnapshot source = rdsService.createDbSnapshot("source", "source-db", Map.of(), "us-west-2");
+
+        AwsException missingKey = assertThrows(AwsException.class, () ->
+                rdsService.copyDbSnapshot(source.getDbSnapshotArn(), "copy", false,
+                        Map.of(), null, null, "us-east-1"));
+        assertEquals("InvalidParameterCombination", missingKey.getErrorCode());
+
+        AwsException wrongRegionKey = assertThrows(AwsException.class, () ->
+                rdsService.copyDbSnapshot(source.getDbSnapshotArn(), "copy", false,
+                        Map.of(), null, source.getKmsKeyId(), "us-east-1"));
+        assertEquals("KMSKeyNotAccessibleFault", wrongRegionKey.getErrorCode());
+
+        knownKey("destination-key", KEY_ARN);
+        DbSnapshot copy = rdsService.copyDbSnapshot(source.getDbSnapshotArn(), "copy", false,
+                Map.of(), null, "destination-key", "us-east-1");
+        assertTrue(copy.isStorageEncrypted());
+        assertEquals(KEY_ARN, copy.getKmsKeyId());
+        DbInstance restored = rdsService.restoreDbInstanceFromDbSnapshot(
+                "restored", "copy", "db.t3.micro", null, false,
+                null, null, Map.of(), "us-east-1");
+        assertEquals(KEY_ARN, restored.getKmsKeyId());
+    }
+
+    @Test
     void modifyDbSnapshotUpdatesEngineVersionAndOptionGroup() {
         rdsService.createDbInstance("mydb", "postgres", "13",
                 "admin", "password", "dbname", "db.t3.micro",
