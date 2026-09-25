@@ -3061,7 +3061,9 @@ public class ApiGatewayService {
                     authType = mapped;
                     authorizerId = schemeToAuthorizerId.get(schemeName);
                     List<String> requestedScopes = secReq.get(schemeName);
-                    if (requestedScopes != null) authorizationScopes = requestedScopes;
+                    if (requestedScopes != null) {
+                        authorizationScopes = requestedScopes;
+                    }
                     break resolveAuth;
                 }
             }

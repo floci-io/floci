@@ -23,6 +23,7 @@ import io.github.hectorvent.floci.services.apigatewayv2.model.Authorizer;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Route;
 import io.github.hectorvent.floci.services.apigatewayv2.websocket.ConnectionInfo;
 import io.github.hectorvent.floci.services.apigatewayv2.websocket.WebSocketConnectionManager;
+import io.github.hectorvent.floci.services.cognito.CognitoService;
 import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
 import io.github.hectorvent.floci.services.elbv2.model.Listener;
 import io.github.hectorvent.floci.services.elbv2.model.LoadBalancer;
@@ -31,7 +32,6 @@ import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.sqs.SqsQueryHandler;
-import io.github.hectorvent.floci.services.cognito.CognitoService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -1048,7 +1048,9 @@ public class ApiGatewayExecuteController {
                 }
                 Set<String> granted = new HashSet<>();
                 Object scopeClaim = verified.claims().get("scope");
-                if (scopeClaim instanceof String value) granted.addAll(Arrays.asList(value.trim().split("\\s+")));
+                if (scopeClaim instanceof String value) {
+                    granted.addAll(Arrays.asList(value.trim().split("\\s+")));
+                }
                 if (requiredScopes.stream().noneMatch(granted::contains)) {
                     return new AuthorizerResult(gatewayResponse(scope, GatewayResponseType.ACCESS_DENIED, 403,
                             "User is not authorized to access this resource"), null, null);
@@ -1387,8 +1389,11 @@ public class ApiGatewayExecuteController {
             }
             if (authorizerContext != null) {
                 authorizerContext.forEach((key, value) -> {
-                    if (value instanceof Map<?, ?>) authorizerNode.set(key, objectMapper.valueToTree(value));
-                    else if (value != null) authorizerNode.put(key, value.toString());
+                    if (value instanceof Map<?, ?>) {
+                        authorizerNode.set(key, objectMapper.valueToTree(value));
+                    } else if (value != null) {
+                        authorizerNode.put(key, value.toString());
+                    }
                 });
             }
         }

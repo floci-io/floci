@@ -4047,6 +4047,18 @@ public class CognitoService implements ResourceProvider {
                     .filter(c -> poolId.equals(c.getUserPoolId())).isEmpty()) {
                 throw new IllegalArgumentException("invalid client");
             }
+            String jti = textClaim(claims, "jti");
+            validateTokenNotRevoked(jti, poolId, tokenUse);
+            String originJti = textClaim(claims, "origin_jti");
+            if (originJti != null) {
+                validateTokenNotRevoked(originJti, poolId, tokenUse);
+            }
+            String username = "access".equals(tokenUse)
+                    ? textClaim(claims, "username") : textClaim(claims, "cognito:username");
+            if (username != null) {
+                validateUserNotGloballySignedOut(username, poolId, tokenUse,
+                        requiredNumericClaim(claims, "iat"));
+            }
             Map<String, Object> mapped = MAPPER.convertValue(claims, new TypeReference<Map<String, Object>>() {});
             return new VerifiedApiGatewayToken(poolId, tokenUse, Map.copyOf(mapped));
         } catch (AwsException e) {
@@ -4098,7 +4110,9 @@ public class CognitoService implements ResourceProvider {
     }
 
     private VerifiedJwt verifyJwtSignatureAndIssuer(String token) throws Exception {
-        if (token == null || token.isBlank()) throw new IllegalArgumentException("missing token");
+        if (token == null || token.isBlank()) {
+            throw new IllegalArgumentException("missing token");
+        }
         String[] parts = token.split("\\.", -1);
         if (parts.length != 3 || Arrays.stream(parts).anyMatch(String::isEmpty)) {
             throw new IllegalArgumentException("malformed JWT");

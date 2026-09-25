@@ -89,6 +89,12 @@ class ApiGatewayCognitoAuthorizerIntegrationTest {
             assertEquals("access", accessClaims.path("tokenUse").asText());
             assertEquals("id", idClaims.path("tokenUse").asText());
             assertEquals(accessClaims.path("sub").asText(), idClaims.path("sub").asText());
+
+            cognitoService.globalSignOut(accessToken);
+            given().header("X-Id-Token", "Bearer " + accessToken)
+                    .when().get(base + "secured").then().statusCode(401);
+            given().header("X-Id-Token", "Bearer " + idToken)
+                    .when().get(base + "unscoped").then().statusCode(401);
         } finally {
             given().when().delete("/restapis/" + apiId).then().statusCode(202);
         }
