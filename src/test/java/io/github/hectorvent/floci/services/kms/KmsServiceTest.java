@@ -3090,6 +3090,108 @@ class KmsServiceTest {
         }
 
         @ParameterizedTest
+        @ValueSource(strings = {"ECC_NIST_P256", "ECC_NIST_P384", "ECC_NIST_P521", "ECC_SECG_P256K1"})
+        void importedEccKeyVerifiesSignaturesAndSignsDigests(String keySpec) throws Exception {
+            KmsKey key = externalKey(keySpec, "SIGN_VERIFY");
+            KeyPair importedKeyPair = ecKeyPair(keySpec);
+            importInto(key, importedKeyPair.getPrivate().getEncoded(), RSA_AES_SHA_256, "RSA_4096");
+            KmsKeySpec.Algorithm algorithm = KmsKeySpec.valueOf(keySpec).getAlgorithm().getFirst();
+            byte[] message = "imported ECC key".getBytes(StandardCharsets.UTF_8);
+
+            Signature signer = Signature.getInstance(algorithm.getJavaName(), BouncyCastleProvider.PROVIDER_NAME);
+            signer.initSign(importedKeyPair.getPrivate());
+            signer.update(message);
+            byte[] externalSignature = signer.sign();
+            assertDoesNotThrow(() -> kmsService.verify(key.getKeyId(), message, externalSignature,
+                    algorithm.name(), REGION));
+            byte[] tampered = "tampered message".getBytes(StandardCharsets.UTF_8);
+            AwsException ex = assertThrows(AwsException.class, () -> kmsService.verify(key.getKeyId(), tampered,
+                    externalSignature, algorithm.name(), REGION));
+            assertEquals("KMSInvalidSignatureException", ex.getErrorCode());
+
+            byte[] digest = MessageDigest.getInstance(algorithm.getJavaName().substring(0, 6)).digest(message);
+            byte[] digestSignature = kmsService.sign(key.getKeyId(), digest, algorithm.name(),
+                    KmsMessageType.DIGEST, REGION);
+            Signature verifier = Signature.getInstance(algorithm.getJavaName(), BouncyCastleProvider.PROVIDER_NAME);
+            verifier.initVerify(importedKeyPair.getPublic());
+            verifier.update(message);
+            assertTrue(verifier.verify(digestSignature));
+        }
+
+        @Test
+        void reimportingTheSameEccKeyAfterDeletionRestoresIt() throws Exception {
+            KmsKey key = externalKey("ECC_SECG_P256K1", "SIGN_VERIFY");
+            KeyPair keyPair = ecKeyPair("ECC_SECG_P256K1");
+            byte[] material = keyPair.getPrivate().getEncoded();
+            importInto(key, material, RSA_AES_SHA_256);
+
+            KmsKey deleted = kmsService.deleteImportedKeyMaterial(key.getKeyId(), REGION);
+            assertEquals("PendingImport", deleted.getKeyState());
+            assertNull(deleted.getPrivateKeyEncoded());
+
+            KmsKey reimported = importInto(key, material, RSA_AES_SHA_256);
+            assertEquals("Enabled", reimported.getKeyState());
+            assertArrayEquals(keyPair.getPublic().getEncoded(),
+                    Base64.getDecoder().decode(reimported.getPublicKeyEncoded()));
+        }
+
+        @Test
+        void reimportingADifferentEccKeyIsRejected() throws Exception {
+            KmsKey key = externalKey("ECC_NIST_P384", "SIGN_VERIFY");
+            importInto(key, ecKeyPair("ECC_NIST_P384").getPrivate().getEncoded(), RSA_AES_SHA_256);
+            kmsService.deleteImportedKeyMaterial(key.getKeyId(), REGION);
+            byte[] otherKey = ecKeyPair("ECC_NIST_P384").getPrivate().getEncoded();
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    importInto(key, otherKey, RSA_AES_SHA_256));
+
+            assertEquals("IncorrectKeyMaterialException", ex.getErrorCode());
+            assertEquals("PendingImport", kmsService.describeKey(key.getKeyId(), REGION).getKeyState());
+        }
+
+        @Test
+        void expiringEccMaterialReturnsTheKeyToPendingImport() throws Exception {
+            KmsKey key = externalKey("ECC_NIST_P256", "SIGN_VERIFY");
+            KmsService.ImportParameters parameters =
+                    kmsService.getParametersForImport(key.getKeyId(), RSA_AES_SHA_256, "RSA_2048", REGION);
+            byte[] wrapped = wrapRsaAes(parameters.publicKeyEncoded(), RSA_AES_SHA_256,
+                    ecKeyPair("ECC_NIST_P256").getPrivate().getEncoded(), material(32, (byte) 91));
+            kmsService.importKeyMaterial(key.getKeyId(), parameters.importToken(), wrapped,
+                    "KEY_MATERIAL_EXPIRES", Instant.now().getEpochSecond() + 3600, null, REGION);
+
+            KmsKey stored = keyStore.get(REGION + "::" + key.getKeyId()).orElseThrow();
+            stored.setValidTo(Instant.now().getEpochSecond() - 60);
+            keyStore.put(REGION + "::" + key.getKeyId(), stored);
+
+            KmsKey expired = kmsService.describeKey(key.getKeyId(), REGION);
+            assertEquals("PendingImport", expired.getKeyState());
+            assertFalse(expired.isEnabled());
+            assertNull(expired.getPrivateKeyEncoded());
+        }
+
+        @Test
+        void aReplicaOfAnImportedEccKeyAcceptsTheSameKey() throws Exception {
+            String replicaRegion = "us-west-2";
+            KmsKey primary = kmsService.createKey("external primary", "SIGN_VERIFY", "ECC_NIST_P256",
+                    null, Map.of(), "EXTERNAL", true, REGION);
+            KeyPair keyPair = ecKeyPair("ECC_NIST_P256");
+            importInto(primary, keyPair.getPrivate().getEncoded(), RSA_AES_SHA_256);
+            KmsKey replica = kmsService.replicateKey(primary.getKeyId(), null, null, Map.of(), replicaRegion, REGION);
+            assertEquals("PendingImport", replica.getKeyState());
+
+            KmsService.ImportParameters parameters = kmsService.getParametersForImport(
+                    replica.getKeyId(), RSA_AES_SHA_256, "RSA_2048", replicaRegion);
+            byte[] wrapped = wrapRsaAes(parameters.publicKeyEncoded(), RSA_AES_SHA_256,
+                    keyPair.getPrivate().getEncoded(), material(32, (byte) 91));
+            KmsKey imported = kmsService.importKeyMaterial(replica.getKeyId(), parameters.importToken(), wrapped,
+                    "KEY_MATERIAL_DOES_NOT_EXPIRE", null, null, replicaRegion);
+
+            assertEquals("Enabled", imported.getKeyState());
+            assertArrayEquals(keyPair.getPublic().getEncoded(),
+                    Base64.getDecoder().decode(imported.getPublicKeyEncoded()));
+        }
+
+        @ParameterizedTest
         @ValueSource(strings = {"ECC_NIST_EDWARDS25519", "ML_DSA_44"})
         void asymmetricKeySpecsWithoutImportSupportCannotUseExternalOrigin(String keySpec) {
             AwsException ex = assertThrows(AwsException.class, () ->
