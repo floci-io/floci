@@ -92,7 +92,10 @@ final class KmsKeyImport {
                                     + "Supported values are: RSA_AES_KEY_WRAP_SHA_1 and RSA_AES_KEY_WRAP_SHA_256.", 400);
                 }
             }
-            case ECC -> { }
+            case ECC -> {
+                // AWS accepts both RSAES_OAEP_* and RSA_AES_KEY_WRAP_* for ECC material,
+                // which is everything validateWrappingAlgorithmValue lets through.
+            }
             default -> throw new AwsException("UnsupportedOperationException",
                     "Importing key material for key spec " + keySpec + " is not supported.", 400);
         }
