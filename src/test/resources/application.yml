@@ -334,6 +334,7 @@ floci:
       ecr-registry-mirror: true
       imds: false
       irsa-signing-key: true
+      embedded-dns: true
     mwaa:
       enabled: true
       mock: true

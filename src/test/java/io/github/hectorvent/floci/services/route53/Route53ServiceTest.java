@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.route53.model.AliasTarget;
 import io.github.hectorvent.floci.services.route53.model.ResourceRecord;
 import io.github.hectorvent.floci.services.route53.model.ResourceRecordSet;
+import io.github.hectorvent.floci.services.route53.model.VpcAssociation;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
@@ -22,7 +23,9 @@ import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class Route53ServiceTest {
 
@@ -262,5 +265,38 @@ class Route53ServiceTest {
         List<ResourceRecordSet> records = service.listResourceRecordSets(zoneId, "www.example.com.", "A", 1);
         assertThat(records, hasSize(1));
         assertEquals("5.6.7.8", records.get(0).getRecords().get(0).getValue());
+    }
+
+    @Test
+    void clear_resetsPrivateZoneNameCounts() {
+        Route53Service service = newService();
+        String zoneId = service.createHostedZone("corp.internal.", "ref-clear", null,
+                new VpcAssociation("vpc-123", "us-east-1")).zone().getId();
+
+        service.changeResourceRecordSets(zoneId,
+                List.of(change("CREATE", aRecord("app.corp.internal.", 300, "10.0.0.1"))), null);
+
+        List<ResourceRecordSet> beforeClear = service.findPrivateRecordsForName("app.corp.internal.");
+        assertThat(beforeClear, hasSize(1));
+
+        service.clear();
+
+        List<ResourceRecordSet> afterClear = service.findPrivateRecordsForName("app.corp.internal.");
+        assertThat(afterClear, empty());
+    }
+
+    @Test
+    void isCoveredByPrivateZone_matchesPrivateZoneDomainsOnly() {
+        Route53Service service = newService();
+        service.createHostedZone("corp.internal.", "ref-private", null,
+                new VpcAssociation("vpc-123", "us-east-1"));
+        service.createHostedZone("public.com.", "ref-public", null, null);
+
+        assertTrue(service.isCoveredByPrivateZone("corp.internal"));
+        assertTrue(service.isCoveredByPrivateZone("app.corp.internal."));
+        assertTrue(service.isCoveredByPrivateZone("sub.service.corp.internal"));
+        assertFalse(service.isCoveredByPrivateZone("public.com"));
+        assertFalse(service.isCoveredByPrivateZone("othercorp.internal"));
+        assertFalse(service.isCoveredByPrivateZone("example.org"));
     }
 }

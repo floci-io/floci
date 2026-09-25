@@ -1,6 +1,6 @@
 # Route53
 
-Route53 management-plane emulation. Supports hosted zones, resource record sets, health checks, change tracking, and tagging. Actual DNS resolution is not provided — this is a management-plane-only implementation.
+Route53 emulation supporting hosted zones, resource record sets, health checks, change tracking, and tagging. Private hosted zones provide embedded DNS resolution for cluster containers such as EKS and workloads wired to Floci's embedded DNS server.
 
 ## Supported Operations
 
@@ -53,6 +53,15 @@ Route53 management-plane emulation. Supports hosted zones, resource record sets,
 - A cross-account association without a matching authorization fails with `NotAuthorizedException`.
 - Private hosted zones support up to 300 VPC associations and up to 1000 outstanding cross-account VPC association authorizations, matching the documented Route 53 default quotas.
 - Set `FLOCI_SERVICES_ROUTE53_VPC_ASSOCIATION_CONTROL_PLANE_DELAY_MS` above `0` to emulate a short in-flight control-plane window for retry testing. During that window, a subsequent `AssociateVPCWithHostedZone` for the same hosted zone returns `PriorRequestNotComplete`; overlapping create/delete authorization requests return `ConcurrentModification`. These are the retryable overlap errors documented by Route 53 for those operations.
+
+## Private Hosted Zone DNS Resolution
+
+Floci resolves private hosted zone DNS records directly through its embedded DNS server on port 53. Cluster containers (such as EKS k3s containers) and workloads wired to embedded DNS automatically query Floci as their primary resolver.
+
+- **Record Types**: Resolves IPv4 `A` records (including `CNAME` and `ALIAS` target chasing across private zones, EC2 internal names, and external hostnames). When a private CNAME targets a public hostname, Floci resolves the target addresses off the event loop so container stub resolvers succeed. Multiple values are returned as separate answers.
+- **Zone Visibility and Fallthrough**: Only private hosted zones (created with a VPC association) are answered by Floci's embedded Route 53 resolver. Public zones and external domains fall through to upstream forwarders. Because the standard DNS wire protocol carries no caller VPC identifier, Floci resolves across private zones without filtering by account or VPC ID.
+- **Zero-Restart Propagation**: Record changes via `ChangeResourceRecordSets` take effect immediately without restarts.
+- **Kubernetes and external-dns Compatibility**: In-cluster controllers like `external-dns` provisioning Route 53 private records for Services or Ingresses are immediately resolvable.
 
 ## Default Nameservers
 
@@ -151,4 +160,4 @@ aws route53 delete-hosted-zone --id Z1PA6795UKMFR9
 - Query logging configs
 - DNSSEC (key signing keys, enabling/disabling)
 - `TestDNSAnswer`
-- Actual DNS resolution
+- Public hosted zone authoritative DNS serving (queries for public zones fall through to upstream forwarders)
