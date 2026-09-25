@@ -124,6 +124,20 @@ class S3ObjectLockVersionedWriteTest {
         assertAccessDenied(() -> s3Service.deleteObject(BUCKET, "compliance.txt", compliance.getVersionId(), true));
     }
 
+    @Test
+    void writesOverLockedPreVersioningObjectAreStillDenied() {
+        s3Service.createBucket("pre-versioning-bucket", "us-east-1");
+        s3Service.setBucketObjectLockEnabled("pre-versioning-bucket");
+        s3Service.putObject("pre-versioning-bucket", "held.txt", BODY, "text/plain", null,
+                new PutObjectOptions().withLegalHoldStatus("ON"));
+        s3Service.putBucketVersioning("pre-versioning-bucket", "Enabled");
+
+        assertAccessDenied(() -> s3Service.putObject("pre-versioning-bucket", "held.txt", BODY, "text/plain", null));
+        assertAccessDenied(() -> s3Service.copyObject(BUCKET, "source.txt", "pre-versioning-bucket", "held.txt"));
+        assertAccessDenied(() -> s3Service.deleteObject("pre-versioning-bucket", "held.txt", null, false));
+        assertEquals("ON", s3Service.getObject("pre-versioning-bucket", "held.txt").getLegalHoldStatus());
+    }
+
     private S3Object putLegalHold(String key) {
         return s3Service.putObject(BUCKET, key, BODY, "text/plain", null,
                 new PutObjectOptions().withLegalHoldStatus("ON"));
