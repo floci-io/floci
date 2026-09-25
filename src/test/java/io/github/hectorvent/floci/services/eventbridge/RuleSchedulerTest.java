@@ -89,6 +89,30 @@ class RuleSchedulerTest {
         assertFalse(scheduler.isRunning(RULE_ARN), "disabled rule must not have its cron timer re-armed");
     }
 
+    @Test
+    void stopBetweenReArmCheckAndReplaceCancelsTheNewTimer() {
+        Vertx vertx = mock(Vertx.class);
+        ArgumentCaptor<Handler<Long>> fire = timerHandlerCaptor();
+        AtomicReference<RuleScheduler> schedulerRef = new AtomicReference<>();
+        // The re-arm's own setTimer call is the last step before the context swap, so a stop
+        // issued from inside it lands after the "still my timer" check and before the replace.
+        when(vertx.setTimer(anyLong(), fire.capture())).thenReturn(1L).thenAnswer(invocation -> {
+            schedulerRef.get().stopScheduler(RULE_ARN);
+            return 2L;
+        });
+
+        Rule rule = enabledRule();
+        StoppingInvoker invoker = new StoppingInvoker(() -> { });
+        RuleScheduler scheduler = newScheduler(vertx, invoker);
+        schedulerRef.set(scheduler);
+        scheduler.startScheduler(RULE_ARN, EVERY_MINUTE_CRON, () -> toScheduleData(rule));
+
+        fire.getValue().handle(1L);
+
+        verify(vertx).cancelTimer(2L);
+        assertFalse(scheduler.isRunning(RULE_ARN), "a stop racing the re-arm must not leave the new timer recorded");
+    }
+
     @SuppressWarnings("unchecked")
     private static ArgumentCaptor<Handler<Long>> timerHandlerCaptor() {
         return ArgumentCaptor.forClass(Handler.class);
