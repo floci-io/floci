@@ -390,7 +390,7 @@ final class CognitoAuthFlowHandler {
             throw ae;
         }
         CognitoService.ClaimsOverride override = firePreTokenGeneration(pool, client, user,
-                clientMetadata, "TokenGeneration_RefreshTokens");
+                clientMetadata, "TokenGeneration_RefreshTokens", List.of());
         Map<String, Object> auth = new HashMap<>();
         auth.put("AccessToken", service.generateSignedJwt(user, pool, "access", client, override, refreshTokenUuid));
         auth.put("IdToken", service.generateSignedJwt(user, pool, "id", client, override, refreshTokenUuid));
@@ -1223,13 +1223,15 @@ final class CognitoAuthFlowHandler {
     }
 
     private CognitoService.ClaimsOverride firePreTokenGeneration(UserPool pool, UserPoolClient client, CognitoUser user,
-                                                                  Map<String, String> clientMetadata, String triggerSource) {
+                                                                  Map<String, String> clientMetadata, String triggerSource,
+                                                                  List<String> scopes) {
         Map<String, Object> req = new HashMap<>();
         req.put("groupConfiguration", buildGroupConfiguration(user));
         req.put("clientMetadata", clientMetadata == null ? Map.of() : clientMetadata);
         // V2 lambdas (CognitoEventUserPoolsPreTokenGenV2) require `scopes` to deserialize.
-        // V1 lambdas tolerate the extra field.
-        req.put("scopes", List.of());
+        // V1 lambdas tolerate the extra field. Only an OAuth flow has requested scopes to send;
+        // the others pass an empty list, which is what the request carries there.
+        req.put("scopes", scopes == null ? List.of() : List.copyOf(scopes));
         TriggerResult result = invokeTrigger(pool, client, user, "PreTokenGeneration", triggerSource, req);
         if (!result.configured() || result.errored()) return null;
 
@@ -1389,17 +1391,18 @@ final class CognitoAuthFlowHandler {
     private Map<String, Object> issueTokens(UserPool pool, UserPoolClient client, CognitoUser user,
                                              String triggerSource, Map<String, String> clientMetadata) {
         firePostAuthentication(pool, client, user, clientMetadata, false);
-        CognitoService.ClaimsOverride override = firePreTokenGeneration(pool, client, user, clientMetadata, triggerSource);
+        CognitoService.ClaimsOverride override = firePreTokenGeneration(pool, client, user, clientMetadata, triggerSource,
+                List.of());
         return service.generateAuthResult(user, pool, client, override);
     }
 
     CognitoService.ClaimsOverride preTokenGenerationForRefresh(UserPool pool, UserPoolClient client, CognitoUser user) {
-        return firePreTokenGeneration(pool, client, user, Map.of(), "TokenGeneration_RefreshTokens");
+        return firePreTokenGeneration(pool, client, user, Map.of(), "TokenGeneration_RefreshTokens", List.of());
     }
 
     /**
      * Fires PreTokenGeneration for a sign-in whose tokens the OAuth token endpoint mints when it
-     * redeems an authorization code — managed login and federated sign-in both land here.
+     * redeems an authorization code: managed login and federated sign-in both land here.
      *
      * <p>Separate from {@link #issueTokens} because the authorization-code flow splits authentication
      * from token issuance: the user authenticates at the authorize/login endpoints, and the tokens are
@@ -1407,11 +1410,12 @@ final class CognitoAuthFlowHandler {
      * already fired at sign-in, so only PreTokenGeneration is owed here.
      *
      * <p>AWS names this trigger source {@code TokenGeneration_HostedAuth}, which it uses for sign-in
-     * through the hosted UI regardless of whether the user is native or federated.
+     * through the hosted UI regardless of whether the user is native or federated. {@code scopes} are
+     * the scopes the authorization request asked for, which a V2 lambda may branch on.
      */
     CognitoService.ClaimsOverride preTokenGenerationForHostedAuth(UserPool pool, UserPoolClient client,
-                                                                  CognitoUser user) {
-        return firePreTokenGeneration(pool, client, user, Map.of(), "TokenGeneration_HostedAuth");
+                                                                  CognitoUser user, List<String> scopes) {
+        return firePreTokenGeneration(pool, client, user, Map.of(), "TokenGeneration_HostedAuth", scopes);
     }
 
     private static String resolveTriggerArn(UserPool pool, String triggerKey) {

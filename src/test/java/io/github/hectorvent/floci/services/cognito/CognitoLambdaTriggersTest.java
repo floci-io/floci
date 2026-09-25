@@ -694,7 +694,7 @@ class CognitoLambdaTriggersTest {
         assertEquals("alice", user.getUsername());
         verify(lambdaService).invoke(anyString(), eq("arn:aws:lambda:::pre"), any(byte[].class), any());
         verify(lambdaService).invoke(anyString(), eq("arn:aws:lambda:::post"), any(byte[].class), any());
-        // Sign-in issues no tokens in the authorization-code flow — it hands back a code, and the
+        // Sign-in issues no tokens in the authorization-code flow: it hands back a code, and the
         // token endpoint mints the tokens later. PreTokenGeneration therefore belongs to redemption,
         // not here; see the hostedAuth tests below.
         verify(lambdaService, never()).invoke(anyString(), eq("arn:aws:lambda:::pretoken"), any(byte[].class), any());
@@ -714,7 +714,8 @@ class CognitoLambdaTriggersTest {
                         "claimsToAddOrOverride", Map.of("tenant", "acme"),
                         "groupOverrideDetails", Map.of("groupsToOverride", List.of("admins"))))));
 
-        Map<String, Object> auth = service.generateAuthResultForHostedAuth(user, pool, client, null);
+        Map<String, Object> auth = service.generateAuthResultForHostedAuth(user, pool, client, null,
+                List.of("openid", "email"));
 
         Map<String, Object> event;
         Map<String, Object> idClaims;
@@ -728,6 +729,8 @@ class CognitoLambdaTriggersTest {
         }
         assertEquals("TokenGeneration_HostedAuth", event.get("triggerSource"),
                 "AWS uses TokenGeneration_HostedAuth for sign-in through the hosted UI");
+        assertEquals(List.of("openid", "email"), ((Map<String, Object>) event.get("request")).get("scopes"),
+                "a V2 lambda may branch on the scopes the authorization request asked for");
         assertEquals("acme", idClaims.get("tenant"), "the trigger's claims should reach the ID token");
         assertEquals("acme", accessClaims.get("tenant"), "the trigger's claims should reach the access token");
         assertEquals(List.of("admins"), accessClaims.get("cognito:groups"),
@@ -752,7 +755,7 @@ class CognitoLambdaTriggersTest {
 
         Map<String, Object> auth = service.generateAuthResultForHostedAuth(user, pool, client,
                 new CognitoService.ClaimsOverride(Map.of("nonce", "request-nonce"), null, null, null,
-                        null, null, null, null, null));
+                        null, null, null, null, null), List.of("openid"));
 
         Map<String, Object> idClaims;
         try {
@@ -774,7 +777,7 @@ class CognitoLambdaTriggersTest {
 
         Map<String, Object> auth = service.generateAuthResultForHostedAuth(user, pool, client,
                 new CognitoService.ClaimsOverride(Map.of("nonce", "request-nonce"), null, null, null,
-                        null, null, null, null, null));
+                        null, null, null, null, null), List.of("openid"));
 
         assertNotNull(auth.get("IdToken"));
         assertNotNull(auth.get("AccessToken"));

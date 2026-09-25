@@ -221,9 +221,12 @@ class CognitoManagedLoginIntegrationTest {
                 code(signIn(null, pool, authorizeRequest(pool.clientId()))), VERIFIER);
 
         tokens.then().statusCode(200);
-        assertEquals("TokenGeneration_HostedAuth",
-                MAPPER.readTree(event.getValue()).path("triggerSource").asText(),
+        JsonNode triggerEvent = MAPPER.readTree(event.getValue());
+        assertEquals("TokenGeneration_HostedAuth", triggerEvent.path("triggerSource").asText(),
                 "AWS uses TokenGeneration_HostedAuth for a sign-in through the hosted UI");
+        assertEquals(List.of("openid", "email"),
+                MAPPER.convertValue(triggerEvent.path("request").path("scopes"), List.class),
+                "the authorization request's scopes reach the trigger");
         JsonNode idToken = jwtPayload(tokens.path("id_token"));
         assertEquals("acme", idToken.path("tenant").asText(), "the trigger's claim should reach the ID token");
         assertEquals("client-nonce", idToken.path("nonce").asText(),

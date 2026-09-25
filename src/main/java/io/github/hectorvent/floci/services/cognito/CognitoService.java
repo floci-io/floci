@@ -3229,17 +3229,18 @@ public class CognitoService implements ResourceProvider {
 
     /**
      * Mints the tokens the OAuth token endpoint returns for a redeemed authorization code, firing
-     * PreTokenGeneration first — as AWS does for a hosted-UI sign-in — so a pool that customises its
+     * PreTokenGeneration first, as AWS does for a hosted-UI sign-in, so a pool that customises its
      * claims gets the same tokens here as it does from {@code InitiateAuth}.
      *
      * <p>{@code protocolClaims} carries claims the OIDC flow itself owns, currently the request's
      * {@code nonce}. They are applied <em>after</em> the trigger's, so a trigger cannot displace them:
      * AWS likewise refuses to let this trigger override {@code nonce} and the other reserved claims.
-     * Passing {@code null} for either side leaves the other's claims untouched.
+     * Passing {@code null} for either side leaves the other's claims untouched. {@code scopes} are the
+     * scopes the authorization request asked for, passed to the trigger so a V2 lambda can branch on them.
      */
     Map<String, Object> generateAuthResultForHostedAuth(CognitoUser user, UserPool pool, UserPoolClient client,
-                                                        ClaimsOverride protocolClaims) {
-        ClaimsOverride trigger = authFlowHandler.preTokenGenerationForHostedAuth(pool, client, user);
+                                                        ClaimsOverride protocolClaims, List<String> scopes) {
+        ClaimsOverride trigger = authFlowHandler.preTokenGenerationForHostedAuth(pool, client, user, scopes);
         return generateAuthResult(user, pool, client, mergeUnderProtocolClaims(trigger, protocolClaims));
     }
 
