@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.redshift;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
@@ -8,8 +9,9 @@ import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
-import io.github.hectorvent.floci.services.dynamodb.DynamoDbStreamService;
-import io.github.hectorvent.floci.services.dynamodb.model.StreamDescription;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbApiStreamReader;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbStreamReader.CheckpointLifetime;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerHandle;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerManager;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
@@ -33,6 +35,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -63,7 +67,7 @@ class RedshiftServiceTest {
     private DockerHostResolver dockerHostResolver;
     private RedshiftCredentialBroker credentialBroker;
     private SecretsManagerService secretsManagerService;
-    private DynamoDbStreamService streamService;
+    private final Set<String> existingStreams = new HashSet<>();
     private RedshiftService service;
 
     @BeforeEach
@@ -109,22 +113,27 @@ class RedshiftServiceTest {
 
         credentialBroker = new RedshiftCredentialBroker();
         secretsManagerService = mock(SecretsManagerService.class);
-        streamService = mock(DynamoDbStreamService.class);
+        ObjectMapper mapper = new ObjectMapper();
+        // Answers DescribeStream the way the native handler does: it throws for an unknown stream.
+        DynamoDbOperations streams = call -> {
+            String streamArn = call.body().path("StreamArn").asText();
+            if (!existingStreams.contains(streamArn)) {
+                throw new AwsException("ResourceNotFoundException", "Stream not found: " + streamArn, 400);
+            }
+            return new DynamoDbOperations.Reply(200, mapper.readTree("{\"StreamDescription\":{\"Shards\":[]}}"),
+                    Map.of());
+        };
 
         service = new RedshiftService(sf, cm, config, regionResolver, proxyManager, dockerHostResolver,
-                credentialBroker, secretsManagerService, new com.fasterxml.jackson.databind.ObjectMapper(),
-                streamService);
+                credentialBroker, secretsManagerService, mapper,
+                new DynamoDbApiStreamReader(streams, CheckpointLifetime.PROCESS));
     }
 
     @Test
     void createDynamoDbZeroEtlIntegrationRequiresExistingProvisionedResources() {
         String streamArn = "arn:aws:dynamodb:us-east-1:111111111111:table/orders/stream/2026-09-18T00:00:00.000";
         String targetArn = "arn:aws:redshift:us-east-1:111111111111:cluster:warehouse";
-        StreamDescription stream = new StreamDescription();
-        stream.setStreamArn(streamArn);
-        stream.setTableName("orders");
-        stream.setStreamStatus("ENABLED");
-        when(streamService.describeStream(streamArn)).thenReturn(stream);
+        existingStreams.add(streamArn);
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("warehouse");
         when(clusterBackend.get("warehouse")).thenReturn(Optional.of(cluster));
@@ -141,14 +150,47 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void createDynamoDbZeroEtlIntegrationRejectsAMissingStreamWithResourceNotFound() {
+        String streamArn = "arn:aws:dynamodb:us-east-1:111111111111:table/orders/stream/2026-09-18T00:00:00.000";
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createIntegration(
+                "orders-to-warehouse", streamArn, "arn:aws:redshift:us-east-1:111111111111:cluster:warehouse",
+                null, null, Map.of(), Map.of(), "us-east-1"));
+
+        assertEquals("ResourceNotFoundException", error.getErrorCode());
+        assertEquals("Stream not found: " + streamArn, error.getMessage());
+        assertEquals(400, error.getHttpStatus());
+        verify(integrationBackend, never()).put(any(), any());
+    }
+
+    @Test
+    void updateIntegrationRuntimeStoresACopyOfShardProgressOnlyOnSuccess() {
+        String integrationArn = "arn:aws:redshift:us-east-1:111111111111:integration:one";
+        Integration integration = new Integration();
+        integration.setIntegrationArn(integrationArn);
+        when(integrationBackend.keysForAccount("111111111111")).thenReturn(Set.of("one"));
+        when(integrationBackend.getForAccount("111111111111", "one")).thenReturn(Optional.of(integration));
+        Map<String, String> progress = new HashMap<>(Map.of("shard-1", "s1"));
+
+        service.updateIntegrationRuntime("111111111111", integrationArn, progress, true, null);
+        progress.put("shard-1", "s2");
+
+        assertEquals(Map.of("shard-1", "s1"), integration.getShardSequenceNumbers());
+        assertEquals("active", integration.getStatus());
+
+        service.updateIntegrationRuntime("111111111111", integrationArn, progress, false, "boom");
+
+        assertEquals(Map.of("shard-1", "s1"), integration.getShardSequenceNumbers());
+        assertEquals("failed", integration.getStatus());
+        assertEquals("boom", integration.getLastError());
+        verify(integrationBackend, times(2)).putForAccount("111111111111", "one", integration);
+    }
+
+    @Test
     void updateIntegrationBackfillProgressPersistsCheckpointAndFlipsStatusOnCompletion() {
         String streamArn = "arn:aws:dynamodb:us-east-1:111111111111:table/orders/stream/2026-09-18T00:00:00.000";
         String targetArn = "arn:aws:redshift:us-east-1:111111111111:cluster:warehouse";
-        StreamDescription stream = new StreamDescription();
-        stream.setStreamArn(streamArn);
-        stream.setTableName("orders");
-        stream.setStreamStatus("ENABLED");
-        when(streamService.describeStream(streamArn)).thenReturn(stream);
+        existingStreams.add(streamArn);
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("warehouse");
         when(clusterBackend.get("warehouse")).thenReturn(Optional.of(cluster));

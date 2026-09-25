@@ -34,7 +34,7 @@ public class DynamoDbStreamService {
 
     private static final Logger LOG = Logger.getLogger(DynamoDbStreamService.class);
 
-    public static final String SHARD_ID = "shardId-0000000001-00000000001";
+    static final String SHARD_ID = "shardId-0000000001-00000000001";
     static final int MAX_RECORDS = 1000;
     private static final String ZERO_SEQUENCE_NUMBER = "000000000000000000000";
 
@@ -231,7 +231,7 @@ public class DynamoDbStreamService {
         return result;
     }
 
-    public StreamDescription describeStream(String streamArn) {
+    StreamDescription describeStream(String streamArn) {
         for (StreamDescription sd : streams.values()) {
             if (streamArn.equals(sd.getStreamArn())) {
                 return sd;
@@ -241,8 +241,8 @@ public class DynamoDbStreamService {
                 "Stream not found: " + streamArn, 400);
     }
 
-    public String getShardIterator(String streamArn, String shardId,
-                                   String iteratorType, String sequenceNumber) {
+    String getShardIterator(String streamArn, String shardId,
+                            String iteratorType, String sequenceNumber) {
         StreamDescription sd = describeStream(streamArn);
         if (!"ENABLED".equals(sd.getStreamStatus()) && !"DISABLED".equals(sd.getStreamStatus())) {
             throw new AwsException("ResourceNotFoundException",
@@ -292,21 +292,9 @@ public class DynamoDbStreamService {
         return records.size();
     }
 
-    public record GetRecordsResult(List<DynamoDbStreamRecord> records, String nextShardIterator) {}
+    record GetRecordsResult(List<DynamoDbStreamRecord> records, String nextShardIterator) {}
 
-    /** Sequence number of the newest record still retained, or null when the stream holds none. */
-    public String latestSequenceNumber(String streamArn) {
-        ConcurrentLinkedDeque<DynamoDbStreamRecord> deque = records.get(streamArn);
-        if (deque == null) {
-            return null;
-        }
-        synchronized (deque) {
-            DynamoDbStreamRecord last = deque.peekLast();
-            return last == null ? null : last.getSequenceNumber();
-        }
-    }
-
-    public GetRecordsResult getRecords(String shardIterator, Integer limit) {
+    GetRecordsResult getRecords(String shardIterator, Integer limit) {
         String[] parts = decodeIterator(shardIterator);
         String streamArn = parts[0];
         String cursorSequence = parts[1];

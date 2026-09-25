@@ -1,6 +1,5 @@
 package io.github.hectorvent.floci.services.lambda;
 
-import io.github.hectorvent.floci.services.dynamodb.DynamoDbStreamService;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.json.JsonPath;
 import io.restassured.path.json.config.JsonPathConfig;
@@ -283,9 +282,10 @@ class EsmIntegrationTest {
                     {"TableName": "%s", "Item": {"pk": {"S": "%s"}}}
                     """.formatted(tableName, pk));
         }
+        String shardId = "shardId-0000000001-00000000001";
         String iterator = dynamoDb("DynamoDBStreams_20120810.GetShardIterator", """
                 {"StreamArn": "%s", "ShardId": "%s", "ShardIteratorType": "TRIM_HORIZON"}
-                """.formatted(streamArn, DynamoDbStreamService.SHARD_ID)).getString("ShardIterator");
+                """.formatted(streamArn, shardId)).getString("ShardIterator");
         String newestSequence = dynamoDb("DynamoDBStreams_20120810.GetRecords", """
                 {"ShardIterator": "%s"}
                 """.formatted(iterator)).getString("Records[-1].dynamodb.SequenceNumber");
@@ -309,7 +309,7 @@ class EsmIntegrationTest {
                 .path("UUID");
 
         assertEquals(newestSequence, esmStore.getForAccount(ACCOUNT_ID, uuid).orElseThrow()
-                .getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+                .getShardSequenceNumbers().get(shardId));
 
         given().delete(LAMBDA_BASE + "/event-source-mappings/" + uuid).then().statusCode(202);
         dynamoDb("DynamoDB_20120810.DeleteTable", "{\"TableName\": \"%s\"}".formatted(tableName));

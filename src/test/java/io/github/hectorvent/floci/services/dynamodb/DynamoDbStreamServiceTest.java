@@ -271,26 +271,6 @@ class DynamoDbStreamServiceTest {
         assertEquals("000000000000000000002", secondPage.records().get(0).getSequenceNumber());
     }
 
-    @Test
-    void latestSequenceNumberIsNullForAnUnknownOrEmptyStream() {
-        TableDefinition table = createTestTableWithStream();
-
-        assertNull(service.latestSequenceNumber(TABLE_ARN + "/stream/unknown"));
-        assertNull(service.latestSequenceNumber(table.getStreamArn()));
-    }
-
-    @Test
-    void latestSequenceNumberIsTheNewestRetainedRecord() throws Exception {
-        TableDefinition table = createTestTableWithStream();
-        service.enableStream(table.getTableName(), table.getTableArn(), "NEW_IMAGE", "us-east-1");
-        JsonNode item = mapper.readTree("{\"userId\":{\"S\":\"u1\"}}");
-
-        service.captureEvent("INSERT", null, item, table, "us-east-1");
-        service.captureEvent("MODIFY", item, item, table, "us-east-1");
-
-        assertEquals("000000000000000000002", service.latestSequenceNumber(table.getStreamArn()));
-    }
-
     private TableDefinition sharedNameTable(String accountId) {
         TableDefinition table = new TableDefinition(SHARED_TABLE,
                 List.of(new KeySchemaElement("userId", "HASH")),

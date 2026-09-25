@@ -79,8 +79,11 @@ Each stream record is written to a stable landing table named `floci_zetl_<integ
 The landing table stores the event id, event name, source, region, sequence number, creation time,
 and DynamoDB keys and images as JSON text. Record event ids are unique, so retries are idempotent.
 
-The integration consumer has its own stream checkpoint and does not share Lambda event source
-mapping state. Deleting an integration stops its consumer while retaining the landing table.
+The integration consumer keeps its own checkpoint for each stream shard and does not share Lambda
+event source mapping state. A batch is checkpointed only once it is written, so a failed write is
+retried with the same records. After a Floci restart the consumer resumes from the trim horizon,
+because native stream records are volatile. Deleting an integration stops its consumer while
+retaining the landing table.
 
 Items already present in the source table when `CreateIntegration` runs are backfilled into the
 landing table with a paginated `Scan`, one page per poll tick, and the scan resumes after a Floci

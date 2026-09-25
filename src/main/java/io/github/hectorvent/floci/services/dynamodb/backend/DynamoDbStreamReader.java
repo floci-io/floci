@@ -21,6 +21,9 @@ import java.util.Set;
  */
 public interface DynamoDbStreamReader {
 
+    /** The most records one GetRecords call returns, as AWS allows. */
+    int MAX_RECORDS_PER_READ = 1000;
+
     enum Position { TRIM_HORIZON, LATEST, AT_SEQUENCE_NUMBER, AFTER_SEQUENCE_NUMBER }
 
     /** How long committed progress stays valid: for this process only, or as long as the stream. */
@@ -43,7 +46,13 @@ public interface DynamoDbStreamReader {
 
     record Record(String sequenceNumber, JsonNode awsRecord) {}
 
-    record RecordsPage(List<Record> records, Cursor nextCursor) {}
+    record RecordsPage(List<Record> records, Cursor nextCursor) {
+
+        /** The shard was read to its end. */
+        public boolean closed() {
+            return records.isEmpty() && nextCursor == null;
+        }
+    }
 
     ShardsPage describeStream(Stream stream, String exclusiveStartShardId, Integer limit);
 
@@ -52,6 +61,34 @@ public interface DynamoDbStreamReader {
     RecordsPage getRecords(Cursor cursor, int limit);
 
     CheckpointLifetime checkpointLifetime();
+
+    /**
+     * Up to {@code limit} records after {@code committedSequence}, or from the trim horizon when
+     * nothing is committed, filled from as many reads as it needs. It stops early at the tip of an
+     * open shard or the end of a closed one. A trim on a later read returns what was already read.
+     */
+    default RecordsPage readAfter(Stream stream, String shardId, String committedSequence, int limit) {
+        Cursor cursor = committedSequence == null
+                ? getShardIterator(stream, shardId, Position.TRIM_HORIZON, null)
+                : getShardIterator(stream, shardId, Position.AFTER_SEQUENCE_NUMBER, committedSequence);
+        List<Record> records = new ArrayList<>();
+        RecordsPage page;
+        do {
+            try {
+                page = getRecords(cursor, Math.min(limit - records.size(), MAX_RECORDS_PER_READ));
+            } catch (AwsException e) {
+                if (!"TrimmedDataAccessException".equals(e.getErrorCode()) || records.isEmpty()) {
+                    throw e;
+                }
+                // The records already read are gone from the stream, so a later read being trimmed
+                // must not drop them; the next read after them surfaces the trim to the caller.
+                return new RecordsPage(List.copyOf(records), cursor);
+            }
+            records.addAll(page.records());
+            cursor = page.nextCursor();
+        } while (records.size() < limit && !page.records().isEmpty() && cursor != null);
+        return new RecordsPage(List.copyOf(records), cursor);
+    }
 
     /** Every shard of the stream, following {@code LastEvaluatedShardId} to the last page. */
     default List<Shard> shards(Stream stream) {
@@ -102,7 +139,7 @@ public interface DynamoDbStreamReader {
             while (cursor != null) {
                 RecordsPage page;
                 try {
-                    page = getRecords(cursor, 1000);
+                    page = getRecords(cursor, MAX_RECORDS_PER_READ);
                 } catch (AwsException e) {
                     if (!"TrimmedDataAccessException".equals(e.getErrorCode()) || reopenings == 3) {
                         throw e;

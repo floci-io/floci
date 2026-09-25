@@ -60,7 +60,8 @@ public final class DynamoDbApiStreamReader implements DynamoDbStreamReader {
 
     @Override
     public RecordsPage getRecords(Cursor cursor, int limit) {
-        ObjectNode body = JSON.objectNode().put("ShardIterator", cursor.token()).put("Limit", limit);
+        ObjectNode body = JSON.objectNode().put("ShardIterator", cursor.token())
+                .put("Limit", Math.min(limit, MAX_RECORDS_PER_READ));
         JsonNode reply = call(cursor.stream(), "GetRecords", body);
         List<Record> records = new ArrayList<>();
         for (JsonNode awsRecord : reply.path("Records")) {

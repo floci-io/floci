@@ -320,6 +320,131 @@ class DynamoDbApiStreamReaderTest {
     }
 
     @Test
+    void getRecordsCapsTheLimitAtTheAwsMaximum() throws Exception {
+        DynamoDbStreamReader reader = reader(call -> ok("{\"Records\":[],\"NextShardIterator\":\"it\"}"));
+
+        reader.getRecords(new Cursor(STREAM, "s1", "it"), 5000);
+
+        assertEquals(json("{\"ShardIterator\":\"it\",\"Limit\":1000}"), calls.get(0).body());
+    }
+
+    @Test
+    void readAfterStartsAtTheTrimHorizonWithoutACommittedSequenceAndAfterItOtherwise() throws Exception {
+        DynamoDbStreamReader reader = reader(call -> {
+            if ("GetShardIterator".equals(call.action())) {
+                return ok("{\"ShardIterator\":\"it\"}");
+            }
+            return "it".equals(call.body().path("ShardIterator").asText())
+                    ? ok("{\"Records\":[" + recordJson("7") + "],\"NextShardIterator\":\"next\"}")
+                    : ok("{\"Records\":[],\"NextShardIterator\":\"next\"}");
+        });
+
+        reader.readAfter(STREAM, "s1", null, 10);
+        assertEquals(json("{\"StreamArn\":\"" + STREAM_ARN
+                + "\",\"ShardId\":\"s1\",\"ShardIteratorType\":\"TRIM_HORIZON\"}"), calls.get(0).body());
+        assertEquals(json("{\"ShardIterator\":\"it\",\"Limit\":10}"), calls.get(1).body());
+        calls.clear();
+        RecordsPage page = reader.readAfter(STREAM, "s1", "5", 10);
+
+        assertEquals(json("{\"StreamArn\":\"" + STREAM_ARN
+                + "\",\"ShardId\":\"s1\",\"ShardIteratorType\":\"AFTER_SEQUENCE_NUMBER\",\"SequenceNumber\":\"5\"}"),
+                calls.get(0).body());
+        assertEquals(json("{\"ShardIterator\":\"it\",\"Limit\":10}"), calls.get(1).body());
+        assertEquals("7", page.records().get(0).sequenceNumber());
+    }
+
+    /** A shard of 3000 records whose iterator {@code at-N} reads after the Nth one. */
+    private DynamoDbStreamReader shardOf3000Records() {
+        return reader(call -> {
+            if ("GetShardIterator".equals(call.action())) {
+                return ok("{\"ShardIterator\":\"at-0\"}");
+            }
+            int after = Integer.parseInt(call.body().path("ShardIterator").asText().substring(3));
+            int end = Math.min(after + call.body().path("Limit").asInt(), 3000);
+            StringBuilder records = new StringBuilder();
+            for (int i = after + 1; i <= end; i++) {
+                records.append(i > after + 1 ? "," : "").append(recordJson(String.valueOf(i)));
+            }
+            return ok("{\"Records\":[" + records + "],\"NextShardIterator\":\"at-" + end + "\"}");
+        });
+    }
+
+    @Test
+    void readAfterFillsALimitAboveTheAwsMaximumFromSeveralReads() throws Exception {
+        RecordsPage page = shardOf3000Records().readAfter(STREAM, "s1", null, 2500);
+
+        assertEquals(List.of(1000, 1000, 500), calls.stream()
+                .filter(call -> "GetRecords".equals(call.action()))
+                .map(call -> call.body().path("Limit").asInt())
+                .toList());
+        assertEquals(2500, page.records().size());
+        assertEquals("1", page.records().get(0).sequenceNumber());
+        assertEquals("2500", page.records().get(2499).sequenceNumber());
+        assertEquals(new Cursor(STREAM, "s1", "at-2500"), page.nextCursor());
+    }
+
+    @Test
+    void readAfterKeepsTheRecordsAlreadyReadWhenALaterReadIsTrimmed() throws Exception {
+        List<String> firstPage = new ArrayList<>();
+        StringBuilder records = new StringBuilder();
+        for (int i = 1; i <= 1000; i++) {
+            firstPage.add(String.valueOf(i));
+            records.append(i > 1 ? "," : "").append(recordJson(String.valueOf(i)));
+        }
+        DynamoDbStreamReader reader = reader(call -> {
+            if ("GetShardIterator".equals(call.action())) {
+                return ok("{\"ShardIterator\":\"first\"}");
+            }
+            return "first".equals(call.body().path("ShardIterator").asText())
+                    ? ok("{\"Records\":[" + records + "],\"NextShardIterator\":\"second\"}")
+                    : trimmed();
+        });
+
+        RecordsPage page = reader.readAfter(STREAM, "s1", null, 1500);
+
+        assertEquals(firstPage, page.records().stream().map(DynamoDbStreamReader.Record::sequenceNumber).toList());
+        assertFalse(page.closed());
+    }
+
+    @Test
+    void readAfterReturnsWhatItReadAtTheTipOfAnOpenShardAndTheEndOfAClosedOne() throws Exception {
+        DynamoDbStreamReader reader = reader(call -> {
+            if ("GetShardIterator".equals(call.action())) {
+                return ok("{\"ShardIterator\":\"" + call.body().path("ShardId").asText() + "\"}");
+            }
+            return switch (call.body().path("ShardIterator").asText()) {
+                case "open" -> ok("{\"Records\":[" + recordJson("1") + "],\"NextShardIterator\":\"tip\"}");
+                case "tip" -> ok("{\"Records\":[],\"NextShardIterator\":\"tip-2\"}");
+                case "closing" -> ok("{\"Records\":[" + recordJson("2") + "],\"NextShardIterator\":null}");
+                default -> ok("{\"Records\":[],\"NextShardIterator\":null}");
+            };
+        });
+
+        RecordsPage open = reader.readAfter(STREAM, "open", null, 10);
+        RecordsPage closing = reader.readAfter(STREAM, "closing", null, 10);
+        RecordsPage closed = reader.readAfter(STREAM, "closed", null, 10);
+
+        assertEquals(List.of("1"), open.records().stream().map(DynamoDbStreamReader.Record::sequenceNumber).toList());
+        assertEquals(new Cursor(STREAM, "open", "tip-2"), open.nextCursor());
+        assertEquals(List.of("2"), closing.records().stream().map(DynamoDbStreamReader.Record::sequenceNumber).toList());
+        assertTrue(closed.closed());
+        assertEquals(List.of(10, 9, 10, 10), calls.stream()
+                .filter(call -> "GetRecords".equals(call.action()))
+                .map(call -> call.body().path("Limit").asInt())
+                .toList());
+    }
+
+    @Test
+    void aPageIsClosedOnlyWhenItHasNoRecordsAndNoNextCursor() throws Exception {
+        List<DynamoDbStreamReader.Record> one = List.of(new DynamoDbStreamReader.Record("7", json(recordJson("7"))));
+        Cursor next = new Cursor(STREAM, "s1", "next");
+
+        assertTrue(new RecordsPage(List.of(), null).closed());
+        assertFalse(new RecordsPage(List.of(), next).closed());
+        assertFalse(new RecordsPage(one, null).closed());
+    }
+
+    @Test
     void checkpointLifetimeEchoesTheConstructorValue() {
         DynamoDbOperations unused = call -> {
             throw new AssertionError("no call expected");

@@ -11,7 +11,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
-import io.github.hectorvent.floci.services.dynamodb.DynamoDbStreamService;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbStreamReader;
 import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerHandle;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerManager;
@@ -83,7 +83,7 @@ public class RedshiftService {
     private final RedshiftCredentialBroker credentialBroker;
     private final SecretsManagerService secretsManagerService;
     private final ObjectMapper objectMapper;
-    private final DynamoDbStreamService streamService;
+    private final DynamoDbStreamReader streamReader;
     // Proxy ports currently handed out, so allocateProxyPort never double-assigns within this JVM.
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
 
@@ -93,7 +93,7 @@ public class RedshiftService {
                             RedshiftProxyManager proxyManager, DockerHostResolver dockerHostResolver,
                             RedshiftCredentialBroker credentialBroker,
                             SecretsManagerService secretsManagerService, ObjectMapper objectMapper,
-                            DynamoDbStreamService streamService) {
+                            DynamoDbStreamReader streamReader) {
         this.clusters = storageFactory.create("redshift", "redshift-clusters.json", new TypeReference<Map<String, Cluster>>() {});
         this.snapshots = storageFactory.create("redshift", "redshift-snapshots.json", new TypeReference<Map<String, Snapshot>>() {});
         this.parameterGroups = storageFactory.create("redshift", "redshift-parameter-groups.json", new TypeReference<Map<String, ClusterParameterGroup>>() {});
@@ -108,7 +108,7 @@ public class RedshiftService {
         this.credentialBroker = credentialBroker;
         this.secretsManagerService = secretsManagerService;
         this.objectMapper = objectMapper;
-        this.streamService = streamService;
+        this.streamReader = streamReader;
     }
 
     RedshiftService(StorageFactory storageFactory, RedshiftContainerManager containerManager,
@@ -335,10 +335,10 @@ public class RedshiftService {
             throw new AwsException("InvalidParameterValue",
                     "SourceArn must identify a DynamoDB stream.", 400);
         }
-        if (streamService == null) {
+        if (streamReader == null) {
             throw new AwsException("InternalFailure", "DynamoDB stream service is unavailable.", 500);
         }
-        streamService.describeStream(sourceArn);
+        streamReader.describeStream(DynamoDbStreamReader.Stream.of(sourceArn), null, null);
         AwsArnUtils.Arn target = parseZeroEtlArn(targetArn, "Redshift cluster");
         if (!"redshift".equals(target.service()) || !target.resource().startsWith("cluster:")) {
             throw new AwsException("InvalidParameterValue",
@@ -378,7 +378,6 @@ public class RedshiftService {
         integration.setSourceStreamArn(sourceArn);
         integration.setTargetClusterIdentifier(clusterIdentifier);
         integration.setLandingTableName("floci_zetl_" + integrationId.replace('-', '_'));
-        integration.setCheckpointSequenceNumber(null);
         integration.setRetryCount(0);
         integration.setLastError(null);
         integration.setPollingEnabled(true);
@@ -467,7 +466,7 @@ public class RedshiftService {
     }
 
     public synchronized void updateIntegrationRuntime(String accountId, String integrationArn,
-                                                       String checkpointSequenceNumber,
+                                                       Map<String, String> shardSequenceNumbers,
                                                        boolean successful, String error) {
         for (String key : integrations.keysForAccount(accountId)) {
             Optional<Integration> stored = integrations.getForAccount(accountId, key);
@@ -476,7 +475,7 @@ public class RedshiftService {
             }
             Integration integration = stored.get();
             if (successful) {
-                integration.setCheckpointSequenceNumber(checkpointSequenceNumber);
+                integration.setShardSequenceNumbers(shardSequenceNumbers);
                 integration.setRetryCount(0);
                 integration.setLastError(null);
                 integration.setStatus("active");
