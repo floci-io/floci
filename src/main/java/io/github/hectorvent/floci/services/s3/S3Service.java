@@ -601,7 +601,12 @@ public class S3Service implements Resettable, ResourceProvider {
             // until the replacement body is on disk, so a failed write does not drop them.
             boolean[] dropPreVersioningAnnotations = {false};
             resolveObjectForAccount(bucketOwnerAccount, latestKey).ifPresent(prev -> {
-                if (prev.isLatest() && !prev.isDeleteMarker() && bucket.isObjectLockEnabled()) {
+                // Object Lock protects specific versions, not keys.
+                // On a versioned bucket, writing a new version is allowed even if the
+                // current version is locked. Only replacing a pre-versioning (null-version)
+                // object is denied because it replaces the locked entry entirely.
+                if (prev.isLatest() && !prev.isDeleteMarker() && bucket.isObjectLockEnabled()
+                        && prev.getVersionId() == null) {
                     checkLockProtection(prev, false);
                 }
                 if (prev.getVersionId() != null) {
@@ -1519,7 +1524,11 @@ public class S3Service implements Resettable, ResourceProvider {
         if (bucket.isVersioningEnabled() && versionId == null) {
             // Check lock on current latest before placing a delete marker
             objectStore.get(objectKey(bucketName, key)).ifPresent(prev -> {
-                if (!prev.isDeleteMarker()) {
+                // Object Lock protects specific versions, not keys.
+                // On a versioned bucket, creating a delete marker (new version) is allowed
+                // even if the current version is locked. Only permanent deletion of a
+                // locked version (with VersionId) is denied.
+                if (!prev.isDeleteMarker() && prev.getVersionId() == null) {
                     checkLockProtection(prev, bypassGovernance);
                 }
             });
