@@ -1441,8 +1441,7 @@ public class RdsQueryHandler {
         Boolean copyTags = parseOptionalBoolean(params, "CopyTags");
         DbSnapshot snapshot = service.copyDbSnapshot(
                 sourceId, targetId, Boolean.TRUE.equals(copyTags), parseTags(params),
-                params.getFirst("OptionGroupName"), params.getFirst("KmsKeyId"),
-                params.getFirst("SourceRegion"), params.getFirst("PreSignedUrl"), region);
+                params.getFirst("OptionGroupName"), params.getFirst("KmsKeyId"), region);
         return Response.ok(AwsQueryResponse.envelope(
                 "CopyDBSnapshot", AwsNamespaces.RDS, dbSnapshotXml(snapshot))).build();
     }

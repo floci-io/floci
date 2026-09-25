@@ -3361,9 +3361,11 @@ class RdsServiceTest {
         assertTrue(copy.isStorageEncrypted());
         assertTrue(copy.getRestoreAccountIds().isEmpty());
 
-        rdsService.restoreDbInstanceFromDbSnapshot(
+        knownKey("kms-key");
+        DbInstance restored = rdsService.restoreDbInstanceFromDbSnapshot(
                 "restored", "copy", "db.t3.micro", null, false,
                 null, null, Map.of(), "us-east-1");
+        assertEquals(KEY_ARN, restored.getKmsKeyId());
         verify(containerManager).restorePostgresSnapshot(any(), eq("admin"), eq("MOCK_DUMP_DATA"));
     }
 
@@ -3389,7 +3391,7 @@ class RdsServiceTest {
     }
 
     @Test
-    void copyDbSnapshotRequiresCrossRegionAuthorizationMetadata() {
+    void copyDbSnapshotFromAnotherRegionNeedsOnlyTheSourceArn() {
         rdsService.createDbInstance("source-db", "postgres", "13",
                 "admin", "password", "dbname", "db.t3.micro",
                 20, false, null, null, null, null, false,
@@ -3398,25 +3400,10 @@ class RdsServiceTest {
         DbSnapshot source = rdsService.createDbSnapshot(
                 "source", "source-db", Map.of(), "us-west-2");
 
-        AwsException missingAuthorization = assertThrows(AwsException.class, () ->
-                rdsService.copyDbSnapshot(source.getDbSnapshotArn(), "copy-missing", false,
-                        Map.of(), null, null, null, null, "us-east-1"));
-        assertEquals("InvalidParameterValue", missingAuthorization.getErrorCode());
-
-        AwsException mismatchedRegion = assertThrows(AwsException.class, () ->
-                rdsService.copyDbSnapshot(source.getDbSnapshotArn(), "copy-mismatch", false,
-                        Map.of(), null, null, "eu-west-1", null, "us-east-1"));
-        assertEquals("InvalidParameterValue", mismatchedRegion.getErrorCode());
-
-        DbSnapshot regionAuthorized = rdsService.copyDbSnapshot(
-                source.getDbSnapshotArn(), "copy-region", false, Map.of(),
-                null, null, "us-west-2", null, "us-east-1");
-        assertEquals(source.getDbSnapshotArn(), regionAuthorized.getSourceDbSnapshotIdentifier());
-
-        DbSnapshot preSigned = rdsService.copyDbSnapshot(
-                source.getDbSnapshotArn(), "copy-presigned", false, Map.of(),
-                null, null, null, "https://rds.us-west-2.amazonaws.com/", "us-east-1");
-        assertEquals(source.getDbSnapshotArn(), preSigned.getSourceDbSnapshotIdentifier());
+        DbSnapshot copy = rdsService.copyDbSnapshot(
+                source.getDbSnapshotArn(), "copy", false, Map.of(),
+                null, null, "us-east-1");
+        assertEquals(source.getDbSnapshotArn(), copy.getSourceDbSnapshotIdentifier());
     }
 
     @Test

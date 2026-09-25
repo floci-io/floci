@@ -1895,8 +1895,7 @@ class RdsQueryHandlerTest {
         snapshot.setStorageEncrypted(true);
         snapshot.setKmsKeyId("kms-key");
         when(service.copyDbSnapshot(eq("source"), eq("copy"), eq(true),
-                eq(Map.of("owner", "platform")), eq("custom-options"), eq("kms-key"),
-                eq("us-west-2"), eq("https://rds.us-west-2.amazonaws.com/"), isNull()))
+                eq(Map.of("owner", "platform")), eq("custom-options"), eq("kms-key"), isNull()))
                 .thenReturn(snapshot);
 
         MultivaluedMap<String, String> p = params();
@@ -1905,8 +1904,6 @@ class RdsQueryHandlerTest {
         p.add("CopyTags", "true");
         p.add("OptionGroupName", "custom-options");
         p.add("KmsKeyId", "kms-key");
-        p.add("SourceRegion", "us-west-2");
-        p.add("PreSignedUrl", "https://rds.us-west-2.amazonaws.com/");
         p.add("Tags.Tag.1.Key", "owner");
         p.add("Tags.Tag.1.Value", "platform");
         Response response = handler.handle("CopyDBSnapshot", p);
@@ -1918,8 +1915,7 @@ class RdsQueryHandlerTest {
         assertTrue(body.contains("<SourceDBSnapshotIdentifier>arn:aws:rds:us-east-1:123456789012:snapshot:source</SourceDBSnapshotIdentifier>"));
         assertTrue(body.contains("<Encrypted>true</Encrypted>"));
         verify(service).copyDbSnapshot("source", "copy", true,
-                Map.of("owner", "platform"), "custom-options", "kms-key",
-                "us-west-2", "https://rds.us-west-2.amazonaws.com/", null);
+                Map.of("owner", "platform"), "custom-options", "kms-key", null);
     }
 
     @Test
