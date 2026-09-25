@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.lambda.model.PendingInvocation;
 import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServer;
+import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -18,6 +19,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 
+import java.time.Duration;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
@@ -27,6 +29,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -331,19 +334,23 @@ class LambdaExecutorServiceTest {
         assertEquals(202, result.getStatusCode());
         assertTrue(routed.await(5, TimeUnit.SECONDS), "destination routing never ran");
         verify(warmPool, never()).acquire(any());
-        verify(router).route(eq(fn), eq(payload), any(), eq(1), eq(0), isNull());
+        ArgumentCaptor<InvokeResult> resultCaptor = ArgumentCaptor.forClass(InvokeResult.class);
+        verify(router).route(eq(fn), eq(payload), resultCaptor.capture(), eq(0), eq(0), isNull());
+        assertTrue(new String(resultCaptor.getValue().getPayload()).contains("EventAgeExceeded"),
+                "an event that expires before execution needs an expiration result");
     }
 
     @Test
-    void eventInvocation_reportsAgeExpirationWhenAgeExpiresBetweenAttempts() throws Exception {
+    void eventInvocation_preservesLastAttemptWhenAgeExpiresBetweenAttempts() throws Exception {
         AsyncInvokeDestinationRouter router = mock(AsyncInvokeDestinationRouter.class);
         LambdaService lambdaService = mock(LambdaService.class);
         FunctionEventInvokeConfig config = new FunctionEventInvokeConfig();
         config.setMaximumRetryAttempts(2);
         config.setMaximumEventAgeInSeconds(1);
         when(lambdaService.findEventInvokeConfig(fn, null)).thenReturn(Optional.of(config));
+        MutableClock clock = new MutableClock();
         LambdaExecutorService retryExecutor =
-                new LambdaExecutorService(warmPool, new ObjectMapper(), concurrencyLimiter, router, lambdaService);
+                new LambdaExecutorService(warmPool, new ObjectMapper(), concurrencyLimiter, router, lambdaService, clock);
 
         RuntimeApiServer rtas = mock(RuntimeApiServer.class);
         ContainerHandle handle = new ContainerHandle("cid-age-after-failure", "test-fn", rtas, ContainerState.WARM);
@@ -351,7 +358,7 @@ class LambdaExecutorServiceTest {
         InvokeResult failedAttempt = new InvokeResult(200, "Unhandled",
                 "{\"errorMessage\":\"fails\"}".getBytes(), null, "req-age");
         doAnswer(invocation -> {
-            Thread.sleep(1100);
+            clock.advance(Duration.ofSeconds(1));
             PendingInvocation pendingInvocation = invocation.getArgument(0);
             pendingInvocation.getResultFuture().complete(failedAttempt);
             return pendingInvocation.getResultFuture();
@@ -370,8 +377,8 @@ class LambdaExecutorServiceTest {
         assertTrue(routed.await(5, TimeUnit.SECONDS), "destination routing never ran");
         ArgumentCaptor<InvokeResult> resultCaptor = ArgumentCaptor.forClass(InvokeResult.class);
         verify(router).route(eq(fn), eq(payload), resultCaptor.capture(), eq(1), eq(0), isNull());
-        assertTrue(new String(resultCaptor.getValue().getPayload()).contains("EventAgeExceeded"),
-                "age expiration should replace the previous invocation error");
+        assertSame(failedAttempt, resultCaptor.getValue(),
+                "age expiration should preserve the last invocation result");
     }
 
     @Test

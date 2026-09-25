@@ -14,6 +14,7 @@ import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.time.Clock;
 import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -44,6 +45,7 @@ public class LambdaExecutorService {
     private final AsyncInvokeDestinationRouter destinationRouter;
     private final Instance<LambdaService> lambdaServiceInstance;
     private final LambdaService directLambdaService;
+    private final Clock clock;
     private final ExecutorService asyncExecutor = new ThreadPoolExecutor(
             Math.max(4, Runtime.getRuntime().availableProcessors() * 2),
             Math.max(8, Runtime.getRuntime().availableProcessors() * 4),
@@ -56,8 +58,9 @@ public class LambdaExecutorService {
                                  ObjectMapper objectMapper,
                                  LambdaConcurrencyLimiter concurrencyLimiter,
                                  AsyncInvokeDestinationRouter destinationRouter,
-                                 Instance<LambdaService> lambdaServiceInstance) {
-        this(warmPool, objectMapper, concurrencyLimiter, destinationRouter, lambdaServiceInstance, null);
+                                 Instance<LambdaService> lambdaServiceInstance,
+                                 Clock clock) {
+        this(warmPool, objectMapper, concurrencyLimiter, destinationRouter, lambdaServiceInstance, null, clock);
     }
 
     LambdaExecutorService(WarmPool warmPool,
@@ -65,7 +68,17 @@ public class LambdaExecutorService {
                           LambdaConcurrencyLimiter concurrencyLimiter,
                           AsyncInvokeDestinationRouter destinationRouter,
                           LambdaService directLambdaService) {
-        this(warmPool, objectMapper, concurrencyLimiter, destinationRouter, null, directLambdaService);
+        this(warmPool, objectMapper, concurrencyLimiter, destinationRouter, null, directLambdaService,
+                Clock.systemUTC());
+    }
+
+    LambdaExecutorService(WarmPool warmPool,
+                          ObjectMapper objectMapper,
+                          LambdaConcurrencyLimiter concurrencyLimiter,
+                          AsyncInvokeDestinationRouter destinationRouter,
+                          LambdaService directLambdaService,
+                          Clock clock) {
+        this(warmPool, objectMapper, concurrencyLimiter, destinationRouter, null, directLambdaService, clock);
     }
 
     private LambdaExecutorService(WarmPool warmPool,
@@ -73,20 +86,23 @@ public class LambdaExecutorService {
                                   LambdaConcurrencyLimiter concurrencyLimiter,
                                   AsyncInvokeDestinationRouter destinationRouter,
                                   Instance<LambdaService> lambdaServiceInstance,
-                                  LambdaService directLambdaService) {
+                                  LambdaService directLambdaService,
+                                  Clock clock) {
         this.warmPool = warmPool;
         this.objectMapper = objectMapper;
         this.concurrencyLimiter = concurrencyLimiter;
         this.destinationRouter = destinationRouter;
         this.lambdaServiceInstance = lambdaServiceInstance;
         this.directLambdaService = directLambdaService;
+        this.clock = clock;
     }
 
     /** Package-private constructor for testing without CDI, leaving destinations unrouted. */
     LambdaExecutorService(WarmPool warmPool,
                           ObjectMapper objectMapper,
                           LambdaConcurrencyLimiter concurrencyLimiter) {
-        this(warmPool, objectMapper, concurrencyLimiter, null, (Instance<LambdaService>) null, null);
+        this(warmPool, objectMapper, concurrencyLimiter, null, (Instance<LambdaService>) null, null,
+                Clock.systemUTC());
     }
 
     LambdaExecutorService(WarmPool warmPool,
@@ -94,7 +110,7 @@ public class LambdaExecutorService {
                           LambdaConcurrencyLimiter concurrencyLimiter,
                           AsyncInvokeDestinationRouter destinationRouter) {
         this(warmPool, objectMapper, concurrencyLimiter, destinationRouter,
-                (Instance<LambdaService>) null, null);
+                (Instance<LambdaService>) null, null, Clock.systemUTC());
     }
 
     public InvokeResult invoke(LambdaFunction fn, byte[] payload, InvocationType type) {
@@ -149,18 +165,16 @@ public class LambdaExecutorService {
             int maxEventAgeSeconds = eventInvokeConfig != null
                     && eventInvokeConfig.getMaximumEventAgeInSeconds() != null
                     ? eventInvokeConfig.getMaximumEventAgeInSeconds() : 21600;
-            long submitTimeMs = System.currentTimeMillis();
+            long submitTimeMs = clock.millis();
 
             try {
                 asyncExecutor.submit(() -> {
                     int attempt = 0;
-                    boolean eventAgeExceeded = false;
                     InvokeResult asyncResult = null;
                     try {
                         while (attempt <= maxRetries) {
-                            long elapsedSeconds = (System.currentTimeMillis() - submitTimeMs) / 1000;
+                            long elapsedSeconds = (clock.millis() - submitTimeMs) / 1000;
                             if (elapsedSeconds >= maxEventAgeSeconds) {
-                                eventAgeExceeded = true;
                                 break;
                             }
 
@@ -181,15 +195,13 @@ public class LambdaExecutorService {
                         permit.close();
                     }
                     if (destinationRouter != null) {
-                        if (eventAgeExceeded || asyncResult == null) {
-                            // Keep the expiration reason in the response payload. AWS documents
-                            // RetriesExhausted as the failure condition but does not confirm a
-                            // distinct condition for event-age expiration.
+                        if (asyncResult == null) {
+                            // This Floci-only placeholder covers expiry before any attempt; AWS documents no payload.
                             asyncResult = new InvokeResult(200, "Unhandled",
                                     buildErrorPayload("Event age exceeded", "EventAgeExceeded"),
                                     null, requestId);
                         }
-                        destinationRouter.route(fn, payload, asyncResult, Math.max(1, attempt),
+                        destinationRouter.route(fn, payload, asyncResult, attempt,
                                 chainDepth, invokedQualifier);
                     }
                 });
