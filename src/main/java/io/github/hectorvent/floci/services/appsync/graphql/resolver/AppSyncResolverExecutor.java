@@ -208,7 +208,7 @@ public class AppSyncResolverExecutor {
                 return result(earlyReturnValue);
             }
             List<FunctionConfiguration> functions = pipelineFunctions();
-                        previousResult = before;
+            previousResult = before;
 
             for (FunctionConfiguration function : functions) {
                 Stage functionStage = Stage.of(function);
