@@ -86,6 +86,9 @@ class AutoScalingTargetTrackingRoundTripIntegrationTest {
     /**
      * A customized metric can be defined by Metrics queries instead of MetricName, which is how
      * metric math reaches a target tracking policy. Those were accepted and never read back.
+     *
+     * <p>Each query carries its own Period, which the model keeps separate from the Period on its
+     * MetricStat.
      */
     @Test
     void aMetricsQuerySurvivesTheRoundTrip() {
@@ -97,6 +100,7 @@ class AutoScalingTargetTrackingRoundTripIntegrationTest {
                 "PolicyType", "TargetTrackingScaling",
                 "TargetTrackingConfiguration.TargetValue", "10",
                 q + "1.Id", "m1",
+                q + "1.Period", "10",
                 q + "1.ReturnData", "false",
                 q + "1.MetricStat.Stat", "Sum",
                 q + "1.MetricStat.Unit", "Count",
@@ -108,6 +112,7 @@ class AutoScalingTargetTrackingRoundTripIntegrationTest {
                 q + "2.Id", "e1",
                 q + "2.Expression", "m1 / 4",
                 q + "2.Label", "backlog per instance",
+                q + "2.Period", "30",
                 q + "2.ReturnData", "true")
             .statusCode(200);
 
@@ -121,7 +126,12 @@ class AutoScalingTargetTrackingRoundTripIntegrationTest {
             .body(containsString("<Id>e1</Id>"))
             .body(containsString("<Expression>m1 / 4</Expression>"))
             .body(containsString("<Label>backlog per instance</Label>"))
-            .body(containsString("<ReturnData>true</ReturnData>"));
+            .body(containsString("<ReturnData>true</ReturnData>"))
+            // The query's own Period and its MetricStat.Period are separate members, so all three
+            // values have to survive rather than one overwriting another.
+            .body(containsString("<Period>10</Period>"))
+            .body(containsString("<Period>30</Period>"))
+            .body(containsString("<Period>60</Period>"));
     }
 
     /** A bad Period is the client's error, and used to come back as InternalFailure. */

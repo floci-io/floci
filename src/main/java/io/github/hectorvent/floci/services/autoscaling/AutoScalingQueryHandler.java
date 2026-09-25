@@ -1048,6 +1048,8 @@ public class AutoScalingQueryHandler {
             query.setId(p.getFirst(base + "Id"));
             query.setExpression(p.getFirst(base + "Expression"));
             query.setLabel(p.getFirst(base + "Label"));
+            query.setPeriod(parseMetricPeriod(p.getFirst(base + "Period"),
+                    "Metrics.member." + i + ".Period"));
             query.setReturnData(parseOptionalBoolean(
                     p.getFirst(base + "ReturnData"), "ReturnData"));
             String stat = p.getFirst(base + "MetricStat.Stat");
@@ -1141,6 +1143,9 @@ public class AutoScalingQueryHandler {
             xml.start("member").elem("Id", query.getId());
             if (query.getExpression() != null) { xml.elem("Expression", query.getExpression()); }
             if (query.getLabel() != null) { xml.elem("Label", query.getLabel()); }
+            if (query.getPeriod() != null) {
+                xml.elem("Period", String.valueOf(query.getPeriod()));
+            }
             if (query.getReturnData() != null) {
                 xml.elem("ReturnData", String.valueOf(query.getReturnData()));
             }

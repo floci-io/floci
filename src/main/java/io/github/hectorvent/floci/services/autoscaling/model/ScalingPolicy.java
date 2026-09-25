@@ -119,6 +119,7 @@ public class ScalingPolicy {
         private String id;
         private String expression;
         private String label;
+        private Integer period;
         private Boolean returnData;
         private TargetTrackingMetricStat metricStat;
 
@@ -130,6 +131,9 @@ public class ScalingPolicy {
         public void setExpression(String v) { this.expression = v; }
         public String getLabel() { return label; }
         public void setLabel(String v) { this.label = v; }
+        /** The query's own Period, which the model keeps separate from MetricStat.Period. */
+        public Integer getPeriod() { return period; }
+        public void setPeriod(Integer v) { this.period = v; }
         public Boolean getReturnData() { return returnData; }
         public void setReturnData(Boolean v) { this.returnData = v; }
         public TargetTrackingMetricStat getMetricStat() { return metricStat; }
