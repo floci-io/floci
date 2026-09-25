@@ -484,6 +484,13 @@ idiom, AssertJ and `@DisplayName` in nearly every file. Follow the module you ar
 - Update docs when necessary
 - Explain missing tests when behavior changed but no automated coverage was added
 
+Branch every pull request off `main`, never off another pull request's branch. A PR whose base
+commit is not on `main` carries the commits beneath it in its own diff, which makes it unreviewable
+in isolation and is how work gets merged without reaching `main`. Maintainers only review a pull
+request that stands alone: if yours depends on another that has not merged yet, it waits, and you
+rebase it onto `main` once the one below it lands. Splitting a large change into a sequence is
+welcome, just open each part when the part before it has merged.
+
 Conventional commits:
 
 - `feat:`
