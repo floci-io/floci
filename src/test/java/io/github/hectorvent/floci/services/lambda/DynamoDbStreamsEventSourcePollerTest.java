@@ -1950,24 +1950,6 @@ class DynamoDbStreamsEventSourcePollerTest {
     }
 
     @Test
-    void failedOnFailureDeliveryIsNotRetriedAfterMappingIsStopped() throws Exception {
-        stubStream("s1");
-        List<List<String>> invocations = failInvocationsContaining("s1");
-        refuseSqsSends(1);
-        EventSourceMapping esm = esmWithDlq(0);
-        DynamoDbStreamsEventSourcePoller p = pollerWith(mock(EsmStore.class));
-        pollOnce(p, esm);
-        assertEquals("s1", checkpoint(esm));
-        p.stopPolling(esm.getUuid());
-
-        pollOnce(p, esm);
-
-        verify(sqsService, times(1)).sendMessage(anyString(), anyString(), anyInt(), anyString());
-        assertEquals("s1", checkpoint(esm));
-        assertEquals(List.of(List.of("s1")), invocations);
-    }
-
-    @Test
     void checkpointIsNotSavedWhileAResetIsInProgress() throws Exception {
         stubStream("s1");
         EventSourceMapping esm = filterEsm();

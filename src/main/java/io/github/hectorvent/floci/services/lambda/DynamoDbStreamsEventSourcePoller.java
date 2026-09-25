@@ -443,12 +443,8 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
             clearBatchState(key);
             return;
         }
-        boolean delivered = sendToOnFailureDestination(esm, shardId, failure.records(), failure.invokeResult(),
+        sendToOnFailureDestination(esm, shardId, failure.records(), failure.invokeResult(),
                 failure.invokeCount(), failure.condition());
-        if (!delivered) {
-            LOG.warnv("DynamoDB Streams ESM {0}: discarding {1} failed record(s) after OnFailure delivery failed",
-                    esm.getUuid(), failure.records().size());
-        }
         clearBatchState(key);
         advanceCheckpoint(esm, shardId, failure.advanceTo());
     }
@@ -565,18 +561,17 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
         return Math.min(pollIntervalMs * (1L << doublings), MAX_RETRY_BACKOFF_MS);
     }
 
-    /** Returns false only when the configured destination refused the batch. */
-    private boolean sendToOnFailureDestination(EventSourceMapping esm, String shardId,
-                                               List<DynamoDbStreamRecord> records,
-                                               InvokeResult invokeResult,
-                                               int invokeCount,
-                                               String condition) {
+    private void sendToOnFailureDestination(EventSourceMapping esm, String shardId,
+                                            List<DynamoDbStreamRecord> records,
+                                            InvokeResult invokeResult,
+                                            int invokeCount,
+                                            String condition) {
         if (esm.getDestinationConfig() == null || esm.getDestinationConfig().getOnFailure() == null) {
-            return true;
+            return;
         }
         String destinationArn = esm.getDestinationConfig().getOnFailure().getDestination();
         if (destinationArn == null || destinationArn.isBlank()) {
-            return true;
+            return;
         }
 
         try {
@@ -611,9 +606,7 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
         } catch (Exception e) {
             LOG.errorv("DynamoDB Streams ESM {0}: failed to send to OnFailure destination {1}; discarding records: {2}",
                     esm.getUuid(), destinationArn, e.getMessage());
-            return false;
         }
-        return true;
     }
 
     private String buildS3OnFailurePayload(EventSourceMapping esm, String shardId,
