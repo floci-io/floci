@@ -189,7 +189,8 @@ public class CognitoService implements ResourceProvider {
                 acmService,
                 new VerificationCodeService(storageFactory, clock),
                 new CognitoMessageDispatcher(sesService, snsService),
-                certificateManager
+                certificateManager,
+                clock
         );
     }
 
@@ -255,6 +256,32 @@ public class CognitoService implements ResourceProvider {
             VerificationCodeService verificationCodeService,
             CognitoMessageDispatcher messageDispatcher,
             TlsCertificateManager certificateManager) {
+        this(poolStore, clientStore, resourceServerStore, domainStore, identityProviderStore, userStore,
+                groupStore, revokedTokenStore, baseUrl, cloudFrontDomainSuffix, regionResolver, lambdaService,
+                acmService, verificationCodeService, messageDispatcher, certificateManager, Clock.systemUTC());
+    }
+
+    /**
+     * Full constructor accepting the {@link Clock} used to time-bound Cognito auth challenge
+     * sessions (see {@link CognitoAuthFlowHandler}). Production code reaches this through the
+     * {@code @Inject} constructor above with the CDI-managed clock; every other constructor here
+     * defaults to {@link Clock#systemUTC()} so existing call sites are unaffected.
+     */
+    CognitoService(StorageBackend<String, UserPool> poolStore,
+            StorageBackend<String, UserPoolClient> clientStore,
+            StorageBackend<String, ResourceServer> resourceServerStore,
+            StorageBackend<String, UserPoolDomain> domainStore,
+            StorageBackend<String, IdentityProvider> identityProviderStore,
+            StorageBackend<String, CognitoUser> userStore,
+            StorageBackend<String, CognitoGroup> groupStore,
+            StorageBackend<String, RevokedTokenInfo> revokedTokenStore,
+            String baseUrl,
+            String cloudFrontDomainSuffix,
+            RegionResolver regionResolver, LambdaService lambdaService, AcmService acmService,
+            VerificationCodeService verificationCodeService,
+            CognitoMessageDispatcher messageDispatcher,
+            TlsCertificateManager certificateManager,
+            Clock clock) {
         this.poolStore = poolStore;
         this.clientStore = clientStore;
         this.resourceServerStore = resourceServerStore;
@@ -271,7 +298,7 @@ public class CognitoService implements ResourceProvider {
         this.verificationCodeService = verificationCodeService;
         this.messageDispatcher = messageDispatcher;
         this.certificateManager = certificateManager;
-        this.authFlowHandler = new CognitoAuthFlowHandler(this, lambdaService, regionResolver);
+        this.authFlowHandler = new CognitoAuthFlowHandler(this, lambdaService, regionResolver, clock);
     }
 
     // ──────────────────────────── User Pools ────────────────────────────

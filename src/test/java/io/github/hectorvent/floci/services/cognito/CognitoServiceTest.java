@@ -32,6 +32,11 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
@@ -2374,6 +2379,139 @@ class CognitoServiceTest {
                                 "TIMESTAMP", "Wed Apr 8 12:00:00 UTC 2026"
                         )));
         assertEquals("NotAuthorizedException", ex.getErrorCode());
+    }
+
+    // =========================================================================
+    // Auth challenge session expiry
+    // =========================================================================
+
+    /** Local, controllable {@link Clock} mirroring VerificationCodeServiceTest's MutableClock. */
+    static final class MutableClock extends Clock {
+        private Instant now;
+
+        MutableClock(Instant start) {
+            this.now = start;
+        }
+
+        void advance(Duration duration) {
+            now = now.plus(duration);
+        }
+
+        @Override
+        public ZoneId getZone() {
+            return ZoneOffset.UTC;
+        }
+
+        @Override
+        public Clock withZone(ZoneId zone) {
+            return this;
+        }
+
+        @Override
+        public Instant instant() {
+            return now;
+        }
+    }
+
+    private CognitoService serviceWithClock(Clock clock) {
+        return new CognitoService(
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                "http://localhost:4566",
+                "cloudfront.net",
+                regionResolver,
+                null,
+                acmService,
+                null,
+                null,
+                null,
+                clock
+        );
+    }
+
+    @Test
+    void respondToAuthChallengeAfterSrpSessionExpiryRejects() {
+        MutableClock clock = new MutableClock(Instant.parse("2026-01-01T00:00:00Z"));
+        CognitoService clockedService = serviceWithClock(clock);
+        String password = "Password123!";
+        UserPool pool = clockedService.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        clockedService.adminCreateUser(pool.getId(), "bob", Map.of("email", "bob@example.com"), null);
+        clockedService.adminSetUserPassword(pool.getId(), "bob", password, true);
+        UserPoolClient client =
+                clockedService.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        Map<String, Object> initResult = clockedService.initiateAuth(client.getClientId(), "USER_SRP_AUTH",
+                Map.of("USERNAME", "bob", "SRP_A", "ABCDEF1234567890"));
+        String session = (String) initResult.get("Session");
+
+        clock.advance(Duration.ofMinutes(3).plusSeconds(1));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                clockedService.respondToAuthChallenge(client.getClientId(), "PASSWORD_VERIFIER", session,
+                        Map.of(
+                                "USERNAME", "bob",
+                                "PASSWORD_CLAIM_SIGNATURE", "any-sig",
+                                "TIMESTAMP", "Wed Apr 8 12:00:00 UTC 2026"
+                        )));
+        assertEquals("NotAuthorizedException", ex.getErrorCode());
+        assertEquals("Invalid session for the user, session is expired.", ex.getMessage());
+    }
+
+    @Test
+    void respondToAuthChallengeBeforeSrpSessionExpiryStillWorks() {
+        MutableClock clock = new MutableClock(Instant.parse("2026-01-01T00:00:00Z"));
+        CognitoService clockedService = serviceWithClock(clock);
+        String password = "Password123!";
+        UserPool pool = clockedService.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        clockedService.adminCreateUser(pool.getId(), "bob", Map.of("email", "bob@example.com"), null);
+        clockedService.adminSetUserPassword(pool.getId(), "bob", password, true);
+        UserPoolClient client =
+                clockedService.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        Map<String, Object> initResult = clockedService.initiateAuth(client.getClientId(), "USER_SRP_AUTH",
+                Map.of("USERNAME", "bob", "SRP_A", "ABCDEF1234567890"));
+        String session = (String) initResult.get("Session");
+
+        clock.advance(Duration.ofMinutes(2));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                clockedService.respondToAuthChallenge(client.getClientId(), "PASSWORD_VERIFIER", session,
+                        Map.of(
+                                "USERNAME", "bob",
+                                "PASSWORD_CLAIM_SIGNATURE", "invalid-sig",
+                                "TIMESTAMP", "Wed Apr 8 12:00:00 UTC 2026"
+                        )));
+        assertEquals("NotAuthorizedException", ex.getErrorCode());
+        assertNotEquals("Invalid session for the user, session is expired.", ex.getMessage(),
+                "a session still within AuthSessionValidity should fail signature checking, not expiry");
+    }
+
+    @Test
+    void respondToAuthChallengeAfterUserAuthPasswordSessionExpiryRejects() {
+        MutableClock clock = new MutableClock(Instant.parse("2026-01-01T00:00:00Z"));
+        CognitoService clockedService = serviceWithClock(clock);
+        UserPool pool = clockedService.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        clockedService.adminCreateUser(pool.getId(), "alice", Map.of("email", "alice@example.com"), "TempPass1!");
+        clockedService.adminSetUserPassword(pool.getId(), "alice", "Perm1234!", true);
+        UserPoolClient client = openClient(clockedService, pool.getId(), "c", false);
+
+        Map<String, Object> initResult = clockedService.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice", "PREFERRED_CHALLENGE", "PASSWORD"));
+        String session = (String) initResult.get("Session");
+
+        clock.advance(Duration.ofMinutes(3).plusSeconds(1));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                clockedService.respondToAuthChallenge(client.getClientId(), "PASSWORD", session,
+                        Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!")));
+        assertEquals("NotAuthorizedException", ex.getErrorCode());
+        assertEquals("Invalid session for the user, session is expired.", ex.getMessage());
     }
 
     // =========================================================================
