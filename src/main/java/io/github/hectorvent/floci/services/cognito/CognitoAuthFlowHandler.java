@@ -1397,6 +1397,23 @@ final class CognitoAuthFlowHandler {
         return firePreTokenGeneration(pool, client, user, Map.of(), "TokenGeneration_RefreshTokens");
     }
 
+    /**
+     * Fires PreTokenGeneration for a sign-in whose tokens the OAuth token endpoint mints when it
+     * redeems an authorization code — managed login and federated sign-in both land here.
+     *
+     * <p>Separate from {@link #issueTokens} because the authorization-code flow splits authentication
+     * from token issuance: the user authenticates at the authorize/login endpoints, and the tokens are
+     * minted later, on a different request, by whoever presents the code. PostAuthentication has
+     * already fired at sign-in, so only PreTokenGeneration is owed here.
+     *
+     * <p>AWS names this trigger source {@code TokenGeneration_HostedAuth}, which it uses for sign-in
+     * through the hosted UI regardless of whether the user is native or federated.
+     */
+    CognitoService.ClaimsOverride preTokenGenerationForHostedAuth(UserPool pool, UserPoolClient client,
+                                                                  CognitoUser user) {
+        return firePreTokenGeneration(pool, client, user, Map.of(), "TokenGeneration_HostedAuth");
+    }
+
     private static String resolveTriggerArn(UserPool pool, String triggerKey) {
         Map<String, Object> cfg = pool.getLambdaConfig();
         if (cfg == null) return null;

@@ -33,6 +33,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class CognitoOAuthControllerTest {
@@ -239,7 +241,7 @@ class CognitoOAuthControllerTest {
                 CLOCK.instant().plusSeconds(60)));
         when(cognitoService.describeUserPool(POOL_ID)).thenReturn(pool());
         when(cognitoService.adminGetUser(POOL_ID, "federated-user")).thenReturn(user());
-        when(cognitoService.generateAuthResult(any(CognitoUser.class), any(UserPool.class), eq(client), eq(null)))
+        when(cognitoService.generateAuthResultForHostedAuth(any(CognitoUser.class), any(UserPool.class), eq(client), eq(null)))
                 .thenReturn(Map.of("AccessToken", "access-token", "IdToken", "id-token", "RefreshToken", "refresh-token",
                         "ExpiresIn", 3600, "TokenType", "Bearer"));
 
@@ -391,7 +393,7 @@ class CognitoOAuthControllerTest {
     void tokenPutsTheNonceInTheIdTokenOnly() {
         String code = putAuthorizationCode("request-nonce", null);
         ArgumentCaptor<CognitoService.ClaimsOverride> override = ArgumentCaptor.forClass(CognitoService.ClaimsOverride.class);
-        when(cognitoService.generateAuthResult(any(CognitoUser.class), any(UserPool.class), eq(client), override.capture()))
+        when(cognitoService.generateAuthResultForHostedAuth(any(CognitoUser.class), any(UserPool.class), eq(client), override.capture()))
                 .thenReturn(Map.of("AccessToken", "access-token", "IdToken", "id-token", "RefreshToken", "refresh-token",
                         "ExpiresIn", 3600, "TokenType", "Bearer"));
 
@@ -401,6 +403,22 @@ class CognitoOAuthControllerTest {
         assertEquals(Map.of("nonce", "request-nonce"), override.getValue().idClaimsToAddOrOverride());
         assertNull(override.getValue().accessClaimsToAddOrOverride());
         assertNull(override.getValue().groupsToOverride());
+    }
+
+    /**
+     * Redemption must mint through the hosted-auth path, which is what fires PreTokenGeneration;
+     * the plain {@code generateAuthResult} does not, and using it here silently drops the trigger.
+     */
+    @Test
+    void tokenMintsThroughTheHostedAuthPathSoPreTokenGenerationFires() {
+        String code = putAuthorizationCode(null, null);
+
+        Response response = controller.token(null, requestContext(null), validAuthorizationCodeForm(code));
+
+        assertEquals(200, response.getStatus());
+        verify(cognitoService).generateAuthResultForHostedAuth(any(CognitoUser.class), any(UserPool.class), eq(client),
+                any());
+        verify(cognitoService, never()).generateAuthResult(any(CognitoUser.class), any(UserPool.class), any(), any());
     }
 
     private String putTransaction(String relyingPartyState) {
@@ -418,7 +436,7 @@ class CognitoOAuthControllerTest {
                 CLOCK.instant().plusSeconds(60)));
         when(cognitoService.describeUserPool(POOL_ID)).thenReturn(pool());
         when(cognitoService.adminGetUser(POOL_ID, "federated-user")).thenReturn(user());
-        when(cognitoService.generateAuthResult(any(CognitoUser.class), any(UserPool.class), eq(client), eq(null)))
+        when(cognitoService.generateAuthResultForHostedAuth(any(CognitoUser.class), any(UserPool.class), eq(client), eq(null)))
                 .thenReturn(Map.of("AccessToken", "access-token", "IdToken", "id-token", "RefreshToken", "refresh-token",
                         "ExpiresIn", 3600, "TokenType", "Bearer"));
         return code;

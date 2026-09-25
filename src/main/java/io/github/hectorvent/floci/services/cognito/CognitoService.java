@@ -3227,6 +3227,47 @@ public class CognitoService implements ResourceProvider {
         return generateAuthResult(user, pool, client, override, originJti);
     }
 
+    /**
+     * Mints the tokens the OAuth token endpoint returns for a redeemed authorization code, firing
+     * PreTokenGeneration first — as AWS does for a hosted-UI sign-in — so a pool that customises its
+     * claims gets the same tokens here as it does from {@code InitiateAuth}.
+     *
+     * <p>{@code protocolClaims} carries claims the OIDC flow itself owns, currently the request's
+     * {@code nonce}. They are applied <em>after</em> the trigger's, so a trigger cannot displace them:
+     * AWS likewise refuses to let this trigger override {@code nonce} and the other reserved claims.
+     * Passing {@code null} for either side leaves the other's claims untouched.
+     */
+    Map<String, Object> generateAuthResultForHostedAuth(CognitoUser user, UserPool pool, UserPoolClient client,
+                                                        ClaimsOverride protocolClaims) {
+        ClaimsOverride trigger = authFlowHandler.preTokenGenerationForHostedAuth(pool, client, user);
+        return generateAuthResult(user, pool, client, mergeUnderProtocolClaims(trigger, protocolClaims));
+    }
+
+    /**
+     * Layers {@code protocolClaims} over {@code trigger}, keeping every other field the trigger set
+     * (suppressions, groups, roles, scopes).
+     */
+    private static ClaimsOverride mergeUnderProtocolClaims(ClaimsOverride trigger, ClaimsOverride protocolClaims) {
+        if (trigger == null) return protocolClaims;
+        if (protocolClaims == null) return trigger;
+        return new ClaimsOverride(
+                claimsWithProtocolLast(trigger.idClaimsToAddOrOverride(), protocolClaims.idClaimsToAddOrOverride()),
+                trigger.idClaimsToSuppress(),
+                claimsWithProtocolLast(trigger.accessClaimsToAddOrOverride(), protocolClaims.accessClaimsToAddOrOverride()),
+                trigger.accessClaimsToSuppress(),
+                trigger.scopesToAdd(), trigger.scopesToSuppress(),
+                trigger.groupsToOverride(), trigger.iamRolesToOverride(), trigger.preferredRole());
+    }
+
+    private static Map<String, Object> claimsWithProtocolLast(Map<String, Object> triggerClaims,
+                                                              Map<String, Object> protocolClaims) {
+        if (protocolClaims == null || protocolClaims.isEmpty()) return triggerClaims;
+        if (triggerClaims == null || triggerClaims.isEmpty()) return protocolClaims;
+        Map<String, Object> merged = new HashMap<>(triggerClaims);
+        merged.putAll(protocolClaims);
+        return merged;
+    }
+
     Map<String, Object> generateAuthResult(CognitoUser user, UserPool pool, UserPoolClient client, ClaimsOverride override, String originJti) {
         Map<String, Object> auth = new HashMap<>();
         auth.put("AccessToken", generateSignedJwt(user, pool, "access", client, override, originJti));

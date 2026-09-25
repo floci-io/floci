@@ -694,7 +694,99 @@ class CognitoLambdaTriggersTest {
         assertEquals("alice", user.getUsername());
         verify(lambdaService).invoke(anyString(), eq("arn:aws:lambda:::pre"), any(byte[].class), any());
         verify(lambdaService).invoke(anyString(), eq("arn:aws:lambda:::post"), any(byte[].class), any());
+        // Sign-in issues no tokens in the authorization-code flow — it hands back a code, and the
+        // token endpoint mints the tokens later. PreTokenGeneration therefore belongs to redemption,
+        // not here; see the hostedAuth tests below.
         verify(lambdaService, never()).invoke(anyString(), eq("arn:aws:lambda:::pretoken"), any(byte[].class), any());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void preTokenGenerationFiresWhenTheTokenEndpointRedeemsAnAuthorizationCode() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreTokenGeneration", "arn:aws:lambda:::pre-token"));
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = createClient(pool);
+        CognitoUser user = service.adminGetUser(pool.getId(), "alice");
+
+        ArgumentCaptor<byte[]> payloadCap = ArgumentCaptor.forClass(byte[].class);
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-token"), payloadCap.capture(), any()))
+                .thenReturn(ok(Map.of("claimsOverrideDetails", Map.of(
+                        "claimsToAddOrOverride", Map.of("tenant", "acme"),
+                        "groupOverrideDetails", Map.of("groupsToOverride", List.of("admins"))))));
+
+        Map<String, Object> auth = service.generateAuthResultForHostedAuth(user, pool, client, null);
+
+        Map<String, Object> event;
+        Map<String, Object> idClaims;
+        Map<String, Object> accessClaims;
+        try {
+            event = MAPPER.readValue(payloadCap.getValue(), new TypeReference<>() {});
+            idClaims = MAPPER.readValue(decodeJwtPayload((String) auth.get("IdToken")), new TypeReference<>() {});
+            accessClaims = MAPPER.readValue(decodeJwtPayload((String) auth.get("AccessToken")), new TypeReference<>() {});
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+        assertEquals("TokenGeneration_HostedAuth", event.get("triggerSource"),
+                "AWS uses TokenGeneration_HostedAuth for sign-in through the hosted UI");
+        assertEquals("acme", idClaims.get("tenant"), "the trigger's claims should reach the ID token");
+        assertEquals("acme", accessClaims.get("tenant"), "the trigger's claims should reach the access token");
+        assertEquals(List.of("admins"), accessClaims.get("cognito:groups"),
+                "groupOverrideDetails should apply on redemption as it does on InitiateAuth");
+    }
+
+    /**
+     * The OIDC flow owns {@code nonce}, and AWS lists it among the claims this trigger cannot
+     * override or suppress. A trigger that tries must not displace the request's value.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void redemptionKeepsTheRequestNonceOverATriggerThatTriesToChangeIt() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreTokenGeneration", "arn:aws:lambda:::pre-token"));
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = createClient(pool);
+        CognitoUser user = service.adminGetUser(pool.getId(), "alice");
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-token"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of("claimsOverrideDetails", Map.of(
+                        "claimsToAddOrOverride", Map.of("nonce", "trigger-nonce", "tier", "gold"),
+                        "claimsToSuppress", List.of("nonce")))));
+
+        Map<String, Object> auth = service.generateAuthResultForHostedAuth(user, pool, client,
+                new CognitoService.ClaimsOverride(Map.of("nonce", "request-nonce"), null, null, null,
+                        null, null, null, null, null));
+
+        Map<String, Object> idClaims;
+        try {
+            idClaims = MAPPER.readValue(decodeJwtPayload((String) auth.get("IdToken")), new TypeReference<>() {});
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+        assertEquals("request-nonce", idClaims.get("nonce"),
+                "the authorization request's nonce must survive a trigger that overrides or suppresses it");
+        assertEquals("gold", idClaims.get("tier"), "the trigger's other claims should still apply");
+    }
+
+    @Test
+    void redemptionMintsTokensWhenNoPreTokenGenerationTriggerIsConfigured() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of());
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = createClient(pool);
+        CognitoUser user = service.adminGetUser(pool.getId(), "alice");
+
+        Map<String, Object> auth = service.generateAuthResultForHostedAuth(user, pool, client,
+                new CognitoService.ClaimsOverride(Map.of("nonce", "request-nonce"), null, null, null,
+                        null, null, null, null, null));
+
+        assertNotNull(auth.get("IdToken"));
+        assertNotNull(auth.get("AccessToken"));
+        assertNotNull(auth.get("RefreshToken"));
+        Map<String, Object> idClaims;
+        try {
+            idClaims = MAPPER.readValue(decodeJwtPayload((String) auth.get("IdToken")), new TypeReference<>() {});
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+        assertEquals("request-nonce", idClaims.get("nonce"));
+        verify(lambdaService, never()).invoke(anyString(), anyString(), any(byte[].class), any());
     }
 
     @Test
