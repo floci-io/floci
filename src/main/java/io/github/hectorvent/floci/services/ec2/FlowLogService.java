@@ -28,12 +28,12 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.zip.GZIPOutputStream;
 
 /**
@@ -87,8 +87,13 @@ public class FlowLogService {
             Map.entry("pkt-src-aws-service", 5), Map.entry("pkt-dst-aws-service", 5),
             Map.entry("flow-direction", 5), Map.entry("traffic-path", 5));
 
-    /** One ${field-name} token of a LogFormat. */
-    private static final Pattern FIELD_TOKEN = Pattern.compile("\\$\\{([a-z0-9-]+)\\}");
+    /**
+     * One ${field-name} token of a LogFormat.
+     *
+     * <p>Deliberately not restricted to the fields below. A token this emulator does not recognise
+     * still names a column the caller asked for, and matching it keeps that column in place.
+     */
+    private static final Pattern FIELD_TOKEN = Pattern.compile("\\$\\{([^}\\s]+)\\}");
 
     /**
      * The fields a flow log created without a LogFormat delivers, read from the same constant the
@@ -355,11 +360,19 @@ public class FlowLogService {
         return List.copyOf(fields);
     }
 
-    /** The version AWS numbers a format by, which is the highest any of its fields belongs to. */
+    /**
+     * The version AWS numbers a format by, which is the highest any of its fields belongs to.
+     *
+     * <p>{@link #FIELD_VERSIONS} is complete through version 5, so a field missing from it belongs
+     * to a later version, and one this emulator has no value for either. Such a field counts as
+     * the highest version the table does define rather than the lowest, which would report 2 for a
+     * record that plainly is not a version 2 one.
+     */
     private static String formatVersion(List<String> fields) {
+        int highestKnown = FIELD_VERSIONS.values().stream().mapToInt(Integer::intValue).max().orElse(2);
         int version = 2;
         for (String field : fields) {
-            version = Math.max(version, FIELD_VERSIONS.getOrDefault(field, 2));
+            version = Math.max(version, FIELD_VERSIONS.getOrDefault(field, highestKnown));
         }
         return String.valueOf(version);
     }

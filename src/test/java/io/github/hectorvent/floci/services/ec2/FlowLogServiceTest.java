@@ -100,8 +100,7 @@ class FlowLogServiceTest {
         List<String> lines = deliver("${srcaddr} ${dstaddr} ${action}");
 
         assertEquals("srcaddr dstaddr action", lines.get(0));
-        assertFalse(lines.size() < 2, "expected at least one record");
-        for (String row : lines.subList(1, lines.size())) {
+        for (String row : records(lines)) {
             assertEquals(3, row.split(" ").length, "row does not match the header: " + row);
             assertTrue(row.endsWith(" ACCEPT"), "action is not the last field: " + row);
         }
@@ -113,7 +112,7 @@ class FlowLogServiceTest {
         List<String> lines = deliver(null);
 
         assertEquals(String.join(" ", FlowLogService.DEFAULT_FIELDS), lines.get(0));
-        for (String row : lines.subList(1, lines.size())) {
+        for (String row : records(lines)) {
             String[] columns = row.split(" ");
             assertEquals(FlowLogService.DEFAULT_FIELDS.size(), columns.length,
                     "row does not match the header: " + row);
@@ -127,7 +126,7 @@ class FlowLogServiceTest {
         List<String> lines = deliver("${version} ${flow-direction}");
 
         assertEquals("version flow-direction", lines.get(0));
-        for (String row : lines.subList(1, lines.size())) {
+        for (String row : records(lines)) {
             assertEquals("5", row.split(" ")[0], "version did not follow the fields: " + row);
         }
     }
@@ -143,9 +142,49 @@ class FlowLogServiceTest {
         List<String> lines = deliver("${srcaddr} ${ecs-cluster-arn} ${action}");
 
         assertEquals("srcaddr ecs-cluster-arn action", lines.get(0));
-        for (String row : lines.subList(1, lines.size())) {
+        for (String row : records(lines)) {
             assertEquals("-", row.split(" ")[1], "unsupported field is not a dash: " + row);
         }
+    }
+
+    /**
+     * A token spelled in a way this emulator does not recognise still holds its column.
+     *
+     * <p>The token pattern once matched lowercase names only, so a format naming ${DSTADDR} lost
+     * that column from both the header and every row, delivering a narrower file than the caller
+     * asked for.
+     */
+    @Test
+    void anUnrecognisedTokenSpellingKeepsItsColumn() throws Exception {
+        List<String> lines = deliver("${srcaddr} ${DSTADDR} ${action}");
+
+        assertEquals("srcaddr DSTADDR action", lines.get(0));
+        for (String row : records(lines)) {
+            assertEquals(3, row.split(" ").length, "row does not match the header: " + row);
+            assertEquals("-", row.split(" ")[1], "unrecognised token is not a dash: " + row);
+        }
+    }
+
+    /**
+     * A field outside the version table counts as the highest version that table defines.
+     *
+     * <p>The table is complete through version 5, so an unlisted field belongs to a later one.
+     * Counting it as version 2 would label a record that plainly is not a version 2 record.
+     */
+    @Test
+    void anUnlistedFieldDoesNotReportVersionTwo() throws Exception {
+        List<String> lines = deliver("${version} ${ecs-cluster-arn}");
+
+        assertEquals("version ecs-cluster-arn", lines.get(0));
+        for (String row : records(lines)) {
+            assertEquals("5", row.split(" ")[0], "version fell back to 2: " + row);
+        }
+    }
+
+    /** The record lines of a delivered file, which must not be empty. */
+    private static List<String> records(List<String> lines) {
+        assertFalse(lines.size() < 2, "delivery carried a header and no records");
+        return lines.subList(1, lines.size());
     }
 
     /** Deliver one file for a flow log with this LogFormat and return its lines. */
