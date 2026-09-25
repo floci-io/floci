@@ -87,12 +87,12 @@ public class DynamoDbService implements ResourceProvider {
      * View type applied when a stream is requested without an explicit StreamViewType.
      *
      * <p>Not an AWS default: the CloudFormation schema marks StreamViewType required inside
-     * StreamSpecification, and the DynamoDB API documents no default either. This mirrors the
-     * lenient handling {@code DynamoDbJsonHandler} already applies on CreateTable/UpdateTable
-     * ({@code path("StreamViewType").asText("NEW_AND_OLD_IMAGES")}), so an under-specified
-     * template gets a working stream instead of a rejection, and every entry point agrees.
+     * StreamSpecification, and the DynamoDB API documents no default either.
+     * {@link NativeDynamoDbTableService} applies the same fallback on CreateTable/UpdateTable, so
+     * an under-specified template gets a working stream instead of a rejection, and every entry
+     * point agrees.
      */
-    private static final String DEFAULT_STREAM_VIEW_TYPE = "NEW_AND_OLD_IMAGES";
+    static final String DEFAULT_STREAM_VIEW_TYPE = "NEW_AND_OLD_IMAGES";
 
     private final StorageBackend<String, TableDefinition> tableStore;
     private final StorageBackend<String, Map<String, JsonNode>> itemStore;
@@ -757,11 +757,11 @@ public class DynamoDbService implements ResourceProvider {
      * Turns on the table's stream and persists the result, so DescribeTable reports
      * StreamSpecification / LatestStreamArn and event source mappings can find the stream.
      *
-     * <p>Callers that reach DynamoDB through the service rather than the JSON handler — notably
-     * CloudFormation provisioning — need this: the handler enables the stream inline on
+     * <p>Callers that reach DynamoDB through this service directly, notably CloudFormation
+     * provisioning, need this: {@link NativeDynamoDbTableService} enables the stream inline on
      * CreateTable/UpdateTable, and without an equivalent entry point a table created by any other
      * path is left streamless. A null {@code viewType} falls back to
-     * {@link #DEFAULT_STREAM_VIEW_TYPE}, matching the leniency the JSON handler already applies
+     * {@link #DEFAULT_STREAM_VIEW_TYPE}, matching the leniency CreateTable/UpdateTable already apply
      * rather than any documented AWS default.
      *
      * @return the updated table, or the unchanged table when no stream service is wired.

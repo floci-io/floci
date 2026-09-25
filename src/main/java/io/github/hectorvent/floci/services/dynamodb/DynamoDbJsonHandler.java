@@ -8,6 +8,12 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsJsonController;
+import io.github.hectorvent.floci.services.dynamodb.NativeDynamoDbTableService.CreateTableRequest;
+import io.github.hectorvent.floci.services.dynamodb.NativeDynamoDbTableService.GsiThroughputUpdate;
+import io.github.hectorvent.floci.services.dynamodb.NativeDynamoDbTableService.OnDemandThroughput;
+import io.github.hectorvent.floci.services.dynamodb.NativeDynamoDbTableService.TableSettings;
+import io.github.hectorvent.floci.services.dynamodb.NativeDynamoDbTableService.Throughput;
+import io.github.hectorvent.floci.services.dynamodb.NativeDynamoDbTableService.UpdateTableRequest;
 import io.github.hectorvent.floci.services.dynamodb.model.*;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -24,25 +30,28 @@ import java.util.function.Supplier;
 @ApplicationScoped
 public class DynamoDbJsonHandler {
 
-    private static final String DEFAULT_ACCOUNT_ID = "000000000000";
     private static final String SSE_TYPE_KMS = "KMS";
-    private static final Set<String> VALID_SSE_TYPES = Set.of("AES256", "KMS");
 
     private final DynamoDbService dynamoDbService;
-    private final DynamoDbStreamService dynamoDbStreamService;
-    private final KinesisService kinesisService;
+    private final NativeDynamoDbTableService tableService;
     private final ObjectMapper objectMapper;
     private final DynamoDbPartiQLHandler partiQLHandler;
     private final Object importLock = new Object();
 
     @Inject
-    public DynamoDbJsonHandler(DynamoDbService dynamoDbService, DynamoDbStreamService dynamoDbStreamService,
-                               KinesisService kinesisService, ObjectMapper objectMapper) {
+    public DynamoDbJsonHandler(DynamoDbService dynamoDbService, NativeDynamoDbTableService tableService,
+                               ObjectMapper objectMapper) {
         this.dynamoDbService = dynamoDbService;
-        this.dynamoDbStreamService = dynamoDbStreamService;
-        this.kinesisService = kinesisService;
+        this.tableService = tableService;
         this.objectMapper = objectMapper;
         this.partiQLHandler = new DynamoDbPartiQLHandler(dynamoDbService, objectMapper);
+    }
+
+    /** Package-private constructor for testing. */
+    DynamoDbJsonHandler(DynamoDbService dynamoDbService, DynamoDbStreamService dynamoDbStreamService,
+                        KinesisService kinesisService, ObjectMapper objectMapper) {
+        this(dynamoDbService, new NativeDynamoDbTableService(dynamoDbService, dynamoDbStreamService, kinesisService),
+                objectMapper);
     }
 
     public Response handle(String action, JsonNode request, String region) throws Exception {
@@ -123,12 +132,11 @@ public class DynamoDbJsonHandler {
                         ad.path("AttributeName").asText(),
                         ad.path("AttributeType").asText())));
 
-        Long readCapacity = null;
-        Long writeCapacity = null;
         JsonNode pt = request.path("ProvisionedThroughput");
+        Throughput throughput = null;
         if (!pt.isMissingNode()) {
-            readCapacity = pt.path("ReadCapacityUnits").asLong(5);
-            writeCapacity = pt.path("WriteCapacityUnits").asLong(5);
+            throughput = new Throughput(
+                    pt.path("ReadCapacityUnits").asLong(5), pt.path("WriteCapacityUnits").asLong(5));
         }
 
         List<GlobalSecondaryIndex> gsis = new ArrayList<>();
@@ -208,107 +216,56 @@ public class DynamoDbJsonHandler {
             }
         }
 
-        String billingMode = request.has("BillingMode")
-                ? request.get("BillingMode").asText() : null;
-
-        boolean deletionProtection = request.path("DeletionProtectionEnabled").asBoolean(false);
-
-        // Parsed and validated before createTable below: that call and the stream-enable that
-        // follows it both have side effects, so an invalid SSEType must fail before either runs
-        // rather than after, or ValidationException would leave a real table (and stream) behind.
-        JsonNode sseSpec = request.path("SSESpecification");
-        boolean sseEnabled = !sseSpec.isMissingNode() && sseSpec.path("Enabled").asBoolean(false);
-        String sseType = sseEnabled ? sseSpec.path("SSEType").asText(SSE_TYPE_KMS) : null;
-        if (sseEnabled) {
-            validateSseType(sseType);
-        }
-
-        if ("PAY_PER_REQUEST".equals(billingMode) && !pt.isMissingNode()) {
-            throw new AwsException("ValidationException",
-                    "One or more parameter values were invalid: Neither ReadCapacityUnits nor WriteCapacityUnits "
-                    + "can be specified when BillingMode is PAY_PER_REQUEST", 400);
-        }
-
-        JsonNode streamSpecCheck = request.path("StreamSpecification");
-        if (streamSpecCheck.isObject() && !streamSpecCheck.path("StreamEnabled").asBoolean(false)
-                && streamSpecCheck.hasNonNull("StreamViewType")) {
-            throw new AwsException("ValidationException",
-                    "One or more parameter values were invalid: Table is being created with a stream "
-                    + "disabled, UpdateViewType should not be specified", 400);
-        }
-
-        TableDefinition table = dynamoDbService.createTable(tableName, keySchema, attrDefs,
-                readCapacity, writeCapacity, gsis, lsis, vectorIndexes, billingMode, region);
-        table.setTableStatus(initialStatus);
-
-        table.setDeletionProtectionEnabled(deletionProtection);
-
-        if ("PAY_PER_REQUEST".equals(billingMode)) {
-            table.setBillingMode("PAY_PER_REQUEST");
-            table.getProvisionedThroughput().setReadCapacityUnits(0L);
-            table.getProvisionedThroughput().setWriteCapacityUnits(0L);
-        } else {
-            table.setBillingMode("PROVISIONED");
-        }
-
-        if (request.has("TableClass")) {
-            table.setTableClass(request.get("TableClass").asText());
-        }
-
-        JsonNode onDemand = request.path("OnDemandThroughput");
-        if (onDemand.isObject()) {
-            if (onDemand.has("MaxReadRequestUnits")) {
-                table.setOnDemandMaxReadRequestUnits(onDemand.get("MaxReadRequestUnits").asInt());
-            }
-            if (onDemand.has("MaxWriteRequestUnits")) {
-                table.setOnDemandMaxWriteRequestUnits(onDemand.get("MaxWriteRequestUnits").asInt());
-            }
-        }
-
-        // Store tags from CreateTable request
+        Map<String, String> tags = new LinkedHashMap<>();
         JsonNode tagsNode = request.path("Tags");
         if (tagsNode.isArray()) {
             for (JsonNode tag : tagsNode) {
-                table.getTags().put(tag.path("Key").asText(), tag.path("Value").asText());
+                tags.put(tag.path("Key").asText(), tag.path("Value").asText());
             }
         }
 
-        JsonNode streamSpec = request.path("StreamSpecification");
-        if (!streamSpec.isMissingNode() && streamSpec.path("StreamEnabled").asBoolean(false)) {
-            String viewType = streamSpec.path("StreamViewType").asText("NEW_AND_OLD_IMAGES");
-            StreamDescription sd = dynamoDbStreamService.enableStream(
-                    tableName, table.getTableArn(), viewType, region);
-            table.setStreamEnabled(true);
-            table.setStreamArn(sd.getStreamArn());
-            table.setStreamViewType(viewType);
-        }
-
-        if (sseEnabled) {
-            table.setSseEnabled(true);
-            table.setSseType(sseType);
-            if (SSE_TYPE_KMS.equals(sseType)) {
-                JsonNode kmsMasterKeyId = sseSpec.path("KMSMasterKeyId");
-                table.setKmsMasterKeyArn(!kmsMasterKeyId.isMissingNode() && !kmsMasterKeyId.isNull()
-                        ? kmsMasterKeyId.asText()
-                        : defaultKmsMasterKeyArn(region));
-            }
-        }
-
-        // Everything above mutates the table AFTER createTable stored it, and a persistent
-        // backend serializes on write rather than holding the live object. Flush once so the
-        // stream, billing, class, tag and SSE settings survive a restart -- stream state
-        // especially, since startup rebuilds streams from the persisted table.
-        dynamoDbService.persistTable(tableName, table, region);
-        return table;
+        return tableService.createTable(new CreateTableRequest(tableName, keySchema, attrDefs,
+                throughput, gsis, lsis, vectorIndexes, tags, parseTableSettings(request)), initialStatus, region);
     }
 
-    private void validateSseType(String sseType) {
-        if (!VALID_SSE_TYPES.contains(sseType)) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + sseType
-                    + "' at 'sSESpecification.sSEType' failed to satisfy constraint: "
-                    + "Member must satisfy enum value set: [AES256, KMS]", 400);
+    /**
+     * The table-level settings CreateTable and UpdateTable share. A member absent from the request
+     * is null; the service applies the per-operation defaults.
+     */
+    private static TableSettings parseTableSettings(JsonNode request) {
+        String billingMode = request.has("BillingMode") ? request.get("BillingMode").asText() : null;
+
+        JsonNode deletionProtectionNode = request.path("DeletionProtectionEnabled");
+        Boolean deletionProtection = deletionProtectionNode.isMissingNode()
+                ? null : deletionProtectionNode.asBoolean();
+
+        String tableClass = request.has("TableClass") ? request.get("TableClass").asText() : null;
+
+        JsonNode streamSpec = request.path("StreamSpecification");
+        Boolean streamEnabled = streamSpec.isMissingNode()
+                ? null : streamSpec.path("StreamEnabled").asBoolean(false);
+        String streamViewType = streamSpec.hasNonNull("StreamViewType")
+                ? streamSpec.get("StreamViewType").asText() : null;
+
+        JsonNode sseSpec = request.path("SSESpecification");
+        Boolean sseEnabled = sseSpec.isMissingNode() ? null : sseSpec.path("Enabled").asBoolean(false);
+        String sseType = sseSpec.hasNonNull("SSEType") ? sseSpec.get("SSEType").asText() : null;
+        JsonNode kmsMasterKeyIdNode = sseSpec.path("KMSMasterKeyId");
+        String kmsMasterKeyId = kmsMasterKeyIdNode.isMissingNode() || kmsMasterKeyIdNode.isNull()
+                ? null : kmsMasterKeyIdNode.asText();
+
+        return new TableSettings(billingMode, deletionProtection, tableClass,
+                parseOnDemandThroughput(request.path("OnDemandThroughput")),
+                streamEnabled, streamViewType, sseEnabled, sseType, kmsMasterKeyId);
+    }
+
+    private static OnDemandThroughput parseOnDemandThroughput(JsonNode onDemand) {
+        if (!onDemand.isObject()) {
+            return null;
         }
+        Integer maxRead = onDemand.has("MaxReadRequestUnits") ? onDemand.get("MaxReadRequestUnits").asInt() : null;
+        Integer maxWrite = onDemand.has("MaxWriteRequestUnits") ? onDemand.get("MaxWriteRequestUnits").asInt() : null;
+        return new OnDemandThroughput(maxRead, maxWrite);
     }
 
     // AWS reports an empty list as a length constraint on the 1-based member path, before the
@@ -1671,12 +1628,10 @@ public class DynamoDbJsonHandler {
                 }
             }
         }
-        Long readCapacity = null;
-        Long writeCapacity = null;
         JsonNode pt = request.path("ProvisionedThroughput");
+        Throughput throughput = null;
         if (!pt.isMissingNode()) {
-            readCapacity = pt.has("ReadCapacityUnits") ? pt.get("ReadCapacityUnits").asLong() : null;
-            writeCapacity = pt.has("WriteCapacityUnits") ? pt.get("WriteCapacityUnits").asLong() : null;
+            throughput = parseThroughput(pt);
         }
 
         String billingModeCheck = request.has("BillingMode") ? request.get("BillingMode").asText() : null;
@@ -1687,7 +1642,7 @@ public class DynamoDbJsonHandler {
 
         List<GlobalSecondaryIndex> gsiCreates = new ArrayList<>();
         List<String> gsiDeletes = new ArrayList<>();
-        List<JsonNode> gsiUpdatesToApply = new ArrayList<>();
+        List<GsiThroughputUpdate> gsiThroughputUpdates = new ArrayList<>();
         JsonNode gsiUpdates = request.path("GlobalSecondaryIndexUpdates");
         if (!gsiUpdates.isMissingNode() && gsiUpdates.isArray()) {
             var updatePosition = 0;
@@ -1735,15 +1690,19 @@ public class DynamoDbJsonHandler {
                 }
                 JsonNode updateNode = update.path("Update");
                 if (updateNode.isObject()) {
-                    gsiUpdatesToApply.add(updateNode);
+                    JsonNode gsiPt = updateNode.path("ProvisionedThroughput");
+                    gsiThroughputUpdates.add(new GsiThroughputUpdate(
+                            updateNode.path("IndexName").asText(),
+                            gsiPt.isObject() ? parseThroughput(gsiPt) : null,
+                            parseOnDemandThroughput(updateNode.path("OnDemandThroughput"))));
                 }
             }
         }
 
-        if (!gsiUpdatesToApply.isEmpty()) {
+        if (!gsiThroughputUpdates.isEmpty()) {
             TableDefinition currentTable = dynamoDbService.describeTable(tableName, region);
-            for (JsonNode updateNode : gsiUpdatesToApply) {
-                String indexName = updateNode.path("IndexName").asText();
+            for (GsiThroughputUpdate gsiUpdate : gsiThroughputUpdates) {
+                String indexName = gsiUpdate.indexName();
                 if (gsiDeletes.contains(indexName)) {
                     throw new AwsException("ValidationException",
                             "Cannot delete and update the same index: " + indexName, 400);
@@ -1787,127 +1746,19 @@ public class DynamoDbJsonHandler {
             }
         }
 
-        if (!addRegions.isEmpty() || !removeRegions.isEmpty() || !updateRegions.isEmpty()) {
-            dynamoDbService.validateReplicaUpdates(
-                    tableName, addRegions, removeRegions, updateRegions, region);
-        }
+        TableDefinition table = tableService.updateTable(new UpdateTableRequest(tableName,
+                throughput, newAttrDefs, gsiCreates, gsiDeletes, gsiThroughputUpdates, vectorCreates, vectorDeletes,
+                addRegions, removeRegions, updateRegions, parseTableSettings(request)), region);
 
-        // Parsed and validated up front, same as the replica check above: updateTable and the
-        // mutations that follow it have side effects (persisted throughput/GSI changes, stream
-        // enable/disable), so an invalid SSEType must fail before any of them run rather than
-        // after, or ValidationException would leave a partially-applied update behind.
-        JsonNode sseSpec = request.path("SSESpecification");
-        boolean sseSpecified = !sseSpec.isMissingNode();
-        boolean sseEnabled = sseSpecified && sseSpec.path("Enabled").asBoolean(false);
-        String sseType = sseEnabled ? sseSpec.path("SSEType").asText(SSE_TYPE_KMS) : null;
-        if (sseEnabled) {
-            validateSseType(sseType);
-        }
-
-        TableDefinition table = dynamoDbService.updateTable(tableName, readCapacity, writeCapacity,
-                gsiCreates, gsiDeletes, newAttrDefs, vectorCreates, vectorDeletes,
-                billingModeCheck, region);
-
-        for (JsonNode updateNode : gsiUpdatesToApply) {
-            GlobalSecondaryIndex gsi = table.findGsi(updateNode.path("IndexName").asText()).orElseThrow();
-            JsonNode gsiPt = updateNode.path("ProvisionedThroughput");
-            if (gsiPt.isObject()) {
-                if (gsiPt.has("ReadCapacityUnits")) {
-                    gsi.getProvisionedThroughput().setReadCapacityUnits(gsiPt.get("ReadCapacityUnits").asLong());
-                }
-                if (gsiPt.has("WriteCapacityUnits")) {
-                    gsi.getProvisionedThroughput().setWriteCapacityUnits(gsiPt.get("WriteCapacityUnits").asLong());
-                }
-            }
-            JsonNode gsiOnDemand = updateNode.path("OnDemandThroughput");
-            if (gsiOnDemand.isObject()) {
-                if (gsiOnDemand.has("MaxReadRequestUnits")) {
-                    gsi.setOnDemandMaxReadRequestUnits(gsiOnDemand.get("MaxReadRequestUnits").asInt());
-                }
-                if (gsiOnDemand.has("MaxWriteRequestUnits")) {
-                    gsi.setOnDemandMaxWriteRequestUnits(gsiOnDemand.get("MaxWriteRequestUnits").asInt());
-                }
-            }
-        }
-
-        JsonNode deletionProtectionNode = request.path("DeletionProtectionEnabled");
-        if (!deletionProtectionNode.isMissingNode()) {
-            table.setDeletionProtectionEnabled(deletionProtectionNode.asBoolean());
-        }
-
-        String billingMode = request.has("BillingMode")
-                ? request.get("BillingMode").asText() : null;
-        if (billingMode != null) {
-            table.setBillingMode(billingMode);
-            if ("PAY_PER_REQUEST".equals(billingMode)) {
-                table.getProvisionedThroughput().setReadCapacityUnits(0L);
-                table.getProvisionedThroughput().setWriteCapacityUnits(0L);
-            }
-        }
-
-        if (request.has("TableClass")) {
-            table.setTableClass(request.get("TableClass").asText());
-        }
-
-        JsonNode onDemand = request.path("OnDemandThroughput");
-        if (onDemand.isObject()) {
-            if (onDemand.has("MaxReadRequestUnits")) {
-                table.setOnDemandMaxReadRequestUnits(onDemand.get("MaxReadRequestUnits").asInt());
-            }
-            if (onDemand.has("MaxWriteRequestUnits")) {
-                table.setOnDemandMaxWriteRequestUnits(onDemand.get("MaxWriteRequestUnits").asInt());
-            }
-        }
-
-        JsonNode streamSpec = request.path("StreamSpecification");
-        if (!streamSpec.isMissingNode()) {
-            boolean streamEnabled = streamSpec.path("StreamEnabled").asBoolean(false);
-            if (streamEnabled) {
-                String viewType = streamSpec.path("StreamViewType").asText("NEW_AND_OLD_IMAGES");
-                StreamDescription sd = dynamoDbStreamService.enableStream(
-                        table.getTableName(), table.getTableArn(), viewType, region);
-                table.setStreamEnabled(true);
-                table.setStreamArn(sd.getStreamArn());
-                table.setStreamViewType(viewType);
-            } else {
-                dynamoDbStreamService.disableStream(table.getTableName(), region);
-                table.setStreamEnabled(false);
-            }
-        }
-
-        if (sseSpecified) {
-            if (sseEnabled) {
-                table.setSseEnabled(true);
-                table.setSseType(sseType);
-                if (SSE_TYPE_KMS.equals(sseType)) {
-                    JsonNode kmsMasterKeyId = sseSpec.path("KMSMasterKeyId");
-                    table.setKmsMasterKeyArn(!kmsMasterKeyId.isMissingNode() && !kmsMasterKeyId.isNull()
-                            ? kmsMasterKeyId.asText()
-                            : defaultKmsMasterKeyArn(region));
-                } else {
-                    table.setKmsMasterKeyArn(null);
-                }
-            } else {
-                table.setSseEnabled(false);
-                table.setSseType(null);
-                table.setKmsMasterKeyArn(null);
-            }
-        }
-
-        // Same flush as CreateTable: the stream and SSE mutations above land after updateTable's
-        // write, so without this a retargeted view type or SSE change is rebuilt from the stale
-        // persisted value on restart. Must run before applyReplicaUpdates below, which re-fetches
-        // the table from storage for its own persist -- a persistent backend serializes on write
-        // rather than holding the live object, so without this flush first, that re-fetch would
-        // see neither the stream nor the SSE mutations above.
-        dynamoDbService.persistTable(tableName, table, region);
-
-        if (!addRegions.isEmpty() || !removeRegions.isEmpty() || !updateRegions.isEmpty()) {
-            table = dynamoDbService.applyReplicaUpdates(tableName, addRegions, removeRegions, updateRegions, region);
-        }
         ObjectNode response = objectMapper.createObjectNode();
         response.set("TableDescription", tableToNode(table));
         return Response.ok(response).build();
+    }
+
+    private static Throughput parseThroughput(JsonNode pt) {
+        Long readCapacity = pt.has("ReadCapacityUnits") ? pt.get("ReadCapacityUnits").asLong() : null;
+        Long writeCapacity = pt.has("WriteCapacityUnits") ? pt.get("WriteCapacityUnits").asLong() : null;
+        return new Throughput(readCapacity, writeCapacity);
     }
 
     private static void validateReplicaRegion(String replicaRegion) {
@@ -2340,34 +2191,8 @@ public class DynamoDbJsonHandler {
                     400);
         }
 
-        TableDefinition table = dynamoDbService.describeTable(tableName, region);
-        String resolvedTableName = table.getTableName();
-
-        String streamName = streamArn.substring(streamArn.lastIndexOf('/') + 1);
-        try {
-            kinesisService.describeStream(streamName, region);
-        } catch (AwsException e) {
-            throw new AwsException("ResourceNotFoundException",
-                    "Kinesis stream not found: " + streamArn, 400);
-        }
-
-        Optional<KinesisStreamingDestination> existing = table.findKinesisStreamingDestination(streamArn);
-        if (existing.isPresent() && "ACTIVE".equals(existing.get().getDestinationStatus())) {
-            throw new AwsException("ValidationException",
-                    "Table already has an active Kinesis streaming destination with this stream ARN", 400);
-        }
-
-        if (existing.isPresent()) {
-            existing.get().setDestinationStatus("ACTIVE");
-            existing.get().setDestinationStatusDescription("Kinesis streaming is enabled for this table");
-            existing.get().setApproximateCreationDateTimePrecision(precision);
-        } else {
-            table.getKinesisStreamingDestinations().add(new KinesisStreamingDestination(streamArn, precision));
-        }
-
-        // DynamoDB Streams is left as the caller configured it: Kinesis forwarding does not depend on it, and
-        // turning it on here showed up as stream_enabled drift on aws_dynamodb_table that never converged.
-        dynamoDbService.persistTable(resolvedTableName, table, region);
+        String resolvedTableName = tableService.enableKinesisStreamingDestination(
+                tableName, streamArn, precision, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.put("TableName", resolvedTableName);
@@ -2383,25 +2208,7 @@ public class DynamoDbJsonHandler {
         String tableName = request.path("TableName").asText();
         String streamArn = request.path("StreamArn").asText();
 
-        TableDefinition table = dynamoDbService.describeTable(tableName, region);
-        String resolvedTableName = table.getTableName();
-
-        Optional<KinesisStreamingDestination> existing = table.findKinesisStreamingDestination(streamArn);
-        if (existing.isEmpty()) {
-            throw new AwsException("ResourceNotFoundException",
-                    "Kinesis streaming destination not found for stream: " + streamArn, 400);
-        }
-
-        if ("DISABLED".equals(existing.get().getDestinationStatus())) {
-            throw new AwsException("ValidationException",
-                    "Kinesis streaming destination is already disabled for stream: " + streamArn, 400);
-        }
-
-        existing.get().setDestinationStatus("DISABLED");
-        existing.get().setDestinationStatusDescription("Kinesis streaming is disabled for this table");
-        dynamoDbService.persistTable(resolvedTableName, table, region);
-        // Stop forwarding and discard buffered CDC records for this now-disabled destination.
-        dynamoDbService.onKinesisStreamingDestinationDisabled(resolvedTableName, streamArn, region);
+        String resolvedTableName = tableService.disableKinesisStreamingDestination(tableName, streamArn, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.put("TableName", resolvedTableName);
@@ -2834,7 +2641,8 @@ public class DynamoDbJsonHandler {
             if (SSE_TYPE_KMS.equals(sseType)) {
                 sseDescription.put("KMSMasterKeyArn", table.getKmsMasterKeyArn() != null
                         ? table.getKmsMasterKeyArn()
-                        : defaultKmsMasterKeyArn(AwsArnUtils.regionOrDefault(table.getTableArn(), "us-east-1")));
+                        : NativeDynamoDbTableService.defaultKmsMasterKeyArn(
+                                AwsArnUtils.regionOrDefault(table.getTableArn(), "us-east-1")));
             }
             node.set("SSEDescription", sseDescription);
         }
@@ -2994,11 +2802,6 @@ public class DynamoDbJsonHandler {
         vectorIndexNode.put("ItemCount", 0);
         vectorIndexNode.put("IndexArn", vectorIndex.getIndexArn());
         return vectorIndexNode;
-    }
-
-    private String defaultKmsMasterKeyArn(String region) {
-        return AwsArnUtils.Arn.of("kms", region, DEFAULT_ACCOUNT_ID,
-                "key/aws-managed-dynamodb").toString();
     }
 
     private ObjectNode continuousBackupsDescriptionNode(TableDefinition table) {
