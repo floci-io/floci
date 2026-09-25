@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /** AddSourceIdentifierToSubscription and RemoveSourceIdentifierFromSubscription. */
 @QuarkusTest
@@ -75,7 +76,7 @@ class RdsSourceIdentifierIntegrationTest {
             .statusCode(200).extract().asString();
         int first = body.indexOf("<SourceId>db-one</SourceId>");
         int second = body.indexOf("<SourceId>db-one</SourceId>", first + 1);
-        org.junit.jupiter.api.Assertions.assertEquals(-1, second,
+        assertEquals(-1, second,
                 "db-one appears once, not twice: " + body);
     }
 
@@ -102,11 +103,22 @@ class RdsSourceIdentifierIntegrationTest {
             .body(containsString("SubscriptionNotFound"));
     }
 
+    /**
+     * Both members are required by the model, so both answer InvalidParameterValue. A missing name
+     * used to reach the lookup and come back as SubscriptionNotFound, which says the subscription
+     * does not exist when the request simply did not name one.
+     */
     @Test
-    void aMissingSourceIdentifierIsRefused() {
+    void aMissingRequiredMemberIsRefusedTheSameWayOnBothOperations() {
         String name = subscription("nosrc");
-        rds("AddSourceIdentifierToSubscription", "SubscriptionName", name)
-            .statusCode(400)
-            .body(containsString("InvalidParameterValue"));
+        for (String action : new String[]{"AddSourceIdentifierToSubscription",
+                "RemoveSourceIdentifierFromSubscription"}) {
+            rds(action, "SubscriptionName", name)
+                .statusCode(400)
+                .body(containsString("InvalidParameterValue"));
+            rds(action, "SourceIdentifier", "db-one")
+                .statusCode(400)
+                .body(containsString("InvalidParameterValue"));
+        }
     }
 }

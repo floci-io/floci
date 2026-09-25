@@ -8598,7 +8598,7 @@ public class RdsService implements Resettable, ResourceProvider {
      */
     public synchronized EventSubscription addSourceIdentifierToSubscription(
             String region, String subscriptionName, String sourceIdentifier) {
-        requireSourceIdentifier(sourceIdentifier);
+        requireSourceIdentifierRequest(subscriptionName, sourceIdentifier);
         EventSubscription subscription = requireEventSubscription(region, subscriptionName);
         List<String> ids = new ArrayList<>(subscription.getSourceIdsList());
         if (!ids.contains(sourceIdentifier)) {
@@ -8615,7 +8615,7 @@ public class RdsService implements Resettable, ResourceProvider {
      */
     public synchronized EventSubscription removeSourceIdentifierFromSubscription(
             String region, String subscriptionName, String sourceIdentifier) {
-        requireSourceIdentifier(sourceIdentifier);
+        requireSourceIdentifierRequest(subscriptionName, sourceIdentifier);
         EventSubscription subscription = requireEventSubscription(region, subscriptionName);
         List<String> ids = new ArrayList<>(subscription.getSourceIdsList());
         if (!ids.remove(sourceIdentifier)) {
@@ -8627,7 +8627,15 @@ public class RdsService implements Resettable, ResourceProvider {
         return subscription;
     }
 
-    private static void requireSourceIdentifier(String sourceIdentifier) {
+    /**
+     * Both members are required by the model, so both fail the same way. Letting a missing
+     * SubscriptionName fall through to the lookup would answer SubscriptionNotFound, which tells
+     * the caller the subscription does not exist when the request simply did not name one.
+     */
+    private static void requireSourceIdentifierRequest(String subscriptionName, String sourceIdentifier) {
+        if (subscriptionName == null || subscriptionName.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "SubscriptionName is required.", 400);
+        }
         if (sourceIdentifier == null || sourceIdentifier.isBlank()) {
             throw new AwsException("InvalidParameterValue", "SourceIdentifier is required.", 400);
         }
