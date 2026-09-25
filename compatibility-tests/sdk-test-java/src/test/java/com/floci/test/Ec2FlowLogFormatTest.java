@@ -48,7 +48,7 @@ class Ec2FlowLogFormatTest {
                 assertThat(describe(ec2, withFormat).logFormat()).isEqualTo(FORMAT);
                 assertThat(describe(ec2, withoutFormat).logFormat()).isNull();
             } finally {
-                for (String id : List.of(withFormat, withoutFormat)) {
+                for (String id : new String[] {withFormat, withoutFormat}) {
                     if (id != null) {
                         ec2.deleteFlowLogs(r -> r.flowLogIds(id));
                     }
