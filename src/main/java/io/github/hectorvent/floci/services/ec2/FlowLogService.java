@@ -56,18 +56,20 @@ public class FlowLogService {
 
     private static final Logger LOG = Logger.getLogger(FlowLogService.class);
 
-    /** AWS VPC Flow Logs default (version 5) field order. */
     /**
      * The format a flow log is created with when CreateFlowLogs omits LogFormat, which
      * DescribeFlowLogs reports for it thereafter. Version 2 fields in the order AWS documents.
      *
-     * <p>Distinct from {@link #DEFAULT_HEADER}, which is the alphabetised superset of every
-     * available field written as the header line of a generated log file.
+     * <p>Distinct from {@link #DEFAULT_HEADER}, which is the header line of a generated log file.
      */
     public static final String DEFAULT_LOG_FORMAT =
             "${version} ${account-id} ${interface-id} ${srcaddr} ${dstaddr} ${srcport} "
             + "${dstport} ${protocol} ${packets} ${bytes} ${start} ${end} ${action} ${log-status}";
 
+    /**
+     * Every available flow log field, alphabetised, written as the header line of a generated log
+     * file. Not a version ordering, and not what {@link #DEFAULT_LOG_FORMAT} describes.
+     */
     static final String DEFAULT_HEADER =
             "account-id action az-id bytes dstaddr dstport end flow-direction instance-id "
             + "interface-id log-status packets pkt-dst-aws-service pkt-dstaddr pkt-src-aws-service "
