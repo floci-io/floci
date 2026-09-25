@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.dynamodb;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -35,6 +36,7 @@ public class DynamoDbStreamService {
     public static final String SHARD_ID = "shardId-0000000001-00000000001";
     static final int MAX_RECORDS = 1000;
     private static final String ZERO_SEQUENCE_NUMBER = "000000000000000000000";
+    private static final String DEFAULT_ACCOUNT = "000000000000";
 
     private static final DateTimeFormatter STREAM_LABEL_FORMAT =
             DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS").withZone(ZoneOffset.UTC);
@@ -43,7 +45,7 @@ public class DynamoDbStreamService {
     private final ConcurrentHashMap<String, ConcurrentLinkedDeque<DynamoDbStreamRecord>> records =
             new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AtomicLong> streamRecordCounts = new ConcurrentHashMap<>();
-    private final AtomicLong sequenceCounter = new AtomicLong(0);
+    private final ConcurrentHashMap<String, AtomicLong> sequenceCounters = new ConcurrentHashMap<>();
 
     private final ObjectMapper objectMapper;
 
@@ -76,7 +78,8 @@ public class DynamoDbStreamService {
     }
 
     public StreamDescription enableStream(String tableName, String tableArn, String viewType, String region, String streamArnInput) {
-        String key = streamKey(region, tableName);
+        String accountId = AwsArnUtils.accountOrDefault(tableArn, DEFAULT_ACCOUNT);
+        String key = streamKey(accountId, region, tableName);
         StreamDescription existing = streams.get(key);
         if (existing != null && "ENABLED".equals(existing.getStreamStatus())) {
             // Re-enabling a live stream with a different view type retargets it. The records this
@@ -117,8 +120,8 @@ public class DynamoDbStreamService {
         return sd;
     }
 
-    public void disableStream(String tableName, String region) {
-        String key = streamKey(region, tableName);
+    public void disableStream(String tableName, String region, String accountId) {
+        String key = streamKey(accountId, region, tableName);
         StreamDescription sd = streams.get(key);
         if (sd != null) {
             sd.setStreamStatus("DISABLED");
@@ -126,12 +129,13 @@ public class DynamoDbStreamService {
         }
     }
 
-    public void deleteStream(String tableName, String region) {
-        String key = streamKey(region, tableName);
+    public void deleteStream(String tableName, String region, String accountId) {
+        String key = streamKey(accountId, region, tableName);
         StreamDescription sd = streams.remove(key);
         if (sd != null) {
             records.remove(sd.getStreamArn());
             streamRecordCounts.remove(sd.getStreamArn());
+            sequenceCounters.remove(sd.getStreamArn());
             LOG.infov("Deleted stream for table {0} in region {1}", tableName, region);
         }
     }
@@ -139,13 +143,15 @@ public class DynamoDbStreamService {
     public void captureEvent(String tableName, String eventName,
                              JsonNode oldItem, JsonNode newItem,
                              TableDefinition table, String region) {
-        String key = streamKey(region, tableName);
+        String accountId = AwsArnUtils.accountOrDefault(table.getTableArn(), DEFAULT_ACCOUNT);
+        String key = streamKey(accountId, region, tableName);
         StreamDescription sd = streams.get(key);
         if (sd == null || !"ENABLED".equals(sd.getStreamStatus())) {
             return;
         }
 
-        long seq = sequenceCounter.incrementAndGet();
+        long seq = sequenceCounters.computeIfAbsent(sd.getStreamArn(), ignored -> new AtomicLong())
+                .incrementAndGet();
         String sequenceNumber = String.format("%021d", seq);
 
         JsonNode sourceItem = newItem != null ? newItem : oldItem;
@@ -209,12 +215,19 @@ public class DynamoDbStreamService {
     }
 
     public List<StreamDescription> listStreams(String tableNameFilter, String region) {
+        return listStreams(tableNameFilter, region, null);
+    }
+
+    public List<StreamDescription> listStreams(String tableNameFilter, String region, String accountId) {
         List<StreamDescription> result = new ArrayList<>();
         for (StreamDescription sd : streams.values()) {
             if (tableNameFilter != null && !tableNameFilter.equals(sd.getTableName())) {
                 continue;
             }
             if (region != null && !sd.getStreamArn().contains(":" + region + ":")) {
+                continue;
+            }
+            if (accountId != null && !sd.getStreamArn().contains(":" + accountId + ":")) {
                 continue;
             }
             result.add(sd);
@@ -286,8 +299,16 @@ public class DynamoDbStreamService {
     public record GetRecordsResult(List<DynamoDbStreamRecord> records, String nextShardIterator) {}
 
     public GetRecordsResult getRecords(String shardIterator, Integer limit) {
+        return getRecords(shardIterator, limit, null);
+    }
+
+    public GetRecordsResult getRecords(String shardIterator, Integer limit, String accountId) {
         String[] parts = decodeIterator(shardIterator);
         String streamArn = parts[0];
+        if (accountId != null && !accountId.equals(AwsArnUtils.accountOrDefault(streamArn, accountId))) {
+            throw new AwsException("ResourceNotFoundException",
+                    "Stream not found: " + streamArn, 400);
+        }
         String cursorSequence = parts[1];
         boolean inclusive = Boolean.parseBoolean(parts[2]);
         long cursorRecordCount = parseRecordCount(parts[3]);
@@ -371,7 +392,7 @@ public class DynamoDbStreamService {
         return ZERO_SEQUENCE_NUMBER;
     }
 
-    private String streamKey(String region, String tableName) {
-        return region + "::" + tableName;
+    private String streamKey(String accountId, String region, String tableName) {
+        return (accountId == null ? DEFAULT_ACCOUNT : accountId) + "::" + region + "::" + tableName;
     }
 }

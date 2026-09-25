@@ -1,6 +1,9 @@
 package io.github.hectorvent.floci.services.dynamodb;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
+import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.services.dynamodb.model.DynamoDbStreamRecord;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.StreamDescription;
@@ -26,13 +29,15 @@ public class DynamoDbStreamsJsonHandler {
     private final DynamoDbStreamService streamService;
     private final DynamoDbService dynamoDbService;
     private final ObjectMapper objectMapper;
+    private final RequestContext requestContext;
 
     @Inject
     public DynamoDbStreamsJsonHandler(DynamoDbStreamService streamService, DynamoDbService dynamoDbService,
-                                      ObjectMapper objectMapper) {
+                                      ObjectMapper objectMapper, RequestContext requestContext) {
         this.streamService = streamService;
         this.dynamoDbService = dynamoDbService;
         this.objectMapper = objectMapper;
+        this.requestContext = requestContext;
     }
 
     public Response handle(String action, JsonNode request, String region) {
@@ -52,7 +57,8 @@ public class DynamoDbStreamsJsonHandler {
     private Response handleListStreams(JsonNode request, String region) {
         String tableNameFilter = request.has("TableName") ? request.get("TableName").asText() : null;
 
-        List<StreamDescription> streams = streamService.listStreams(tableNameFilter, region);
+        List<StreamDescription> streams =
+                streamService.listStreams(tableNameFilter, region, requestContext.getAccountId());
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode streamList = objectMapper.createArrayNode();
@@ -69,6 +75,7 @@ public class DynamoDbStreamsJsonHandler {
 
     private Response handleDescribeStream(JsonNode request, String region) {
         String streamArn = request.path("StreamArn").asText();
+        requireOwnStream(streamArn);
         StreamDescription sd = streamService.describeStream(streamArn);
 
         // Fetch key schema from the table
@@ -122,6 +129,7 @@ public class DynamoDbStreamsJsonHandler {
         String sequenceNumber = request.has("SequenceNumber")
                 ? request.get("SequenceNumber").asText() : null;
 
+        requireOwnStream(streamArn);
         String iterator = streamService.getShardIterator(streamArn, shardId, iteratorType, sequenceNumber);
 
         ObjectNode response = objectMapper.createObjectNode();
@@ -133,7 +141,8 @@ public class DynamoDbStreamsJsonHandler {
         String shardIterator = request.path("ShardIterator").asText();
         Integer limit = request.has("Limit") ? request.get("Limit").asInt() : null;
 
-        DynamoDbStreamService.GetRecordsResult result = streamService.getRecords(shardIterator, limit);
+        DynamoDbStreamService.GetRecordsResult result =
+                streamService.getRecords(shardIterator, limit, requestContext.getAccountId());
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode recordsArray = objectMapper.createArrayNode();
@@ -171,5 +180,17 @@ public class DynamoDbStreamsJsonHandler {
         node.set("dynamodb", dynamodb);
 
         return node;
+    }
+
+    /**
+     * A stream ARN carries the owning account, so a request for another account's ARN must read as
+     * a missing stream rather than exposing that account's stream. ARN operations are otherwise
+     * account-blind because the ARN is globally unique.
+     */
+    private void requireOwnStream(String streamArn) {
+        String accountId = requestContext.getAccountId();
+        if (accountId != null && !accountId.equals(AwsArnUtils.accountOrDefault(streamArn, accountId))) {
+            throw new AwsException("ResourceNotFoundException", "Stream not found: " + streamArn, 400);
+        }
     }
 }

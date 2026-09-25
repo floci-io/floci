@@ -797,7 +797,7 @@ public class DynamoDbService implements ResourceProvider {
         if (streamService == null) {
             return table;
         }
-        streamService.disableStream(table.getTableName(), region);
+        streamService.disableStream(table.getTableName(), region, regionResolver.getAccountId());
         table.setStreamEnabled(false);
         persistTable(tableName, table, region);
         return table;
@@ -822,7 +822,7 @@ public class DynamoDbService implements ResourceProvider {
             itemStore.delete(storageKey);
         }
         if (streamService != null) {
-            streamService.deleteStream(canonicalTableName, region);
+            streamService.deleteStream(canonicalTableName, region, regionResolver.getAccountId());
         }
         if (kinesisForwarder != null) {
             // Discard any buffered CDC records and stop draining: the destination stream is gone.

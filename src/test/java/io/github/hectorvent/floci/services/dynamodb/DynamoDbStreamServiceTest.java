@@ -264,4 +264,41 @@ class DynamoDbStreamServiceTest {
         assertEquals("ValidationException", blankSequence.getErrorCode());
     }
 
+    /**
+     * Two accounts with a same-named table in one region must not share a stream. Before this,
+     * the stream map was keyed by region and table name only, so the second account's
+     * enableStream returned the first account's stream and every record landed on it.
+     */
+    @Test
+    void sameNamedTablesInTwoAccountsStayIsolated() throws Exception {
+        TableDefinition otherAccountTable = new TableDefinition("ViewTypeTable",
+                List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")),
+                "us-east-1", "111111111111");
+        otherAccountTable.setStreamEnabled(true);
+
+        StreamDescription first = service.enableStream("ViewTypeTable", TABLE_ARN, "NEW_IMAGE", "us-east-1");
+        StreamDescription second = service.enableStream(
+                "ViewTypeTable", otherAccountTable.getTableArn(), "NEW_IMAGE", "us-east-1");
+
+        assertNotEquals(first.getStreamArn(), second.getStreamArn());
+        assertEquals(1, service.listStreams("ViewTypeTable", "us-east-1", "000000000000").size());
+        assertEquals(1, service.listStreams("ViewTypeTable", "us-east-1", "111111111111").size());
+
+        JsonNode item = mapper.readTree("{\"userId\":{\"S\":\"u1\"}}");
+        service.captureEvent("ViewTypeTable", "INSERT", null, item, otherAccountTable, "us-east-1");
+
+        String secondIterator = service.getShardIterator(
+                second.getStreamArn(), DynamoDbStreamService.SHARD_ID, "TRIM_HORIZON", null);
+        assertEquals(1, service.getRecords(secondIterator, 10).records().size());
+
+        String firstIterator = service.getShardIterator(
+                first.getStreamArn(), DynamoDbStreamService.SHARD_ID, "TRIM_HORIZON", null);
+        assertEquals(0, service.getRecords(firstIterator, 10).records().size());
+
+        service.deleteStream("ViewTypeTable", "us-east-1", "111111111111");
+        assertEquals(0, service.listStreams("ViewTypeTable", "us-east-1", "111111111111").size());
+        assertEquals(1, service.listStreams("ViewTypeTable", "us-east-1", "000000000000").size());
+    }
+
 }

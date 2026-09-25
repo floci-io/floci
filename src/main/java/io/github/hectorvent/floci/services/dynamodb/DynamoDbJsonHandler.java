@@ -1870,7 +1870,8 @@ public class DynamoDbJsonHandler {
                 table.setStreamArn(sd.getStreamArn());
                 table.setStreamViewType(viewType);
             } else {
-                dynamoDbStreamService.disableStream(table.getTableName(), region);
+                dynamoDbStreamService.disableStream(table.getTableName(), region,
+                        AwsArnUtils.accountOrDefault(table.getTableArn(), DEFAULT_ACCOUNT_ID));
                 table.setStreamEnabled(false);
             }
         }
