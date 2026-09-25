@@ -42,7 +42,10 @@ jobs:
   test:
     name: Build and Test (shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Shards run 10m49s to 13m47s, so 15 left the slowest about a minute of margin and a slow
+    # runner spent it. This is a runaway-job kill switch, not a budget: Actions bills the minutes a
+    # job actually uses, so a higher ceiling costs nothing until something hangs.
+    timeout-minutes: 20
     needs: draft-gate
     strategy:
       fail-fast: false
