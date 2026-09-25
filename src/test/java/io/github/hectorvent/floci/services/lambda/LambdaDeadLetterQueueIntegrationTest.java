@@ -24,6 +24,7 @@ class LambdaDeadLetterQueueIntegrationTest {
 
     private static final String REGION = "us-east-1";
     private static final String ACCOUNT = "000000000000";
+    private static final String OTHER_ACCOUNT = "111122223333";
 
     @Inject
     LambdaService lambdaService;
@@ -75,5 +76,33 @@ class LambdaDeadLetterQueueIntegrationTest {
         assertThat(message.getMessageAttributes().get("ErrorCode").getDataType(), equalTo("Number"));
         assertThat(message.getMessageAttributes().get("ErrorMessage").getStringValue(), equalTo("always fails"));
         assertThat(message.getMessageAttributes().get("ErrorMessage").getDataType(), equalTo("String"));
+    }
+
+    @Test
+    void failedInvocation_deliversToDeadLetterQueueInTheTargetAccount() {
+        String queueName = "dlq-cross-account-queue";
+        String functionName = "dlq-cross-account-fn";
+
+        Queue queue = RequestScopes.callAs(OTHER_ACCOUNT, () ->
+                sqsService.createQueue(queueName, Map.of(), REGION));
+        String queueArn = RequestScopes.callAs(OTHER_ACCOUNT, () ->
+                sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("QueueArn"), REGION).get("QueueArn"));
+
+        LambdaFunction fn = RequestScopes.callAs(ACCOUNT, () ->
+                lambdaService.createFunction(REGION, new HashMap<>(Map.of(
+                        "FunctionName", functionName,
+                        "Runtime", "nodejs22.x",
+                        "Role", "arn:aws:iam::" + ACCOUNT + ":role/test-role",
+                        "Handler", "index.handler",
+                        "DeadLetterConfig", Map.of("TargetArn", queueArn)))));
+        InvokeResult failureResult = new InvokeResult(200, "Unhandled",
+                "{\"errorMessage\":\"always fails\"}".getBytes(), null, "test-cross-account-req");
+
+        destinationRouter.route(fn, "{\"probe\":1}".getBytes(), failureResult, 0);
+
+        List<Message> messages = RequestScopes.callAs(OTHER_ACCOUNT, () ->
+                sqsService.receiveMessage(queue.getQueueUrl(), 10, 0, 0, REGION));
+        assertEquals(1, messages.size(), "the DLQ should receive the failed invocation in its owning account");
+        assertEquals("{\"probe\":1}", messages.get(0).getBody());
     }
 }
