@@ -26,6 +26,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
@@ -69,12 +70,15 @@ public class ExternalTableMaterializer {
             throw exception;
         }
         String label = binding.schemaName() + "." + tableName;
+        // DuckDB reads as the account, so the bound role's access is enforced here, ahead of the read,
+        // with the same signed authorization COPY uses: identity policy and bucket policy.
+        RedshiftRoleAccess.RoleSession roleSession = openRoleSession(binding, session);
         try {
             Location location = Location.parse(table);
             List<Partition> partitions = partitions(session.accountId(), binding, table);
-            List<ReadSource> sources = readSources(session.accountId(), binding, table, location, partitions);
+            List<ReadSource> sources = readSources(session.accountId(), binding, roleSession, table, location, partitions);
             List<S3Object> objects = sources.stream().flatMap(source -> source.objects().stream()).toList();
-            authorizeObjects(binding, sources);
+            authorizeObjects(session.accountId(), binding, roleSession, sources);
             String cacheKey = cacheKey(session, binding, tableName);
             String fingerprint = fingerprint(table, partitions, objects);
             if (!session.inTransaction() && fingerprint.equals(fingerprints.get(cacheKey))) {
@@ -100,6 +104,8 @@ public class ExternalTableMaterializer {
             throw exception;
         } catch (RuntimeException exception) {
             throw new SpectrumReadException(SQLSTATE_LOAD_FAILED, "Unable to load external table \"" + label + "\": " + exception.getMessage(), exception);
+        } finally {
+            RedshiftRoleAccess.releaseRoleSession(roleSession, binding.iamRoleArn(), iamService);
         }
     }
 
@@ -107,24 +113,54 @@ public class ExternalTableMaterializer {
         fingerprints.remove(clusterKey + "|" + databaseName + "|" + schemaName + "|" + tableName);
     }
 
+    /** Forgets every table of one external schema, so a dropped and recreated schema is reloaded. */
+    public void forgetSchema(String clusterKey, String databaseName, String schemaName) {
+        String prefix = schemaPrefix(clusterKey, databaseName, schemaName);
+        fingerprints.keySet().removeIf(key -> key.startsWith(prefix));
+    }
+
+    /** Tables of one external schema this materializer has loaded into PostgreSQL and still tracks. */
+    public Set<String> loadedTables(String clusterKey, String databaseName, String schemaName) {
+        String prefix = schemaPrefix(clusterKey, databaseName, schemaName);
+        return fingerprints.keySet().stream().filter(key -> key.startsWith(prefix))
+                .map(key -> key.substring(prefix.length())).collect(Collectors.toSet());
+    }
+
     public void forgetCluster(String clusterKey) {
         fingerprints.keySet().removeIf(key -> key.startsWith(clusterKey + "|"));
     }
 
-    private void authorizeList(ExternalSchemaBinding binding, Location location) {
+    private static String schemaPrefix(String clusterKey, String databaseName, String schemaName) {
+        return clusterKey + "|" + databaseName + "|" + schemaName + "|";
+    }
+
+    private RedshiftRoleAccess.RoleSession openRoleSession(ExternalSchemaBinding binding, SpectrumSession session) {
         try {
-            RedshiftRoleAccess.authorizeRoleAction(s3Service, iamService, binding.iamRoleArn(), "s3:ListBucket", RedshiftRoleAccess.bucketArn(binding.iamRoleArn(), location.bucket()));
+            return RedshiftRoleAccess.resolveRoleSession(binding.iamRoleArn(), iamService, session.accountId(),
+                    session.iamRoleArns());
         } catch (S3CopySimulator.S3TransferException exception) {
             throw new SpectrumSqlException(exception.sqlState(), exception.getMessage());
         }
     }
 
-    private void authorizeObjects(ExternalSchemaBinding binding, List<ReadSource> sources) {
+    private void authorizeList(String accountId, ExternalSchemaBinding binding,
+                               RedshiftRoleAccess.RoleSession roleSession, Location location) {
+        try {
+            RequestScopes.runAs(accountId, () -> RedshiftRoleAccess.authorizeRoleList(
+                    s3Service, iamService, roleSession, binding.iamRoleArn(), location.bucket()));
+        } catch (S3CopySimulator.S3TransferException exception) {
+            throw new SpectrumSqlException(exception.sqlState(), exception.getMessage());
+        }
+    }
+
+    private void authorizeObjects(String accountId, ExternalSchemaBinding binding,
+                                  RedshiftRoleAccess.RoleSession roleSession, List<ReadSource> sources) {
         try {
             for (ReadSource source : sources) {
                 for (S3Object object : source.objects()) {
-                    RedshiftRoleAccess.authorizeRoleAction(s3Service, iamService, binding.iamRoleArn(), "s3:GetObject",
-                            RedshiftRoleAccess.objectArn(binding.iamRoleArn(), source.location().bucket(), object.getKey()));
+                    RequestScopes.runAs(accountId, () -> RedshiftRoleAccess.authorizeRoleRead(
+                            s3Service, iamService, roleSession, binding.iamRoleArn(),
+                            source.location().bucket(), object.getKey()));
                 }
             }
         } catch (S3CopySimulator.S3TransferException exception) {
@@ -145,28 +181,49 @@ public class ExternalTableMaterializer {
         return partitions == null ? List.of() : partitions;
     }
 
-    private List<ReadSource> readSources(String accountId, ExternalSchemaBinding binding, Table table, Location tableLocation,
-                                         List<Partition> partitions) {
+    private List<ReadSource> readSources(String accountId, ExternalSchemaBinding binding,
+                                         RedshiftRoleAccess.RoleSession roleSession, Table table,
+                                         Location tableLocation, List<Partition> partitions) {
         if (partitions.isEmpty()) {
-            authorizeList(binding, tableLocation);
+            authorizeList(accountId, binding, roleSession, tableLocation);
             return List.of(new ReadSource(table, null, tableLocation, listObjects(accountId, tableLocation)));
         }
         List<ReadSource> sources = new ArrayList<>();
         for (Partition partition : partitions) {
-            StorageDescriptor descriptor = partition.getStorageDescriptor();
-            if (descriptor == null || descriptor.getLocation() == null || descriptor.getLocation().isBlank()) {
-                descriptor = table.getStorageDescriptor();
-            }
+            StorageDescriptor descriptor = partitionDescriptor(table, partition);
             Table partitionTable = new Table();
             partitionTable.setName(table.getName());
             partitionTable.setParameters(table.getParameters());
             partitionTable.setPartitionKeys(table.getPartitionKeys());
             partitionTable.setStorageDescriptor(descriptor);
             Location location = Location.parse(descriptor.getLocation(), table.getName());
-            authorizeList(binding, location);
+            authorizeList(accountId, binding, roleSession, location);
             sources.add(new ReadSource(partitionTable, partition, location, listObjects(accountId, location)));
         }
         return List.copyOf(sources);
+    }
+
+    /**
+     * A partition's descriptor with whatever it leaves unset filled in from the table, so the
+     * columns, format and CSV options the read depends on are never lost for a sparse partition.
+     */
+    private static StorageDescriptor partitionDescriptor(Table table, Partition partition) {
+        StorageDescriptor tableDescriptor = table.getStorageDescriptor();
+        StorageDescriptor own = partition.getStorageDescriptor();
+        if (own == null) {
+            return tableDescriptor;
+        }
+        StorageDescriptor merged = new StorageDescriptor();
+        merged.setLocation(own.getLocation() == null || own.getLocation().isBlank()
+                ? tableDescriptor.getLocation() : own.getLocation());
+        merged.setColumns(own.getColumns() == null || own.getColumns().isEmpty()
+                ? tableDescriptor.getColumns() : own.getColumns());
+        merged.setInputFormat(own.getInputFormat() != null ? own.getInputFormat() : tableDescriptor.getInputFormat());
+        merged.setOutputFormat(own.getOutputFormat() != null ? own.getOutputFormat() : tableDescriptor.getOutputFormat());
+        merged.setSerdeInfo(own.getSerdeInfo() != null ? own.getSerdeInfo() : tableDescriptor.getSerdeInfo());
+        merged.setParameters(own.getParameters() != null ? own.getParameters() : tableDescriptor.getParameters());
+        merged.setCompressed(own.getCompressed() != null ? own.getCompressed() : tableDescriptor.getCompressed());
+        return merged;
     }
 
     private List<S3Object> listObjects(String accountId, Location location) {

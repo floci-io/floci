@@ -48,6 +48,9 @@ public class RedshiftInterceptingBridge {
 
     private static final byte[] EMPTY_BODY = new byte[0];
 
+    /** Frontend {@code Flush}: asks PostgreSQL to send the answers it holds for pipelined Parse/Bind/Execute. */
+    private static final byte[] FLUSH_MESSAGE = {'H', 0, 0, 0, 4};
+
     private static final int PUMP_READ_TIMEOUT_MS = 200;
     private static final int CLIENT_READ_TIMEOUT_MS = 10_000;
     private static final long PUMP_PARK_WAIT_MS = 2_000L;
@@ -653,14 +656,23 @@ public class RedshiftInterceptingBridge {
      */
     private void awaitPriorBackendResponses() throws IOException {
         long deadlineNanos = System.nanoTime() + PUMP_PARK_WAIT_MS * 1_000_000L;
+        boolean flushed = false;
         while (!pumpFinished) {
             try {
-                if (coordinator.awaitIdle(PUMP_READ_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                if (coordinator.awaitIdle(flushed ? PUMP_READ_TIMEOUT_MS : 1, TimeUnit.MILLISECONDS)) {
                     return;
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throw new IOException("Interrupted while waiting for prior backend responses", e);
+            }
+            if (!flushed) {
+                // PostgreSQL holds the answers to pipelined Parse/Bind/Execute until Sync or Flush, and
+                // the client's Sync only arrives after the message being handled, so waiting for them
+                // without asking would run out the clock and drop the connection.
+                write(backend.getOutputStream(), FLUSH_MESSAGE);
+                flushed = true;
+                continue;
             }
             if (System.nanoTime() >= deadlineNanos) {
                 throw new IOException("Backend did not go idle in time before local Spectrum response");

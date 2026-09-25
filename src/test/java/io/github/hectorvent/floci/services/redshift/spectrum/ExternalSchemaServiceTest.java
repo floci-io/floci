@@ -18,11 +18,15 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.endsWith;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -156,5 +160,95 @@ class ExternalSchemaServiceTest {
                 return 0;
             }
         };
+    }
+
+    private static ExternalSchemaBinding analyticsBinding() {
+        return new ExternalSchemaBinding(ACCOUNT, CLUSTER, "dev", "analytics", "lake", ROLE_ARN);
+    }
+
+    @Test
+    void dropSchemaWithoutCascadeIsRestrictedAndDropsOnlyTablesFlociManages() {
+        when(registry.find(ACCOUNT, CLUSTER, "dev", "analytics")).thenReturn(Optional.of(analyticsBinding()));
+        Table events = new Table();
+        events.setName("events");
+        when(glue.getTables("lake")).thenReturn(List.of(events));
+        when(tableMaterializer.loadedTables(CLUSTER, "dev", "analytics")).thenReturn(Set.of("stale"));
+
+        Optional<String> result = service.execute(new ExternalStatement.DropSchema("analytics", false, false),
+                session, backend());
+
+        assertThat(result, equalTo(Optional.of("DROP SCHEMA")));
+        assertThat(statements, hasSize(1));
+        assertThat(statements.get(0), containsString("DROP TABLE IF EXISTS \"analytics\".\"events\";"));
+        assertThat(statements.get(0), containsString("DROP TABLE IF EXISTS \"analytics\".\"stale\";"));
+        assertThat(statements.get(0), endsWith("DROP SCHEMA IF EXISTS \"analytics\""));
+        assertThat(statements.get(0), not(containsString("CASCADE")));
+        verify(registry).unbind(ACCOUNT, CLUSTER, "dev", "analytics");
+        verify(tableMaterializer).forgetSchema(CLUSTER, "dev", "analytics");
+    }
+
+    @Test
+    void dropSchemaCascadeIsExecutedOnlyWhenTheStatementAskedForIt() {
+        when(registry.find(ACCOUNT, CLUSTER, "dev", "analytics")).thenReturn(Optional.of(analyticsBinding()));
+
+        service.execute(new ExternalStatement.DropSchema("analytics", false, true), session, backend());
+
+        assertThat(statements, contains("DROP SCHEMA IF EXISTS \"analytics\" CASCADE"));
+        verify(tableMaterializer).forgetSchema(CLUSTER, "dev", "analytics");
+    }
+
+    @Test
+    void refusedRestrictedDropKeepsTheBindingAndTheFingerprints() {
+        when(registry.find(ACCOUNT, CLUSTER, "dev", "analytics")).thenReturn(Optional.of(analyticsBinding()));
+        BackendSql refusing = new BackendSql() {
+            @Override
+            public void execute(String sql) {
+                throw new SpectrumReadException("2BP01", "cannot drop table because other objects depend on it");
+            }
+
+            @Override
+            public long copyIn(String copySql, InputStream data) {
+                return 0;
+            }
+        };
+
+        SpectrumReadException error = assertThrows(SpectrumReadException.class, () -> service.execute(
+                new ExternalStatement.DropSchema("analytics", false, false), session, refusing));
+
+        assertThat(error.sqlState(), equalTo("2BP01"));
+        verify(registry, never()).unbind(any(), any(), any(), any());
+        verify(tableMaterializer, never()).forgetSchema(any(), any(), any());
+    }
+
+    @Test
+    void dropTableCascadeIsExecutedOnlyWhenAskedFor() {
+        when(registry.find(ACCOUNT, CLUSTER, "dev", "analytics")).thenReturn(Optional.of(analyticsBinding()));
+
+        service.execute(new ExternalStatement.DropTable("analytics", "events", false, false), session, backend());
+        service.execute(new ExternalStatement.DropTable("analytics", "events", false, true), session, backend());
+
+        assertThat(statements, contains("DROP TABLE IF EXISTS \"analytics\".\"events\"",
+                "DROP TABLE IF EXISTS \"analytics\".\"events\" CASCADE"));
+    }
+
+    @Test
+    void onlyBoundSchemasOwnDropAndAlterStatements() {
+        assertFalse(service.handles(new ExternalStatement.DropTable("public", "t", false, false), session));
+        assertFalse(service.handles(new ExternalStatement.DropSchema("local_schema", false, false), session));
+        assertTrue(service.handles(new CreateSchema("analytics", "lake", ROLE_ARN, false), session));
+
+        when(registry.find(ACCOUNT, CLUSTER, "dev", "analytics")).thenReturn(Optional.of(analyticsBinding()));
+
+        assertTrue(service.handles(new ExternalStatement.DropTable("analytics", "events", false, false), session));
+        assertTrue(service.handles(new ExternalStatement.DropSchema("analytics", false, false), session));
+    }
+
+    @Test
+    void newSchemaForgetsFingerprintsAnEarlierSchemaOfTheSameNameLeftBehind() {
+        when(glue.getDatabase("lake")).thenReturn(new Database("lake"));
+
+        service.execute(new CreateSchema("analytics", "lake", ROLE_ARN, false), session, backend());
+
+        verify(tableMaterializer).forgetSchema(CLUSTER, "dev", "analytics");
     }
 }

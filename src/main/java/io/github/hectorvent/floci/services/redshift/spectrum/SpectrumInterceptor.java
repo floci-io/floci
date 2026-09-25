@@ -43,7 +43,9 @@ public class SpectrumInterceptor {
         }
         Optional<ExternalStatement> statement = parseStatement(sql);
         if (statement.isPresent()) {
-            return new Plan.Ddl(statement.get());
+            // A DROP or ALTER that only looks like an external statement is a native one: forward it
+            // instead of planning DDL that no external schema owns.
+            return service.handles(statement.get(), session) ? new Plan.Ddl(statement.get()) : new Plan.Forward();
         }
         service.rejectExternalWrites(sql, session);
         List<ExternalReferenceScanner.Reference> references = service.referencesIn(sql, session);

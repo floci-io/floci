@@ -108,8 +108,8 @@ quarkus:
       - --initialize-at-run-time=io.github.hectorvent.floci.services.lambda.launcher.LambdaExecutionRoleCredentials
       - --initialize-at-run-time=io.github.hectorvent.floci.services.ecs.container.EcsTaskRoleCredentials
       - --initialize-at-run-time=io.github.hectorvent.floci.services.ssoportal.SsoPortalService
-        - --initialize-at-run-time=io.github.hectorvent.floci.services.redshift.proxy.S3CopySimulator
-        - --initialize-at-run-time=io.github.hectorvent.floci.services.redshift.proxy.RedshiftRoleAccess
+      - --initialize-at-run-time=io.github.hectorvent.floci.services.redshift.proxy.S3CopySimulator
+      - --initialize-at-run-time=io.github.hectorvent.floci.services.redshift.proxy.RedshiftRoleAccess
       - --initialize-at-run-time=io.github.hectorvent.floci.services.redshift.spectrum.SpectrumMaterializer
       - --initialize-at-run-time=io.github.hectorvent.floci.services.ecs.exec.EcsExecSessionRegistry
       # snappy-java (Firehose Snappy/HADOOP_SNAPPY delivery) extracts and loads a

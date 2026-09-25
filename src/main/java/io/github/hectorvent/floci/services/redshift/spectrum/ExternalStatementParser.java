@@ -15,8 +15,8 @@ import java.util.regex.Pattern;
 public class ExternalStatementParser {
     private static final Pattern CREATE_SCHEMA = Pattern.compile("(?is)^\\s*CREATE\\s+EXTERNAL\\s+SCHEMA\\s+(.+?)\\s+FROM\\s+DATA\\s+CATALOG\\s+DATABASE\\s+'((?:''|[^'])*)'(?:\\s+REGION\\s+'(?:''|[^'])*')?\\s+IAM_ROLE\\s+(.+?)(?:\\s+CREATE\\s+EXTERNAL\\s+DATABASE\\s+IF\\s+NOT\\s+EXISTS)?\\s*;?\\s*$");
     private static final Pattern CREATE_TABLE_HEAD = Pattern.compile("(?is)^\\s*CREATE\\s+EXTERNAL\\s+TABLE\\s+(.+?)\\.(.+?)\\s*\\(");
-    private static final Pattern DROP_TABLE = Pattern.compile("(?is)^\\s*DROP\\s+TABLE\\s+(IF\\s+EXISTS\\s+)?([^.;\\s]+)\\.([^.;\\s]+)(?:\\s+(?:CASCADE|RESTRICT))?\\s*;?\\s*$");
-    private static final Pattern DROP_SCHEMA = Pattern.compile("(?is)^\\s*DROP\\s+SCHEMA\\s+(IF\\s+EXISTS\\s+)?([^\\s;]+)(?:\\s+(?:CASCADE|RESTRICT))?\\s*;?\\s*$");
+    private static final Pattern DROP_TABLE = Pattern.compile("(?is)^\\s*DROP\\s+TABLE\\s+(IF\\s+EXISTS\\s+)?([^.;\\s]+)\\.([^.;\\s]+)(?:\\s+(CASCADE|RESTRICT))?\\s*;?\\s*$");
+    private static final Pattern DROP_SCHEMA = Pattern.compile("(?is)^\\s*DROP\\s+SCHEMA\\s+(IF\\s+EXISTS\\s+)?([^\\s;]+)(?:\\s+(CASCADE|RESTRICT))?\\s*;?\\s*$");
     private static final Pattern ADD_PARTITIONS = Pattern.compile("(?is)^\\s*ALTER\\s+TABLE\\s+([^.;\\s]+)\\.([^.;\\s]+)\\s+ADD\\s+(IF\\s+NOT\\s+EXISTS\\s+)?(.+?)\\s*;?\\s*$");
 
     public Optional<ExternalStatement> parse(String sql) {
@@ -30,9 +30,11 @@ public class ExternalStatementParser {
         }
         if (text.regionMatches(true, 0, "CREATE EXTERNAL", 0, 15)) return Optional.of(parseTable(text));
         Matcher dropTable = DROP_TABLE.matcher(text);
-        if (dropTable.matches()) return Optional.of(new ExternalStatement.DropTable(identifier(dropTable.group(2)), identifier(dropTable.group(3)), dropTable.group(1) != null));
+        if (dropTable.matches()) return Optional.of(new ExternalStatement.DropTable(identifier(dropTable.group(2)), identifier(dropTable.group(3)),
+                dropTable.group(1) != null, "CASCADE".equalsIgnoreCase(dropTable.group(4))));
         Matcher dropSchema = DROP_SCHEMA.matcher(text);
-        if (dropSchema.matches()) return Optional.of(new ExternalStatement.DropSchema(identifier(dropSchema.group(2)), dropSchema.group(1) != null));
+        if (dropSchema.matches()) return Optional.of(new ExternalStatement.DropSchema(identifier(dropSchema.group(2)),
+                dropSchema.group(1) != null, "CASCADE".equalsIgnoreCase(dropSchema.group(3))));
         Matcher addPartitions = ADD_PARTITIONS.matcher(text);
         if (addPartitions.matches()) {
             List<ExternalStatement.PartitionSpec> partitions = parsePartitions(addPartitions.group(4));

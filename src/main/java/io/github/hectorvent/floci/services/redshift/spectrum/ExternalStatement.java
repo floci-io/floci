@@ -20,6 +20,7 @@ public sealed interface ExternalStatement permits ExternalStatement.CreateSchema
                          List<PartitionSpec> partitions) implements ExternalStatement {
         public AddPartitions { partitions = List.copyOf(partitions); }
     }
-    record DropSchema(String schemaName, boolean ifExists) implements ExternalStatement { }
-    record DropTable(String schemaName, String tableName, boolean ifExists) implements ExternalStatement { }
+    /** {@code cascade} is true only when the statement said CASCADE; RESTRICT is the default, as in PostgreSQL and Redshift. */
+    record DropSchema(String schemaName, boolean ifExists, boolean cascade) implements ExternalStatement { }
+    record DropTable(String schemaName, String tableName, boolean ifExists, boolean cascade) implements ExternalStatement { }
 }

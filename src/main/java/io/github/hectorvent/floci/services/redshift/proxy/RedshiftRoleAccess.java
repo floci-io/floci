@@ -135,6 +135,34 @@ public final class RedshiftRoleAccess {
         }
     }
 
+    /**
+     * Authorizes {@code s3:ListBucket} as the role's signed session: the identity policy first, then
+     * the bucket policy through the signed-request path COPY uses, so a bucket-policy deny applies
+     * even when the identity policy allows the action.
+     */
+    public static void authorizeRoleList(S3Service s3, IamService iamService, RoleSession roleSession,
+                                         String roleArn, String bucket) {
+        authorizeRoleAction(s3, iamService, roleArn, "s3:ListBucket", bucketArn(roleArn, bucket));
+        try {
+            s3.authorizeSignedListBucket(roleSession.accessKeyId(), roleSession.sessionToken(), bucket);
+        } catch (AwsException e) {
+            throw new S3CopySimulator.S3TransferException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
+                    "S3 access denied for s3://" + bucket, e);
+        }
+    }
+
+    /** {@code s3:GetObject} counterpart of {@link #authorizeRoleList}. */
+    public static void authorizeRoleRead(S3Service s3, IamService iamService, RoleSession roleSession,
+                                         String roleArn, String bucket, String key) {
+        authorizeRoleAction(s3, iamService, roleArn, "s3:GetObject", objectArn(roleArn, bucket, key));
+        try {
+            s3.authorizeSignedGetObject(roleSession.accessKeyId(), roleSession.sessionToken(), bucket, key);
+        } catch (AwsException e) {
+            throw new S3CopySimulator.S3TransferException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
+                    "S3 access denied for s3://" + bucket + "/" + key, e);
+        }
+    }
+
     public static String bucketArn(String roleArn, String bucket) {
         AwsArnUtils.Arn role = AwsArnUtils.parse(roleArn);
         return new AwsArnUtils.Arn(role.partition(), "s3", "", "", bucket).toString();

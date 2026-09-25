@@ -12,6 +12,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.contains;
+import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class GlueTableResolverTest {
@@ -113,5 +114,41 @@ class GlueTableResolverTest {
     @Test
     void isIcebergTableFalseWhenParametersMissing() {
         assertThat(GlueTableResolver.isIcebergTable(new Table()), is(false));
+    }
+
+    @Test
+    void readPlanUsesExplicitCsvOptionsInsteadOfSniffingWhenTheTableDeclaresThem() {
+        Table table = table("org.apache.hadoop.mapred.TextInputFormat", "s3://bucket/events/",
+                List.of(column("id", "int"), column("name", "string")));
+        table.setParameters(Map.of("skip.header.line.count", "0", "serialization.null.format", "NA"));
+        StorageDescriptor.SerDeInfo serde = new StorageDescriptor.SerDeInfo();
+        serde.setParameters(Map.of("field.delim", "|", "quoteChar", "'", "escapeChar", "\\"));
+        table.getStorageDescriptor().setSerdeInfo(serde);
+
+        String from = GlueTableResolver.readPlan(table).fromClause();
+
+        assertThat(from, equalTo("read_csv('s3://bucket/events/**', header = false, delim = '|', quote = '''', "
+                + "escape = '\\', nullstr = 'NA', columns = {'id': 'VARCHAR', 'name': 'VARCHAR'})"));
+    }
+
+    @Test
+    void readPlanTreatsOneSkippedLineAsAHeaderAndMoreAsSkippedRows() {
+        Table oneLine = table("org.apache.hadoop.mapred.TextInputFormat", "s3://bucket/events/",
+                List.of(column("id", "int")));
+        oneLine.setParameters(Map.of("skip.header.line.count", "1"));
+        Table twoLines = table("org.apache.hadoop.mapred.TextInputFormat", "s3://bucket/events/",
+                List.of(column("id", "int")));
+        twoLines.setParameters(Map.of("skip.header.line.count", "2"));
+
+        assertThat(GlueTableResolver.readPlan(oneLine).fromClause(), containsString("header = true"));
+        assertThat(GlueTableResolver.readPlan(twoLines).fromClause(), containsString("header = false, skip = 2"));
+    }
+
+    @Test
+    void readPlanKeepsSniffingWhenTheTableDeclaresNoCsvOptions() {
+        Table table = table("org.apache.hadoop.mapred.TextInputFormat", "s3://bucket/events/",
+                List.of(column("id", "int")));
+
+        assertThat(GlueTableResolver.readPlan(table).fromClause(), equalTo("read_csv_auto('s3://bucket/events/**')"));
     }
 }

@@ -115,6 +115,10 @@ class RedshiftSpectrumIntegrationTest {
     }
 
     private void seedCsvTable(String tableName, String csv) {
+        seedCsvTable(tableName, csv, "1");
+    }
+
+    private void seedCsvTable(String tableName, String csv, String skipHeaderLines) {
         bucket = "spectrum-it-" + System.nanoTime();
         s3Service.createBucket(bucket, "us-east-1");
         s3Service.putObject(bucket, tableName + "/part-1.csv", csv.getBytes(StandardCharsets.UTF_8), "text/csv", null);
@@ -136,7 +140,7 @@ class RedshiftSpectrumIntegrationTest {
         Table table = new Table();
         table.setName(tableName);
         table.setTableType("EXTERNAL_TABLE");
-        table.setParameters(Map.of("skip.header.line.count", "1"));
+        table.setParameters(Map.of("skip.header.line.count", skipHeaderLines));
         table.setStorageDescriptor(descriptor);
         glueService.createTable(glueDatabase, table);
     }
@@ -284,6 +288,123 @@ class RedshiftSpectrumIntegrationTest {
                 assertEquals("Parquet", rows.getString("name"));
                 assertFalse(rows.next());
             }
+        }
+    }
+
+    @Test
+    @Timeout(120)
+    void nativeDropStatementsReachPostgresThroughExtendedQuery() throws SQLException {
+        seedCsvTable("events", "id,name\n1,Alice\n");
+        Cluster cluster = newCluster("native-drop");
+        try (Connection connection = connect(cluster); Statement statement = connection.createStatement()) {
+            statement.execute(createSchemaSql("analytics"));
+            statement.execute("CREATE TABLE native_t (id int)");
+            statement.execute("CREATE SCHEMA local_schema");
+            // A PreparedStatement runs over the Extended Query protocol, where a native DROP that only
+            // looks like external DDL used to be answered with 0A000 instead of being forwarded.
+            try (PreparedStatement dropTable = connection.prepareStatement("DROP TABLE public.native_t");
+                 PreparedStatement dropSchema = connection.prepareStatement("DROP SCHEMA local_schema")) {
+                dropTable.execute();
+                dropSchema.execute();
+            }
+            try (ResultSet gone = statement.executeQuery("SELECT to_regclass('public.native_t') IS NULL")) {
+                assertTrue(gone.next());
+                assertTrue(gone.getBoolean(1));
+            }
+        }
+    }
+
+    @Test
+    @Timeout(120)
+    void dropSchemaIsRestrictedByDefaultAndCascadesOnlyWhenAskedTo() throws SQLException {
+        seedCsvTable("events", "id,name\n1,Alice\n");
+        Cluster cluster = newCluster("restrict");
+        try (Connection connection = connect(cluster); Statement statement = connection.createStatement()) {
+            statement.execute(createSchemaSql("analytics"));
+            statement.execute("CREATE VIEW dependent AS SELECT id FROM analytics.events");
+
+            SQLException refused = assertThrows(SQLException.class, () -> statement.execute("DROP SCHEMA analytics"));
+            assertEquals("2BP01", refused.getSQLState());
+            try (ResultSet rows = statement.executeQuery("SELECT count(*) FROM analytics.events")) {
+                assertTrue(rows.next());
+                assertEquals(1, rows.getInt(1));
+            }
+            try (ResultSet view = statement.executeQuery("SELECT count(*) FROM dependent")) {
+                assertTrue(view.next());
+            }
+
+            statement.execute("DROP SCHEMA analytics CASCADE");
+            SQLException viewGone = assertThrows(SQLException.class, () -> statement.executeQuery("SELECT * FROM dependent"));
+            assertEquals("42P01", viewGone.getSQLState());
+        }
+    }
+
+    @Test
+    @Timeout(120)
+    void recreatedSchemaReloadsItsTablesEvenThoughGlueAndS3AreUnchanged() throws SQLException {
+        seedCsvTable("events", "id,name\n1,Alice\n");
+        Cluster cluster = newCluster("recreate");
+        try (Connection connection = connect(cluster); Statement statement = connection.createStatement()) {
+            statement.execute(createSchemaSql("analytics"));
+            statement.executeQuery("SELECT count(*) FROM analytics.events").close();
+            statement.execute("DROP SCHEMA analytics");
+            statement.execute(createSchemaSql("analytics"));
+
+            try (ResultSet rows = statement.executeQuery("SELECT name FROM analytics.events")) {
+                assertTrue(rows.next());
+                assertEquals("Alice", rows.getString(1));
+            }
+        }
+    }
+
+    @Test
+    @Timeout(120)
+    void headerlessCsvTableJoinsWithNativeTableUsingItsDeclaredColumns() throws SQLException {
+        seedCsvTable("events", "1,Alice\n2,Bob\n", "0");
+        Cluster cluster = newCluster("headerless");
+        try (Connection connection = connect(cluster); Statement statement = connection.createStatement()) {
+            statement.execute(createSchemaSql("analytics"));
+            statement.execute("CREATE TABLE owners (id int, team text)");
+            statement.execute("INSERT INTO owners VALUES (1, 'core')");
+            try (ResultSet rows = statement.executeQuery(
+                    "SELECT e.name, o.team FROM analytics.events e JOIN owners o ON o.id = e.id")) {
+                assertTrue(rows.next());
+                assertEquals("Alice", rows.getString("name"));
+                assertEquals("core", rows.getString("team"));
+                assertFalse(rows.next());
+            }
+        }
+    }
+
+    @Test
+    @Timeout(120)
+    void tableAliasNamedLikeAnExternalSchemaIsNotLoadedAsATable() throws SQLException {
+        seedCsvTable("events", "id,name\n1,Alice\n");
+        Cluster cluster = newCluster("alias");
+        try (Connection connection = connect(cluster); Statement statement = connection.createStatement()) {
+            statement.execute(createSchemaSql("analytics"));
+            statement.execute("CREATE TABLE owners (id int)");
+            statement.execute("INSERT INTO owners VALUES (5)");
+            try (ResultSet rows = statement.executeQuery("SELECT analytics.id FROM owners AS analytics")) {
+                assertTrue(rows.next());
+                assertEquals(5, rows.getInt(1));
+            }
+        }
+    }
+
+    @Test
+    @Timeout(120)
+    void externalWriteBehindANativeWriteInABatchIsRejected() throws SQLException {
+        seedCsvTable("events", "id,name\n1,Alice\n");
+        Cluster cluster = newCluster("batch-write");
+        try (Connection connection = connect(cluster); Statement statement = connection.createStatement()) {
+            statement.execute(createSchemaSql("analytics"));
+            statement.execute("CREATE TABLE owners (id int)");
+
+            SQLException write = assertThrows(SQLException.class,
+                    () -> statement.execute("UPDATE owners SET id = 1; DELETE FROM analytics.events"));
+
+            assertEquals("0A000", write.getSQLState());
         }
     }
 }

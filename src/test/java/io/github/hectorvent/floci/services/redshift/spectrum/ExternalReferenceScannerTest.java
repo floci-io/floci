@@ -46,4 +46,49 @@ class ExternalReferenceScannerTest {
         assertThat(ExternalReferenceScanner.writeTarget("WITH values_to_write AS (SELECT 1) UPDATE analytics.events SET id = 2", SCHEMAS),
                 equalTo(Optional.of(new Reference("analytics", "events"))));
     }
+
+    @Test
+    void doesNotTreatColumnQualifiersOrTableAliasesAsTableReferences() {
+        assertThat(ExternalReferenceScanner.scan("SELECT analytics.id FROM public.owners AS analytics", SCHEMAS), empty());
+        assertThat(ExternalReferenceScanner.scan("SELECT * FROM public.owners analytics WHERE analytics.id = 1", SCHEMAS), empty());
+        assertThat(ExternalReferenceScanner.scan(
+                "SELECT * FROM public.owners o JOIN public.teams t ON t.id = analytics.id", SCHEMAS), empty());
+    }
+
+    @Test
+    void findsCommaJoinedAndSubqueryReferencesAndRestoresContextAfterTheSubquery() {
+        assertThat(ExternalReferenceScanner.scan("SELECT * FROM public.a, analytics.events", SCHEMAS),
+                contains(new Reference("analytics", "events")));
+        assertThat(ExternalReferenceScanner.scan(
+                "SELECT * FROM public.t WHERE id IN (SELECT id FROM analytics.events)", SCHEMAS),
+                contains(new Reference("analytics", "events")));
+        assertThat(ExternalReferenceScanner.scan(
+                "SELECT * FROM public.t WHERE id IN (SELECT id FROM public.u) AND analytics.id = 1", SCHEMAS), empty());
+    }
+
+    @Test
+    void checksEveryStatementOfABatchForWrites() {
+        assertThat(ExternalReferenceScanner.writeTarget(
+                "UPDATE public.owners SET x = 1; DELETE FROM analytics.events", SCHEMAS),
+                equalTo(Optional.of(new Reference("analytics", "events"))));
+    }
+
+    @Test
+    void detectsWritesInsideDataModifyingCtesTruncateAndMerge() {
+        assertThat(ExternalReferenceScanner.writeTarget(
+                "WITH gone AS (DELETE FROM analytics.events RETURNING id) SELECT * FROM gone", SCHEMAS),
+                equalTo(Optional.of(new Reference("analytics", "events"))));
+        assertThat(ExternalReferenceScanner.writeTarget("TRUNCATE TABLE analytics.events", SCHEMAS),
+                equalTo(Optional.of(new Reference("analytics", "events"))));
+        assertThat(ExternalReferenceScanner.writeTarget(
+                "MERGE INTO analytics.events USING public.t ON true WHEN MATCHED THEN DELETE", SCHEMAS),
+                equalTo(Optional.of(new Reference("analytics", "events"))));
+    }
+
+    @Test
+    void writesToNativeTablesAreNotExternalWrites() {
+        assertThat(ExternalReferenceScanner.writeTarget("UPDATE public.owners SET x = 1", SCHEMAS), equalTo(Optional.empty()));
+        assertThat(ExternalReferenceScanner.writeTarget(
+                "INSERT INTO public.t VALUES (1) ON CONFLICT DO UPDATE SET x = 1", SCHEMAS), equalTo(Optional.empty()));
+    }
 }

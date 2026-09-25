@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.glue.model.StorageDescriptor;
 import io.github.hectorvent.floci.services.glue.model.Table;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
+import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.junit.jupiter.api.BeforeEach;
@@ -20,6 +21,9 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
@@ -30,6 +34,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -39,6 +44,9 @@ class ExternalTableMaterializerTest {
     private static final String ACCOUNT = "000000000000";
     private static final ExternalSchemaBinding BINDING = new ExternalSchemaBinding(ACCOUNT, ACCOUNT + ":c",
             "dev", "analytics", "lake", "arn:aws:iam::000000000000:role/R");
+    private static final String TRUST_POLICY = """
+            {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+            "Principal":{"Service":"redshift.amazonaws.com"},"Action":"sts:AssumeRole"}]}""";
     private FlociDuckClient duck;
     private GlueService glue;
     private S3Service s3;
@@ -67,6 +75,9 @@ class ExternalTableMaterializerTest {
         glue = mock(GlueService.class);
         s3 = mock(S3Service.class);
         iam = mock(IamService.class);
+        IamRole role = mock(IamRole.class);
+        when(role.getAssumeRolePolicyDocument()).thenReturn(TRUST_POLICY);
+        when(iam.findRole(ACCOUNT, "R")).thenReturn(Optional.of(role));
         EmulatorConfig config = mock(EmulatorConfig.class, Answers.RETURNS_DEEP_STUBS);
         when(config.services().redshift().spectrumMaxRows()).thenReturn(1000L);
         when(config.defaultRegion()).thenReturn("us-east-1");
@@ -239,5 +250,96 @@ class ExternalTableMaterializerTest {
         table.setVersionId("1");
         table.setStorageDescriptor(descriptor);
         return table;
+    }
+
+    @Test
+    void deniesReadsThatOnlyTheBucketPolicyForbids() {
+        when(glue.getTable("lake", "events")).thenReturn(csvTable());
+        doThrow(new AwsException("AccessDenied", "Access Denied", 403)).when(s3)
+                .authorizeSignedGetObject(anyString(), anyString(), eq("bucket"), eq("events/p1.csv"));
+
+        SpectrumSqlException exception = assertThrows(SpectrumSqlException.class,
+                () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
+
+        assertThat(exception.sqlState(), equalTo("42501"));
+        verify(duck, never()).execute(anyString(), any(), anyString(), anyString());
+    }
+
+    @Test
+    void authorizesListingAndEveryObjectAsTheRoleSessionAndReleasesIt() {
+        when(glue.getTable("lake", "events")).thenReturn(csvTable());
+
+        materializer.ensureCurrent(backend, session(false), BINDING, "events");
+
+        verify(s3).authorizeSignedListBucket(anyString(), anyString(), eq("bucket"));
+        verify(s3).authorizeSignedGetObject(anyString(), anyString(), eq("bucket"), eq("events/p1.csv"));
+        verify(iam).unregisterSession(eq(ACCOUNT), anyString());
+    }
+
+    @Test
+    void releasesTheRoleSessionWhenAuthorizationFails() {
+        when(glue.getTable("lake", "events")).thenReturn(csvTable());
+        doThrow(new AwsException("AccessDenied", "Access Denied", 403)).when(s3)
+                .authorizeSignedListBucket(anyString(), anyString(), eq("bucket"));
+
+        assertThrows(SpectrumSqlException.class,
+                () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
+
+        verify(iam).unregisterSession(eq(ACCOUNT), anyString());
+    }
+
+    @Test
+    void reloadsAfterTheSchemaWasForgottenEvenWhenNothingChanged() {
+        when(glue.getTable("lake", "events")).thenReturn(csvTable());
+        materializer.ensureCurrent(backend, session(false), BINDING, "events");
+        assertThat(materializer.loadedTables(BINDING.clusterKey(), "dev", "analytics"),
+                equalTo(Set.of("events")));
+
+        materializer.forgetSchema(BINDING.clusterKey(), "dev", "analytics");
+
+        assertThat(materializer.loadedTables(BINDING.clusterKey(), "dev", "analytics"), equalTo(Set.of()));
+        assertThat(materializer.ensureCurrent(backend, session(false), BINDING, "events"),
+                equalTo(ExternalTableMaterializer.Outcome.LOADED));
+    }
+
+    @Test
+    void readsHeaderlessDelimitedCsvWithTheTablesDeclaredOptions() {
+        Table table = csvTable();
+        table.setParameters(Map.of("skip.header.line.count", "0"));
+        StorageDescriptor.SerDeInfo serde = new StorageDescriptor.SerDeInfo();
+        serde.setParameters(Map.of("field.delim", "|"));
+        table.getStorageDescriptor().setSerdeInfo(serde);
+        when(glue.getTable("lake", "events")).thenReturn(table);
+
+        materializer.ensureCurrent(backend, session(false), BINDING, "events");
+
+        verify(duck).execute(argThat(sql -> sql.contains("read_csv('s3://bucket/events/**'")
+                && sql.contains("header = false") && sql.contains("delim = '|'")
+                && sql.contains("columns = {'id': 'VARCHAR', 'name': 'VARCHAR'}")),
+                isNull(), anyString(), eq(ACCOUNT));
+    }
+
+    @Test
+    void sparsePartitionKeepsTheTablesColumnsAndCsvOptions() {
+        Table table = csvTable();
+        table.setPartitionKeys(List.of(new Column("day", "string")));
+        table.setParameters(Map.of("skip.header.line.count", "0"));
+        when(glue.getTable("lake", "events")).thenReturn(table);
+        StorageDescriptor sparse = new StorageDescriptor();
+        sparse.setLocation("s3://bucket/archived/day=2026-09-25/");
+        Partition partition = new Partition();
+        partition.setValues(List.of("2026-09-25"));
+        partition.setStorageDescriptor(sparse);
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(partition));
+        when(s3.listObjectsWithPrefixes(eq("bucket"), eq("archived/day=2026-09-25/"), eq(""), eq(1000), any(), any()))
+                .thenReturn(new S3Service.ListObjectsResult(List.of(
+                        new S3Object("bucket", "archived/day=2026-09-25/part.csv", new byte[]{1}, "text/csv", "e")),
+                        List.of(), false, null));
+
+        materializer.ensureCurrent(backend, session(false), BINDING, "events");
+
+        verify(duck).execute(argThat(sql -> sql.contains("header = false")
+                && sql.contains("columns = {'id': 'VARCHAR', 'name': 'VARCHAR'}")
+                && sql.contains("CAST('2026-09-25' AS VARCHAR)")), any(), anyString(), eq(ACCOUNT));
     }
 }

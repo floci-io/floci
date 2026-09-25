@@ -14,6 +14,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
@@ -112,6 +113,8 @@ public class ExternalSchemaService {
             }
         });
         backend.execute("CREATE SCHEMA " + quote(statement.schemaName()));
+        // A new schema starts with no loaded tables, whatever a schema of the same name left behind.
+        materializer.forgetSchema(session.clusterKey(), session.databaseName(), statement.schemaName());
         ExternalSchemaBinding binding = new ExternalSchemaBinding(session.accountId(), session.clusterKey(), session.databaseName(), statement.schemaName(), statement.glueDatabase(), statement.iamRoleArn());
         registry.bind(binding);
         metadata.refresh(backend, session.accountId(), binding);
@@ -148,10 +151,59 @@ public class ExternalSchemaService {
     private Optional<String> dropSchema(ExternalStatement.DropSchema statement, SpectrumSession session, BackendSql backend) {
         Optional<ExternalSchemaBinding> binding = registry.find(session.accountId(), session.clusterKey(), session.databaseName(), statement.schemaName());
         if (binding.isEmpty()) return Optional.empty();
-        backend.execute("DROP SCHEMA IF EXISTS " + quote(statement.schemaName()) + " CASCADE");
+        String schema = quote(statement.schemaName());
+        if (statement.cascade()) {
+            backend.execute("DROP SCHEMA IF EXISTS " + schema + " CASCADE");
+        } else {
+            // RESTRICT is the default: drop only the tables Floci loaded for this schema, each without
+            // CASCADE so a user's dependent view still blocks the drop, then the schema itself without
+            // CASCADE. One message is one implicit transaction, so a refusal leaves everything in place.
+            StringBuilder sql = new StringBuilder();
+            for (String table : managedTables(binding.get(), session)) {
+                sql.append("DROP TABLE IF EXISTS ").append(schema).append('.').append(quote(table)).append("; ");
+            }
+            backend.execute(sql.append("DROP SCHEMA IF EXISTS ").append(schema).toString());
+        }
         registry.unbind(session.accountId(), session.clusterKey(), session.databaseName(), statement.schemaName());
+        materializer.forgetSchema(session.clusterKey(), session.databaseName(), statement.schemaName());
         metadata.purge(backend, statement.schemaName());
         return Optional.of("DROP SCHEMA");
+    }
+
+    /** Tables Floci itself put in the external schema: the catalog's tables plus any it loaded and still tracks. */
+    private Set<String> managedTables(ExternalSchemaBinding binding, SpectrumSession session) {
+        Set<String> names = new TreeSet<>(materializer.loadedTables(
+                session.clusterKey(), session.databaseName(), binding.schemaName()));
+        try {
+            List<Table> tables = RequestScopes.callAs(session.accountId(), () -> glueService.getTables(binding.glueDatabase()));
+            for (Table table : tables) {
+                names.add(table.getName());
+            }
+        } catch (AwsException exception) {
+            if (!"EntityNotFoundException".equals(exception.getErrorCode())) {
+                throw exception;
+            }
+            // the Glue database is already gone, so only the tables this schema loaded remain to drop
+        }
+        return names;
+    }
+
+    /**
+     * Whether {@code statement} is really for an external schema. A DROP or ALTER only looks like one
+     * syntactically; when its target is not a bound schema it is an ordinary PostgreSQL statement.
+     */
+    public boolean handles(ExternalStatement statement, SpectrumSession session) {
+        return switch (statement) {
+            case ExternalStatement.CreateSchema ignored -> true;
+            case ExternalStatement.CreateTable ignored -> true;
+            case ExternalStatement.AddPartitions add -> isBound(add.schemaName(), session);
+            case ExternalStatement.DropSchema drop -> isBound(drop.schemaName(), session);
+            case ExternalStatement.DropTable drop -> isBound(drop.schemaName(), session);
+        };
+    }
+
+    private boolean isBound(String schemaName, SpectrumSession session) {
+        return registry.find(session.accountId(), session.clusterKey(), session.databaseName(), schemaName).isPresent();
     }
 
     private Optional<String> dropTable(ExternalStatement.DropTable statement, SpectrumSession session, BackendSql backend) {
@@ -163,7 +215,8 @@ public class ExternalSchemaService {
             if (!statement.ifExists()) throw new SpectrumSqlException("42P01", "table \"" + statement.tableName() + "\" does not exist");
         }
         materializer.forget(session.clusterKey(), session.databaseName(), statement.schemaName(), statement.tableName());
-        backend.execute("DROP TABLE IF EXISTS " + quote(statement.schemaName()) + "." + quote(statement.tableName()));
+        backend.execute("DROP TABLE IF EXISTS " + quote(statement.schemaName()) + "." + quote(statement.tableName())
+                + (statement.cascade() ? " CASCADE" : ""));
         metadata.refresh(backend, session.accountId(), binding.get());
         return Optional.of("DROP TABLE");
     }

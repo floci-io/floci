@@ -240,7 +240,11 @@ Floci's Redshift auth proxy inspects frontend queries on the PostgreSQL wire pro
 Redshift Spectrum uses the Glue Data Catalog as the authoritative metadata store for new external
 schemas and tables. The proxy supports `CREATE EXTERNAL SCHEMA ... FROM DATA CATALOG DATABASE ...
 IAM_ROLE ...`, optional `REGION` and `CREATE EXTERNAL DATABASE IF NOT EXISTS`, `CREATE EXTERNAL
-TABLE`, `ALTER TABLE ... ADD PARTITION`, `DROP TABLE`, and `DROP SCHEMA`. The
+TABLE`, `ALTER TABLE ... ADD PARTITION`, `DROP TABLE`, and `DROP SCHEMA`. `DROP SCHEMA` and
+`DROP TABLE` are `RESTRICT` unless the statement says `CASCADE`: a restricted drop of an external
+schema removes only the tables Floci itself loaded, and is refused, leaving the schema bound, while a
+view of yours still depends on one. A `DROP` or `ALTER` that does not name a bound external schema is
+an ordinary PostgreSQL statement. The
 `svv_external_schemas`, `svv_external_tables`, `svv_external_columns`, and
 `svv_external_partitions` views expose Glue metadata. A missing Glue database or table is an error;
 it does not fall through to a same-named local PostgreSQL table.
@@ -267,9 +271,12 @@ Glue owns metadata for new DDL. Persisted Phase 1 schema and table records remai
 backward compatibility, including historical schema records whose table key used the `dev`
 database name. A current Glue binding takes precedence over legacy records; new DDL is not written
 into the old Phase 1 catalog. Set `FLOCI_SERVICES_REDSHIFT_SPECTRUM_ENABLED=false` to forward
-external-schema statements without interception. CSV inputs should have a header matching the
-declared column names when `skip.header.line.count` is configured. Nested Glue types are loaded as
-`jsonb` on the generalized path.
+external-schema statements without interception. On the generalized path a CSV table that declares
+`skip.header.line.count`, `field.delim`, or `separatorChar` is read with exactly those options
+(`quoteChar`, `escapeChar`, and `serialization.null.format` are honored too) and its declared columns,
+so a headerless file works when `skip.header.line.count` is `0`; a table that declares none is
+sniffed as Athena does, which expects a header row. Nested Glue types are loaded as `jsonb` on the
+generalized path.
 
 | Glue type | PostgreSQL type |
 |---|---|
@@ -286,9 +293,11 @@ declared column names when `skip.header.line.count` is configured. Nested Glue t
 
 Writes to external tables (`INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`) fail with SQLSTATE `0A000`.
 Views depending on an external table can prevent its reload; drop those views before querying the
-table again. `IAM_ROLE default` and cross-account roles are unsupported. The Phase 1 reader uses the
-role bound to the Redshift cluster and external schema, and evaluates its S3 identity policy when
-S3 IAM enforcement is enabled. Extended Query loads generalized materializations at `Parse`, so a
+table again. `IAM_ROLE default` and cross-account roles are unsupported. Both read paths authorize the
+listing and every object as the role bound to the external schema, with the same signed
+authorization COPY uses: with `FLOCI_SERVICES_S3_ENFORCE_AUTH` on, the role's identity policy must
+allow the action and a bucket policy denying the role blocks the read. DuckDB then reads as the
+account, so the role's access is enforced by this check ahead of the read. Extended Query loads generalized materializations at `Parse`, so a
 prepared statement sees the data as of its parse; the Phase 1 path materializes at execution.
 
 | SQLSTATE | Meaning |

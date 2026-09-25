@@ -42,6 +42,7 @@ class SpectrumInterceptorTest {
 
     @Test
     void externalDdlIsHandledWithTheCommandTag() {
+        when(service.handles(any(), eq(SESSION))).thenReturn(true);
         when(service.execute(any(), eq(SESSION), eq(BACKEND))).thenReturn(Optional.of("CREATE SCHEMA"));
         SpectrumInterceptor.Decision result = interceptor.intercept(
                 "CREATE EXTERNAL SCHEMA a FROM DATA CATALOG DATABASE 'd' IAM_ROLE 'arn:aws:iam::000000000000:role/R'", SESSION, BACKEND);
@@ -50,6 +51,7 @@ class SpectrumInterceptorTest {
 
     @Test
     void legacyExternalSchemaSyntaxRetainsCreateGlueDatabaseOption() {
+        when(service.handles(any(), eq(SESSION))).thenReturn(true);
         SpectrumInterceptor.Plan plan = interceptor.plan(
                 "CREATE EXTERNAL SCHEMA a FROM DATA CATALOG DATABASE 'd' IAM_ROLE 'r' CREATE EXTERNAL DATABASE IF NOT EXISTS", SESSION);
 
@@ -94,5 +96,19 @@ class SpectrumInterceptorTest {
         when(config.services().redshift().spectrumEnabled()).thenReturn(false);
         assertThat(interceptor.intercept("CREATE EXTERNAL SCHEMA a FROM DATA CATALOG DATABASE 'd' IAM_ROLE 'r'", SESSION, BACKEND),
                 instanceOf(SpectrumInterceptor.Decision.Forward.class));
+    }
+
+    @Test
+    void nativeDropStatementsAreForwardedInsteadOfPlannedAsExternalDdl() {
+        assertThat(interceptor.plan("DROP TABLE public.t", SESSION), instanceOf(SpectrumInterceptor.Plan.Forward.class));
+        assertThat(interceptor.plan("DROP SCHEMA local_schema", SESSION), instanceOf(SpectrumInterceptor.Plan.Forward.class));
+        verify(service, never()).execute(any(), any(), any());
+    }
+
+    @Test
+    void dropOfABoundExternalSchemaIsPlannedAsExternalDdl() {
+        when(service.handles(any(), eq(SESSION))).thenReturn(true);
+
+        assertThat(interceptor.plan("DROP SCHEMA analytics", SESSION), instanceOf(SpectrumInterceptor.Plan.Ddl.class));
     }
 }

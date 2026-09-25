@@ -55,4 +55,20 @@ class ExternalStatementParserTest {
                 "CREATE EXTERNAL TABLE analytics.events (id int) STORED AS ORC LOCATION 's3://bucket/events/'"));
         assertThat(error.sqlState(), equalTo("0A000"));
     }
+
+    @Test
+    void dropStatementsDefaultToRestrictAndOnlyCascadeWhenAsked() {
+        assertThat(parser.parse("DROP SCHEMA analytics").orElseThrow(),
+                equalTo(new ExternalStatement.DropSchema("analytics", false, false)));
+        assertThat(parser.parse("DROP SCHEMA analytics RESTRICT").orElseThrow(),
+                equalTo(new ExternalStatement.DropSchema("analytics", false, false)));
+        assertThat(parser.parse("DROP SCHEMA IF EXISTS analytics CASCADE;").orElseThrow(),
+                equalTo(new ExternalStatement.DropSchema("analytics", true, true)));
+        assertThat(parser.parse("DROP TABLE analytics.events").orElseThrow(),
+                equalTo(new ExternalStatement.DropTable("analytics", "events", false, false)));
+        assertThat(parser.parse("DROP TABLE IF EXISTS analytics.events RESTRICT").orElseThrow(),
+                equalTo(new ExternalStatement.DropTable("analytics", "events", true, false)));
+        assertThat(parser.parse("drop table analytics.events cascade").orElseThrow(),
+                equalTo(new ExternalStatement.DropTable("analytics", "events", false, true)));
+    }
 }
