@@ -1,5 +1,46 @@
 package io.github.hectorvent.floci.services.apigateway;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.TlsCertificateManager;
+import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.ReservedTags;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.apigateway.model.Account;
+import io.github.hectorvent.floci.services.apigateway.model.ApiGatewayResource;
+import io.github.hectorvent.floci.services.apigateway.model.ApiKey;
+import io.github.hectorvent.floci.services.apigateway.model.Authorizer;
+import io.github.hectorvent.floci.services.apigateway.model.BasePathMapping;
+import io.github.hectorvent.floci.services.apigateway.model.CustomDomain;
+import io.github.hectorvent.floci.services.apigateway.model.Deployment;
+import io.github.hectorvent.floci.services.apigateway.model.EndpointConfiguration;
+import io.github.hectorvent.floci.services.apigateway.model.EndpointType;
+import io.github.hectorvent.floci.services.apigateway.model.GatewayResponse;
+import io.github.hectorvent.floci.services.apigateway.model.GatewayResponseType;
+import io.github.hectorvent.floci.services.apigateway.model.Integration;
+import io.github.hectorvent.floci.services.apigateway.model.IntegrationResponse;
+import io.github.hectorvent.floci.services.apigateway.model.MethodConfig;
+import io.github.hectorvent.floci.services.apigateway.model.MethodResponse;
+import io.github.hectorvent.floci.services.apigateway.model.MethodSetting;
+import io.github.hectorvent.floci.services.apigateway.model.Model;
+import io.github.hectorvent.floci.services.apigateway.model.RequestValidator;
+import io.github.hectorvent.floci.services.apigateway.model.RestApi;
+import io.github.hectorvent.floci.services.apigateway.model.Stage;
+import io.github.hectorvent.floci.services.apigateway.model.UsagePlan;
+import io.github.hectorvent.floci.services.apigateway.model.UsagePlanKey;
+import io.github.hectorvent.floci.services.apigateway.model.VpcLink;
+import io.swagger.v3.oas.models.OpenAPI;
+import io.swagger.v3.oas.models.Operation;
+import io.swagger.v3.oas.models.PathItem;
+import io.swagger.v3.oas.models.security.SecurityRequirement;
+import io.swagger.v3.oas.models.security.SecurityScheme;
+import io.swagger.v3.parser.core.models.SwaggerParseResult;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
+
 import java.time.LocalDate;
 import java.time.format.DateTimeParseException;
 import java.time.temporal.ChronoUnit;
@@ -15,49 +56,6 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
-
-import io.github.hectorvent.floci.services.apigateway.model.EndpointConfiguration;
-import io.github.hectorvent.floci.services.apigateway.model.EndpointType;
-import org.jboss.logging.Logger;
-
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
-
-import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.config.TlsCertificateManager;
-import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.common.ReservedTags;
-import io.github.hectorvent.floci.core.storage.StorageBackend;
-import io.github.hectorvent.floci.core.storage.StorageFactory;
-import io.github.hectorvent.floci.services.apigateway.model.Account;
-import io.github.hectorvent.floci.services.apigateway.model.ApiGatewayResource;
-import io.github.hectorvent.floci.services.apigateway.model.ApiKey;
-import io.github.hectorvent.floci.services.apigateway.model.Authorizer;
-import io.github.hectorvent.floci.services.apigateway.model.BasePathMapping;
-import io.github.hectorvent.floci.services.apigateway.model.MethodSetting;
-import io.github.hectorvent.floci.services.apigateway.model.VpcLink;
-import io.github.hectorvent.floci.services.apigateway.model.CustomDomain;
-import io.github.hectorvent.floci.services.apigateway.model.Deployment;
-import io.github.hectorvent.floci.services.apigateway.model.GatewayResponse;
-import io.github.hectorvent.floci.services.apigateway.model.GatewayResponseType;
-import io.github.hectorvent.floci.services.apigateway.model.Integration;
-import io.github.hectorvent.floci.services.apigateway.model.IntegrationResponse;
-import io.github.hectorvent.floci.services.apigateway.model.MethodConfig;
-import io.github.hectorvent.floci.services.apigateway.model.MethodResponse;
-import io.github.hectorvent.floci.services.apigateway.model.Model;
-import io.github.hectorvent.floci.services.apigateway.model.RequestValidator;
-import io.github.hectorvent.floci.services.apigateway.model.RestApi;
-import io.github.hectorvent.floci.services.apigateway.model.Stage;
-import io.github.hectorvent.floci.services.apigateway.model.UsagePlan;
-import io.github.hectorvent.floci.services.apigateway.model.UsagePlanKey;
-import io.swagger.v3.oas.models.OpenAPI;
-import io.swagger.v3.oas.models.Operation;
-import io.swagger.v3.oas.models.PathItem;
-import io.swagger.v3.oas.models.security.SecurityRequirement;
-import io.swagger.v3.oas.models.security.SecurityScheme;
-import io.swagger.v3.parser.core.models.SwaggerParseResult;
-import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.inject.Inject;
 
 @ApplicationScoped
 public class ApiGatewayService {
