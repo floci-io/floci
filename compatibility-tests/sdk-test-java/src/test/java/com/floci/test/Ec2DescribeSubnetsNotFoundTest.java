@@ -25,17 +25,23 @@ class Ec2DescribeSubnetsNotFoundTest {
             assertThat(error.awsErrorDetails().errorCode()).isEqualTo("InvalidSubnetID.NotFound");
 
             String vpcId = ec2.createVpc(r -> r.cidrBlock("10.75.0.0/16")).vpc().vpcId();
-            String subnetId = ec2.createSubnet(r -> r.vpcId(vpcId).cidrBlock("10.75.1.0/24"))
-                    .subnet().subnetId();
+            String subnetId = null;
             try {
-                assertThat(ec2.describeSubnets(r -> r.subnetIds(subnetId)).subnets())
+                subnetId = ec2.createSubnet(r -> r.vpcId(vpcId).cidrBlock("10.75.1.0/24"))
+                        .subnet().subnetId();
+                String created = subnetId;
+
+                assertThat(ec2.describeSubnets(r -> r.subnetIds(created)).subnets())
                         .singleElement().satisfies(s -> assertThat(s.vpcId()).isEqualTo(vpcId));
 
                 Ec2Exception mixed = assertThrows(Ec2Exception.class,
-                        () -> ec2.describeSubnets(r -> r.subnetIds(subnetId, MISSING)));
+                        () -> ec2.describeSubnets(r -> r.subnetIds(created, MISSING)));
                 assertThat(mixed.awsErrorDetails().errorCode()).isEqualTo("InvalidSubnetID.NotFound");
             } finally {
-                ec2.deleteSubnet(r -> r.subnetId(subnetId));
+                if (subnetId != null) {
+                    String cleanup = subnetId;
+                    ec2.deleteSubnet(r -> r.subnetId(cleanup));
+                }
                 ec2.deleteVpc(r -> r.vpcId(vpcId));
             }
         }
