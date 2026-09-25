@@ -4688,6 +4688,745 @@ given()
         deleteTable(tableName);
     }
 
+    // An undefined #name/:value in ConditionExpression must reject, not false-fail the condition.
+    @Test
+    void undefinedTokensInConditionExpressionAreRejected() {
+        String tableName = "ConditionExprTokenTable";
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "KeySchema": [
+                        {"AttributeName": "pk", "KeyType": "HASH"},
+                        {"AttributeName": "sk", "KeyType": "RANGE"}
+                    ],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "pk", "AttributeType": "S"},
+                        {"AttributeName": "sk", "AttributeType": "S"}
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then().statusCode(200);
+
+        // PutItem: ConditionExpression references an undefined :value.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Item": {"pk": {"S": "a"}, "sk": {"S": "b"}},
+                    "ConditionExpression": "sk = :v"
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Invalid ConditionExpression: An expression attribute value "
+                    + "used in expression is not defined; attribute value: :v"));
+
+        // PutItem: ConditionExpression references an undefined #name.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Item": {"pk": {"S": "a"}, "sk": {"S": "b"}},
+                    "ConditionExpression": "#n = sk"
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Invalid ConditionExpression: An expression attribute name "
+                    + "used in the document path is not defined; attribute name: #n"));
+
+        // Both undefined; the textually-first token (:v) is reported, not names before values.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Item": {"pk": {"S": "a"}, "sk": {"S": "b"}},
+                    "ConditionExpression": ":v = #n"
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Invalid ConditionExpression: An expression attribute value "
+                    + "used in expression is not defined; attribute value: :v"));
+
+        // DeleteItem: ConditionExpression references an undefined :value.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DeleteItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Key": {"pk": {"S": "a"}, "sk": {"S": "b"}},
+                    "ConditionExpression": "sk = :v"
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Invalid ConditionExpression: An expression attribute value "
+                    + "used in expression is not defined; attribute value: :v"));
+
+        // DeleteItem: ConditionExpression references an undefined #name.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DeleteItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Key": {"pk": {"S": "a"}, "sk": {"S": "b"}},
+                    "ConditionExpression": "#n = sk"
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Invalid ConditionExpression: An expression attribute name "
+                    + "used in the document path is not defined; attribute name: #n"));
+
+        // UpdateItem: valid UpdateExpression, but ConditionExpression is undefined.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Key": {"pk": {"S": "a"}, "sk": {"S": "b"}},
+                    "UpdateExpression": "SET payload = :d",
+                    "ExpressionAttributeValues": {":d": {"S": "x"}},
+                    "ConditionExpression": "sk = :v"
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Invalid ConditionExpression: An expression attribute value "
+                    + "used in expression is not defined; attribute value: :v"));
+
+        // UpdateItem: ConditionExpression references an undefined #name.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Key": {"pk": {"S": "a"}, "sk": {"S": "b"}},
+                    "UpdateExpression": "SET payload = :d",
+                    "ExpressionAttributeValues": {":d": {"S": "x"}},
+                    "ConditionExpression": "#n = sk"
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Invalid ConditionExpression: An expression attribute name "
+                    + "used in the document path is not defined; attribute name: #n"));
+
+        // Undefined :v must win over the unused-EAV check for the stray :z.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Key": {"pk": {"S": "a"}, "sk": {"S": "b"}},
+                    "UpdateExpression": "SET payload = :d",
+                    "ConditionExpression": "sk = :v",
+                    "ExpressionAttributeValues": {":d": {"S": "x"}, ":z": {"S": "unused"}}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Invalid ConditionExpression: An expression attribute value "
+                    + "used in expression is not defined; attribute value: :v"));
+
+        // Edge case: nested path #a.#b, only #a defined.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Item": {"pk": {"S": "a"}, "sk": {"S": "b"}},
+                    "ConditionExpression": "attribute_not_exists(#a.#b)",
+                    "ExpressionAttributeNames": {"#a": "payload"}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Invalid ConditionExpression: An expression attribute name "
+                    + "used in the document path is not defined; attribute name: #b"));
+
+        // Edge case: the same undefined token used twice must still report once, not crash.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Item": {"pk": {"S": "a"}, "sk": {"S": "b"}},
+                    "ConditionExpression": "sk = :v OR pk = :v"
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Invalid ConditionExpression: An expression attribute value "
+                    + "used in expression is not defined; attribute value: :v"));
+
+        // Control: a different token than the one supplied is missing and must be named.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Item": {"pk": {"S": "a"}, "sk": {"S": "b"}},
+                    "ConditionExpression": "#n = :v",
+                    "ExpressionAttributeNames": {"#n": "sk"},
+                    "ExpressionAttributeValues": {":other": {"S": "x"}}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Invalid ConditionExpression: An expression attribute value "
+                    + "used in expression is not defined; attribute value: :v"));
+
+        // Control: a fully-defined ConditionExpression is still accepted; seed the item first.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Item": {"pk": {"S": "a"}, "sk": {"S": "b"}}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then().statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Item": {"pk": {"S": "a"}, "sk": {"S": "b"}},
+                    "ConditionExpression": "#n = :v",
+                    "ExpressionAttributeNames": {"#n": "sk"},
+                    "ExpressionAttributeValues": {":v": {"S": "b"}}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then().statusCode(200);
+
+        deleteTable(tableName);
+    }
+
+    // Query/Scan must reject an undefined #name/:value, never silently treat it as "no match".
+    @Test
+    void undefinedTokensInKeyConditionAndFilterExpressionsAreRejected() {
+        String tableName = "QueryScanTokenTable";
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "KeySchema": [
+                        {"AttributeName": "pk", "KeyType": "HASH"},
+                        {"AttributeName": "sk", "KeyType": "RANGE"}
+                    ],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "pk", "AttributeType": "S"},
+                        {"AttributeName": "sk", "AttributeType": "S"}
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then().statusCode(200);
+
+        // Must be the real cause, not "Query condition missed key schema element".
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.Query")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "KeyConditionExpression": "#n = :pk",
+                    "ExpressionAttributeValues": {":pk": {"S": "a"}}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Invalid KeyConditionExpression: An expression attribute name "
+                    + "used in the document path is not defined; attribute name: #n"));
+
+        // Must not silently evaluate as "no match" and return an empty page.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.Query")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "KeyConditionExpression": "pk = :pk",
+                    "FilterExpression": "payload = :d",
+                    "ExpressionAttributeValues": {":pk": {"S": "a"}}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Invalid FilterExpression: An expression attribute value "
+                    + "used in expression is not defined; attribute value: :d"));
+
+        // Scan: FilterExpression references an undefined :value.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.Scan")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "FilterExpression": "payload = :d"
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Invalid FilterExpression: An expression attribute value "
+                    + "used in expression is not defined; attribute value: :d"));
+
+        // Scan: FilterExpression references an undefined #name.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.Scan")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "FilterExpression": "#n = :d",
+                    "ExpressionAttributeValues": {":d": {"S": "x"}}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Invalid FilterExpression: An expression attribute name "
+                    + "used in the document path is not defined; attribute name: #n"));
+
+        // Edge case: :p is a function argument, begins_with(#n, :p), not a bare operand.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.Scan")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "FilterExpression": "begins_with(#n, :p)",
+                    "ExpressionAttributeNames": {"#n": "payload"}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Invalid FilterExpression: An expression attribute value "
+                    + "used in expression is not defined; attribute value: :p"));
+
+        deleteTable(tableName);
+    }
+
+    // UpdateExpression must reject an undefined #name the same way it already rejects :value.
+    @Test
+    void undefinedTokensInUpdateExpressionAreRejected() {
+        String tableName = "UpdateExprTokenTable";
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "KeySchema": [
+                        {"AttributeName": "pk", "KeyType": "HASH"},
+                        {"AttributeName": "sk", "KeyType": "RANGE"}
+                    ],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "pk", "AttributeType": "S"},
+                        {"AttributeName": "sk", "AttributeType": "S"}
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then().statusCode(200);
+
+        // The UpdateExpression itself references an undefined :value.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Key": {"pk": {"S": "a"}, "sk": {"S": "b"}},
+                    "UpdateExpression": "SET notes = :d"
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Invalid UpdateExpression: An expression attribute value "
+                    + "used in expression is not defined; attribute value: :d"));
+
+        // Previously this silently stored an attribute literally named "#n".
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Key": {"pk": {"S": "a"}, "sk": {"S": "b"}},
+                    "UpdateExpression": "SET #n = :d",
+                    "ExpressionAttributeValues": {":d": {"S": "x"}}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Invalid UpdateExpression: An expression attribute name "
+                    + "used in the document path is not defined; attribute name: #n"));
+
+        // Both undefined; #n comes first in the text and is reported.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Key": {"pk": {"S": "a"}, "sk": {"S": "b"}},
+                    "UpdateExpression": "SET #n = :d"
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Invalid UpdateExpression: An expression attribute name "
+                    + "used in the document path is not defined; attribute name: #n"));
+
+        // :d is inside list_append's args but still comes before #n in the text.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Key": {"pk": {"S": "a"}, "sk": {"S": "b"}},
+                    "UpdateExpression": "SET notes = list_append(:d, #n)"
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Invalid UpdateExpression: An expression attribute value "
+                    + "used in expression is not defined; attribute value: :d"));
+
+        // Control: a fully-defined UpdateExpression #name is still accepted (no regression).
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Key": {"pk": {"S": "a"}, "sk": {"S": "b"}},
+                    "UpdateExpression": "SET #n = :d",
+                    "ExpressionAttributeNames": {"#n": "notes"},
+                    "ExpressionAttributeValues": {":d": {"S": "x"}}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then().statusCode(200);
+
+        deleteTable(tableName);
+    }
+
+    // An undefined token must reject, never fall through to a false ConditionalCheckFailed.
+    @Test
+    void undefinedTokensInTransactWriteItemsAreRejected() {
+        String tableName = "TransactTokenTable";
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "KeySchema": [
+                        {"AttributeName": "pk", "KeyType": "HASH"},
+                        {"AttributeName": "sk", "KeyType": "RANGE"}
+                    ],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "pk", "AttributeType": "S"},
+                        {"AttributeName": "sk", "AttributeType": "S"}
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then().statusCode(200);
+
+        // ConditionCheck's ConditionExpression references an undefined :value.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.TransactWriteItems")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TransactItems": [{
+                        "ConditionCheck": {
+                            "TableName": "%s",
+                            "Key": {"pk": {"S": "a"}, "sk": {"S": "b"}},
+                            "ConditionExpression": "sk = :v"
+                        }
+                    }]
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Invalid ConditionExpression: An expression attribute value "
+                    + "used in expression is not defined; attribute value: :v"));
+
+        // ConditionCheck's ConditionExpression references an undefined #name.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.TransactWriteItems")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TransactItems": [{
+                        "ConditionCheck": {
+                            "TableName": "%s",
+                            "Key": {"pk": {"S": "a"}, "sk": {"S": "b"}},
+                            "ConditionExpression": "#n = sk"
+                        }
+                    }]
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Invalid ConditionExpression: An expression attribute name "
+                    + "used in the document path is not defined; attribute name: #n"));
+
+        // Put's ConditionExpression references an undefined :value.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.TransactWriteItems")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TransactItems": [{
+                        "Put": {
+                            "TableName": "%s",
+                            "Item": {"pk": {"S": "a"}, "sk": {"S": "b"}},
+                            "ConditionExpression": "sk = :v"
+                        }
+                    }]
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Invalid ConditionExpression: An expression attribute value "
+                    + "used in expression is not defined; attribute value: :v"));
+
+        // Delete's ConditionExpression references an undefined #name.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.TransactWriteItems")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TransactItems": [{
+                        "Delete": {
+                            "TableName": "%s",
+                            "Key": {"pk": {"S": "a"}, "sk": {"S": "b"}},
+                            "ConditionExpression": "#n = sk"
+                        }
+                    }]
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Invalid ConditionExpression: An expression attribute name "
+                    + "used in the document path is not defined; attribute name: #n"));
+
+        // Update's ConditionExpression is undefined despite an otherwise-valid UpdateExpression.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.TransactWriteItems")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TransactItems": [{
+                        "Update": {
+                            "TableName": "%s",
+                            "Key": {"pk": {"S": "a"}, "sk": {"S": "b"}},
+                            "UpdateExpression": "SET notes = :d",
+                            "ExpressionAttributeValues": {":d": {"S": "x"}},
+                            "ConditionExpression": "sk = :v"
+                        }
+                    }]
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Invalid ConditionExpression: An expression attribute value "
+                    + "used in expression is not defined; attribute value: :v"));
+
+        // Previously this silently no-op'd instead of erroring.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.TransactWriteItems")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TransactItems": [{
+                        "Update": {
+                            "TableName": "%s",
+                            "Key": {"pk": {"S": "a"}, "sk": {"S": "b"}},
+                            "UpdateExpression": "SET notes = :d"
+                        }
+                    }]
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Invalid UpdateExpression: An expression attribute value "
+                    + "used in expression is not defined; attribute value: :d"));
+
+        // Previously this silently stored an attribute literally named "#n".
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.TransactWriteItems")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TransactItems": [{
+                        "Update": {
+                            "TableName": "%s",
+                            "Key": {"pk": {"S": "a"}, "sk": {"S": "b"}},
+                            "UpdateExpression": "SET #n = :d",
+                            "ExpressionAttributeValues": {":d": {"S": "x"}}
+                        }
+                    }]
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Invalid UpdateExpression: An expression attribute name "
+                    + "used in the document path is not defined; attribute name: #n"));
+
+        // Both undefined; UpdateExpression's own token is reported first.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.TransactWriteItems")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TransactItems": [{
+                        "Update": {
+                            "TableName": "%s",
+                            "Key": {"pk": {"S": "a"}, "sk": {"S": "b"}},
+                            "UpdateExpression": "SET notes = :d",
+                            "ConditionExpression": "sk = :v"
+                        }
+                    }]
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Invalid UpdateExpression: An expression attribute value "
+                    + "used in expression is not defined; attribute value: :d"));
+
+        // Control: a fully-defined transaction is still accepted; seed the item first.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Item": {"pk": {"S": "txn-control"}, "sk": {"S": "b"}}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then().statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.TransactWriteItems")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TransactItems": [{
+                        "Update": {
+                            "TableName": "%s",
+                            "Key": {"pk": {"S": "txn-control"}, "sk": {"S": "b"}},
+                            "UpdateExpression": "SET #n = :d",
+                            "ExpressionAttributeNames": {"#n": "notes"},
+                            "ConditionExpression": "sk = :v",
+                            "ExpressionAttributeValues": {":v": {"S": "b"}, ":d": {"S": "x"}}
+                        }
+                    }]
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then().statusCode(200);
+
+        deleteTable(tableName);
+    }
+
     private void deleteTable(String tableName) {
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")
