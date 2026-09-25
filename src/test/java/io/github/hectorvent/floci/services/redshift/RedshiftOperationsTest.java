@@ -214,15 +214,16 @@ public class RedshiftOperationsTest {
             .statusCode(200)
             .body(not(containsString("redshift-copy")));
 
-        // 1e. Logging: EnableLogging with s3table destination does not require BucketName and preserves S3Table config
+        // 1e. Logging: EnableLogging with s3table destination preserves its publishing status
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", AUTH_HEADER)
             .formParam("Action", "EnableLogging")
             .formParam("ClusterIdentifier", "cluster-src")
             .formParam("LogDestinationType", "s3table")
-            .formParam("S3TableGranularity", "daily")
+            .formParam("S3TableGranularity", "cluster")
             .formParam("S3TableKmsKeyId", "test-kms-key")
+            .formParam("LogExports.member.1", "sys_query_history")
         .when()
             .post("/")
         .then()
@@ -230,8 +231,9 @@ public class RedshiftOperationsTest {
             .contentType("application/xml")
             .body(containsString("<LoggingEnabled>true</LoggingEnabled>"))
             .body(containsString("<LogDestinationType>s3table</LogDestinationType>"))
-            .body(containsString("<S3Tables>"))
-            .body(containsString("<S3TableGranularity>daily</S3TableGranularity>"));
+            .body(containsString("<S3Tables><S3Tables><member>sys_query_history</member></S3Tables>"))
+            .body(containsString("<S3TableGranularity>cluster</S3TableGranularity>"))
+            .body(containsString("<EnabledAll>false</EnabledAll>"));
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -245,11 +247,26 @@ public class RedshiftOperationsTest {
             .contentType("application/xml")
             .body(containsString("<LoggingEnabled>true</LoggingEnabled>"))
             .body(containsString("<LogDestinationType>s3table</LogDestinationType>"))
-            .body(containsString("<S3Tables>"))
-            .body(containsString("<S3TableGranularity>daily</S3TableGranularity>"))
+            .body(containsString("<S3Tables><S3Tables><member>sys_query_history</member></S3Tables>"))
+            .body(containsString("<S3TableGranularity>cluster</S3TableGranularity>"))
+            .body(containsString("<EnabledAll>false</EnabledAll>"))
             .body(not(containsString("<S3TableKmsKeyId>")));
 
         assertEquals("test-kms-key", service.describeLoggingStatus("cluster-src").getLoggingS3TableKmsKeyId());
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "EnableLogging")
+            .formParam("ClusterIdentifier", "cluster-src")
+            .formParam("LogDestinationType", "s3table")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<S3Tables><EnabledAll>true</EnabledAll></S3Tables>"))
+            .body(not(containsString("<S3Tables></S3Tables>")))
+            .body(not(containsString("<S3TableGranularity>")));
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -271,13 +288,28 @@ public class RedshiftOperationsTest {
             .formParam("Action", "EnableLogging")
             .formParam("ClusterIdentifier", "cluster-src")
             .formParam("LogDestinationType", "cloudwatch")
-            .formParam("S3TableGranularity", "daily")
+            .formParam("S3TableGranularity", "cluster")
         .when()
             .post("/")
         .then()
             .statusCode(400)
             .contentType("application/xml")
             .body(containsString("<Code>InvalidParameterCombination</Code>"));
+
+        // 1e.1.1 Only AWS-supported S3-table granularity values are accepted
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "EnableLogging")
+            .formParam("ClusterIdentifier", "cluster-src")
+            .formParam("LogDestinationType", "s3table")
+            .formParam("S3TableGranularity", "daily")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .contentType("application/xml")
+            .body(containsString("<Code>InvalidParameterValue</Code>"));
 
         // 1e.2 Non-table logging status must omit the S3-table status block
         given()

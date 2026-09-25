@@ -659,6 +659,24 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
+    void describeS3TableLoggingStatusIncludesEnabledAllWithoutGranularity() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "test-cluster");
+
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("test-cluster");
+        cluster.setLoggingEnabled(true);
+        cluster.setLoggingDestinationType("s3table");
+        when(service.describeLoggingStatus("test-cluster")).thenReturn(cluster);
+
+        Response response = handler.handle("DescribeLoggingStatus", params);
+
+        String xml = (String) response.getEntity();
+        assertTrue(xml.contains("<S3Tables><EnabledAll>true</EnabledAll></S3Tables>"));
+        assertFalse(xml.contains("<S3Tables></S3Tables>"));
+    }
+
+    @Test
     void describeLoggingStatusRequiresClusterIdentifier() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
 
@@ -695,15 +713,18 @@ class RedshiftQueryHandlerTest {
         params.putSingle("ClusterIdentifier", "test-cluster");
         params.putSingle("LogDestinationType", "s3table");
         params.putSingle("S3TableKmsKeyId", "my-kms-key");
-        params.putSingle("S3TableGranularity", "daily");
+        params.putSingle("S3TableGranularity", "cluster");
+        params.putSingle("LogExports.member.1", "sys_query_history");
 
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("test-cluster");
         cluster.setLoggingEnabled(true);
         cluster.setLoggingDestinationType("s3table");
         cluster.setLoggingS3TableKmsKeyId("my-kms-key");
-        cluster.setLoggingS3TableGranularity("daily");
-        when(service.enableLogging("test-cluster", null, null, "s3table", List.of(), "my-kms-key", "daily"))
+        cluster.setLoggingS3TableGranularity("cluster");
+        cluster.setLoggingExports(List.of("sys_query_history"));
+        when(service.enableLogging("test-cluster", null, null, "s3table", List.of("sys_query_history"),
+                "my-kms-key", "cluster"))
                 .thenReturn(cluster);
 
         Response response = handler.handle("EnableLogging", params);
@@ -712,8 +733,9 @@ class RedshiftQueryHandlerTest {
         assertTrue(xml.contains("<EnableLoggingResult>"));
         assertTrue(xml.contains("<LoggingEnabled>true</LoggingEnabled>"));
         assertTrue(xml.contains("<LogDestinationType>s3table</LogDestinationType>"));
-        assertTrue(xml.contains("<S3Tables>"));
-        assertTrue(xml.contains("<S3TableGranularity>daily</S3TableGranularity>"));
+        assertTrue(xml.contains("<S3Tables><S3Tables><member>sys_query_history</member></S3Tables>"));
+        assertTrue(xml.contains("<EnabledAll>false</EnabledAll>"));
+        assertTrue(xml.contains("<S3TableGranularity>cluster</S3TableGranularity>"));
     }
 
     @Test

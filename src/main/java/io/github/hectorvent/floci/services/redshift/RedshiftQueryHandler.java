@@ -954,9 +954,18 @@ public class RedshiftQueryHandler {
         }
         if ("s3table".equalsIgnoreCase(cluster.getLoggingDestinationType())) {
             builder.start("S3Tables");
+            List<String> exports = cluster.getLoggingExports();
+            if (exports != null && !exports.isEmpty()) {
+                builder.start("S3Tables");
+                for (String export : exports) {
+                    builder.elem("member", export);
+                }
+                builder.end("S3Tables");
+            }
             if (cluster.getLoggingS3TableGranularity() != null) {
                 builder.elem("S3TableGranularity", cluster.getLoggingS3TableGranularity());
             }
+            builder.elem("EnabledAll", exports == null || exports.isEmpty() || exports.contains("all"));
             builder.end("S3Tables");
         }
         return builder.build();

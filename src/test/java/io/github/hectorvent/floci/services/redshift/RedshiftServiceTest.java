@@ -935,12 +935,25 @@ class RedshiftServiceTest {
         cluster.setClusterIdentifier("my-cluster");
         when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
 
-        Cluster result = service.enableLogging("my-cluster", null, null, "s3table", null, "my-kms-key", "daily");
+        Cluster result = service.enableLogging("my-cluster", null, null, "s3table", null, "my-kms-key", "account");
         assertTrue(result.isLoggingEnabled());
         assertEquals("s3table", result.getLoggingDestinationType());
         assertNull(result.getLoggingBucketName());
         assertEquals("my-kms-key", result.getLoggingS3TableKmsKeyId());
-        assertEquals("daily", result.getLoggingS3TableGranularity());
+        assertEquals("account", result.getLoggingS3TableGranularity());
+    }
+
+    @Test
+    void enableLoggingRejectsInvalidS3TableGranularity() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.enableLogging("my-cluster", null, null, "s3table", null, null, "daily"));
+
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertFalse(cluster.isLoggingEnabled());
     }
 
     @Test
@@ -950,7 +963,7 @@ class RedshiftServiceTest {
         when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
 
         AwsException ex = assertThrows(AwsException.class,
-                () -> service.enableLogging("my-cluster", null, null, "s3", null, null, "daily"));
+                () -> service.enableLogging("my-cluster", null, null, "s3", null, null, "cluster"));
 
         assertEquals("InvalidParameterCombination", ex.getErrorCode());
         assertFalse(cluster.isLoggingEnabled());
@@ -963,7 +976,7 @@ class RedshiftServiceTest {
         cluster.setLoggingEnabled(true);
         cluster.setLoggingDestinationType("s3table");
         cluster.setLoggingS3TableKmsKeyId("my-kms-key");
-        cluster.setLoggingS3TableGranularity("daily");
+        cluster.setLoggingS3TableGranularity("account");
         when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
 
         Cluster result = service.disableLogging("my-cluster");
