@@ -3,6 +3,9 @@ package io.github.hectorvent.floci.services.autoscaling.model;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.util.ArrayList;
+import java.util.List;
+
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class ScalingPolicy {
@@ -58,25 +61,77 @@ public class ScalingPolicy {
     @JsonIgnoreProperties(ignoreUnknown = true)
     public static class TargetTrackingConfiguration {
         private PredefinedMetricSpecification predefinedMetricSpecification;
+        private CustomizedMetricSpecification customizedMetricSpecification;
         private Double targetValue;
+        private Boolean disableScaleIn;
 
         public TargetTrackingConfiguration() {}
 
         public PredefinedMetricSpecification getPredefinedMetricSpecification() { return predefinedMetricSpecification; }
         public void setPredefinedMetricSpecification(PredefinedMetricSpecification v) { this.predefinedMetricSpecification = v; }
 
+        public CustomizedMetricSpecification getCustomizedMetricSpecification() { return customizedMetricSpecification; }
+        public void setCustomizedMetricSpecification(CustomizedMetricSpecification v) { this.customizedMetricSpecification = v; }
+
         public Double getTargetValue() { return targetValue; }
         public void setTargetValue(Double v) { this.targetValue = v; }
+
+        public Boolean getDisableScaleIn() { return disableScaleIn; }
+        public void setDisableScaleIn(Boolean v) { this.disableScaleIn = v; }
+    }
+
+    /** CustomizedMetricSpecification, the alternative to naming a predefined metric. */
+    @RegisterForReflection
+    public static class CustomizedMetricSpecification {
+        private String metricName;
+        private String namespace;
+        private String statistic;
+        private String unit;
+        private Integer period;
+        private List<MetricDimension> dimensions = new ArrayList<>();
+
+        public CustomizedMetricSpecification() {}
+
+        public String getMetricName() { return metricName; }
+        public void setMetricName(String v) { this.metricName = v; }
+        public String getNamespace() { return namespace; }
+        public void setNamespace(String v) { this.namespace = v; }
+        public String getStatistic() { return statistic; }
+        public void setStatistic(String v) { this.statistic = v; }
+        public String getUnit() { return unit; }
+        public void setUnit(String v) { this.unit = v; }
+        public Integer getPeriod() { return period; }
+        public void setPeriod(Integer v) { this.period = v; }
+        public List<MetricDimension> getDimensions() { return dimensions; }
+        public void setDimensions(List<MetricDimension> v) { this.dimensions = v; }
+    }
+
+    /** A dimension of a customized metric. The model requires both members. */
+    @RegisterForReflection
+    public static class MetricDimension {
+        private String name;
+        private String value;
+
+        public MetricDimension() {}
+
+        public String getName() { return name; }
+        public void setName(String v) { this.name = v; }
+        public String getValue() { return value; }
+        public void setValue(String v) { this.value = v; }
     }
 
     @RegisterForReflection
     @JsonIgnoreProperties(ignoreUnknown = true)
     public static class PredefinedMetricSpecification {
         private String predefinedMetricType;
+        private String resourceLabel;
 
         public PredefinedMetricSpecification() {}
 
         public String getPredefinedMetricType() { return predefinedMetricType; }
         public void setPredefinedMetricType(String v) { this.predefinedMetricType = v; }
+
+        public String getResourceLabel() { return resourceLabel; }
+        public void setResourceLabel(String v) { this.resourceLabel = v; }
     }
 }

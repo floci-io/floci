@@ -961,10 +961,16 @@ public class AutoScalingQueryHandler {
         return ok(xml.build());
     }
 
+    private static final String TTC = "TargetTrackingConfiguration.";
+    private static final String CUSTOM = TTC + "CustomizedMetricSpecification.";
+
     private static ScalingPolicy.TargetTrackingConfiguration parseTargetTrackingConfiguration(MultivaluedMap<String, String> p) {
-        String predefinedMetricType = p.getFirst("TargetTrackingConfiguration.PredefinedMetricSpecification.PredefinedMetricType");
-        Double targetValue = nullableDoubleParam(p, "TargetTrackingConfiguration.TargetValue");
-        if (predefinedMetricType == null && targetValue == null) {
+        String predefinedMetricType = p.getFirst(TTC + "PredefinedMetricSpecification.PredefinedMetricType");
+        String customMetricName = p.getFirst(CUSTOM + "MetricName");
+        Double targetValue = nullableDoubleParam(p, TTC + "TargetValue");
+        String disableScaleIn = p.getFirst(TTC + "DisableScaleIn");
+        if (predefinedMetricType == null && customMetricName == null
+                && targetValue == null && disableScaleIn == null) {
             return null;
         }
         ScalingPolicy.TargetTrackingConfiguration configuration = new ScalingPolicy.TargetTrackingConfiguration();
@@ -972,10 +978,42 @@ public class AutoScalingQueryHandler {
             ScalingPolicy.PredefinedMetricSpecification specification =
                     new ScalingPolicy.PredefinedMetricSpecification();
             specification.setPredefinedMetricType(predefinedMetricType);
+            specification.setResourceLabel(
+                    p.getFirst(TTC + "PredefinedMetricSpecification.ResourceLabel"));
             configuration.setPredefinedMetricSpecification(specification);
         }
+        if (customMetricName != null) {
+            configuration.setCustomizedMetricSpecification(parseCustomizedMetricSpecification(p));
+        }
         configuration.setTargetValue(targetValue);
+        if (disableScaleIn != null) {
+            configuration.setDisableScaleIn(Boolean.parseBoolean(disableScaleIn));
+        }
         return configuration;
+    }
+
+    private static ScalingPolicy.CustomizedMetricSpecification parseCustomizedMetricSpecification(
+            MultivaluedMap<String, String> p) {
+        ScalingPolicy.CustomizedMetricSpecification spec = new ScalingPolicy.CustomizedMetricSpecification();
+        spec.setMetricName(p.getFirst(CUSTOM + "MetricName"));
+        spec.setNamespace(p.getFirst(CUSTOM + "Namespace"));
+        spec.setStatistic(p.getFirst(CUSTOM + "Statistic"));
+        spec.setUnit(p.getFirst(CUSTOM + "Unit"));
+        String period = p.getFirst(CUSTOM + "Period");
+        if (period != null && !period.isBlank()) {
+            spec.setPeriod(Integer.valueOf(period));
+        }
+        // Numbered members are read from 1 up to the first gap, the same reading the other Query
+        // handlers apply. The model requires both Name and Value on a dimension.
+        List<ScalingPolicy.MetricDimension> dimensions = new ArrayList<>();
+        for (int i = 1; p.getFirst(CUSTOM + "Dimensions.member." + i + ".Name") != null; i++) {
+            ScalingPolicy.MetricDimension dimension = new ScalingPolicy.MetricDimension();
+            dimension.setName(p.getFirst(CUSTOM + "Dimensions.member." + i + ".Name"));
+            dimension.setValue(p.getFirst(CUSTOM + "Dimensions.member." + i + ".Value"));
+            dimensions.add(dimension);
+        }
+        spec.setDimensions(dimensions);
+        return spec;
     }
 
     private static void appendTargetTrackingConfigurationXml(
@@ -991,12 +1029,43 @@ public class AutoScalingQueryHandler {
             if (predefinedMetric.getPredefinedMetricType() != null) {
                 xml.elem("PredefinedMetricType", predefinedMetric.getPredefinedMetricType());
             }
+            if (predefinedMetric.getResourceLabel() != null) {
+                xml.elem("ResourceLabel", predefinedMetric.getResourceLabel());
+            }
             xml.end("PredefinedMetricSpecification");
         }
+        appendCustomizedMetricSpecificationXml(xml, configuration.getCustomizedMetricSpecification());
         if (configuration.getTargetValue() != null) {
             xml.elem("TargetValue", String.valueOf(configuration.getTargetValue()));
         }
+        if (configuration.getDisableScaleIn() != null) {
+            xml.elem("DisableScaleIn", String.valueOf(configuration.getDisableScaleIn()));
+        }
         xml.end("TargetTrackingConfiguration");
+    }
+
+    private static void appendCustomizedMetricSpecificationXml(
+            XmlBuilder xml, ScalingPolicy.CustomizedMetricSpecification spec) {
+        if (spec == null) {
+            return;
+        }
+        xml.start("CustomizedMetricSpecification");
+        if (!spec.getDimensions().isEmpty()) {
+            xml.start("Dimensions");
+            for (ScalingPolicy.MetricDimension dimension : spec.getDimensions()) {
+                xml.start("member")
+                   .elem("Name", dimension.getName())
+                   .elem("Value", dimension.getValue())
+                   .end("member");
+            }
+            xml.end("Dimensions");
+        }
+        if (spec.getMetricName() != null) { xml.elem("MetricName", spec.getMetricName()); }
+        if (spec.getNamespace() != null) { xml.elem("Namespace", spec.getNamespace()); }
+        if (spec.getStatistic() != null) { xml.elem("Statistic", spec.getStatistic()); }
+        if (spec.getUnit() != null) { xml.elem("Unit", spec.getUnit()); }
+        if (spec.getPeriod() != null) { xml.elem("Period", String.valueOf(spec.getPeriod())); }
+        xml.end("CustomizedMetricSpecification");
     }
 
     // ── Activities ────────────────────────────────────────────────────────────
