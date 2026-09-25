@@ -219,7 +219,7 @@ Supported rule behavior:
 - `sqs` action sends to an SQS queue through Floci's SQS service boundary.
 - `sns` action publishes to an SNS topic through Floci's SNS service boundary.
 - `s3` action writes to the configured bucket/key through Floci's S3 service boundary.
-- `dynamoDBv2` action writes JSON object fields as DynamoDB attribute values through Floci's DynamoDB service boundary.
+- `dynamoDBv2` action writes JSON object fields as DynamoDB attribute values through Floci's DynamoDB service boundary, as the account that owns the rule.
 - `kinesis` action puts the document into a Kinesis stream through Floci's Kinesis service boundary.
 - `lambda` action invokes the configured function ARN through Floci's Lambda service boundary.
 - `firehose` action puts the document into a Kinesis Data Firehose delivery stream through Floci's Firehose service boundary, with `separator` appended to each record; the separator must be `\n`, `\t`, `\r\n` or `,`, as the API model requires, or the rule is rejected with `InvalidRequestException`. With `batchMode`, a JSON array document becomes one record per element.

@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
 import io.github.hectorvent.floci.services.acm.AcmService;
 import io.github.hectorvent.floci.services.apigateway.ApiGatewayService;
@@ -102,7 +103,9 @@ import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsService;
 import io.github.hectorvent.floci.services.cognito.CognitoService;
 import io.github.hectorvent.floci.services.docdb.DocDbService;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
+import io.github.hectorvent.floci.services.dynamodb.backend.NativeDynamoDbBackend;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ecr.EcrService;
 import io.github.hectorvent.floci.services.ecs.EcsService;
@@ -265,7 +268,9 @@ final class CfnProvisionerFixture {
                 discovered.add(new SnsCfnProvisioner(snsService));
             }
             if (dynamoDbService != null) {
-                discovered.add(new DynamoDbCfnProvisioner(dynamoDbService));
+                NativeDynamoDbBackend backend = new NativeDynamoDbBackend(null, null, dynamoDbService, objectMapper);
+                discovered.add(new DynamoDbCfnProvisioner(new DynamoDbFacade(backend, backend,
+                        new RegionResolver("us-east-1", "000000000000"))));
             }
             if (ssmService != null) {
                 discovered.add(new SsmCfnProvisioner(ssmService));

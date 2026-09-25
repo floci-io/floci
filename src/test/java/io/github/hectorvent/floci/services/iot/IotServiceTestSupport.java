@@ -7,7 +7,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
-import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
 import io.github.hectorvent.floci.services.firehose.FirehoseService;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iot.model.IotCertificate;
@@ -74,7 +74,7 @@ final class IotServiceTestSupport {
                 mock(SnsService.class),
                 mock(S3Service.class),
                 mock(KinesisService.class),
-                mock(DynamoDbService.class),
+                mock(DynamoDbFacade.class),
                 mock(LambdaService.class),
                 mock(FirehoseService.class),
                 mock(CloudWatchLogsService.class),

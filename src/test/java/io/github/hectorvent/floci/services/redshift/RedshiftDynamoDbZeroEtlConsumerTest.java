@@ -3,9 +3,13 @@ package io.github.hectorvent.floci.services.redshift;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbStreamService;
+import io.github.hectorvent.floci.services.dynamodb.backend.RecordingDynamoDbBackend;
+import io.github.hectorvent.floci.services.dynamodb.backend.RecordingDynamoDbBackend.Invocation;
 import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.DynamoDbStreamRecord;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
@@ -39,6 +43,9 @@ class RedshiftDynamoDbZeroEtlConsumerTest {
     @Inject
     DynamoDbService dynamoDbService;
 
+    @Inject
+    DynamoDbFacade dynamoDb;
+
     @Test
     void writesRecordsAndAdvancesCheckpointOnlyAfterSuccessfulBatch() {
         DynamoDbStreamService streamService = mock(DynamoDbStreamService.class);
@@ -58,7 +65,7 @@ class RedshiftDynamoDbZeroEtlConsumerTest {
                 .thenReturn(record.getSequenceNumber());
 
         RedshiftDynamoDbZeroEtlConsumer consumer =
-                new RedshiftDynamoDbZeroEtlConsumer(streamService, dynamoDbService, redshiftService, writer);
+                new RedshiftDynamoDbZeroEtlConsumer(streamService, dynamoDb, redshiftService, writer);
         consumer.pollOnce(integration);
 
         verify(writer).createLandingTable(integration.getAccountId(), "warehouse", "floci_zetl_orders");
@@ -92,7 +99,7 @@ class RedshiftDynamoDbZeroEtlConsumerTest {
         assertThrows(AwsException.class, () -> dynamoDbService.describeTable(tableName, "us-east-1"));
 
         RedshiftDynamoDbZeroEtlConsumer consumer =
-                new RedshiftDynamoDbZeroEtlConsumer(streamService, dynamoDbService, redshiftService, writer);
+                new RedshiftDynamoDbZeroEtlConsumer(streamService, dynamoDb, redshiftService, writer);
         consumer.pollOnce(integration);
 
         assertFalse(integration.isBackfillCompleted());
@@ -129,7 +136,7 @@ class RedshiftDynamoDbZeroEtlConsumerTest {
         assertThrows(AwsException.class, () -> dynamoDbService.describeTable(tableName, "us-east-1"));
 
         RedshiftDynamoDbZeroEtlConsumer consumer =
-                new RedshiftDynamoDbZeroEtlConsumer(streamService, dynamoDbService, redshiftService, writer);
+                new RedshiftDynamoDbZeroEtlConsumer(streamService, dynamoDb, redshiftService, writer);
         consumer.pollOnce(integration);
 
         assertTrue(integration.isBackfillCompleted());
@@ -156,7 +163,7 @@ class RedshiftDynamoDbZeroEtlConsumerTest {
         });
 
         RedshiftDynamoDbZeroEtlConsumer consumer =
-                new RedshiftDynamoDbZeroEtlConsumer(streamService, dynamoDbService, redshiftService, writer);
+                new RedshiftDynamoDbZeroEtlConsumer(streamService, dynamoDb, redshiftService, writer);
         consumer.pollOnce(integration);
         integration.setBackfillCompleted(false);
         consumer.pollOnce(integration);
@@ -166,6 +173,21 @@ class RedshiftDynamoDbZeroEtlConsumerTest {
         verify(writer, times(2)).writeBatch(any(), any(), any(), captor.capture());
         assertEquals(captor.getAllValues().get(0).get(0).getEventId(),
                 captor.getAllValues().get(1).get(0).getEventId());
+    }
+
+    @Test
+    void backfillReadsTheTableAsTheIntegrationAccountInTheStreamRegion() {
+        RecordingDynamoDbBackend backend = new RecordingDynamoDbBackend();
+        DynamoDbFacade recording = new DynamoDbFacade(backend, backend, new RegionResolver("us-east-1", "000000000000"));
+        Integration integration = integration("orders");
+        integration.setSourceStreamArn("arn:aws:dynamodb:eu-west-1:111111111111:table/orders/stream/one");
+
+        new RedshiftDynamoDbZeroEtlConsumer(mock(DynamoDbStreamService.class), recording,
+                mock(RedshiftService.class), mock(RedshiftZeroEtlWriter.class)).pollOnce(integration);
+
+        assertEquals(List.of(
+                new Invocation("describeTable", "111111111111", "eu-west-1"),
+                new Invocation("scan", "111111111111", "eu-west-1")), backend.invocations());
     }
 
     private static ObjectNode itemWithId(String id) {

@@ -2,8 +2,11 @@ package io.github.hectorvent.floci.services.stepfunctions;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
-import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
+import io.github.hectorvent.floci.services.dynamodb.backend.RecordingDynamoDbBackend;
+import io.github.hectorvent.floci.services.dynamodb.backend.RecordingDynamoDbBackend.Invocation;
 import io.github.hectorvent.floci.services.lambda.LambdaExecutorService;
 import io.github.hectorvent.floci.services.lambda.LambdaFunctionStore;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
@@ -59,17 +62,24 @@ class AslExecutorTaskHistoryEventsTest {
     @Inject
     Vertx vertx;
 
+    @Inject
+    RegionResolver regionResolver;
+
     @BeforeEach
     void setUp() {
         lambdaExecutor = mock(LambdaExecutorService.class);
         functionStore = mock(LambdaFunctionStore.class);
+        executor = newExecutor(mock(DynamoDbFacade.class));
+    }
+
+    private AslExecutor newExecutor(DynamoDbFacade dynamoDb) {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().stepfunctions().maxWaitSeconds()).thenReturn(30);
 
-        executor = new AslExecutor(
+        return new AslExecutor(
                 lambdaExecutor,
                 functionStore,
-                mock(DynamoDbService.class),
+                dynamoDb,
                 mock(DynamoDbJsonHandler.class),
                 mock(SqsJsonHandler.class), mock(SnsJsonHandler.class),
                 mock(io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHandler.class),
@@ -84,6 +94,36 @@ class AslExecutorTaskHistoryEventsTest {
                 new JsonataEvaluator(objectMapper),
                 mock(Instance.class), config, vertx,
                 mock(io.github.hectorvent.floci.core.common.CustomResourceLiveness.class));
+    }
+
+    /**
+     * The optimized DynamoDB integration scopes to the ambient account, which the executor sets to
+     * the one in the state machine ARN, and to the state machine's region.
+     */
+    @Test
+    void optimizedDynamoDbTaskRunsAsTheExecutionAccountInTheStateMachineRegion() {
+        RecordingDynamoDbBackend backend = new RecordingDynamoDbBackend();
+        AslExecutor recordingExecutor = newExecutor(new DynamoDbFacade(backend, backend, regionResolver));
+        StateMachine stateMachine = new StateMachine();
+        stateMachine.setName("ddb");
+        stateMachine.setStateMachineArn("arn:aws:states:eu-west-1:111122223333:stateMachine:ddb");
+        stateMachine.setRoleArn("arn:aws:iam::111122223333:role/test-role");
+        stateMachine.setDefinition("""
+                {"StartAt": "Put", "States": {"Put": {"Type": "Task",
+                  "Resource": "arn:aws:states:::dynamodb:putItem",
+                  "Parameters": {"TableName": "orders", "Item": {"id": {"S": "k1"}}}, "End": true}}}
+                """);
+        Execution execution = new Execution();
+        execution.setName("ddb-execution");
+        execution.setExecutionArn("arn:aws:states:eu-west-1:111122223333:execution:ddb:ddb-execution");
+        execution.setStateMachineArn(stateMachine.getStateMachineArn());
+        execution.setInput("{}");
+
+        recordingExecutor.executeSync(stateMachine, execution, new ArrayList<>(), (updated, events) -> {
+        });
+
+        assertEquals("SUCCEEDED", execution.getStatus(), execution.getCause());
+        assertEquals(List.of(new Invocation("putItem", "111122223333", "eu-west-1")), backend.invocations());
     }
 
     @Test

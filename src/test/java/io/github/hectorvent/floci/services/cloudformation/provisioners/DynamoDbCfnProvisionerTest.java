@@ -3,9 +3,12 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
+import io.github.hectorvent.floci.services.dynamodb.backend.NativeDynamoDbBackend;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import org.junit.jupiter.api.Test;
 
@@ -42,8 +45,10 @@ class DynamoDbCfnProvisionerTest {
     private static final String STREAM_ARN = TABLE_ARN + "/stream/2026-01-01T00:00:00.000";
 
     private final DynamoDbService dynamoDb = mock(DynamoDbService.class);
-    private final DynamoDbCfnProvisioner provisioner = new DynamoDbCfnProvisioner(dynamoDb);
     private final ObjectMapper mapper = new ObjectMapper();
+    private final NativeDynamoDbBackend backend = new NativeDynamoDbBackend(null, null, dynamoDb, mapper);
+    private final DynamoDbCfnProvisioner provisioner = new DynamoDbCfnProvisioner(
+            new DynamoDbFacade(backend, backend, new RegionResolver("us-east-1", "000000000000")));
 
     private ProvisionContext ctx() {
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);

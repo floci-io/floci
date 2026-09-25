@@ -8,8 +8,10 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RequestScopes;
-import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbStreamService;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbItemAccess.ScanPage;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations.Scope;
 import io.github.hectorvent.floci.services.dynamodb.model.DynamoDbStreamRecord;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
@@ -39,7 +41,7 @@ public class RedshiftDynamoDbZeroEtlConsumer {
 
     private final Vertx vertx;
     private final DynamoDbStreamService streamService;
-    private final DynamoDbService dynamoDbService;
+    private final DynamoDbFacade dynamoDb;
     private final RedshiftService redshiftService;
     private final RedshiftZeroEtlWriter writer;
     private final ObjectMapper objectMapper;
@@ -55,32 +57,32 @@ public class RedshiftDynamoDbZeroEtlConsumer {
     @Inject
     public RedshiftDynamoDbZeroEtlConsumer(Vertx vertx,
                                            DynamoDbStreamService streamService,
-                                           DynamoDbService dynamoDbService,
+                                           DynamoDbFacade dynamoDb,
                                            RedshiftService redshiftService,
                                            RedshiftZeroEtlWriter writer,
                                            ObjectMapper objectMapper,
                                            EmulatorConfig config) {
-        this(vertx, streamService, dynamoDbService, redshiftService, writer, objectMapper,
+        this(vertx, streamService, dynamoDb, redshiftService, writer, objectMapper,
                 config.services().redshift().pollIntervalMs());
     }
 
     RedshiftDynamoDbZeroEtlConsumer(DynamoDbStreamService streamService,
-                                    DynamoDbService dynamoDbService,
+                                    DynamoDbFacade dynamoDb,
                                     RedshiftService redshiftService,
                                     RedshiftZeroEtlWriter writer) {
-        this(null, streamService, dynamoDbService, redshiftService, writer, new ObjectMapper(), 1000);
+        this(null, streamService, dynamoDb, redshiftService, writer, new ObjectMapper(), 1000);
     }
 
     private RedshiftDynamoDbZeroEtlConsumer(Vertx vertx,
                                             DynamoDbStreamService streamService,
-                                            DynamoDbService dynamoDbService,
+                                            DynamoDbFacade dynamoDb,
                                             RedshiftService redshiftService,
                                             RedshiftZeroEtlWriter writer,
                                             ObjectMapper objectMapper,
                                             long pollIntervalMs) {
         this.vertx = vertx;
         this.streamService = streamService;
-        this.dynamoDbService = dynamoDbService;
+        this.dynamoDb = dynamoDb;
         this.redshiftService = redshiftService;
         this.writer = writer;
         this.objectMapper = objectMapper;
@@ -141,11 +143,12 @@ public class RedshiftDynamoDbZeroEtlConsumer {
         RequestScopes.runAs(integration.getAccountId(), () -> {
             String tableName = extractTableName(integration.getSourceStreamArn());
             String region = AwsArnUtils.parse(integration.getSourceStreamArn()).region();
-            TableDefinition table = dynamoDbService.describeTable(tableName, region);
+            Scope scope = new Scope(integration.getAccountId(), region);
+            TableDefinition table = dynamoDb.tables().describeTable(scope, tableName);
             JsonNode exclusiveStartKey = parseBackfillKey(integration.getBackfillLastEvaluatedKey());
 
-            DynamoDbService.ScanResult result = dynamoDbService.scan(tableName, null, null, null, null,
-                    BATCH_SIZE, exclusiveStartKey, region);
+            ScanPage result = dynamoDb.items().scan(scope, tableName, null, null, null, null,
+                    BATCH_SIZE, exclusiveStartKey);
             if (!result.items().isEmpty()) {
                 List<DynamoDbStreamRecord> records = result.items().stream()
                         .map(item -> toBackfillRecord(integration, item, table))

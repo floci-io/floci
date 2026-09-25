@@ -8,7 +8,10 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
-import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbItemAccess;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations.Scope;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbTableAccess;
 import io.github.hectorvent.floci.services.firehose.FirehoseService;
 import io.github.hectorvent.floci.services.firehose.model.Record;
 import io.github.hectorvent.floci.services.iot.model.IotPolicy;
@@ -42,6 +45,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
@@ -68,7 +72,7 @@ class IotServiceTest {
     private final ObjectMapper mapper = new ObjectMapper();
     private final SqsService sqs = mock(SqsService.class);
     private final LambdaService lambda = mock(LambdaService.class);
-    private final DynamoDbService dynamoDb = mock(DynamoDbService.class);
+    private final DynamoDbItemAccess dynamoDb = mock(DynamoDbItemAccess.class);
     private final FirehoseService firehose = mock(FirehoseService.class);
     private final CloudWatchLogsService logs = mock(CloudWatchLogsService.class);
     private IotService service;
@@ -101,7 +105,7 @@ class IotServiceTest {
                 mock(SnsService.class),
                 mock(S3Service.class),
                 mock(KinesisService.class),
-                dynamoDb,
+                new DynamoDbFacade(dynamoDb, mock(DynamoDbTableAccess.class), new RegionResolver(REGION, ACCOUNT)),
                 lambda,
                 firehose,
                 logs,
@@ -452,7 +456,8 @@ class IotServiceTest {
 
     private JsonNode capturedDynamoDbItem(String tableName) {
         ArgumentCaptor<ObjectNode> item = ArgumentCaptor.forClass(ObjectNode.class);
-        verify(dynamoDb).putItem(eq(tableName), item.capture(), eq(REGION));
+        verify(dynamoDb).putItem(eq(new Scope(ACCOUNT, REGION)), eq(tableName), item.capture(),
+                isNull(), isNull(), isNull());
         return item.getValue();
     }
 

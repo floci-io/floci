@@ -3,8 +3,8 @@ package io.github.hectorvent.floci.services.stepfunctions;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
-import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.lambda.LambdaAliasStore;
 import io.github.hectorvent.floci.services.lambda.LambdaExecutorService;
 import io.github.hectorvent.floci.services.lambda.LambdaFunctionStore;
@@ -86,7 +86,7 @@ class AslExecutorLambdaInvokeResultTest {
         executor = new AslExecutor(
                 lambdaExecutor,
                 new LambdaTargetResolver(functionStore, aliasStore),
-                mock(DynamoDbService.class),
+                mock(DynamoDbFacade.class),
                 mock(DynamoDbJsonHandler.class),
                 mock(SqsJsonHandler.class), mock(SnsJsonHandler.class),
                 mock(io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHandler.class),

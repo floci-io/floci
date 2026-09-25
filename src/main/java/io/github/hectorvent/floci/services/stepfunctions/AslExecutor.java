@@ -13,8 +13,10 @@ import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHandler;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
-import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbItemAccess;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations.Scope;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeHandler;
 import io.github.hectorvent.floci.services.ecs.EcsJsonHandler;
@@ -232,7 +234,7 @@ public class AslExecutor {
 
     private final LambdaExecutorService lambdaExecutor;
     private final LambdaTargetResolver targetResolver;
-    private final DynamoDbService dynamoDbService;
+    private final DynamoDbFacade dynamoDb;
     private final DynamoDbJsonHandler dynamoDbJsonHandler;
     private final SqsJsonHandler sqsJsonHandler;
     private final SnsJsonHandler snsJsonHandler;
@@ -265,7 +267,7 @@ public class AslExecutor {
 
     @Inject
     public AslExecutor(LambdaExecutorService lambdaExecutor, LambdaTargetResolver targetResolver,
-                       DynamoDbService dynamoDbService, DynamoDbJsonHandler dynamoDbJsonHandler,
+                       DynamoDbFacade dynamoDb, DynamoDbJsonHandler dynamoDbJsonHandler,
                        SqsJsonHandler sqsJsonHandler, SnsJsonHandler snsJsonHandler,
                        CloudFormationQueryHandler cloudFormationHandler,
                        Ec2Service ec2Service, S3Service s3Service,
@@ -275,7 +277,7 @@ public class AslExecutor {
                        ObjectMapper objectMapper, JsonataEvaluator jsonataEvaluator,
                        Instance<StepFunctionsService> sfnService, EmulatorConfig config, Vertx vertx,
                        CustomResourceLiveness customResourceLiveness) {
-        this(lambdaExecutor, targetResolver, dynamoDbService, dynamoDbJsonHandler,
+        this(lambdaExecutor, targetResolver, dynamoDb, dynamoDbJsonHandler,
                 sqsJsonHandler, snsJsonHandler, cloudFormationHandler,
                 ec2Service, s3Service, ecsService, ecsJsonHandler,
                 eventBridgeHandler, schedulerService, schedulerController, rdsDataService,
@@ -284,7 +286,7 @@ public class AslExecutor {
     }
 
     AslExecutor(LambdaExecutorService lambdaExecutor, LambdaTargetResolver targetResolver,
-                DynamoDbService dynamoDbService, DynamoDbJsonHandler dynamoDbJsonHandler,
+                DynamoDbFacade dynamoDb, DynamoDbJsonHandler dynamoDbJsonHandler,
                 SqsJsonHandler sqsJsonHandler, SnsJsonHandler snsJsonHandler,
                 CloudFormationQueryHandler cloudFormationHandler,
                 Ec2Service ec2Service, S3Service s3Service,
@@ -298,7 +300,7 @@ public class AslExecutor {
         this.customResourceLiveness = customResourceLiveness;
         this.lambdaExecutor = lambdaExecutor;
         this.targetResolver = targetResolver;
-        this.dynamoDbService = dynamoDbService;
+        this.dynamoDb = dynamoDb;
         this.dynamoDbJsonHandler = dynamoDbJsonHandler;
         this.sqsJsonHandler = sqsJsonHandler;
         this.snsJsonHandler = snsJsonHandler;
@@ -334,7 +336,7 @@ public class AslExecutor {
     }
 
     AslExecutor(LambdaExecutorService lambdaExecutor, LambdaFunctionStore functionStore,
-                DynamoDbService dynamoDbService, DynamoDbJsonHandler dynamoDbJsonHandler,
+                DynamoDbFacade dynamoDb, DynamoDbJsonHandler dynamoDbJsonHandler,
                 SqsJsonHandler sqsJsonHandler, SnsJsonHandler snsJsonHandler,
                 CloudFormationQueryHandler cloudFormationHandler,
                 Ec2Service ec2Service, S3Service s3Service,
@@ -345,7 +347,7 @@ public class AslExecutor {
                 Instance<StepFunctionsService> sfnService, EmulatorConfig config, Vertx vertx,
                 CustomResourceLiveness customResourceLiveness,
                 Clock clock, Sleeper sleeper, Integer maxWaitSecondsOverride) {
-        this(lambdaExecutor, new LambdaTargetResolver(functionStore, null), dynamoDbService, dynamoDbJsonHandler,
+        this(lambdaExecutor, new LambdaTargetResolver(functionStore, null), dynamoDb, dynamoDbJsonHandler,
                 sqsJsonHandler, snsJsonHandler, cloudFormationHandler, ec2Service, s3Service,
                 ecsService, ecsJsonHandler, eventBridgeHandler, schedulerService,
                 schedulerController, null, objectMapper, jsonataEvaluator, sfnService, config,
@@ -359,7 +361,7 @@ public class AslExecutor {
     }
 
     AslExecutor(LambdaExecutorService lambdaExecutor, LambdaFunctionStore functionStore,
-                DynamoDbService dynamoDbService, DynamoDbJsonHandler dynamoDbJsonHandler,
+                DynamoDbFacade dynamoDb, DynamoDbJsonHandler dynamoDbJsonHandler,
                 SqsJsonHandler sqsJsonHandler, SnsJsonHandler snsJsonHandler,
                 CloudFormationQueryHandler cloudFormationHandler,
                 Ec2Service ec2Service, S3Service s3Service,
@@ -369,7 +371,7 @@ public class AslExecutor {
                 ObjectMapper objectMapper, JsonataEvaluator jsonataEvaluator,
                 Instance<StepFunctionsService> sfnService, EmulatorConfig config, Vertx vertx,
                 CustomResourceLiveness customResourceLiveness) {
-        this(lambdaExecutor, new LambdaTargetResolver(functionStore, null), dynamoDbService, dynamoDbJsonHandler,
+        this(lambdaExecutor, new LambdaTargetResolver(functionStore, null), dynamoDb, dynamoDbJsonHandler,
                 sqsJsonHandler, snsJsonHandler, cloudFormationHandler, ec2Service, s3Service,
                 ecsService, ecsJsonHandler, eventBridgeHandler, schedulerService,
                 schedulerController, null, objectMapper, jsonataEvaluator, sfnService, config,
@@ -1951,6 +1953,7 @@ public class AslExecutor {
 
     private JsonNode invokeDynamoDb(String operation, JsonNode input, String region) {
         String tableName = input.path("TableName").asText();
+        Scope scope = dynamoDb.scope(region);
         switch (operation) {
             case "putItem" -> {
                 JsonNode item = input.path("Item");
@@ -1960,12 +1963,12 @@ public class AslExecutor {
                         ? input.get("ExpressionAttributeNames") : null;
                 JsonNode exprAttrValues = input.has("ExpressionAttributeValues")
                         ? input.get("ExpressionAttributeValues") : null;
-                dynamoDbService.putItem(tableName, item, conditionExpr, exprAttrNames, exprAttrValues, region, "NONE");
+                dynamoDb.items().putItem(scope, tableName, item, conditionExpr, exprAttrNames, exprAttrValues);
                 return objectMapper.createObjectNode();
             }
             case "getItem" -> {
                 JsonNode key = input.path("Key");
-                JsonNode item = dynamoDbService.getItem(tableName, key, region);
+                JsonNode item = dynamoDb.items().getItem(scope, tableName, key);
                 ObjectNode result = objectMapper.createObjectNode();
                 if (item != null) {
                     result.set("Item", item);
@@ -1980,7 +1983,7 @@ public class AslExecutor {
                         ? input.get("ExpressionAttributeNames") : null;
                 JsonNode exprAttrValues = input.has("ExpressionAttributeValues")
                         ? input.get("ExpressionAttributeValues") : null;
-                dynamoDbService.deleteItem(tableName, key, conditionExpr, exprAttrNames, exprAttrValues, region, "NONE");
+                dynamoDb.items().deleteItem(scope, tableName, key, conditionExpr, exprAttrNames, exprAttrValues);
                 return objectMapper.createObjectNode();
             }
             case "scan" -> {
@@ -1992,10 +1995,10 @@ public class AslExecutor {
                         ? input.get("ExpressionAttributeValues") : null;
                 Integer limit = input.has("Limit") ? input.get("Limit").asInt() : null;
                 JsonNode scanFilter = input.has("ScanFilter") ? input.get("ScanFilter") : null;
-                DynamoDbService.ScanResult scanResult = dynamoDbService.scan(
-                        tableName, filterExpression, exprAttrNames, exprAttrValues, scanFilter, limit, null, null, region);
+                DynamoDbItemAccess.ScanPage scanResult = dynamoDb.items().scan(
+                        scope, tableName, filterExpression, exprAttrNames, exprAttrValues, scanFilter, limit, null);
                 ObjectNode response = objectMapper.createObjectNode();
-                com.fasterxml.jackson.databind.node.ArrayNode items = objectMapper.createArrayNode();
+                ArrayNode items = objectMapper.createArrayNode();
                 scanResult.items().forEach(items::add);
                 response.set("Items", items);
                 response.put("Count", scanResult.items().size());
@@ -2016,16 +2019,13 @@ public class AslExecutor {
                         ? input.get("ConditionExpression").asText() : null;
                 String returnValues = input.path("ReturnValues").asText("NONE");
 
-                DynamoDbService.UpdateResult result = dynamoDbService.updateItem(
-                        tableName, key, attributeUpdates, updateExpression,
-                        exprAttrNames, exprAttrValues, returnValues,
-                        conditionExpression, region, "NONE");
+                JsonNode attributes = dynamoDb.items().updateItem(
+                        scope, tableName, key, attributeUpdates, updateExpression,
+                        exprAttrNames, exprAttrValues, returnValues, conditionExpression);
 
                 ObjectNode response = objectMapper.createObjectNode();
-                if ("ALL_NEW".equals(returnValues) && result.newItem() != null) {
-                    response.set("Attributes", result.newItem());
-                } else if ("ALL_OLD".equals(returnValues) && result.oldItem() != null) {
-                    response.set("Attributes", result.oldItem());
+                if (attributes != null) {
+                    response.set("Attributes", attributes);
                 }
                 return response;
             }
@@ -2052,9 +2052,6 @@ public class AslExecutor {
         int status = response.getStatus();
 
         if (status >= 400) {
-            if (entity instanceof AwsErrorResponse err) {
-                throw new FailStateException("DynamoDb." + err.type(), err.message());
-            }
             if (entity instanceof JsonNode errorNode) {
                 String errorName = errorNode.path("__type").asText("UnknownError");
                 String errorMessage = errorNode.path("message").asText(

@@ -3,7 +3,7 @@ package io.github.hectorvent.floci.core.common;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbConditionKeys;
-import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
@@ -54,19 +54,19 @@ public class IamConditionContextResolver {
     public static final String EXISTING_OBJECT_TAG_PREFIX = "s3:ExistingObjectTag/";
     public static final String REQUEST_OBJECT_TAG_PREFIX = "s3:RequestObjectTag/";
 
-    private final Instance<DynamoDbService> dynamoDbService;
+    private final Instance<DynamoDbFacade> dynamoDbFacade;
     private final Instance<Ec2Service> ec2Service;
     private final Instance<S3Service> s3Service;
     private final RequestContext requestContext;
     private final EmulatorConfig config;
 
     @Inject
-    public IamConditionContextResolver(Instance<DynamoDbService> dynamoDbService,
+    public IamConditionContextResolver(Instance<DynamoDbFacade> dynamoDbFacade,
                                        Instance<Ec2Service> ec2Service,
                                        Instance<S3Service> s3Service,
                                        RequestContext requestContext,
                                        EmulatorConfig config) {
-        this.dynamoDbService = dynamoDbService;
+        this.dynamoDbFacade = dynamoDbFacade;
         this.ec2Service = ec2Service;
         this.s3Service = s3Service;
         this.requestContext = requestContext;
@@ -529,18 +529,19 @@ public class IamConditionContextResolver {
 
     /**
      * Looks up the table whose key schema names the partition key. Resolved lazily through
-     * Instance so core.common keeps no hard dependency on the DynamoDB service, and via
+     * Instance so core.common keeps no hard dependency on the DynamoDB facade, and via
      * {@code findTable} rather than {@code describeTable} so the O(items) item-count refresh
      * never runs on the enforcement hot path.
      */
     private TableDefinition describeTargetTable(JsonNode body) {
         String tableName = targetTableName(body);
-        if (tableName == null || !dynamoDbService.isResolvable()) {
+        if (tableName == null || !dynamoDbFacade.isResolvable()) {
             return null;
         }
         String region = requestContext.getRegion() == null
                 ? config.defaultRegion() : requestContext.getRegion();
-        return dynamoDbService.get().findTable(tableName, region).orElse(null);
+        DynamoDbFacade dynamoDb = dynamoDbFacade.get();
+        return dynamoDb.tables().findTable(dynamoDb.scope(region), tableName).orElse(null);
     }
 
     /**

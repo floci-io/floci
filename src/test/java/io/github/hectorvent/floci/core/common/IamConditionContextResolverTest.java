@@ -3,7 +3,9 @@ package io.github.hectorvent.floci.core.common;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
+import io.github.hectorvent.floci.services.dynamodb.backend.NativeDynamoDbBackend;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
@@ -43,7 +45,7 @@ class IamConditionContextResolverTest {
 
     private final ObjectMapper mapper = new ObjectMapper();
     private DynamoDbService dynamoDbService;
-    private Instance<DynamoDbService> dynamoDbServiceInstance;
+    private Instance<DynamoDbFacade> dynamoDbFacadeInstance;
     private Ec2Service ec2Service;
     private S3Service s3Service;
     private RequestContext requestContext;
@@ -54,9 +56,11 @@ class IamConditionContextResolverTest {
     @BeforeEach
     void setUp() {
         dynamoDbService = mock(DynamoDbService.class);
-        dynamoDbServiceInstance = mock(Instance.class);
-        when(dynamoDbServiceInstance.isResolvable()).thenReturn(true);
-        when(dynamoDbServiceInstance.get()).thenReturn(dynamoDbService);
+        NativeDynamoDbBackend dynamoDbBackend = new NativeDynamoDbBackend(null, null, dynamoDbService, mapper);
+        dynamoDbFacadeInstance = mock(Instance.class);
+        when(dynamoDbFacadeInstance.isResolvable()).thenReturn(true);
+        when(dynamoDbFacadeInstance.get()).thenReturn(new DynamoDbFacade(dynamoDbBackend, dynamoDbBackend,
+                new RegionResolver("us-east-1", "000000000000")));
         ec2Service = mock(Ec2Service.class);
         Instance<Ec2Service> ec2ServiceInstance = mock(Instance.class);
         when(ec2ServiceInstance.isResolvable()).thenReturn(true);
@@ -70,7 +74,7 @@ class IamConditionContextResolverTest {
         config = mock(EmulatorConfig.class);
         when(config.defaultRegion()).thenReturn("us-east-1");
         resolver = new IamConditionContextResolver(
-                dynamoDbServiceInstance, ec2ServiceInstance, s3ServiceInstance, requestContext, config);
+                dynamoDbFacadeInstance, ec2ServiceInstance, s3ServiceInstance, requestContext, config);
     }
 
     /** A form request whose body can be read again, as a real request's restored stream can. */

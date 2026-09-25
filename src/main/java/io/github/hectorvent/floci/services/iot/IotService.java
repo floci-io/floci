@@ -34,7 +34,8 @@ import io.github.hectorvent.floci.services.iot.rules.RuleSqlContext;
 import io.github.hectorvent.floci.services.iot.rules.RuleSqlEvaluator;
 import io.github.hectorvent.floci.services.iot.rules.RuleSqlParseException;
 import io.github.hectorvent.floci.services.iot.rules.RuleSqlParser;
-import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations.Scope;
 import io.github.hectorvent.floci.services.firehose.FirehoseService;
 import io.github.hectorvent.floci.services.firehose.model.Record;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
@@ -117,7 +118,7 @@ public class IotService {
     private final SnsService snsService;
     private final S3Service s3Service;
     private final KinesisService kinesisService;
-    private final DynamoDbService dynamoDbService;
+    private final DynamoDbFacade dynamoDb;
     private final LambdaService lambdaService;
     private final FirehoseService firehoseService;
     private final CloudWatchLogsService cloudWatchLogsService;
@@ -136,7 +137,7 @@ public class IotService {
                         SnsService snsService,
                         S3Service s3Service,
                         KinesisService kinesisService,
-                        DynamoDbService dynamoDbService,
+                        DynamoDbFacade dynamoDb,
                         LambdaService lambdaService,
                         FirehoseService firehoseService,
                         CloudWatchLogsService cloudWatchLogsService,
@@ -156,7 +157,7 @@ public class IotService {
                 storageFactory.create("iot", "iot-thing-groups.json", new TypeReference<Map<String, IotThingGroup>>() {}),
                 storageFactory.create("iot", "iot-thing-group-memberships.json", new TypeReference<Map<String, Set<String>>>() {}),
                 config, regionResolver, objectMapper, publishEventRecorder, mqttBrokerService, sqsService, snsService,
-                s3Service, kinesisService, dynamoDbService, lambdaService, firehoseService, cloudWatchLogsService, certificateAuthority,
+                s3Service, kinesisService, dynamoDb, lambdaService, firehoseService, cloudWatchLogsService, certificateAuthority,
                 policyEvaluator);
     }
 
@@ -182,7 +183,7 @@ public class IotService {
                   SnsService snsService,
                   S3Service s3Service,
                   KinesisService kinesisService,
-                  DynamoDbService dynamoDbService,
+                  DynamoDbFacade dynamoDb,
                   LambdaService lambdaService,
                   FirehoseService firehoseService,
                   CloudWatchLogsService cloudWatchLogsService,
@@ -210,7 +211,7 @@ public class IotService {
         this.snsService = snsService;
         this.s3Service = s3Service;
         this.kinesisService = kinesisService;
-        this.dynamoDbService = dynamoDbService;
+        this.dynamoDb = dynamoDb;
         this.lambdaService = lambdaService;
         this.firehoseService = firehoseService;
         this.cloudWatchLogsService = cloudWatchLogsService;
@@ -1527,7 +1528,10 @@ public class IotService {
             case "dynamoDBv2" -> {
                 String tableName = action.path("putItem").path("tableName").asText(null);
                 if (tableName != null && !tableName.isBlank()) {
-                    dynamoDbService.putItem(tableName, toDynamoDbItem(payload), region);
+                    // An MQTT publish evaluates rules with no request account, so the write names the rule's owner explicitly.
+                    Scope scope = new Scope(
+                            AwsArnUtils.accountOrDefault(rule.getRuleArn(), config.defaultAccountId()), region);
+                    dynamoDb.items().putItem(scope, tableName, toDynamoDbItem(payload), null, null, null);
                 }
             }
             case "lambda" -> {
