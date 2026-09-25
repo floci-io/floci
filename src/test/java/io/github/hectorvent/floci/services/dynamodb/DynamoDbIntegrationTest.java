@@ -4767,6 +4767,24 @@ given()
             .body("message", equalTo("Invalid ConditionExpression: An expression attribute value "
                     + "used in expression is not defined; attribute value: :v"));
 
+        // The undefined name must be reported ahead of contains()'s distinct-operand semantic error.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Item": {"pk": {"S": "a"}, "sk": {"S": "b"}},
+                    "ConditionExpression": "contains(#missing, #missing)"
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Invalid ConditionExpression: An expression attribute name "
+                    + "used in the document path is not defined; attribute name: #missing"));
+
         // DeleteItem: ConditionExpression references an undefined :value.
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.DeleteItem")
@@ -4862,6 +4880,28 @@ given()
             .body("__type", containsString("ValidationException"))
             .body("message", equalTo("Invalid ConditionExpression: An expression attribute value "
                     + "used in expression is not defined; attribute value: :v"));
+
+        // contains()'s distinct-operand error must win over the unused-EAN check for the stray #z.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Key": {"pk": {"S": "a"}, "sk": {"S": "b"}},
+                    "UpdateExpression": "SET payload = :d",
+                    "ConditionExpression": "contains(#m, #m)",
+                    "ExpressionAttributeNames": {"#m": "sk", "#z": "unused"},
+                    "ExpressionAttributeValues": {":d": {"S": "x"}}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Invalid ConditionExpression: The first operand must be distinct "
+                    + "from the remaining operands for this operator or function; operator: contains, "
+                    + "first operand: [sk]"));
 
         // Edge case: nested path #a.#b, only #a defined.
         given()
