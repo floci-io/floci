@@ -167,6 +167,9 @@ class SesExportJobServiceTest {
         releaseWrite.countDown();
         reset.join(5_000);
 
+        // join returns on timeout too, so without this the assertion below would hold even if
+        // beforeReset never came back.
+        assertFalse(reset.isAlive(), "the reset did not finish after the in-flight write");
         assertTrue(workerFinishedTheWrite.get(),
                 "the reset returned before the in-flight write finished");
     }
