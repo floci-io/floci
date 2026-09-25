@@ -260,6 +260,29 @@ class RuleSqlEvaluatorTest {
                 "{\"level\":9007199254740993}").isPresent());
     }
 
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "level = 1e5              | {\"level\":100000}             | true",
+            "level = 1e5              | {\"level\":1}                  | false",
+            "level > 1E-3             | {\"level\":0.01}               | true",
+            "level > 1E-3             | {\"level\":0}                  | false",
+            "level < 2.5e+3           | {\"level\":2499.9}             | true",
+            "level < 2.5e+3           | {\"level\":2500}               | false",
+            "n = 99999999999999999999 | {\"n\":99999999999999999999}   | true",
+            "n = 99999999999999999999 | {\"n\":1}                      | false",
+            "n > 99999999999999999999 | {\"n\":100000000000000000000}  | true"
+    })
+    void filtersOnAnExponentOrBigIntegerLiteral(String predicate, String payload, boolean fires) {
+        assertEquals(fires, evaluate("SELECT * FROM 'a/b' WHERE " + predicate, "a/b", payload).isPresent());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"1e5", "1E-3", "2.5e+3", "99999999999999999999"})
+    void projectsANumberLiteralAsTheSamePayloadNumberIsProjected(String number) {
+        assertEquals(text(evaluate("SELECT level FROM 'a/b'", "a/b", "{\"level\":" + number + "}")),
+                text(evaluate("SELECT " + number + " AS level FROM 'a/b'", "a/b", "{}")));
+    }
+
     @Test
     void skipsANonJsonPayloadWhenTheStatementNeedsFields() {
         assertFalse(evaluate("SELECT *, topic() as topic FROM 'a/b'", "a/b", "plain text").isPresent());
