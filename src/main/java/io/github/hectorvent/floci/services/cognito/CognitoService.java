@@ -3278,8 +3278,12 @@ public class CognitoService implements ResourceProvider {
      * (suppressions, groups, roles, scopes).
      */
     private static ClaimsOverride mergeUnderProtocolClaims(ClaimsOverride trigger, ClaimsOverride protocolClaims) {
-        if (trigger == null) return protocolClaims;
-        if (protocolClaims == null) return trigger;
+        if (trigger == null) {
+            return protocolClaims;
+        }
+        if (protocolClaims == null) {
+            return trigger;
+        }
         return new ClaimsOverride(
                 claimsWithProtocolLast(trigger.idClaimsToAddOrOverride(), protocolClaims.idClaimsToAddOrOverride()),
                 trigger.idClaimsToSuppress(),
@@ -3291,8 +3295,12 @@ public class CognitoService implements ResourceProvider {
 
     private static Map<String, Object> claimsWithProtocolLast(Map<String, Object> triggerClaims,
                                                               Map<String, Object> protocolClaims) {
-        if (protocolClaims == null || protocolClaims.isEmpty()) return triggerClaims;
-        if (triggerClaims == null || triggerClaims.isEmpty()) return protocolClaims;
+        if (protocolClaims == null || protocolClaims.isEmpty()) {
+            return triggerClaims;
+        }
+        if (triggerClaims == null || triggerClaims.isEmpty()) {
+            return protocolClaims;
+        }
         Map<String, Object> merged = new HashMap<>(triggerClaims);
         merged.putAll(protocolClaims);
         return merged;
