@@ -2911,6 +2911,18 @@ public class Ec2QueryHandler {
     private Response handleDescribeSubnets(MultivaluedMap<String, String> p, String region) {
         List<String> ids = getList(p, "SubnetId");
         Map<String, List<String>> filters = getFilters(p);
+        // A requested id that does not exist is an error, not an omission from the result. Returning
+        // an empty list tells a caller the subnet is gone when the id may simply be wrong, and a
+        // waiter polling for a subnet it just created cannot tell "not yet" from "never".
+        //
+        // The check belongs here rather than in describeSubnets because that method is shared with
+        // ELB, ELBv2, DMS, ElastiCache, RDS and others, each of which reads an absent id as its own
+        // error. ElbV2Service raises SubnetNotFound and DmsService raises InvalidSubnet, and both
+        // are the codes those APIs are supposed to return. Raising in the service would replace
+        // them with this one.
+        for (String subnetId : ids) {
+            service.requireSubnet(region, subnetId);
+        }
         List<Subnet> subnets = service.describeSubnets(region, ids, filters);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeSubnetsResponse", AwsNamespaces.EC2)

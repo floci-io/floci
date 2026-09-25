@@ -4780,16 +4780,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
     public List<Subnet> describeSubnets(String region, List<String> subnetIds, Map<String, List<String>> filters) {
         ensureDefaultResources(region);
-        // A requested id that does not exist is an error, not an omission from the result, which is
-        // how describeVpcs already reads its own ids. Returning an empty list instead tells a caller
-        // the subnet is gone when the id may simply be wrong, and a waiter polling for a subnet it
-        // just created cannot tell "not yet" from "never".
-        for (String subnetId : subnetIds) {
-            if (subnets.get(key(region, subnetId)).isEmpty()) {
-                throw new AwsException("InvalidSubnetID.NotFound",
-                        "The subnet ID '" + subnetId + "' does not exist", 400);
-            }
-        }
         return subnets.scan(k -> true).stream()
                 .filter(s -> s.getRegion().equals(region))
                 .filter(s -> subnetIds.isEmpty() || subnetIds.contains(s.getSubnetId()))
