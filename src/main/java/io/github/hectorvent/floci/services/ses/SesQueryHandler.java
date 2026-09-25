@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ses;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsQueryResponse;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntry;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntryResult;
@@ -110,7 +111,7 @@ public class SesQueryHandler {
                 case "UpdateTemplate" -> handleUpdateTemplate(params, region);
                 case "GetTemplate" -> handleGetTemplate(params, region);
                 case "DeleteTemplate" -> handleDeleteTemplate(params, region);
-                case "ListTemplates" -> handleListTemplates(region);
+                case "ListTemplates" -> handleListTemplates(params, region);
                 case "SendTemplatedEmail" -> handleSendTemplatedEmail(params, region);
                 case "SendBulkTemplatedEmail" -> handleSendBulkTemplatedEmail(params, region);
                 case "TestRenderTemplate" -> handleTestRenderTemplate(params, region);
@@ -563,10 +564,13 @@ public class SesQueryHandler {
         return Response.ok(AwsQueryResponse.envelopeEmptyResult("DeleteTemplate", AwsNamespaces.SES)).build();
     }
 
-    private Response handleListTemplates(String region) {
-        List<EmailTemplate> templates = templateService.listTemplates(region);
-        var xml = new XmlBuilder().start("TemplatesMetadata");
-        for (EmailTemplate t : templates) {
+    private Response handleListTemplates(MultivaluedMap<String, String> params, String region) {
+        PaginatedResult<EmailTemplate> page = SesListPaging.V1_LIST_TEMPLATES.page(
+                templateService.listTemplates(region), SesListPaging::templateCursor,
+                SesListPaging.parseQueryProtocolPageSize(getParam(params, "MaxItems")),
+                getParam(params, "NextToken"));
+        XmlBuilder xml = new XmlBuilder().start("TemplatesMetadata");
+        for (EmailTemplate t : page.items()) {
             xml.start("member")
                     .elem("Name", t.getTemplateName());
             if (t.getCreatedTimestamp() != null) {
@@ -575,6 +579,7 @@ public class SesQueryHandler {
             xml.end("member");
         }
         xml.end("TemplatesMetadata");
+        xml.elem("NextToken", page.nextToken());
         return Response.ok(AwsQueryResponse.envelope("ListTemplates", AwsNamespaces.SES, xml.build())).build();
     }
 

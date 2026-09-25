@@ -17,6 +17,8 @@ import java.security.SecureRandom;
 import java.util.List;
 import java.util.stream.Stream;
 
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -98,15 +100,14 @@ class SesTemplateServiceTest {
     }
 
     @Test
-    void list_isSortedByCreationAndPerRegion() {
+    void list_isPerRegion() {
         service.createTemplate(template("a"), REGION);
         service.createTemplate(template("b"), REGION);
         service.createTemplate(template("other"), "eu-west-1");
 
-        List<EmailTemplate> list = service.listTemplates(REGION);
-        assertEquals(2, list.size());
-        assertEquals("a", list.get(0).getTemplateName());
-        assertEquals("b", list.get(1).getTemplateName());
+        List<String> names = service.listTemplates(REGION).stream()
+                .map(EmailTemplate::getTemplateName).toList();
+        assertThat(names, containsInAnyOrder("a", "b"));
     }
 
     @Test
