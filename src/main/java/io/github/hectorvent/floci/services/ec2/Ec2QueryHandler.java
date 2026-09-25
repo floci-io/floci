@@ -1697,6 +1697,7 @@ public class Ec2QueryHandler {
                     .elem("logDestination", fl.getLogDestination())
                     .elem("deliverLogsPermissionArn", fl.getDeliverLogsPermissionArn())
                     .elem("flowLogStatus", fl.getFlowLogStatus())
+                    .elem("logFormat", fl.getLogFormat())
                     .elem("deliverLogsStatus", fl.getDeliverLogsStatus())
                     .elem("maxAggregationInterval", String.valueOf(fl.getMaxAggregationInterval()))
                     .elem("creationTime", ISO_FMT.format(fl.getCreationTime()))
