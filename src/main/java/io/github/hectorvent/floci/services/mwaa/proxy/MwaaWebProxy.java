@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.mwaa.proxy;
 
 import io.github.hectorvent.floci.services.mwaa.MwaaEnvironmentManager;
 import io.vertx.core.Vertx;
+import io.vertx.core.WorkerExecutor;
 import io.vertx.core.http.HttpClient;
 import io.vertx.core.http.HttpClientOptions;
 import io.vertx.core.http.HttpMethod;
@@ -34,6 +35,10 @@ public class MwaaWebProxy {
 
     private static final Logger LOG = Logger.getLogger(MwaaWebProxy.class);
     private static final String CLI_PATH = "/aws_mwaa/cli";
+    // CLI execs get their own small pool, shared by name across environments, so a burst of
+    // slow Docker execs cannot occupy the Vert.x worker pool the rest of the emulator uses.
+    private static final String CLI_WORKER_POOL_NAME = "mwaa-cli";
+    private static final int CLI_WORKER_POOL_SIZE = 4;
 
     private static final List<String> HOP_BY_HOP_HEADERS = List.of(
             "connection", "keep-alive", "transfer-encoding", "upgrade", "te", "trailers",
@@ -48,6 +53,7 @@ public class MwaaWebProxy {
 
     private HttpServer server;
     private HttpClient client;
+    private WorkerExecutor cliWorkers;
 
     public MwaaWebProxy(String environmentName, Vertx vertx, String backendHost, int backendPort,
                         CliTokenValidator tokenValidator, CliExecutor cliExecutor) {
@@ -61,6 +67,7 @@ public class MwaaWebProxy {
 
     /** Starts listening on {@code proxyPort}, blocking until bound (or throwing on failure). */
     public void start(int proxyPort) throws Exception {
+        cliWorkers = vertx.createSharedWorkerExecutor(CLI_WORKER_POOL_NAME, CLI_WORKER_POOL_SIZE);
         client = vertx.createHttpClient(new HttpClientOptions()
                 .setConnectTimeout(5000)
                 .setKeepAlive(true));
@@ -88,6 +95,9 @@ public class MwaaWebProxy {
         if (client != null) {
             client.close();
         }
+        if (cliWorkers != null) {
+            cliWorkers.close();
+        }
     }
 
     private void handleRequest(HttpServerRequest req) {
@@ -110,7 +120,7 @@ public class MwaaWebProxy {
             String command = body.toString(StandardCharsets.UTF_8).trim();
             // The Docker exec can block for up to 30 seconds, so keep it off the event loop.
             // Unordered: independent CLI calls should not queue behind each other.
-            vertx.<MwaaEnvironmentManager.ExecResult>executeBlocking(() -> cliExecutor.execute(command), false)
+            cliWorkers.<MwaaEnvironmentManager.ExecResult>executeBlocking(() -> cliExecutor.execute(command), false)
                     .onSuccess(result -> {
                         String stdoutB64 = Base64.getEncoder().encodeToString(result.stdout().getBytes(StandardCharsets.UTF_8));
                         String stderrB64 = Base64.getEncoder().encodeToString(result.stderr().getBytes(StandardCharsets.UTF_8));

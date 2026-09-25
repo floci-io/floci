@@ -14,7 +14,9 @@ import org.junit.jupiter.api.Test;
 
 import java.net.ServerSocket;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -118,8 +120,66 @@ class MwaaWebProxyCliOffloadTest {
             assertEquals("",
                     new String(Base64.getDecoder().decode(json.getString("stderr")), StandardCharsets.UTF_8));
         } finally {
+            releaseCli.countDown();
             proxy.stop();
             backend.close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test
+    void burstOfSlowCliCallsLeavesTheSharedWorkerPoolFree() throws Exception {
+        int sharedWorkers = 2;
+        vertx = Vertx.vertx(new VertxOptions().setEventLoopPoolSize(1).setWorkerPoolSize(sharedWorkers));
+
+        CountDownLatch cliStarted = new CountDownLatch(sharedWorkers);
+        CountDownLatch releaseCli = new CountDownLatch(1);
+        MwaaWebProxy.CliExecutor slowExecutor = command -> {
+            cliStarted.countDown();
+            if (!releaseCli.await(5, TimeUnit.SECONDS)) {
+                throw new IllegalStateException("test did not release the CLI exec in time");
+            }
+            return new MwaaEnvironmentManager.ExecResult(0, "", "");
+        };
+        MwaaWebProxy proxy = new MwaaWebProxy("env1", vertx, "127.0.0.1", 1,
+                (environmentName, token) -> true, slowExecutor);
+        int proxyPort;
+        try (ServerSocket freePort = new ServerSocket(0)) {
+            proxyPort = freePort.getLocalPort();
+        }
+        proxy.start(proxyPort);
+
+        try {
+            HttpClient client = vertx.createHttpClient();
+            List<CompletableFuture<Integer>> cliCalls = new ArrayList<>();
+            for (int i = 0; i < sharedWorkers * 2; i++) {
+                cliCalls.add(client.request(new RequestOptions()
+                                .setHost("127.0.0.1")
+                                .setPort(proxyPort)
+                                .setMethod(HttpMethod.POST)
+                                .setURI("/aws_mwaa/cli"))
+                        .compose(request -> {
+                            request.putHeader("Authorization", "Bearer test-token");
+                            request.putHeader("Content-Type", "text/plain");
+                            return request.send(Buffer.buffer("dags list"));
+                        })
+                        .map(response -> response.statusCode())
+                        .toCompletionStage().toCompletableFuture());
+            }
+            assertTrue(cliStarted.await(2, TimeUnit.SECONDS), "CLI executor was never invoked");
+
+            // Unrelated blocking work, such as a Lambda invocation, must not queue behind CLI execs.
+            String unrelated = vertx.<String>executeBlocking(() -> "ran", false)
+                    .toCompletionStage().toCompletableFuture()
+                    .get(2, TimeUnit.SECONDS);
+            assertEquals("ran", unrelated);
+
+            releaseCli.countDown();
+            for (CompletableFuture<Integer> cliCall : cliCalls) {
+                assertEquals(200, cliCall.get(3, TimeUnit.SECONDS));
+            }
+        } finally {
+            releaseCli.countDown();
+            proxy.stop();
         }
     }
 
