@@ -3,18 +3,20 @@ package io.github.hectorvent.floci.services.ses;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.ses.model.Tag;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Request-parsing helpers shared by the SES v2 REST JSON controllers: body and member shape checks
- * that answer with the probe-confirmed {@code BadRequestException} / {@code SerializationException}
- * wordings, the resource {@code Tags} array, and the v1-to-v2 error remapping applied at the v2
- * boundary. Stateless by design so every controller can call them without a bean; the one helper
- * that reads a body takes the caller's {@link ObjectMapper}.
+ * Helpers shared by the SES v2 REST JSON controllers: body and member shape checks that answer
+ * with the probe-confirmed {@code BadRequestException} / {@code SerializationException} wordings,
+ * the resource {@code Tags} array, the v1-to-v2 error remapping applied at the v2 boundary, and the
+ * epoch-seconds timestamp members of a response. Stateless by design so every controller can call
+ * them without a bean; the one helper that reads a body takes the caller's {@link ObjectMapper}.
  */
 final class SesV2Json {
 
@@ -248,5 +250,20 @@ final class SesV2Json {
             return false;
         }
         return coerceBoolean(enabledNode);
+    }
+
+    /**
+     * Epoch seconds with the millisecond fraction, the shape AWS returns for every SES v2
+     * timestamp (probe-confirmed, e.g. {@code 1.790312384592E9}). It must stay a JSON number: an
+     * ISO string, as the v1 Query path writes, breaks the SDK's unixTimestamp unmarshaller.
+     */
+    static double epochSeconds(Instant instant) {
+        return instant.toEpochMilli() / 1000.0;
+    }
+
+    static void putTimestamp(ObjectNode node, String field, Instant value) {
+        if (value != null) {
+            node.put(field, epochSeconds(value));
+        }
     }
 }

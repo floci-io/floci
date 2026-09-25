@@ -11,9 +11,12 @@ import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.stream.Stream;
 
+import static io.github.hectorvent.floci.services.ses.SesV2TimestampMatchers.DECIMAL_NUMBERS;
+import static io.github.hectorvent.floci.services.ses.SesV2TimestampMatchers.epochSecondsWithMillis;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.everyItem;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.notNullValue;
 
@@ -165,6 +168,7 @@ class SesTemplateV2IntegrationTest {
     @Order(8)
     void listTemplates_includesCreated() {
         given()
+            .config(DECIMAL_NUMBERS)
             .contentType("application/json")
             .header("Authorization", AUTH_HEADER)
         .when()
@@ -172,7 +176,8 @@ class SesTemplateV2IntegrationTest {
         .then()
             .statusCode(200)
             .body("TemplatesMetadata", notNullValue())
-            .body("TemplatesMetadata.TemplateName", hasItem("v2-welcome"));
+            .body("TemplatesMetadata.TemplateName", hasItem("v2-welcome"))
+            .body("TemplatesMetadata.CreatedTimestamp", everyItem(epochSecondsWithMillis()));
     }
 
     @Test

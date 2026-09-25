@@ -25,6 +25,8 @@ import jakarta.ws.rs.core.Response;
 
 import java.util.List;
 
+import static io.github.hectorvent.floci.services.ses.SesV2Json.putTimestamp;
+
 /**
  * SES V2 message insights ({@code /v2/email/insights/{MessageId}/}), the read side of the
  * per-recipient timelines {@link SesMessageInsights} derives at send time.
@@ -103,9 +105,7 @@ public class SesInsightsController {
 
     private ObjectNode renderEvent(InsightsEvent event) {
         ObjectNode node = objectMapper.createObjectNode();
-        if (event.timestamp() != null) {
-            node.put("Timestamp", event.timestamp().toEpochMilli() / 1000.0);
-        }
+        putTimestamp(node, "Timestamp", event.timestamp());
         node.put("Type", event.type());
         InsightsEventDetails details = event.details();
         if (details == null) {

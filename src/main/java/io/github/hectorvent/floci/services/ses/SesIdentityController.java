@@ -28,6 +28,7 @@ import java.util.List;
 import java.util.Map;
 
 import static io.github.hectorvent.floci.services.ses.SesV2Json.parseTagsArray;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.putTimestamp;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.remapV1Exception;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.requireJsonObject;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.requireObjectOrAbsent;
@@ -494,12 +495,7 @@ public class SesIdentityController {
         dkim.put("SigningAttributesOrigin", src.getDkimSigningAttributesOrigin());
         dkim.put("NextSigningKeyLength", src.getDkimNextSigningKeyLength());
         dkim.put("CurrentSigningKeyLength", src.getDkimCurrentSigningKeyLength());
-        if (src.getDkimLastKeyGenerationTimestamp() != null) {
-            // SES v2 (restJson1) serializes this timestamp as epoch seconds (a number); emitting an
-            // ISO string breaks the SDK's unixTimestamp unmarshaller.
-            dkim.put("LastKeyGenerationTimestamp",
-                    src.getDkimLastKeyGenerationTimestamp().toEpochMilli() / 1000.0);
-        }
+        putTimestamp(dkim, "LastKeyGenerationTimestamp", src.getDkimLastKeyGenerationTimestamp());
         return dkim;
     }
 

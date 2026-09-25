@@ -22,9 +22,9 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
 import java.time.Instant;
-import java.util.Optional;
 
 import static io.github.hectorvent.floci.services.ses.SesV2Json.intMemberOrAbsent;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.putTimestamp;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.readOptionBody;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.stringMemberOrAbsent;
 
@@ -162,10 +162,5 @@ public class SesExportJobController {
         Instant created = job.getCreatedTimestamp();
         long descending = Long.MAX_VALUE - (created == null ? 0L : created.toEpochMilli());
         return String.format("%019d#%s", descending, job.getJobId());
-    }
-
-    private static void putTimestamp(ObjectNode node, String field, Instant value) {
-        Optional.ofNullable(value)
-                .ifPresent(instant -> node.put(field, instant.toEpochMilli() / 1000.0));
     }
 }

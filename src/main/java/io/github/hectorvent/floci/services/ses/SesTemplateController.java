@@ -27,6 +27,7 @@ import org.jboss.logging.Logger;
 import java.util.List;
 
 import static io.github.hectorvent.floci.services.ses.SesV2Json.parseTagsArray;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.putTimestamp;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.remapV1Exception;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.requireJsonObject;
 
@@ -92,9 +93,7 @@ public class SesTemplateController {
         for (EmailTemplate t : templates) {
             ObjectNode item = objectMapper.createObjectNode();
             item.put("TemplateName", t.getTemplateName());
-            if (t.getCreatedTimestamp() != null) {
-                item.put("CreatedTimestamp", t.getCreatedTimestamp().getEpochSecond());
-            }
+            putTimestamp(item, "CreatedTimestamp", t.getCreatedTimestamp());
             items.add(item);
         }
         return Response.ok(result).build();

@@ -25,6 +25,7 @@ import org.jboss.logging.Logger;
 
 import java.util.List;
 
+import static io.github.hectorvent.floci.services.ses.SesV2Json.putTimestamp;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.readRequiredStringField;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.remapV1Exception;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.requireJsonObject;
@@ -92,9 +93,7 @@ public class SesSuppressionController {
             ObjectNode entry = result.putObject("SuppressedDestination");
             entry.put("EmailAddress", suppressed.getEmailAddress());
             entry.put("Reason", suppressed.getReason());
-            if (suppressed.getLastUpdateTime() != null) {
-                entry.put("LastUpdateTime", suppressed.getLastUpdateTime().getEpochSecond());
-            }
+            putTimestamp(entry, "LastUpdateTime", suppressed.getLastUpdateTime());
             // AWS renders TenantName on every entry: an explicit null for account-level ones.
             entry.put("TenantName", suppressed.getTenantName());
             return Response.ok(result).build();
@@ -136,9 +135,7 @@ public class SesSuppressionController {
             ObjectNode item = objectMapper.createObjectNode();
             item.put("EmailAddress", s.getEmailAddress());
             item.put("Reason", s.getReason());
-            if (s.getLastUpdateTime() != null) {
-                item.put("LastUpdateTime", s.getLastUpdateTime().getEpochSecond());
-            }
+            putTimestamp(item, "LastUpdateTime", s.getLastUpdateTime());
             summaries.add(item);
         }
         return Response.ok(result).build();

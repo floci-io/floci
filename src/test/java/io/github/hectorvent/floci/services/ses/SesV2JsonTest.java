@@ -2,11 +2,13 @@ package io.github.hectorvent.floci.services.ses;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.ses.model.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
 
+import java.time.Instant;
 import java.util.Arrays;
 import java.util.List;
 
@@ -18,7 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Unit tests for the request-parsing helpers shared by the SES v2 controllers. Each helper's
+ * Unit tests for the helpers shared by the SES v2 controllers. Each helper's
  * accept / reject split and its wording were previously pinned only through the controller
  * integration tests; these pin them directly so the controllers can move without re-proving them.
  */
@@ -229,5 +231,32 @@ class SesV2JsonTest {
         assertTrue(SesV2Json.parseSendingEnabled(json("\"yes\"")));
         assertAws("SerializationException", 400, () -> SesV2Json.parseSendingEnabled(json("null")));
         assertAws("SerializationException", 400, () -> SesV2Json.parseSendingEnabled(json("0")));
+    }
+
+    @Test
+    void epochSeconds_keepsMillisecondFraction() {
+        assertEquals(1_790_312_384.592, SesV2Json.epochSeconds(Instant.ofEpochMilli(1_790_312_384_592L)));
+    }
+
+    @Test
+    void epochSeconds_dropsSubMillisecondPrecision() {
+        assertEquals(1_790_312_384.592,
+                SesV2Json.epochSeconds(Instant.ofEpochSecond(1_790_312_384L, 592_999_999L)));
+    }
+
+    @Test
+    void putTimestamp_writesDecimalNumber() {
+        ObjectNode node = MAPPER.createObjectNode();
+        SesV2Json.putTimestamp(node, "CreatedTimestamp", Instant.ofEpochMilli(1_790_312_384_592L));
+
+        assertEquals("{\"CreatedTimestamp\":1.790312384592E9}", node.toString());
+    }
+
+    @Test
+    void putTimestamp_skipsNull() {
+        ObjectNode node = MAPPER.createObjectNode();
+        SesV2Json.putTimestamp(node, "CompletedTimestamp", null);
+
+        assertFalse(node.has("CompletedTimestamp"));
     }
 }
