@@ -57,7 +57,7 @@ class ApiGatewayVtlCompatibilityTest {
             String responseTemplate = "#set($parsed = $util.parseJson($input.body))"
                     + "#if($parsed.headers)$parsed.headers.isEmpty()|$parsed.headers.size()|"
                     + "#foreach($entry in $parsed.headers.entrySet())$entry.getKey()=$entry.getValue()#end|"
-                    + "#foreach($item in $parsed.items)$item#end#end";
+                    + "$parsed.items.isEmpty()|$parsed.items.size()|#foreach($item in $parsed.items)$item#end#end";
             apiGateway.putIntegrationResponse(request -> request
                     .restApiId(apiId)
                     .resourceId(resourceId)
@@ -81,7 +81,7 @@ class ApiGatewayVtlCompatibilityTest {
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
 
             assertThat(response.statusCode()).isEqualTo(200);
-            assertThat(response.body().trim()).isEqualTo("false|1|x-test=yes|ab");
+            assertThat(response.body().trim()).isEqualTo("false|1|x-test=yes|false|2|ab");
         } finally {
             apiGateway.deleteRestApi(request -> request.restApiId(apiId));
             apiGateway.close();
