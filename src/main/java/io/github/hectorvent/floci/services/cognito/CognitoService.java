@@ -4023,37 +4023,17 @@ public class CognitoService implements ResourceProvider {
     /** Verified JWT details for services that enforce Cognito user-pool authorizers. */
     public record VerifiedApiGatewayToken(String poolId, String tokenUse, Map<String, Object> claims) {}
 
+    private record VerifiedJwt(String poolId, JsonNode claims) {}
+
     /**
      * Verifies an access or ID token using the persisted user-pool signing key. This deliberately
      * does not fetch keys over the network because the emulator owns the pool and its key pair.
      */
     public VerifiedApiGatewayToken verifyApiGatewayToken(String token) {
         try {
-            if (token == null || token.isBlank()) throw new IllegalArgumentException("missing token");
-            String[] parts = token.split("\\.", -1);
-            if (parts.length != 3 || Arrays.stream(parts).anyMatch(String::isEmpty)) {
-                throw new IllegalArgumentException("malformed JWT");
-            }
-            JsonNode header = MAPPER.readTree(Base64.getUrlDecoder().decode(parts[0]));
-            JsonNode claims = MAPPER.readTree(Base64.getUrlDecoder().decode(parts[1]));
-            if (!"RS256".equals(header.path("alg").asText())
-                    || !"JWT".equalsIgnoreCase(header.path("typ").asText())) {
-                throw new IllegalArgumentException("unsupported JWT algorithm");
-            }
-            String issuer = textClaim(claims, "iss");
-            String poolId = issuer != null && issuer.startsWith(baseUrl + "/")
-                    ? issuer.substring((baseUrl + "/").length()) : null;
-            UserPool pool = poolId == null ? null : poolStore.get(poolId).orElse(null);
-            if (pool == null || !getIssuer(poolId).equals(issuer)
-                    || !getSigningKeyId(pool).equals(textClaim(header, "kid"))) {
-                throw new IllegalArgumentException("invalid issuer or key");
-            }
-            Signature verifier = Signature.getInstance("SHA256withRSA");
-            verifier.initVerify(getSigningPublicKey(pool));
-            verifier.update((parts[0] + "." + parts[1]).getBytes(StandardCharsets.UTF_8));
-            if (!verifier.verify(Base64.getUrlDecoder().decode(parts[2]))) {
-                throw new IllegalArgumentException("invalid signature");
-            }
+            VerifiedJwt verified = verifyJwtSignatureAndIssuer(token);
+            JsonNode claims = verified.claims();
+            String poolId = verified.poolId();
             String tokenUse = textClaim(claims, "token_use");
             long expiresAt = requiredNumericClaim(claims, "exp");
             String subject = textClaim(claims, "sub");
@@ -4084,38 +4064,9 @@ public class CognitoService implements ResourceProvider {
      */
     VerifiedAccessToken verifyAccessToken(String token) {
         try {
-            if (token == null || token.isBlank()) {
-                throw new IllegalArgumentException("missing token");
-            }
-            String[] parts = token.split("\\.", -1);
-            if (parts.length != 3 || parts[0].isEmpty() || parts[1].isEmpty() || parts[2].isEmpty()) {
-                throw new IllegalArgumentException("malformed JWT");
-            }
-
-            JsonNode header = MAPPER.readTree(Base64.getUrlDecoder().decode(parts[0]));
-            JsonNode claims = MAPPER.readTree(Base64.getUrlDecoder().decode(parts[1]));
-            if (!"RS256".equals(header.path("alg").asText())
-                    || !"JWT".equalsIgnoreCase(header.path("typ").asText())) {
-                throw new IllegalArgumentException("unsupported JWT algorithm");
-            }
-
-            String issuer = textClaim(claims, "iss");
-            String poolId = null;
-            if (issuer != null && issuer.startsWith(baseUrl + "/")) {
-                poolId = issuer.substring((baseUrl + "/").length());
-            }
-            UserPool pool = poolId == null ? null : poolStore.get(poolId).orElse(null);
-            if (pool == null || !getIssuer(poolId).equals(issuer)
-                    || !getSigningKeyId(pool).equals(textClaim(header, "kid"))) {
-                throw new IllegalArgumentException("invalid issuer or key");
-            }
-
-            Signature verifier = Signature.getInstance("SHA256withRSA");
-            verifier.initVerify(getSigningPublicKey(pool));
-            verifier.update((parts[0] + "." + parts[1]).getBytes(StandardCharsets.UTF_8));
-            if (!verifier.verify(Base64.getUrlDecoder().decode(parts[2]))) {
-                throw new IllegalArgumentException("invalid signature");
-            }
+            VerifiedJwt verified = verifyJwtSignatureAndIssuer(token);
+            JsonNode claims = verified.claims();
+            String poolId = verified.poolId();
 
             String verifiedPoolId = poolId;
             String username = textClaim(claims, "username");
@@ -4144,6 +4095,35 @@ public class CognitoService implements ResourceProvider {
             LOG.debug("Access token verification failed", e);
             throw new AwsException("NotAuthorizedException", INVALID_ACCESS_TOKEN_MESSAGE, 400);
         }
+    }
+
+    private VerifiedJwt verifyJwtSignatureAndIssuer(String token) throws Exception {
+        if (token == null || token.isBlank()) throw new IllegalArgumentException("missing token");
+        String[] parts = token.split("\\.", -1);
+        if (parts.length != 3 || Arrays.stream(parts).anyMatch(String::isEmpty)) {
+            throw new IllegalArgumentException("malformed JWT");
+        }
+        JsonNode header = MAPPER.readTree(Base64.getUrlDecoder().decode(parts[0]));
+        JsonNode claims = MAPPER.readTree(Base64.getUrlDecoder().decode(parts[1]));
+        if (!"RS256".equals(header.path("alg").asText())
+                || !"JWT".equalsIgnoreCase(header.path("typ").asText())) {
+            throw new IllegalArgumentException("unsupported JWT algorithm");
+        }
+        String issuer = textClaim(claims, "iss");
+        String poolId = issuer != null && issuer.startsWith(baseUrl + "/")
+                ? issuer.substring((baseUrl + "/").length()) : null;
+        UserPool pool = poolId == null ? null : poolStore.get(poolId).orElse(null);
+        if (pool == null || !getIssuer(poolId).equals(issuer)
+                || !getSigningKeyId(pool).equals(textClaim(header, "kid"))) {
+            throw new IllegalArgumentException("invalid issuer or key");
+        }
+        Signature verifier = Signature.getInstance("SHA256withRSA");
+        verifier.initVerify(getSigningPublicKey(pool));
+        verifier.update((parts[0] + "." + parts[1]).getBytes(StandardCharsets.UTF_8));
+        if (!verifier.verify(Base64.getUrlDecoder().decode(parts[2]))) {
+            throw new IllegalArgumentException("invalid signature");
+        }
+        return new VerifiedJwt(poolId, claims);
     }
 
     private static String textClaim(JsonNode claims, String name) {

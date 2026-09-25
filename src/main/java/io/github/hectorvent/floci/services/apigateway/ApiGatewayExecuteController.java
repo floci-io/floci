@@ -142,23 +142,6 @@ public class ApiGatewayExecuteController {
         this.sigV4Authorizer = sigV4Authorizer;
     }
 
-    /** Compatibility constructor for focused unit tests that do not exercise Cognito REST auth. */
-    public ApiGatewayExecuteController(ApiGatewayService apiGatewayService, ApiGatewayV2Service apiGatewayV2Service,
-                                       LambdaService lambdaService, RegionResolver regionResolver,
-                                       ObjectMapper objectMapper, VtlTemplateEngine vtlEngine,
-                                       AwsServiceRouter serviceRouter,
-                                       WebSocketConnectionManager webSocketConnectionManager,
-                                       ElbV2Service elbV2Service,
-                                       SqsQueryHandler sqsQueryHandler,
-                                       ApiGatewayExecuteRouteContext routeContext,
-                                       JwtSignatureVerifier jwtSignatureVerifier,
-                                       RequestContext requestContext,
-                                       ExecuteApiSigV4Authorizer sigV4Authorizer) {
-        this(apiGatewayService, null, apiGatewayV2Service, lambdaService, regionResolver, objectMapper, vtlEngine,
-                serviceRouter, webSocketConnectionManager, elbV2Service, sqsQueryHandler, routeContext,
-                jwtSignatureVerifier, requestContext, sigV4Authorizer);
-    }
-
     /** Matches an ELBv2 listener ARN (ALB {@code app/} or NLB {@code net/}); group 1 = region. */
     static final Pattern ELB_LISTENER_ARN = Pattern.compile(
             "^arn:" + AwsArnUtils.PARTITION_REGEX + ":elasticloadbalancing:([^:]+):[^:]*:listener/(?:app|net)/.+$");
@@ -1031,21 +1014,30 @@ public class ApiGatewayExecuteController {
 
     private AuthorizerResult invokeCognitoAuthorizer(GatewayResponseScope scope, String region, String apiId,
                                                       MethodConfig method, HttpHeaders headers) {
-        if (cognitoService == null || method.getAuthorizerId() == null) {
+        if (method.getAuthorizerId() == null) {
             return new AuthorizerResult(gatewayResponse(scope, GatewayResponseType.UNAUTHORIZED, 401, "Unauthorized"), null, null);
         }
-        String authorization = headers.getHeaderString(HttpHeaders.AUTHORIZATION);
-        if (authorization == null || authorization.isBlank()) {
-            return new AuthorizerResult(gatewayResponse(scope, GatewayResponseType.UNAUTHORIZED, 401, "Unauthorized"), null, null);
-        }
-        String token = authorization.regionMatches(true, 0, "Bearer ", 0, 7)
-                ? authorization.substring(7).trim() : authorization.trim();
         try {
             io.github.hectorvent.floci.services.apigateway.model.Authorizer authorizer =
                     apiGatewayService.getAuthorizer(region, apiId, method.getAuthorizerId());
+            List<String> providerArns = authorizer.getProviderARNs();
+            if (providerArns == null || providerArns.isEmpty()) {
+                return new AuthorizerResult(gatewayResponse(scope, GatewayResponseType.UNAUTHORIZED, 401, "Unauthorized"), null, null);
+            }
+            String identitySource = authorizer.getIdentitySource();
+            if (identitySource == null || !identitySource.startsWith("method.request.header.")) {
+                return new AuthorizerResult(gatewayResponse(scope, GatewayResponseType.UNAUTHORIZED, 401, "Unauthorized"), null, null);
+            }
+            String headerName = identitySource.substring("method.request.header.".length());
+            String authorization = headers.getHeaderString(headerName);
+            if (authorization == null || authorization.isBlank()) {
+                return new AuthorizerResult(gatewayResponse(scope, GatewayResponseType.UNAUTHORIZED, 401, "Unauthorized"), null, null);
+            }
+            String token = authorization.regionMatches(true, 0, "Bearer ", 0, 7)
+                    ? authorization.substring(7).trim() : authorization.trim();
             CognitoService.VerifiedApiGatewayToken verified = cognitoService.verifyApiGatewayToken(token);
-            if (authorizer.getProviderARNs() != null && !authorizer.getProviderARNs().isEmpty()
-                    && authorizer.getProviderARNs().stream().noneMatch(arn -> arn.endsWith("/" + verified.poolId()))) {
+            String verifiedPoolArn = cognitoService.describeUserPool(verified.poolId()).getArn();
+            if (!providerArns.contains(verifiedPoolArn)) {
                 return new AuthorizerResult(gatewayResponse(scope, GatewayResponseType.UNAUTHORIZED, 401, "Unauthorized"), null, null);
             }
             List<String> requiredScopes = method.getAuthorizationScopes();
@@ -1063,7 +1055,7 @@ public class ApiGatewayExecuteController {
                 }
             }
             String principalId = String.valueOf(verified.claims().getOrDefault("sub", "unknown"));
-            return new AuthorizerResult(null, principalId, verified.claims());
+            return new AuthorizerResult(null, principalId, Map.of("claims", verified.claims()));
         } catch (AwsException e) {
             return new AuthorizerResult(gatewayResponse(scope, GatewayResponseType.UNAUTHORIZED, 401, "Unauthorized"), null, null);
         }
@@ -1395,9 +1387,8 @@ public class ApiGatewayExecuteController {
             }
             if (authorizerContext != null) {
                 authorizerContext.forEach((key, value) -> {
-                    if (value != null) {
-                        authorizerNode.put(key, value.toString());
-                    }
+                    if (value instanceof Map<?, ?>) authorizerNode.set(key, objectMapper.valueToTree(value));
+                    else if (value != null) authorizerNode.put(key, value.toString());
                 });
             }
         }
@@ -1567,7 +1558,7 @@ public class ApiGatewayExecuteController {
         if (authorizerContext != null) {
             authorizerContext.forEach((key, value) -> {
                 if (value != null) {
-                    result.put(key, value.toString());
+                    result.put(key, value instanceof Map<?, ?> ? value : value.toString());
                 }
             });
         }
