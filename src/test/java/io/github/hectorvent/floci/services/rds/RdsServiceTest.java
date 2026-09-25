@@ -3641,6 +3641,32 @@ class RdsServiceTest {
         assertEquals("InvalidDBSnapshotState", exception.getErrorCode());
         assertTrue(exception.getMessage().contains("Failed to restore snapshot: failed restore"));
     }
+    @Test
+    void restoreDbInstanceFromDbSnapshotCleansUpTheTargetRegionOnFailure() {
+        rdsService.createDbInstance("source", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false,
+                false, null, Map.of(), "eu-west-1");
+        rdsService.createDbInstance("restored-db", "postgres", "13",
+                "admin", "password", "defaultdb", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
+        rdsService.createDbSnapshot("mysnap", "source", Map.of(), "eu-west-1");
+        doThrow(new RuntimeException("failed restore"))
+                .when(containerManager).restorePostgresSnapshot(any(), eq("admin"), eq("MOCK_DUMP_DATA"));
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.restoreDbInstanceFromDbSnapshot(
+                        "restored-db", "mysnap", "db.t3.large", null, false,
+                        null, null, Map.of(), "eu-west-1"));
+
+        assertEquals("InvalidDBSnapshotState", exception.getErrorCode());
+        assertEquals("defaultdb", rdsService.getDbInstance("restored-db").getDbName());
+        AwsException missingTarget = assertThrows(AwsException.class,
+                () -> rdsService.getDbInstance("restored-db", "eu-west-1"));
+        assertEquals("DBInstanceNotFound", missingTarget.getErrorCode());
+    }
+
 
     @Test
     void describeDbSnapshotsFiltersCorrectly() {

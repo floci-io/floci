@@ -1105,7 +1105,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 containerManager.restorePostgresSnapshot(instance.getContainerId(), instance.getMasterUsername(), sqlDump);
             } catch (Exception e) {
                 try {
-                    deleteDbInstance(instanceId);
+                    deleteDbInstance(instanceId, effectiveRegion);
                 } catch (Exception cleanupError) {
                     e.addSuppressed(cleanupError);
                 }
