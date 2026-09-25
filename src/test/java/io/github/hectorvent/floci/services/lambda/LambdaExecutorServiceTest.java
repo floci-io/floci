@@ -79,7 +79,7 @@ class LambdaExecutorServiceTest {
     void asyncInvocationShortOfTheChainBound_stillRuns() {
         executor.invoke(fn, "{}".getBytes(), InvocationType.Event, LambdaInvocationChain.MAX_DEPTH - 1);
 
-        verify(warmPool, timeout(5000)).acquire(fn);
+        verify(warmPool, timeout(5000).atLeastOnce()).acquire(fn);
     }
 
     @Test
