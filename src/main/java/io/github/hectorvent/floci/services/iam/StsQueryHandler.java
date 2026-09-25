@@ -100,6 +100,10 @@ public class StsQueryHandler {
         if (validation != null) {
             return validation;
         }
+        Response durationValidation = validateDurationSeconds(params, 900, 43200);
+        if (durationValidation != null) {
+            return durationValidation;
+        }
         String roleArn = getParam(params, "RoleArn");
         String sessionName = getParam(params, "RoleSessionName");
         int durationSeconds = getIntParam(params, "DurationSeconds", 3600);
@@ -182,6 +186,10 @@ public class StsQueryHandler {
     }
 
     private Response handleGetSessionToken(MultivaluedMap<String, String> params) {
+        Response durationValidation = validateDurationSeconds(params, 900, 129600);
+        if (durationValidation != null) {
+            return durationValidation;
+        }
         int durationSeconds = getIntParam(params, "DurationSeconds", 43200);
         String accessKeyId = "ASIA" + randomId(16);
         String secretKey = randomSecret(40);
@@ -199,6 +207,10 @@ public class StsQueryHandler {
         Response validation = validateRequired(params, "RoleArn", "RoleSessionName", "WebIdentityToken");
         if (validation != null) {
             return validation;
+        }
+        Response durationValidation = validateDurationSeconds(params, 900, 43200);
+        if (durationValidation != null) {
+            return durationValidation;
         }
         String roleArn = getParam(params, "RoleArn");
         String sessionName = getParam(params, "RoleSessionName");
@@ -341,6 +353,10 @@ public class StsQueryHandler {
         if (validation != null) {
             return validation;
         }
+        Response durationValidation = validateDurationSeconds(params, 900, 43200);
+        if (durationValidation != null) {
+            return durationValidation;
+        }
         String roleArn = getParam(params, "RoleArn");
         String principalArn = getParam(params, "PrincipalArn");
         int durationSeconds = getIntParam(params, "DurationSeconds", 3600);
@@ -403,6 +419,10 @@ public class StsQueryHandler {
         if (validation != null) {
             return validation;
         }
+        Response durationValidation = validateDurationSeconds(params, 900, 129600);
+        if (durationValidation != null) {
+            return durationValidation;
+        }
         String name = getParam(params, "Name");
         int durationSeconds = getIntParam(params, "DurationSeconds", 43200);
 
@@ -450,6 +470,39 @@ public class StsQueryHandler {
                         + "' failed to satisfy constraint: Member must not be null",
                         AwsNamespaces.STS, 400);
             }
+        }
+        return null;
+    }
+
+    /**
+     * Validates the optional {@code DurationSeconds} parameter against {@code minSeconds}/{@code maxSeconds}.
+     * Returns {@code null} when the parameter is absent or valid; otherwise a {@code ValidationError} (out of
+     * range) or {@code InvalidParameterValue} (not an integer) response, matching AWS's own wire behavior.
+     */
+    private Response validateDurationSeconds(MultivaluedMap<String, String> params, int minSeconds, int maxSeconds) {
+        String value = params.getFirst("DurationSeconds");
+        if (value == null) {
+            return null;
+        }
+        int durationSeconds;
+        try {
+            durationSeconds = Integer.parseInt(value);
+        } catch (NumberFormatException e) {
+            return AwsQueryResponse.error("InvalidParameterValue",
+                    "Value " + value + " for parameter DurationSeconds is invalid. Reason: Must be an integer.",
+                    AwsNamespaces.STS, 400);
+        }
+        if (durationSeconds < minSeconds) {
+            return AwsQueryResponse.error("ValidationError",
+                    "1 validation error detected: Value '" + durationSeconds + "' at 'durationSeconds' failed to "
+                            + "satisfy constraint: Member must have value greater than or equal to " + minSeconds,
+                    AwsNamespaces.STS, 400);
+        }
+        if (durationSeconds > maxSeconds) {
+            return AwsQueryResponse.error("ValidationError",
+                    "1 validation error detected: Value '" + durationSeconds + "' at 'durationSeconds' failed to "
+                            + "satisfy constraint: Member must have value less than or equal to " + maxSeconds,
+                    AwsNamespaces.STS, 400);
         }
         return null;
     }
