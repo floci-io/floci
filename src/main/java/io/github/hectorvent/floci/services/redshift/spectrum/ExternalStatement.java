@@ -13,8 +13,20 @@ public sealed interface ExternalStatement permits ExternalStatement.CreateSchema
     record CreateSchema(String schemaName, String glueDatabase, String iamRoleArn, boolean createDatabaseIfNotExists) implements ExternalStatement { }
     record CreateTable(String schemaName, String tableName, List<ColumnDefinition> columns,
                        List<ColumnDefinition> partitionColumns, TableFormat format, String location,
-                       String delimiter, String serde, Map<String, String> properties) implements ExternalStatement {
-        public CreateTable { columns = List.copyOf(columns); partitionColumns = List.copyOf(partitionColumns); properties = Map.copyOf(properties); }
+                       String delimiter, String serde, Map<String, String> properties,
+                       Map<String, String> serdeProperties) implements ExternalStatement {
+        public CreateTable {
+            columns = List.copyOf(columns);
+            partitionColumns = List.copyOf(partitionColumns);
+            properties = Map.copyOf(properties);
+            serdeProperties = Map.copyOf(serdeProperties);
+        }
+
+        public CreateTable(String schemaName, String tableName, List<ColumnDefinition> columns,
+                           List<ColumnDefinition> partitionColumns, TableFormat format, String location,
+                           String delimiter, String serde, Map<String, String> properties) {
+            this(schemaName, tableName, columns, partitionColumns, format, location, delimiter, serde, properties, Map.of());
+        }
     }
     record AddPartitions(String schemaName, String tableName, boolean ifNotExists,
                          List<PartitionSpec> partitions) implements ExternalStatement {

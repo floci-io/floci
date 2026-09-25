@@ -27,6 +27,44 @@ class ExternalStatementParserTest {
     }
 
     @Test
+    void parsesPartitionColumnsWhoseTypesContainParentheses() {
+        ExternalStatement.CreateTable table = (ExternalStatement.CreateTable) parser.parse(
+                "CREATE EXTERNAL TABLE analytics.events (id BIGINT) PARTITIONED BY (price decimal(10,2), day string) "
+                        + "STORED AS PARQUET LOCATION 's3://bucket/events/'").orElseThrow();
+        assertThat(table.partitionColumns().size(), equalTo(2));
+        assertThat(table.partitionColumns().get(0).type(), equalTo("decimal(10,2)"));
+        assertThat(table.partitionColumns().get(1).name(), equalTo("day"));
+    }
+
+    @Test
+    void parsesSerdePropertiesOfAnOpenCsvTable() {
+        ExternalStatement.CreateTable table = (ExternalStatement.CreateTable) parser.parse(
+                "CREATE EXTERNAL TABLE analytics.events (id INT, note VARCHAR(20)) "
+                        + "ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.OpenCSVSerde' "
+                        + "WITH SERDEPROPERTIES ('separatorChar'='|', 'quoteChar'='\"') "
+                        + "STORED AS TEXTFILE LOCATION 's3://bucket/events/'").orElseThrow();
+        assertThat(table.serde(), equalTo("org.apache.hadoop.hive.serde2.OpenCSVSerde"));
+        assertThat(table.serdeProperties().get("separatorChar"), equalTo("|"));
+        assertThat(table.serdeProperties().get("quoteChar"), equalTo("\""));
+    }
+
+    @Test
+    void createDatabaseOptionSurvivesLineBreaksAndExtraWhitespace() {
+        ExternalStatement.CreateSchema schema = (ExternalStatement.CreateSchema) parser.parse(
+                "CREATE EXTERNAL SCHEMA a FROM DATA CATALOG DATABASE 'lake' IAM_ROLE 'arn:aws:iam::000000000000:role/R'\n"
+                        + "CREATE   EXTERNAL\n DATABASE IF NOT   EXISTS").orElseThrow();
+        assertThat(schema.createDatabaseIfNotExists(), equalTo(true));
+    }
+
+    @Test
+    void otherCreateExternalStatementsAreReportedAsUnsupported() {
+        SpectrumSqlException error = assertThrows(SpectrumSqlException.class,
+                () -> parser.parse("CREATE EXTERNAL FUNCTION f(int) RETURNS int LAMBDA 'x' IAM_ROLE 'r'"));
+        assertThat(error.sqlState(), equalTo("0A000"));
+        assertThat(error.getMessage().contains("unsupported"), equalTo(true));
+    }
+
+    @Test
     void parsesMultiplePartitionClausesAndPreservesQuotedNames() {
         ExternalStatement.AddPartitions add = (ExternalStatement.AddPartitions) parser.parse(
                 "ALTER TABLE \"Mixed\".\"Events\" ADD IF NOT EXISTS "

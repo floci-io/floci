@@ -13,28 +13,46 @@ import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class ExternalStatementParser {
-    private static final Pattern CREATE_SCHEMA = Pattern.compile("(?is)^\\s*CREATE\\s+EXTERNAL\\s+SCHEMA\\s+(.+?)\\s+FROM\\s+DATA\\s+CATALOG\\s+DATABASE\\s+'((?:''|[^'])*)'(?:\\s+REGION\\s+'(?:''|[^'])*')?\\s+IAM_ROLE\\s+(.+?)(?:\\s+CREATE\\s+EXTERNAL\\s+DATABASE\\s+IF\\s+NOT\\s+EXISTS)?\\s*;?\\s*$");
+    private static final Pattern CREATE_SCHEMA = Pattern.compile("(?is)^\\s*CREATE\\s+EXTERNAL\\s+SCHEMA\\s+(.+?)\\s+FROM\\s+DATA\\s+CATALOG\\s+DATABASE\\s+'((?:''|[^'])*)'(?:\\s+REGION\\s+'(?:''|[^'])*')?\\s+IAM_ROLE\\s+(.+?)(\\s+CREATE\\s+EXTERNAL\\s+DATABASE\\s+IF\\s+NOT\\s+EXISTS)?\\s*;?\\s*$");
+    private static final Pattern CREATE_EXTERNAL_TABLE = Pattern.compile("(?is)^\\s*CREATE\\s+EXTERNAL\\s+TABLE\\b.*");
+    private static final Pattern CREATE_EXTERNAL = Pattern.compile("(?is)^\\s*CREATE\\s+EXTERNAL\\b.*");
+    private static final Pattern SERDE_PROPERTIES = Pattern.compile("(?is)WITH\\s+SERDEPROPERTIES\\s*\\((.*?)\\)");
     private static final Pattern CREATE_TABLE_HEAD = Pattern.compile("(?is)^\\s*CREATE\\s+EXTERNAL\\s+TABLE\\s+(.+?)\\.(.+?)\\s*\\(");
     private static final Pattern DROP_TABLE = Pattern.compile("(?is)^\\s*DROP\\s+TABLE\\s+(IF\\s+EXISTS\\s+)?([^.;\\s]+)\\.([^.;\\s]+)(?:\\s+(CASCADE|RESTRICT))?\\s*;?\\s*$");
     private static final Pattern DROP_SCHEMA = Pattern.compile("(?is)^\\s*DROP\\s+SCHEMA\\s+(IF\\s+EXISTS\\s+)?([^\\s;]+)(?:\\s+(CASCADE|RESTRICT))?\\s*;?\\s*$");
+    private static final Pattern PARTITIONED_BY = Pattern.compile("(?is)PARTITIONED\\s+BY\\s*\\(");
     private static final Pattern ADD_PARTITIONS = Pattern.compile("(?is)^\\s*ALTER\\s+TABLE\\s+([^.;\\s]+)\\.([^.;\\s]+)\\s+ADD\\s+(IF\\s+NOT\\s+EXISTS\\s+)?(.+?)\\s*;?\\s*$");
 
     public Optional<ExternalStatement> parse(String sql) {
-        if (sql == null) return Optional.empty();
+        if (sql == null) {
+            return Optional.empty();
+        }
         String text = sql.trim();
         Matcher schema = CREATE_SCHEMA.matcher(text);
         if (schema.matches()) {
             String role = schema.group(3).trim();
-            if (role.equalsIgnoreCase("default") || !role.startsWith("'")) throw new SpectrumSqlException("0A000", "IAM_ROLE DEFAULT is not supported");
-            return Optional.of(new ExternalStatement.CreateSchema(identifier(schema.group(1)), schema.group(2).replace("''", "'"), unquote(role), text.toLowerCase(Locale.ROOT).contains("create external database if not exists")));
+            if (role.equalsIgnoreCase("default") || !role.startsWith("'")) {
+                throw new SpectrumSqlException("0A000", "IAM_ROLE DEFAULT is not supported");
+            }
+            return Optional.of(new ExternalStatement.CreateSchema(identifier(schema.group(1)),
+                    schema.group(2).replace("''", "'"), unquote(role), schema.group(4) != null));
         }
-        if (text.regionMatches(true, 0, "CREATE EXTERNAL", 0, 15)) return Optional.of(parseTable(text));
+        if (CREATE_EXTERNAL_TABLE.matcher(text).matches()) {
+            return Optional.of(parseTable(text));
+        }
+        if (CREATE_EXTERNAL.matcher(text).matches()) {
+            throw new SpectrumSqlException("0A000", "unsupported CREATE EXTERNAL statement");
+        }
         Matcher dropTable = DROP_TABLE.matcher(text);
-        if (dropTable.matches()) return Optional.of(new ExternalStatement.DropTable(identifier(dropTable.group(2)), identifier(dropTable.group(3)),
-                dropTable.group(1) != null, "CASCADE".equalsIgnoreCase(dropTable.group(4))));
+        if (dropTable.matches()) {
+            return Optional.of(new ExternalStatement.DropTable(identifier(dropTable.group(2)), identifier(dropTable.group(3)),
+                    dropTable.group(1) != null, "CASCADE".equalsIgnoreCase(dropTable.group(4))));
+        }
         Matcher dropSchema = DROP_SCHEMA.matcher(text);
-        if (dropSchema.matches()) return Optional.of(new ExternalStatement.DropSchema(identifier(dropSchema.group(2)),
-                dropSchema.group(1) != null, "CASCADE".equalsIgnoreCase(dropSchema.group(3))));
+        if (dropSchema.matches()) {
+            return Optional.of(new ExternalStatement.DropSchema(identifier(dropSchema.group(2)),
+                    dropSchema.group(1) != null, "CASCADE".equalsIgnoreCase(dropSchema.group(3))));
+        }
         Matcher addPartitions = ADD_PARTITIONS.matcher(text);
         if (addPartitions.matches()) {
             List<ExternalStatement.PartitionSpec> partitions = parsePartitions(addPartitions.group(4));
@@ -47,17 +65,31 @@ public class ExternalStatementParser {
 
     private ExternalStatement.CreateTable parseTable(String text) {
         Matcher matcher = CREATE_TABLE_HEAD.matcher(text);
-        if (!matcher.find()) throw new SpectrumSqlException("0A000", "malformed CREATE EXTERNAL TABLE");
+        if (!matcher.find()) {
+            throw new SpectrumSqlException("0A000", "malformed CREATE EXTERNAL TABLE");
+        }
         int open = matcher.end() - 1;
         int close = matchingParen(text, open);
-        if (close < 0) throw new SpectrumSqlException("0A000", "malformed CREATE EXTERNAL TABLE column list");
+        if (close < 0) {
+            throw new SpectrumSqlException("0A000", "malformed CREATE EXTERNAL TABLE column list");
+        }
         String tail = text.substring(close + 1);
         List<ExternalStatement.ColumnDefinition> columns = columns(text.substring(open + 1, close));
         List<ExternalStatement.ColumnDefinition> partitions = List.of();
-        Matcher partition = Pattern.compile("(?is).*?PARTITIONED\\s+BY\\s*\\((.*?)\\).*", Pattern.DOTALL).matcher(tail);
-        if (partition.matches()) partitions = columns(partition.group(1));
+        Matcher partition = PARTITIONED_BY.matcher(tail);
+        if (partition.find()) {
+            // Cột partition có thể chứa ngoặc như decimal(10,2), nên phải ghép cặp ngoặc thay vì dừng ở ")" đầu tiên
+            int partitionOpen = partition.end() - 1;
+            int partitionClose = matchingParen(tail, partitionOpen);
+            if (partitionClose < 0) {
+                throw new SpectrumSqlException("0A000", "malformed CREATE EXTERNAL TABLE partition list");
+            }
+            partitions = columns(tail.substring(partitionOpen + 1, partitionClose));
+        }
         String location = value(tail, "LOCATION");
-        if (location == null || !location.startsWith("s3://")) throw new SpectrumSqlException("22023", "external table location must be an s3:// URI");
+        if (location == null || !location.startsWith("s3://")) {
+            throw new SpectrumSqlException("22023", "external table location must be an s3:// URI");
+        }
         String serde = value(tail, "SERDE");
         String delimiter = value(tail, "TERMINATED BY");
         String stored = keywordValue(tail, "STORED AS");
@@ -69,7 +101,8 @@ public class ExternalStatementParser {
                 : serde != null && serde.toLowerCase(Locale.ROOT).contains("json")
                 ? ExternalStatement.TableFormat.JSON : ExternalStatement.TableFormat.TEXTFILE;
         Map<String, String> properties = properties(tail);
-        return new ExternalStatement.CreateTable(identifier(matcher.group(1)), identifier(matcher.group(2)), columns, partitions, format, location, delimiter, serde, properties);
+        return new ExternalStatement.CreateTable(identifier(matcher.group(1)), identifier(matcher.group(2)), columns, partitions,
+                format, location, delimiter, serde, properties, serdeProperties(tail));
     }
 
     private static int matchingParen(String text, int open) {
@@ -79,40 +112,122 @@ public class ExternalStatementParser {
             char c = text.charAt(i);
             if (quote != 0) {
                 if (c == quote) {
-                    if (i + 1 < text.length() && text.charAt(i + 1) == quote) i++;
-                    else quote = 0;
+                    if (i + 1 < text.length() && text.charAt(i + 1) == quote) {
+                        i++;
+                    } else {
+                        quote = 0;
+                    }
                 }
-            } else if (c == '\'' || c == '"') quote = c;
-            else if (c == '(') depth++;
-            else if (c == ')' && --depth == 0) return i;
+            } else if (c == '\'' || c == '"') {
+                quote = c;
+            } else if (c == '(') {
+                depth++;
+            } else if (c == ')' && --depth == 0) {
+                return i;
+            }
         }
         return -1;
     }
 
     private static List<ExternalStatement.ColumnDefinition> columns(String text) {
         List<ExternalStatement.ColumnDefinition> result = new ArrayList<>();
-        for (String item : split(text)) { String[] parts = item.trim().split("\\s+", 2); if (parts.length < 2) throw new SpectrumSqlException("0A000", "malformed column definition"); result.add(new ExternalStatement.ColumnDefinition(identifier(parts[0]), parts[1].replace(" ", "").toLowerCase(Locale.ROOT))); }
+        for (String item : split(text)) {
+            String[] parts = item.trim().split("\\s+", 2);
+            if (parts.length < 2) {
+                throw new SpectrumSqlException("0A000", "malformed column definition");
+            }
+            result.add(new ExternalStatement.ColumnDefinition(identifier(parts[0]),
+                    parts[1].replace(" ", "").toLowerCase(Locale.ROOT)));
+        }
         return result;
     }
-    private static List<String> split(String text) { List<String> result = new ArrayList<>(); int depth = 0, start = 0; for (int i=0;i<text.length();i++){ char c=text.charAt(i); if(c=='('||c=='<')depth++; else if(c==')'||c=='>')depth--; else if(c==','&&depth==0){result.add(text.substring(start,i));start=i+1;} } result.add(text.substring(start)); return result; }
-    private static String value(String text, String key) { Matcher m=Pattern.compile("(?is)"+Pattern.quote(key)+"\\s+'((?:''|[^'])*)'").matcher(text); return m.find()?m.group(1).replace("''", "'"):null; }
-    private static String keywordValue(String text, String key) { Matcher m=Pattern.compile("(?is)"+Pattern.quote(key)+"\\s+([A-Za-z]+)").matcher(text); return m.find()?m.group(1):null; }
-    private static Map<String,String> properties(String text){ Map<String,String> result=new LinkedHashMap<>(); Matcher m=Pattern.compile("(?is)(?:TBLPROPERTIES|TABLE\\s+PROPERTIES)\\s*\\((.*?)\\)").matcher(text); if(m.find()){Matcher p=Pattern.compile("'([^']*)'\\s*=\\s*'([^']*)'").matcher(m.group(1)); while(p.find()) result.put(p.group(1),p.group(2));} return result; }
+
+    private static List<String> split(String text) {
+        List<String> result = new ArrayList<>();
+        int depth = 0;
+        int start = 0;
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (c == '(' || c == '<') {
+                depth++;
+            } else if (c == ')' || c == '>') {
+                depth--;
+            } else if (c == ',' && depth == 0) {
+                result.add(text.substring(start, i));
+                start = i + 1;
+            }
+        }
+        result.add(text.substring(start));
+        return result;
+    }
+
+    private static String value(String text, String key) {
+        Matcher matcher = Pattern.compile("(?is)" + Pattern.quote(key) + "\\s+'((?:''|[^'])*)'").matcher(text);
+        return matcher.find() ? matcher.group(1).replace("''", "'") : null;
+    }
+
+    private static String keywordValue(String text, String key) {
+        Matcher matcher = Pattern.compile("(?is)" + Pattern.quote(key) + "\\s+([A-Za-z]+)").matcher(text);
+        return matcher.find() ? matcher.group(1) : null;
+    }
+
+    private static Map<String, String> serdeProperties(String text) {
+        Map<String, String> result = new LinkedHashMap<>();
+        Matcher matcher = SERDE_PROPERTIES.matcher(text);
+        if (matcher.find()) {
+            Matcher pair = Pattern.compile("'((?:''|[^'])*)'\\s*=\\s*'((?:''|[^'])*)'").matcher(matcher.group(1));
+            while (pair.find()) {
+                result.put(pair.group(1).replace("''", "'"), pair.group(2).replace("''", "'"));
+            }
+        }
+        return result;
+    }
+
+    private static Map<String, String> properties(String text) {
+        Map<String, String> result = new LinkedHashMap<>();
+        Matcher matcher = Pattern.compile("(?is)(?:TBLPROPERTIES|TABLE\\s+PROPERTIES)\\s*\\((.*?)\\)").matcher(text);
+        if (matcher.find()) {
+            Matcher pair = Pattern.compile("'([^']*)'\\s*=\\s*'([^']*)'").matcher(matcher.group(1));
+            while (pair.find()) {
+                result.put(pair.group(1), pair.group(2));
+            }
+        }
+        return result;
+    }
+
     private static List<ExternalStatement.PartitionSpec> parsePartitions(String text) {
         List<ExternalStatement.PartitionSpec> result = new ArrayList<>();
         Matcher matcher = Pattern.compile("(?is)PARTITION\\s*\\(([^)]*)\\)\\s*LOCATION\\s+'((?:''|[^'])*)'").matcher(text);
         int end = 0;
         while (matcher.find()) {
-            if (!text.substring(end, matcher.start()).isBlank()) return List.of();
+            if (!text.substring(end, matcher.start()).isBlank()) {
+                return List.of();
+            }
             Map<String, String> values = new LinkedHashMap<>();
             Matcher value = Pattern.compile("(?is)([^,=]+)=\\s*'((?:''|[^'])*)'\\s*(?:,|$)").matcher(matcher.group(1).trim() + ",");
-            while (value.find()) values.put(identifier(value.group(1)), value.group(2).replace("''", "'"));
-            if (values.isEmpty()) return List.of();
+            while (value.find()) {
+                values.put(identifier(value.group(1)), value.group(2).replace("''", "'"));
+            }
+            if (values.isEmpty()) {
+                return List.of();
+            }
             result.add(new ExternalStatement.PartitionSpec(values, matcher.group(2).replace("''", "'")));
             end = matcher.end();
         }
         return end == text.length() || text.substring(end).isBlank() ? result : List.of();
     }
-    private static String identifier(String value){String v=value.trim(); if(v.startsWith("\"")&&v.endsWith("\"")) return v.substring(1,v.length()-1).replace("\"\"","\""); return v.toLowerCase(Locale.ROOT);}
-    private static String unquote(String value){String v=value.trim(); return v.startsWith("'")&&v.endsWith("'")?v.substring(1,v.length()-1).replace("''", "'"):v;}
+
+    private static String identifier(String value) {
+        String trimmed = value.trim();
+        if (trimmed.startsWith("\"") && trimmed.endsWith("\"")) {
+            return trimmed.substring(1, trimmed.length() - 1).replace("\"\"", "\"");
+        }
+        return trimmed.toLowerCase(Locale.ROOT);
+    }
+
+    private static String unquote(String value) {
+        String trimmed = value.trim();
+        return trimmed.startsWith("'") && trimmed.endsWith("'")
+                ? trimmed.substring(1, trimmed.length() - 1).replace("''", "'") : trimmed;
+    }
 }
