@@ -1432,7 +1432,16 @@ class DynamoDbStreamsEventSourcePollerTest {
     @ValueSource(strings = STALE_CHECKPOINT)
     void bisectIsolatesThePoisonRecordAndDeliversTheRest(String startingCheckpoint) throws Exception {
         stubStream("s1", "s2", "s3", "s4");
-        List<List<String>> invocations = failInvocationsContaining("s3");
+        List<String> successfullyProcessedSequences = new CopyOnWriteArrayList<>();
+        List<List<String>> invocations = recordInvocations(sequences -> {
+            InvokeResult result = new InvokeResult();
+            if (sequences.contains("s3")) {
+                result.setFunctionError("Unhandled");
+            } else {
+                successfullyProcessedSequences.addAll(sequences);
+            }
+            return result;
+        });
         EventSourceMapping esm = esmWithDlq(0);
         esm.setBisectBatchOnFunctionError(true);
         if (startingCheckpoint != null) {
@@ -1452,6 +1461,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         assertEquals("s3", batchInfo(body.getValue()).path("endSequenceNumber").asText());
         assertEquals(1, batchInfo(body.getValue()).path("batchSize").asInt());
         assertEquals("s4", checkpoint(esm));
+        assertEquals(List.of("s1", "s2", "s4"), successfullyProcessedSequences);
     }
 
     @Test
@@ -1586,7 +1596,7 @@ class DynamoDbStreamsEventSourcePollerTest {
     }
 
     @Test
-    void refusedOnFailureDestinationKeepsTheBatchAndRetriesTheSend() throws Exception {
+    void refusedOnFailureDestinationDiscardsTheBatchAndAdvancesCheckpoint() throws Exception {
         stubStream("s1");
         List<List<String>> invocations = failInvocationsContaining("s1");
         List<String> delivered = refuseSqsSends(1);
@@ -1594,40 +1604,56 @@ class DynamoDbStreamsEventSourcePollerTest {
         DynamoDbStreamsEventSourcePoller p = pollerWith(mock(EsmStore.class));
 
         pollOnce(p, esm);
-        assertNull(checkpoint(esm), "a refused send must not checkpoint the discarded batch");
-        pollOnce(p, esm);
+        assertEquals("s1", checkpoint(esm));
+        assertTrue(delivered.isEmpty());
         verify(sqsService, times(1)).sendMessage(anyString(), anyString(), anyInt(), anyString());
-
-        advancePastRetry(p);
         pollOnce(p, esm);
-
-        assertEquals(List.of(List.of("s1")), invocations, "the parked batch is re-sent, not re-invoked");
-        assertEquals(1, delivered.size());
-        assertEquals("s1", batchInfo(delivered.get(0)).path("startSequenceNumber").asText());
-        assertEquals("s1", batchInfo(delivered.get(0)).path("endSequenceNumber").asText());
+        assertEquals(1, invocations.size());
+        verify(sqsService, times(1)).sendMessage(anyString(), anyString(), anyInt(), anyString());
         assertEquals("s1", checkpoint(esm));
     }
 
     @Test
-    void parkedFailureIsResentAfterTheFunctionStopsResolving() throws Exception {
-        stubStream("s1");
-        failInvocationsContaining("s1");
+    void failedOnFailureDeliveryAllowsNextRecordsToBeProcessed() throws Exception {
+        List<DynamoDbStreamRecord> stream = stubStream("s1");
+        List<List<String>> invocations = failInvocationsContaining("s1");
         List<String> delivered = refuseSqsSends(1);
         EventSourceMapping esm = esmWithDlq(0);
         DynamoDbStreamsEventSourcePoller p = pollerWith(mock(EsmStore.class));
 
         pollOnce(p, esm);
-        assertNull(checkpoint(esm));
-        when(functionStore.getForAccount(ACCOUNT_ID, "us-east-1", "fn")).thenReturn(Optional.empty());
-        advancePastRetry(p);
+        assertEquals("s1", checkpoint(esm));
+        stream.add(ddbRecord("s2", "INSERT", "{}"));
         pollOnce(p, esm);
 
-        assertEquals(1, delivered.size(), "the resend does not need the function");
-        assertEquals("s1", checkpoint(esm));
+        assertEquals(List.of(List.of("s1"), List.of("s2")), invocations);
+        assertTrue(delivered.isEmpty());
+        verify(sqsService, times(1)).sendMessage(anyString(), anyString(), anyInt(), anyString());
+        assertEquals("s2", checkpoint(esm));
     }
 
     @Test
-    void refusedOnFailureDestinationAfterPartialSuccessKeepsTheAcknowledgedPrefix() throws Exception {
+    void unsupportedOnFailureDestinationDiscardsBatchAndAdvancesCheckpoint() throws Exception {
+        stubStream("s1");
+        failInvocationsContaining("s1");
+        EventSourceMapping esm = filterEsm();
+        esm.setMaximumRetryAttempts(0);
+        EventSourceMapping.OnFailure onFailure = new EventSourceMapping.OnFailure();
+        onFailure.setDestination("arn:aws:lambda:us-east-1:000000000000:function:unsupported");
+        EventSourceMapping.DestinationConfig destinationConfig = new EventSourceMapping.DestinationConfig();
+        destinationConfig.setOnFailure(onFailure);
+        esm.setDestinationConfig(destinationConfig);
+
+        DynamoDbStreamsEventSourcePoller p = pollerWith(mock(EsmStore.class));
+        pollOnce(p, esm);
+
+        assertEquals("s1", checkpoint(esm));
+        verify(sqsService, never()).sendMessage(anyString(), anyString(), anyInt(), anyString());
+        verify(snsService, never()).publish(anyString(), any(), anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void refusedOnFailureDestinationDiscardsFailedSuffixAfterPartialSuccess() throws Exception {
         stubStream("s1", "s2", "s3");
         List<List<String>> invocations = recordInvocations(seqs -> partialFailure("s2"));
         List<String> delivered = refuseSqsSends(1);
@@ -1636,15 +1662,14 @@ class DynamoDbStreamsEventSourcePollerTest {
         DynamoDbStreamsEventSourcePoller p = pollerWith(mock(EsmStore.class));
 
         pollOnce(p, esm);
-        assertEquals("s1", checkpoint(esm));
+        assertEquals("s3", checkpoint(esm));
 
         advancePastRetry(p);
         pollOnce(p, esm);
 
         assertEquals(1, invocations.size());
-        assertEquals(1, delivered.size());
-        assertEquals("s2", batchInfo(delivered.get(0)).path("startSequenceNumber").asText());
-        assertEquals("s3", batchInfo(delivered.get(0)).path("endSequenceNumber").asText());
+        assertTrue(delivered.isEmpty());
+        verify(sqsService, times(1)).sendMessage(anyString(), anyString(), anyInt(), anyString());
         assertEquals("s3", checkpoint(esm));
     }
 
