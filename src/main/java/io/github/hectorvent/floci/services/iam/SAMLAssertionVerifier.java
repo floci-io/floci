@@ -60,6 +60,18 @@ final class SAMLAssertionVerifier {
             if (signature == null) {
                 throw invalid("signature missing");
             }
+            Element signedInfo = first(signature, DS, "SignedInfo");
+            if (signedInfo == null) {
+                throw invalid("signed info missing");
+            }
+            // Checked on the DOM because unmarshalling some transform parameters fails in the native image.
+            NodeList transforms = signedInfo.getElementsByTagNameNS(DS, "Transform");
+            for (int i = 0; i < transforms.getLength(); i++) {
+                String algorithm = ((Element) transforms.item(i)).getAttribute("Algorithm");
+                if (!ALLOWED_TRANSFORMS.contains(algorithm)) {
+                    throw new InvalidAssertionException("reference transform " + algorithm, SIGNATURE_INVALID);
+                }
+            }
             X509Certificate certificate = certificate(provider.getCertificate());
             var context = new DOMValidateContext(certificate.getPublicKey(), signature);
             context.setProperty("org.jcp.xml.dsig.secureValidation", Boolean.TRUE);
@@ -68,12 +80,6 @@ final class SAMLAssertionVerifier {
                     || !(xmlSignature.getSignedInfo().getReferences().get(0) instanceof javax.xml.crypto.dsig.Reference reference)
                     || !("#" + assertionId).equals(reference.getURI())) {
                 throw invalid("signature reference");
-            }
-            for (Transform transform : reference.getTransforms()) {
-                if (!ALLOWED_TRANSFORMS.contains(transform.getAlgorithm())) {
-                    throw new InvalidAssertionException("reference transform " + transform.getAlgorithm(),
-                            SIGNATURE_INVALID);
-                }
             }
             if (!xmlSignature.validate(context)) {
                 throw invalid("signature validation");
