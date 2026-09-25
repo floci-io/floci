@@ -33,6 +33,8 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `DescribeEventSubscriptions` | List subscriptions, or the one the request names |
 | `ModifyEventSubscription` | Update the members the request names |
 | `DeleteEventSubscription` | Delete a subscription |
+| `AddSourceIdentifierToSubscription` | Add a source id to a subscription |
+| `RemoveSourceIdentifierFromSubscription` | Remove a source id from a subscription |
 | `CreateDBSubnetGroup` | Create a DB subnet group; tags given here are readable through `ListTagsForResource` |
 | `DescribeDBSubnetGroups` | List DB subnet groups |
 | `ModifyDBSubnetGroup` | Update DB subnet group description and subnet list |
@@ -144,6 +146,10 @@ checked against the instance's other window. Modifications apply immediately —
 The four subscription actions manage the resource itself. **Nothing is published to the topic.**
 A subscription is stored and reported back so a client can manage it. No RDS event reaches SNS
 through it, so an SNS subscriber sees nothing.
+
+`SourceIds` is set at create and changed only through `AddSourceIdentifierToSubscription` and
+`RemoveSourceIdentifierFromSubscription`, since `ModifyEventSubscription` carries no `SourceIds`
+member. Adding an id twice is a no-op, because the model declares no fault that fits a duplicate.
 
 `SnsTopicArn` is required and is not resolved against the SNS service. `SourceType` is checked
 against the model's valid values, and a request naming `SourceIds` must also name the `SourceType`

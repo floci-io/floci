@@ -95,6 +95,10 @@ public class RdsQueryHandler {
                 case "DescribeEventSubscriptions" -> handleDescribeEventSubscriptions(params, region);
                 case "ModifyEventSubscription" -> handleModifyEventSubscription(params, region);
                 case "DeleteEventSubscription" -> handleDeleteEventSubscription(params, region);
+                case "AddSourceIdentifierToSubscription" ->
+                        handleAddSourceIdentifierToSubscription(params, region);
+                case "RemoveSourceIdentifierFromSubscription" ->
+                        handleRemoveSourceIdentifierFromSubscription(params, region);
                 case "CreateDBSubnetGroup" -> handleCreateDbSubnetGroup(params, region);
                 case "DescribeDBSubnetGroups" -> handleDescribeDbSubnetGroups(params, region);
                 case "ModifyDBSubnetGroup" -> handleModifyDbSubnetGroup(params, region);
@@ -306,6 +310,22 @@ public class RdsQueryHandler {
                 optionalBoolean(params.getFirst("Enabled")));
         return Response.ok(AwsQueryResponse.envelope("ModifyEventSubscription", AwsNamespaces.RDS,
                 new XmlBuilder().raw(eventSubscriptionXml(subscription)).build())).build();
+    }
+
+    private Response handleAddSourceIdentifierToSubscription(
+            MultivaluedMap<String, String> params, String region) {
+        EventSubscription subscription = service.addSourceIdentifierToSubscription(region,
+                params.getFirst("SubscriptionName"), params.getFirst("SourceIdentifier"));
+        return Response.ok(AwsQueryResponse.envelope("AddSourceIdentifierToSubscription",
+                AwsNamespaces.RDS, new XmlBuilder().raw(eventSubscriptionXml(subscription)).build())).build();
+    }
+
+    private Response handleRemoveSourceIdentifierFromSubscription(
+            MultivaluedMap<String, String> params, String region) {
+        EventSubscription subscription = service.removeSourceIdentifierFromSubscription(region,
+                params.getFirst("SubscriptionName"), params.getFirst("SourceIdentifier"));
+        return Response.ok(AwsQueryResponse.envelope("RemoveSourceIdentifierFromSubscription",
+                AwsNamespaces.RDS, new XmlBuilder().raw(eventSubscriptionXml(subscription)).build())).build();
     }
 
     private Response handleDeleteEventSubscription(MultivaluedMap<String, String> params, String region) {
