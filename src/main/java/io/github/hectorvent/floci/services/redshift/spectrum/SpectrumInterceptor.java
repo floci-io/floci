@@ -1,15 +1,19 @@
 package io.github.hectorvent.floci.services.redshift.spectrum;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsException;
 import jakarta.enterprise.context.ApplicationScoped;
 
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class SpectrumInterceptor {
+    private static final Pattern CREATE_DATABASE_IF_NOT_EXISTS = Pattern.compile(
+            "(?is)\\bCREATE\\s+EXTERNAL\\s+DATABASE\\s+IF\\s+NOT\\s+EXISTS\\b");
+
     private final SpectrumStatementParser legacyParser;
     private final ExternalStatementParser parser;
     private final SpectrumQueryClassifier classifier;
@@ -38,6 +42,22 @@ public class SpectrumInterceptor {
     }
 
     public Plan plan(String sql, SpectrumSession session) {
+        try {
+            return planStatement(sql, session);
+        } catch (AwsException exception) {
+            throw asSqlError(exception);
+        }
+    }
+
+    /**
+     * The bridge answers a Spectrum SQL error on the wire but drops the connection on anything else,
+     * so a Glue or IAM failure must reach the client as an error rather than as a closed socket.
+     */
+    private static SpectrumSqlException asSqlError(AwsException exception) {
+        return new SpectrumSqlException("XX000", exception.getMessage());
+    }
+
+    private Plan planStatement(String sql, SpectrumSession session) {
         if (!config.services().redshift().spectrumEnabled()) {
             return new Plan.Forward();
         }
@@ -93,6 +113,14 @@ public class SpectrumInterceptor {
     }
 
     public Decision execute(Plan plan, SpectrumSession session, BackendSql backend) {
+        try {
+            return executePlan(plan, session, backend);
+        } catch (AwsException exception) {
+            throw asSqlError(exception);
+        }
+    }
+
+    private Decision executePlan(Plan plan, SpectrumSession session, BackendSql backend) {
         return switch (plan) {
             case Plan.Ddl ddl -> service.execute(ddl.statement(), session, backend)
                     .<Decision>map(Decision.Handled::new).orElseGet(Decision.Forward::new);
@@ -151,7 +179,7 @@ public class SpectrumInterceptor {
         return switch (statement) {
             case SpectrumStatement.CreateSchema create -> new ExternalStatement.CreateSchema(
                     create.schemaName(), create.databaseName(), create.iamRoleArn(),
-                    sql.toLowerCase(Locale.ROOT).contains("create external database if not exists"));
+                    CREATE_DATABASE_IF_NOT_EXISTS.matcher(sql).find());
             case SpectrumStatement.CreateTable create -> new ExternalStatement.CreateTable(
                     create.schemaName(), create.tableName(),
                     create.columns().stream().map(column -> new ExternalStatement.ColumnDefinition(

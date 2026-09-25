@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.redshift.spectrum;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Answers;
@@ -13,8 +14,10 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.is;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -73,6 +76,26 @@ class SpectrumInterceptorTest {
         when(service.touchesCatalogViews("SELECT * FROM svv_external_tables")).thenReturn(true);
         interceptor.intercept("SELECT * FROM svv_external_tables", SESSION, BACKEND);
         verify(service).refreshMetadata(SESSION, BACKEND);
+    }
+
+    @Test
+    void glueFailuresReachTheClientAsSqlErrorsInsteadOfDroppingTheConnection() {
+        when(service.touchesCatalogViews("SELECT * FROM svv_external_tables")).thenReturn(true);
+        doThrow(new AwsException("InternalServiceException", "Glue is down", 500)).when(service).refreshMetadata(SESSION, BACKEND);
+
+        SpectrumSqlException error = assertThrows(SpectrumSqlException.class,
+                () -> interceptor.intercept("SELECT * FROM svv_external_tables", SESSION, BACKEND));
+
+        assertThat(error.sqlState(), equalTo("XX000"));
+        assertThat(error.getMessage(), equalTo("Glue is down"));
+    }
+
+    @Test
+    void glueFailuresWhilePlanningAlsoBecomeSqlErrors() {
+        when(service.referencesIn("SELECT * FROM a.t", SESSION))
+                .thenThrow(new AwsException("InternalServiceException", "Glue is down", 500));
+
+        assertThrows(SpectrumSqlException.class, () -> interceptor.plan("SELECT * FROM a.t", SESSION));
     }
 
     @Test

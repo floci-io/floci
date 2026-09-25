@@ -86,6 +86,33 @@ class ExternalReferenceScannerTest {
     }
 
     @Test
+    void detectsDdlThatWouldChangeAnExternalTableBehindFlocisBack() {
+        Optional<Reference> events = Optional.of(new Reference("analytics", "events"));
+        assertThat(ExternalReferenceScanner.writeTarget("DROP TABLE public.a, analytics.events", SCHEMAS), equalTo(events));
+        assertThat(ExternalReferenceScanner.writeTarget("SELECT 1; DROP TABLE IF EXISTS analytics.events", SCHEMAS), equalTo(events));
+        assertThat(ExternalReferenceScanner.writeTarget("ALTER TABLE analytics.events RENAME TO x", SCHEMAS), equalTo(events));
+        assertThat(ExternalReferenceScanner.writeTarget("ALTER TABLE IF EXISTS ONLY analytics.events ADD COLUMN c int", SCHEMAS), equalTo(events));
+        assertThat(ExternalReferenceScanner.writeTarget("COPY analytics.events FROM 's3://b/k'", SCHEMAS), equalTo(events));
+        assertThat(ExternalReferenceScanner.writeTarget("CREATE TABLE analytics.events (id int)", SCHEMAS), equalTo(events));
+        assertThat(ExternalReferenceScanner.writeTarget("CREATE TEMP TABLE IF NOT EXISTS analytics.events (id int)", SCHEMAS), equalTo(events));
+    }
+
+    @Test
+    void detectsDroppingAnExternalSchemaFromAList() {
+        assertThat(ExternalReferenceScanner.writeTarget("DROP SCHEMA local_schema, analytics CASCADE", SCHEMAS),
+                equalTo(Optional.of(new Reference("analytics", ""))));
+    }
+
+    @Test
+    void ddlOnNativeObjectsIsNotAnExternalWrite() {
+        assertThat(ExternalReferenceScanner.writeTarget("DROP TABLE public.a, public.b", SCHEMAS), equalTo(Optional.empty()));
+        assertThat(ExternalReferenceScanner.writeTarget("DROP SCHEMA local_schema", SCHEMAS), equalTo(Optional.empty()));
+        assertThat(ExternalReferenceScanner.writeTarget("ALTER TABLE public.t ADD COLUMN c int", SCHEMAS), equalTo(Optional.empty()));
+        assertThat(ExternalReferenceScanner.writeTarget("CREATE TABLE public.t AS SELECT * FROM analytics.events", SCHEMAS), equalTo(Optional.empty()));
+        assertThat(ExternalReferenceScanner.writeTarget("COPY public.t FROM 's3://b/k'", SCHEMAS), equalTo(Optional.empty()));
+    }
+
+    @Test
     void writesToNativeTablesAreNotExternalWrites() {
         assertThat(ExternalReferenceScanner.writeTarget("UPDATE public.owners SET x = 1", SCHEMAS), equalTo(Optional.empty()));
         assertThat(ExternalReferenceScanner.writeTarget(

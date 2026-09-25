@@ -96,9 +96,10 @@ public final class ExternalReferenceScanner {
     }
 
     /**
-     * The first external table an {@code INSERT}, {@code UPDATE}, {@code DELETE}, {@code MERGE} or
-     * {@code TRUNCATE} anywhere in {@code sql} writes to: every statement of a batch and every
-     * data-modifying CTE is checked, not only the first write.
+     * The first external table or schema an {@code INSERT}, {@code UPDATE}, {@code DELETE}, {@code MERGE},
+     * {@code TRUNCATE}, {@code COPY}, {@code CREATE TABLE}, {@code ALTER TABLE} or {@code DROP} anywhere in
+     * {@code sql} changes: every statement of a batch and every data-modifying CTE is checked, not only
+     * the first write. The external DDL Floci implements is parsed before this is reached.
      */
     public static Optional<Reference> writeTarget(String sql, Set<String> schemaNames) {
         if (sql == null) {
@@ -113,11 +114,67 @@ public final class ExternalReferenceScanner {
                     return Optional.of(reference);
                 }
             }
+            Optional<Reference> dropped = droppedTarget(tokens, i, schemaNames);
+            if (dropped.isPresent()) {
+                return dropped;
+            }
+        }
+        return Optional.empty();
+    }
+
+    /** {@code DROP TABLE a, b} and {@code DROP SCHEMA a, b}: any name of the list may be an external one. */
+    private static Optional<Reference> droppedTarget(List<Token> tokens, int i, Set<String> schemaNames) {
+        if (!keywordAt(tokens, i, "drop")) {
+            return Optional.empty();
+        }
+        boolean table = keywordAt(tokens, i + 1, "table");
+        if (!table && !keywordAt(tokens, i + 1, "schema")) {
+            return Optional.empty();
+        }
+        int index = i + 2;
+        if (keywordAt(tokens, index, "if") && keywordAt(tokens, index + 1, "exists")) {
+            index += 2;
+        }
+        while (index < tokens.size() && tokens.get(index).isChain()) {
+            List<Word> chain = tokens.get(index).chain();
+            Reference reference = table ? reference(chain, schemaNames)
+                    : schemaNames.contains(chain.getFirst().value()) ? new Reference(chain.getFirst().value(), "") : null;
+            if (reference != null) {
+                return Optional.of(reference);
+            }
+            boolean anotherName = index + 1 < tokens.size() && !tokens.get(index + 1).isChain()
+                    && tokens.get(index + 1).symbol() == ',';
+            index += anotherName ? 2 : tokens.size();
         }
         return Optional.empty();
     }
 
     private static int writeTargetIndex(List<Token> tokens, int i) {
+        if (keywordAt(tokens, i, "create")) {
+            int index = i + 1;
+            while (keywordAt(tokens, index, "temp") || keywordAt(tokens, index, "temporary")
+                    || keywordAt(tokens, index, "unlogged") || keywordAt(tokens, index, "local")) {
+                index++;
+            }
+            if (!keywordAt(tokens, index, "table")) {
+                return -1;
+            }
+            index++;
+            if (keywordAt(tokens, index, "if") && keywordAt(tokens, index + 1, "not") && keywordAt(tokens, index + 2, "exists")) {
+                index += 3;
+            }
+            return index;
+        }
+        if (keywordAt(tokens, i, "alter") && keywordAt(tokens, i + 1, "table")) {
+            int index = skipOnly(tokens, i + 2);
+            if (keywordAt(tokens, index, "if") && keywordAt(tokens, index + 1, "exists")) {
+                index += 2;
+            }
+            return skipOnly(tokens, index);
+        }
+        if (keywordAt(tokens, i, "copy")) {
+            return i + 1;
+        }
         if (keywordAt(tokens, i, "insert") && keywordAt(tokens, i + 1, "into")) {
             return skipOnly(tokens, i + 2);
         }

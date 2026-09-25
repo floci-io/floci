@@ -32,6 +32,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -50,6 +51,7 @@ class ExternalSchemaServiceTest {
     private ExternalMetadataWriter metadata;
     private GlueService glue;
     private ExternalTableMaterializer tableMaterializer;
+    private SpectrumCatalog legacyCatalog;
     private ExternalSchemaService service;
     private SpectrumSession session;
 
@@ -63,7 +65,8 @@ class ExternalSchemaServiceTest {
         when(role.getAssumeRolePolicyDocument()).thenReturn(TRUST_POLICY);
         when(iam.findRole(ACCOUNT, "SpectrumRole")).thenReturn(Optional.of(role));
         tableMaterializer = mock(ExternalTableMaterializer.class);
-        service = new ExternalSchemaService(registry, new SpectrumCatalogResolver(registry, mock(SpectrumCatalog.class)),
+        legacyCatalog = mock(SpectrumCatalog.class);
+        service = new ExternalSchemaService(registry, new SpectrumCatalogResolver(registry, legacyCatalog),
                 tableMaterializer, metadata, glue, iam);
         session = new SpectrumSession(ACCOUNT, CLUSTER, "dev", List.of(ROLE_ARN), false);
         statements.clear();
@@ -227,8 +230,174 @@ class ExternalSchemaServiceTest {
         service.execute(new ExternalStatement.DropTable("analytics", "events", false, false), session, backend());
         service.execute(new ExternalStatement.DropTable("analytics", "events", false, true), session, backend());
 
-        assertThat(statements, contains("DROP TABLE IF EXISTS \"analytics\".\"events\"",
+        assertThat(dropStatements(), contains("DROP TABLE IF EXISTS \"analytics\".\"events\"",
                 "DROP TABLE IF EXISTS \"analytics\".\"events\" CASCADE"));
+    }
+
+    @Test
+    void refusedDropTableLeavesTheGlueTableInPlace() {
+        when(registry.find(ACCOUNT, CLUSTER, "dev", "analytics")).thenReturn(Optional.of(analyticsBinding()));
+        BackendSql refusing = new BackendSql() {
+            @Override
+            public void execute(String sql) {
+                throw new SpectrumReadException("2BP01", "cannot drop table because other objects depend on it");
+            }
+
+            @Override
+            public long copyIn(String copySql, InputStream data) {
+                return 0;
+            }
+        };
+
+        assertThrows(SpectrumReadException.class, () -> service.execute(
+                new ExternalStatement.DropTable("analytics", "events", false, false), session, refusing));
+
+        verify(glue, never()).deleteTable(any(), any());
+        verify(tableMaterializer, never()).forget(any(), any(), any(), any());
+    }
+
+    @Test
+    void dropTableDeletesTheGlueTableAfterPostgresAcceptsTheDrop() {
+        when(registry.find(ACCOUNT, CLUSTER, "dev", "analytics")).thenReturn(Optional.of(analyticsBinding()));
+
+        service.execute(new ExternalStatement.DropTable("analytics", "events", false, false), session, backend());
+
+        assertThat(dropStatements(), contains("DROP TABLE IF EXISTS \"analytics\".\"events\""));
+        verify(glue).deleteTable("lake", "events");
+    }
+
+    @Test
+    void dropTableChecksTheSchemaPrivilegeBeforeTouchingGlue() {
+        when(registry.find(ACCOUNT, CLUSTER, "dev", "analytics")).thenReturn(Optional.of(analyticsBinding()));
+        BackendSql denying = new BackendSql() {
+            @Override
+            public void execute(String sql) {
+                throw new SpectrumReadException("42501", "permission denied for schema analytics");
+            }
+
+            @Override
+            public long copyIn(String copySql, InputStream data) {
+                return 0;
+            }
+        };
+
+        assertThrows(SpectrumReadException.class, () -> service.execute(
+                new ExternalStatement.DropTable("analytics", "events", false, false), session, denying));
+
+        verify(glue, never()).deleteTable(any(), any());
+    }
+
+    @Test
+    void createSchemaAcceptsAGlueDatabaseCreatedByAnotherSessionInTheMeantime() {
+        when(glue.getDatabase("lake")).thenThrow(new AwsException("EntityNotFoundException", "missing", 400));
+        doThrow(new AwsException("AlreadyExistsException", "exists", 400)).when(glue).createDatabase(any(Database.class));
+
+        Optional<String> result = service.execute(new CreateSchema("analytics", "lake", ROLE_ARN, true), session, backend());
+
+        assertThat(result, equalTo(Optional.of("CREATE SCHEMA")));
+        verify(registry).bind(any(ExternalSchemaBinding.class));
+    }
+
+    private List<String> dropStatements() {
+        return statements.stream().filter(sql -> sql.startsWith("DROP ")).toList();
+    }
+
+    @Test
+    void createSchemaDoesNotCreateAGlueDatabaseWhenPostgresRefusesTheSchema() {
+        when(glue.getDatabase("lake")).thenThrow(new AwsException("EntityNotFoundException", "missing", 400));
+        BackendSql refusing = new BackendSql() {
+            @Override
+            public void execute(String sql) {
+                throw new SpectrumReadException("42P06", "schema already exists");
+            }
+
+            @Override
+            public long copyIn(String copySql, InputStream data) {
+                return 0;
+            }
+        };
+
+        assertThrows(SpectrumReadException.class, () -> service.execute(
+                new CreateSchema("analytics", "lake", ROLE_ARN, true), session, refusing));
+
+        verify(glue, never()).createDatabase(any(Database.class));
+        verify(registry, never()).bind(any(ExternalSchemaBinding.class));
+    }
+
+    @Test
+    void createSchemaRollsTheSchemaBackWhenGlueDatabaseCreationFails() {
+        when(glue.getDatabase("lake")).thenThrow(new AwsException("EntityNotFoundException", "missing", 400));
+        doThrow(new AwsException("InternalServiceException", "boom", 500)).when(glue).createDatabase(any(Database.class));
+
+        assertThrows(AwsException.class, () -> service.execute(
+                new CreateSchema("analytics", "lake", ROLE_ARN, true), session, backend()));
+
+        assertThat(statements, contains("CREATE SCHEMA \"analytics\"", "DROP SCHEMA IF EXISTS \"analytics\""));
+        verify(registry, never()).bind(any(ExternalSchemaBinding.class));
+    }
+
+    @Test
+    void externalDdlIsRefusedInsideATransactionBlock() {
+        SpectrumSession inTransaction = new SpectrumSession(ACCOUNT, CLUSTER, "dev", List.of(ROLE_ARN), true);
+
+        SpectrumSqlException error = assertThrows(SpectrumSqlException.class, () -> service.execute(
+                new CreateSchema("analytics", "lake", ROLE_ARN, false), inTransaction, backend()));
+
+        assertThat(error.sqlState(), equalTo("25001"));
+        assertThat(statements, hasSize(0));
+        verify(registry, never()).bind(any(ExternalSchemaBinding.class));
+    }
+
+    @Test
+    void createTableChecksTheSchemaPrivilegeBeforeWritingGlue() {
+        when(registry.find(ACCOUNT, CLUSTER, "dev", "analytics")).thenReturn(Optional.of(analyticsBinding()));
+        BackendSql denying = new BackendSql() {
+            @Override
+            public void execute(String sql) {
+                throw new SpectrumReadException("42501", "permission denied for schema analytics");
+            }
+
+            @Override
+            public long copyIn(String copySql, InputStream data) {
+                return 0;
+            }
+        };
+        CreateTable create = new CreateTable("analytics", "events", List.of(new ColumnDefinition("id", "int")),
+                List.of(), TableFormat.PARQUET, "s3://bucket/events/", null, null, Map.of());
+
+        SpectrumReadException error = assertThrows(SpectrumReadException.class,
+                () -> service.execute(create, session, denying));
+
+        assertThat(error.sqlState(), equalTo("42501"));
+        verify(glue, never()).createTable(any(), any());
+    }
+
+    @Test
+    void createTableOnALegacySchemaExplainsWhyItIsRefused() {
+        when(registry.find(ACCOUNT, CLUSTER, "dev", "old_schema")).thenReturn(Optional.empty());
+        when(legacyCatalog.legacySchemaNames(ACCOUNT)).thenReturn(List.of("old_schema"));
+        CreateTable create = new CreateTable("old_schema", "events", List.of(new ColumnDefinition("id", "int")),
+                List.of(), TableFormat.PARQUET, "s3://bucket/events/", null, null, Map.of());
+
+        SpectrumSqlException error = assertThrows(SpectrumSqlException.class,
+                () -> service.execute(create, session, backend()));
+
+        assertThat(error.sqlState(), equalTo("0A000"));
+        assertThat(error.getMessage(), containsString("legacy"));
+    }
+
+    @Test
+    void metadataRefreshSkipsASchemaWhoseGlueDatabaseIsGone() {
+        ExternalSchemaBinding broken = new ExternalSchemaBinding(ACCOUNT, CLUSTER, "dev", "broken", "gone", ROLE_ARN);
+        ExternalSchemaBinding healthy = analyticsBinding();
+        when(registry.list(ACCOUNT, CLUSTER, "dev")).thenReturn(List.of(broken, healthy));
+        BackendSql backend = backend();
+        doThrow(new AwsException("EntityNotFoundException", "gone", 400)).when(metadata)
+                .refresh(backend, ACCOUNT, broken);
+
+        service.refreshMetadata(session, backend);
+
+        verify(metadata).refresh(backend, ACCOUNT, healthy);
     }
 
     @Test
