@@ -680,13 +680,40 @@ class RedshiftQueryHandlerTest {
         cluster.setLoggingEnabled(true);
         cluster.setLoggingBucketName("my-bucket");
         cluster.setLoggingS3KeyPrefix("logs/");
-        when(service.enableLogging("test-cluster", "my-bucket", "logs/", null, List.of())).thenReturn(cluster);
+        when(service.enableLogging("test-cluster", "my-bucket", "logs/", null, List.of(), null, null)).thenReturn(cluster);
 
         Response response = handler.handle("EnableLogging", params);
         assertEquals(200, response.getStatus());
         String xml = (String) response.getEntity();
         assertTrue(xml.contains("<EnableLoggingResult>"));
         assertTrue(xml.contains("<LoggingEnabled>true</LoggingEnabled>"));
+    }
+
+    @Test
+    void enableLoggingS3TableWithGranularityAndKmsKey() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "test-cluster");
+        params.putSingle("LogDestinationType", "s3table");
+        params.putSingle("S3TableKmsKeyId", "my-kms-key");
+        params.putSingle("S3TableGranularity", "daily");
+
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("test-cluster");
+        cluster.setLoggingEnabled(true);
+        cluster.setLoggingDestinationType("s3table");
+        cluster.setLoggingS3TableKmsKeyId("my-kms-key");
+        cluster.setLoggingS3TableGranularity("daily");
+        when(service.enableLogging("test-cluster", null, null, "s3table", List.of(), "my-kms-key", "daily"))
+                .thenReturn(cluster);
+
+        Response response = handler.handle("EnableLogging", params);
+        assertEquals(200, response.getStatus());
+        String xml = (String) response.getEntity();
+        assertTrue(xml.contains("<EnableLoggingResult>"));
+        assertTrue(xml.contains("<LoggingEnabled>true</LoggingEnabled>"));
+        assertTrue(xml.contains("<LogDestinationType>s3table</LogDestinationType>"));
+        assertTrue(xml.contains("<S3Tables>"));
+        assertTrue(xml.contains("<S3TableGranularity>daily</S3TableGranularity>"));
     }
 
     @Test

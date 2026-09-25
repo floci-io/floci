@@ -667,7 +667,9 @@ public class RedshiftQueryHandler {
             String clusterIdentifier = requireParam(params, "ClusterIdentifier");
             Cluster cluster = service.enableLogging(clusterIdentifier, params.getFirst("BucketName"),
                     params.getFirst("S3KeyPrefix"), params.getFirst("LogDestinationType"),
-                    memberList(params, "LogExports"));
+                    memberList(params, "LogExports"),
+                    params.getFirst("S3TableKmsKeyId"),
+                    params.getFirst("S3TableGranularity"));
             return loggingStatusResponse(action, cluster);
         }
         case "DisableLogging" -> {
@@ -949,6 +951,14 @@ public class RedshiftQueryHandler {
                 builder.elem("member", export);
             }
             builder.end("LogExports");
+        }
+        if ("s3table".equalsIgnoreCase(cluster.getLoggingDestinationType())
+                || cluster.getLoggingS3TableGranularity() != null) {
+            builder.start("S3Tables");
+            if (cluster.getLoggingS3TableGranularity() != null) {
+                builder.elem("S3TableGranularity", cluster.getLoggingS3TableGranularity());
+            }
+            builder.end("S3Tables");
         }
         return builder.build();
     }

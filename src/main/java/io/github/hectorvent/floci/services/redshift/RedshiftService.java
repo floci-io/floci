@@ -732,6 +732,12 @@ public class RedshiftService {
 
     public synchronized Cluster enableLogging(String clusterIdentifier, String bucketName, String s3KeyPrefix,
                                               String logDestinationType, List<String> logExports) {
+        return enableLogging(clusterIdentifier, bucketName, s3KeyPrefix, logDestinationType, logExports, null, null);
+    }
+
+    public synchronized Cluster enableLogging(String clusterIdentifier, String bucketName, String s3KeyPrefix,
+                                              String logDestinationType, List<String> logExports,
+                                              String s3TableKmsKeyId, String s3TableGranularity) {
         Cluster cluster = clusters.get(clusterIdentifier)
                 .orElseThrow(() -> new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404));
         boolean cloudWatch = "cloudwatch".equalsIgnoreCase(logDestinationType);
@@ -744,6 +750,8 @@ public class RedshiftService {
         cluster.setLoggingDestinationType(logDestinationType);
         cluster.setLoggingExports(logExports == null || logExports.isEmpty() ? null : List.copyOf(logExports));
         cluster.setLoggingS3KeyPrefix(s3KeyPrefix);
+        cluster.setLoggingS3TableKmsKeyId(s3TableKmsKeyId);
+        cluster.setLoggingS3TableGranularity(s3TableGranularity);
         clusters.put(clusterIdentifier, cluster);
         clusters.flush();
         return cluster;
@@ -757,6 +765,8 @@ public class RedshiftService {
         cluster.setLoggingS3KeyPrefix(null);
         cluster.setLoggingDestinationType(null);
         cluster.setLoggingExports(null);
+        cluster.setLoggingS3TableKmsKeyId(null);
+        cluster.setLoggingS3TableGranularity(null);
         clusters.put(clusterIdentifier, cluster);
         clusters.flush();
         return cluster;

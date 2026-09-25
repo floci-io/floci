@@ -935,10 +935,29 @@ class RedshiftServiceTest {
         cluster.setClusterIdentifier("my-cluster");
         when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
 
-        Cluster result = service.enableLogging("my-cluster", null, null, "s3table", null);
+        Cluster result = service.enableLogging("my-cluster", null, null, "s3table", null, "my-kms-key", "daily");
         assertTrue(result.isLoggingEnabled());
         assertEquals("s3table", result.getLoggingDestinationType());
         assertNull(result.getLoggingBucketName());
+        assertEquals("my-kms-key", result.getLoggingS3TableKmsKeyId());
+        assertEquals("daily", result.getLoggingS3TableGranularity());
+    }
+
+    @Test
+    void disableLoggingClearsS3TableFields() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        cluster.setLoggingEnabled(true);
+        cluster.setLoggingDestinationType("s3table");
+        cluster.setLoggingS3TableKmsKeyId("my-kms-key");
+        cluster.setLoggingS3TableGranularity("daily");
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+
+        Cluster result = service.disableLogging("my-cluster");
+        assertFalse(result.isLoggingEnabled());
+        assertNull(result.getLoggingDestinationType());
+        assertNull(result.getLoggingS3TableKmsKeyId());
+        assertNull(result.getLoggingS3TableGranularity());
     }
 
     @Test

@@ -60,11 +60,17 @@ public class Cluster {
 
     private String loggingDestinationType;
     private List<String> loggingExports;
+    private String loggingS3TableKmsKeyId;
+    private String loggingS3TableGranularity;
 
     public String getLoggingDestinationType() { return loggingDestinationType; }
     public void setLoggingDestinationType(String loggingDestinationType) { this.loggingDestinationType = loggingDestinationType; }
     public List<String> getLoggingExports() { return loggingExports; }
     public void setLoggingExports(List<String> loggingExports) { this.loggingExports = loggingExports; }
+    public String getLoggingS3TableKmsKeyId() { return loggingS3TableKmsKeyId; }
+    public void setLoggingS3TableKmsKeyId(String loggingS3TableKmsKeyId) { this.loggingS3TableKmsKeyId = loggingS3TableKmsKeyId; }
+    public String getLoggingS3TableGranularity() { return loggingS3TableGranularity; }
+    public void setLoggingS3TableGranularity(String loggingS3TableGranularity) { this.loggingS3TableGranularity = loggingS3TableGranularity; }
 
     private boolean multiAZ = false;
 

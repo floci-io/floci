@@ -210,20 +210,24 @@ public class RedshiftOperationsTest {
             .statusCode(200)
             .body(not(containsString("redshift-copy")));
 
-        // 1e. Logging: EnableLogging with s3table destination does not require BucketName
+        // 1e. Logging: EnableLogging with s3table destination does not require BucketName and preserves S3Table config
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", AUTH_HEADER)
             .formParam("Action", "EnableLogging")
             .formParam("ClusterIdentifier", "cluster-src")
             .formParam("LogDestinationType", "s3table")
+            .formParam("S3TableGranularity", "daily")
+            .formParam("S3TableKmsKeyId", "test-kms-key")
         .when()
             .post("/")
         .then()
             .statusCode(200)
             .contentType("application/xml")
             .body(containsString("<LoggingEnabled>true</LoggingEnabled>"))
-            .body(containsString("<LogDestinationType>s3table</LogDestinationType>"));
+            .body(containsString("<LogDestinationType>s3table</LogDestinationType>"))
+            .body(containsString("<S3Tables>"))
+            .body(containsString("<S3TableGranularity>daily</S3TableGranularity>"));
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -236,7 +240,9 @@ public class RedshiftOperationsTest {
             .statusCode(200)
             .contentType("application/xml")
             .body(containsString("<LoggingEnabled>true</LoggingEnabled>"))
-            .body(containsString("<LogDestinationType>s3table</LogDestinationType>"));
+            .body(containsString("<LogDestinationType>s3table</LogDestinationType>"))
+            .body(containsString("<S3Tables>"))
+            .body(containsString("<S3TableGranularity>daily</S3TableGranularity>"));
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -248,7 +254,21 @@ public class RedshiftOperationsTest {
         .then()
             .statusCode(200)
             .contentType("application/xml")
-            .body(containsString("<LoggingEnabled>false</LoggingEnabled>"));
+            .body(containsString("<LoggingEnabled>false</LoggingEnabled>"))
+            .body(not(containsString("<S3Tables>")));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DescribeLoggingStatus")
+            .formParam("ClusterIdentifier", "cluster-src")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body(containsString("<LoggingEnabled>false</LoggingEnabled>"))
+            .body(not(containsString("<S3Tables>")));
 
         // 1f. Static discovery APIs
         given()
