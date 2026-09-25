@@ -72,7 +72,6 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
     private final ConcurrentHashMap<String, Integer> retryCounts = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Long> retryNotBefore = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Integer> bisectLimits = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, PendingFailure> pendingFailures = new ConcurrentHashMap<>();
     private final ExecutorService pollExecutor = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "dynamodb-streams-esm-poller");
         t.setDaemon(true);
@@ -169,7 +168,6 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
         retryCounts.clear();
         retryNotBefore.clear();
         bisectLimits.clear();
-        pendingFailures.clear();
     }
 
     public void startPolling(EventSourceMapping esm) {
@@ -197,7 +195,6 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
         retryCounts.keySet().removeIf(k -> k.startsWith(uuid + ":"));
         retryNotBefore.keySet().removeIf(k -> k.startsWith(uuid + ":"));
         bisectLimits.keySet().removeIf(k -> k.startsWith(uuid + ":"));
-        pendingFailures.keySet().removeIf(k -> k.startsWith(uuid + ":"));
     }
 
 
@@ -211,14 +208,6 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
                 String shardId = DynamoDbStreamService.SHARD_ID;
                 String lastSeq = esm.getShardSequenceNumbers().get(shardId);
                 String persistedKey = batchStateKey(esm.getUuid(), shardId, lastSeq);
-                PendingFailure pending = pendingFailures.get(persistedKey);
-                if (pending != null) {
-                    long now = clock.getAsLong();
-                    if (now >= retryNotBefore.getOrDefault(persistedKey, 0L)) {
-                        dispose(esm, shardId, persistedKey, pending, now);
-                    }
-                    return;
-                }
 
                 LambdaFunction fn = targetResolver.resolveMappingTarget(esm).orElse(null);
                 if (fn == null) {
@@ -336,17 +325,13 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
                     if (hasExceededMaximumRecordAge(esm, failedRecords, now)) {
                         LOG.warnv("DynamoDB Streams ESM {0}: maximum record age exceeded for batch ending at {1}",
                                 esm.getUuid(), newestFetchedSeq);
-                        if (!dispose(esm, shardId, nextBatchKey, new PendingFailure(failedRecords, invokeResult,
-                                currentRetries, "MaximumRecordAgeExceeded", newestFetchedSeq), now)) {
-                            advanceCheckpoint(esm, shardId, nextCheckpoint);
-                        }
+                        dispose(esm, shardId, nextBatchKey, new PendingFailure(failedRecords, invokeResult,
+                                currentRetries, "MaximumRecordAgeExceeded", newestFetchedSeq));
                     } else if (maxRetries != null && maxRetries >= 0 && currentRetries > maxRetries) {
                         LOG.warnv("DynamoDB Streams ESM {0}: maximum retry attempts ({1}) exhausted for batch ending at {2}",
                                 esm.getUuid(), maxRetries, newestFetchedSeq);
-                        if (!dispose(esm, shardId, nextBatchKey, new PendingFailure(failedRecords, invokeResult,
-                                currentRetries, "RetryAttemptsExhausted", newestFetchedSeq), now)) {
-                            advanceCheckpoint(esm, shardId, nextCheckpoint);
-                        }
+                        dispose(esm, shardId, nextBatchKey, new PendingFailure(failedRecords, invokeResult,
+                                currentRetries, "RetryAttemptsExhausted", newestFetchedSeq));
                     } else {
                         retryNotBefore.put(nextBatchKey, now + retryBackoffMs(currentRetries));
                         LOG.warnv("DynamoDB Streams ESM {0}: Lambda returned error [batchItemFailures], retry {1}, records will be retried",
@@ -361,7 +346,7 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
                                 esm.getUuid(), newestFetchedSeq);
                         clearBatchState(batchKey);
                         dispose(esm, shardId, persistedKey, new PendingFailure(matched, invokeResult,
-                                currentRetries, "MaximumRecordAgeExceeded", newestFetchedSeq), now);
+                                currentRetries, "MaximumRecordAgeExceeded", newestFetchedSeq));
                     } else if (invokeResult.getFunctionError() != null
                             && Boolean.TRUE.equals(esm.getBisectBatchOnFunctionError()) && matched.size() > 1) {
                         // ponytail: the halved limit is keyed by checkpoint, so once a good half advances the
@@ -377,7 +362,7 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
                                 esm.getUuid(), maxRetries, newestFetchedSeq);
                         clearBatchState(batchKey);
                         dispose(esm, shardId, persistedKey, new PendingFailure(matched, invokeResult,
-                                currentRetries, "RetryAttemptsExhausted", newestFetchedSeq), now);
+                                currentRetries, "RetryAttemptsExhausted", newestFetchedSeq));
                     } else {
                         retryCounts.put(batchKey, currentRetries);
                         retryNotBefore.put(batchKey, now + retryBackoffMs(currentRetries));
@@ -402,29 +387,25 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
                                   String condition, String advanceTo) {}
 
     /**
-     * Sends a discarded batch to the OnFailure destination and checkpoints past it. A refused send
-     * parks the batch under {@code key}, the checkpoint actually persisted, and retries only the send
-     * after a backoff. Returns false when the batch was parked.
+     * Sends a discarded batch to the OnFailure destination and checkpoints past it.
+     * A refused send drops the batch and advances the checkpoint (matching AWS behavior).
      */
-    private boolean dispose(EventSourceMapping esm, String shardId, String key, PendingFailure failure, long now) {
-        if (sendToOnFailureDestination(esm, shardId, failure.records(), failure.invokeResult(),
-                failure.invokeCount(), failure.condition())) {
-            clearBatchState(key);
-            advanceCheckpoint(esm, shardId, failure.advanceTo());
-            return true;
+    private void dispose(EventSourceMapping esm, String shardId, String key, PendingFailure failure) {
+        boolean sent = sendToOnFailureDestination(esm, shardId, failure.records(), failure.invokeResult(),
+                failure.invokeCount(), failure.condition());
+        if (!sent) {
+            // Destination REFUSED - per AWS, drop the batch and advance checkpoint
+            LOG.warnv("DynamoDB Streams ESM {0}: OnFailure destination refused the batch, dropping {1} records and advancing checkpoint",
+                    esm.getUuid(), failure.records().size());
         }
-        if (pendingFailures.put(key, failure) == null) {
-            retryCounts.remove(key);
-        }
-        retryNotBefore.put(key, now + retryBackoffMs(retryCounts.merge(key, 1, Integer::sum)));
-        return false;
+        clearBatchState(key);
+        advanceCheckpoint(esm, shardId, failure.advanceTo());
     }
 
     private void clearBatchState(String key) {
         retryCounts.remove(key);
         retryNotBefore.remove(key);
         bisectLimits.remove(key);
-        pendingFailures.remove(key);
     }
 
     private int bisectLimit(EventSourceMapping esm, String key) {
@@ -577,7 +558,7 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
                         esm.getUuid(), destinationArn);
             }
         } catch (Exception e) {
-            LOG.errorv("DynamoDB Streams ESM {0}: OnFailure destination {1} refused the batch, retrying the send: {2}",
+            LOG.errorv("DynamoDB Streams ESM {0}: OnFailure destination {1} refused the batch, dropping and advancing checkpoint: {2}",
                     esm.getUuid(), destinationArn, e.getMessage());
             return false;
         }

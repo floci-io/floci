@@ -1544,7 +1544,7 @@ class DynamoDbStreamsEventSourcePollerTest {
     }
 
     @Test
-    void refusedOnFailureDestinationKeepsTheBatchAndRetriesTheSend() throws Exception {
+    void refusedOnFailureDestinationDropsTheBatchAndAdvancesCheckpoint() throws Exception {
         stubStream("s1");
         List<List<String>> invocations = failInvocationsContaining("s1");
         List<String> delivered = refuseSqsSends(1);
@@ -1552,22 +1552,22 @@ class DynamoDbStreamsEventSourcePollerTest {
         DynamoDbStreamsEventSourcePoller p = pollerWith(mock(EsmStore.class));
 
         pollOnce(p, esm);
-        assertNull(checkpoint(esm), "a refused send must not checkpoint the discarded batch");
+
+        // Per AWS: refused send drops the batch and advances checkpoint immediately
+        // Send IS attempted but refused, then batch is dropped and checkpoint advances
+        assertEquals("s1", checkpoint(esm), "checkpoint advances past the batch");
+        assertEquals(List.of(List.of("s1")), invocations, "function invoked once, no re-invoke");
+        // Send was attempted but refused (delivered.size() == 0 means no successful delivery)
+        assertEquals(0, delivered.size(), "no successful DLQ delivery because destination refused");
+
+        // Second poll should process new records (if any), not retry the dropped batch
         pollOnce(p, esm);
+        // Verify no additional send attempts on second poll
         verify(sqsService, times(1)).sendMessage(anyString(), anyString(), anyInt(), anyString());
-
-        advancePastRetry(p);
-        pollOnce(p, esm);
-
-        assertEquals(List.of(List.of("s1")), invocations, "the parked batch is re-sent, not re-invoked");
-        assertEquals(1, delivered.size());
-        assertEquals("s1", batchInfo(delivered.get(0)).path("startSequenceNumber").asText());
-        assertEquals("s1", batchInfo(delivered.get(0)).path("endSequenceNumber").asText());
-        assertEquals("s1", checkpoint(esm));
     }
 
     @Test
-    void parkedFailureIsResentAfterTheFunctionStopsResolving() throws Exception {
+    void refusedOnFailureDestinationDoesNotResendWhenFunctionUnavailable() throws Exception {
         stubStream("s1");
         failInvocationsContaining("s1");
         List<String> delivered = refuseSqsSends(1);
@@ -1575,17 +1575,20 @@ class DynamoDbStreamsEventSourcePollerTest {
         DynamoDbStreamsEventSourcePoller p = pollerWith(mock(EsmStore.class));
 
         pollOnce(p, esm);
-        assertNull(checkpoint(esm));
+
+        // Per AWS: refused send drops the batch and advances checkpoint
+        assertEquals("s1", checkpoint(esm), "checkpoint advances past the batch");
+
+        // Even if function becomes unavailable, no resend occurs
         when(functionStore.getForAccount(ACCOUNT_ID, "us-east-1", "fn")).thenReturn(Optional.empty());
-        advancePastRetry(p);
         pollOnce(p, esm);
 
-        assertEquals(1, delivered.size(), "the resend does not need the function");
+        assertEquals(0, delivered.size(), "no resend - batch was dropped");
         assertEquals("s1", checkpoint(esm));
     }
 
     @Test
-    void refusedOnFailureDestinationAfterPartialSuccessKeepsTheAcknowledgedPrefix() throws Exception {
+    void refusedOnFailureDestinationAfterPartialSuccessDropsTailAndAdvancesCheckpoint() throws Exception {
         stubStream("s1", "s2", "s3");
         List<List<String>> invocations = recordInvocations(seqs -> partialFailure("s2"));
         List<String> delivered = refuseSqsSends(1);
@@ -1594,16 +1597,21 @@ class DynamoDbStreamsEventSourcePollerTest {
         DynamoDbStreamsEventSourcePoller p = pollerWith(mock(EsmStore.class));
 
         pollOnce(p, esm);
-        assertEquals("s1", checkpoint(esm));
 
+        // With maxRetries=0, retries exhaust on first failure
+        // Partial success: s1 acknowledged, s2-s3 failed
+        // Since retries exhausted immediately, dispose is called with advanceTo=s3 (end of batch)
+        // Per AWS: refused send drops the tail (s2, s3) and advances checkpoint past it
+        assertEquals("s3", checkpoint(esm), "checkpoint advances past the dropped tail");
+
+        // Only one invocation (the original), no re-invoke for the dropped tail
+        assertEquals(1, invocations.size());
+        // No successful DLQ delivery because destination refused
+        assertEquals(0, delivered.size());
+        // Second poll should process new records (if any), not retry the dropped batch
         advancePastRetry(p);
         pollOnce(p, esm);
-
-        assertEquals(1, invocations.size());
-        assertEquals(1, delivered.size());
-        assertEquals("s2", batchInfo(delivered.get(0)).path("startSequenceNumber").asText());
-        assertEquals("s3", batchInfo(delivered.get(0)).path("endSequenceNumber").asText());
-        assertEquals("s3", checkpoint(esm));
+        verify(sqsService, times(1)).sendMessage(anyString(), anyString(), anyInt(), anyString());
     }
 
     @Test
