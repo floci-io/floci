@@ -72,7 +72,8 @@ public final class SpectrumS3Reader {
         RedshiftRoleAccess.RoleSession roleSession = null;
         try {
             if (roleArn != null) {
-                roleSession = RedshiftRoleAccess.resolveRoleSession(roleArn, iamService, accountId, associatedRoleArns);
+                roleSession = RedshiftRoleAccess.resolveRoleSession(roleArn, iamService, accountId, associatedRoleArns,
+                        RedshiftRoleAccess.STREAMING_ROLE_SESSION_TTL);
             }
             RedshiftRoleAccess.RoleSession session = roleSession;
             // Account-aware S3 storage resolves the account from the request context, which the
@@ -81,7 +82,7 @@ public final class SpectrumS3Reader {
                 if (session == null) {
                     s3Service.authorizeAnonymousListBucket(location.bucket());
                 } else {
-                    RedshiftRoleAccess.authorizeRoleList(s3Service, iamService, session, roleArn, location.bucket());
+                    RedshiftRoleAccess.authorizeRoleList(s3Service, iamService, session, roleArn, location.bucket(), location.key());
                 }
                 List<S3Object> objects = new ArrayList<>();
                 String continuationToken = null;

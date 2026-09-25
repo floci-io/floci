@@ -86,6 +86,8 @@ public final class GlueTableResolver {
         appendOption(sql, "nullstr", options.get("serialization.null.format"));
         List<Column> dataColumns = table.getStorageDescriptor().getColumns();
         if (dataColumns != null && !dataColumns.isEmpty()) {
+            // Every column is read as VARCHAR: DuckDB's own type sniffing would disagree with the Glue types,
+            // and the caller casts each column to its declared type afterwards.
             sql.append(", columns = {");
             for (int i = 0; i < dataColumns.size(); i++) {
                 if (i > 0) {
@@ -235,6 +237,10 @@ public final class GlueTableResolver {
      */
     public static String readPath(Table table, String normalizedLocation) {
         return PartitionProjection.readPath(table, normalizedLocation);
+    }
+
+    public static String projectionLocationTemplate(Table table) {
+        return PartitionProjection.locationTemplate(table);
     }
 
     /**

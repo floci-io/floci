@@ -226,6 +226,186 @@ class ExternalTableMaterializerTest {
                 any(), anyString(), eq(ACCOUNT));
     }
 
+    @Test
+    void reloadRefillsTheExistingTableInPlaceSoDependentViewsSurvive() {
+        when(glue.getTable("lake", "events")).thenReturn(csvTable());
+        materializer.ensureCurrent(backend, session(false), BINDING, "events");
+        when(s3.listObjectsWithPrefixes(eq("bucket"), eq("events/"), eq(""), eq(1000), any(), any()))
+                .thenReturn(new S3Service.ListObjectsResult(
+                        List.of(new S3Object("bucket", "events/p1.csv", new byte[]{1, 2}, "text/csv", "etag2")),
+                        List.of(), false, null));
+        backend.statements.clear();
+
+        assertThat(materializer.ensureCurrent(backend, session(false), BINDING, "events"),
+                equalTo(ExternalTableMaterializer.Outcome.LOADED));
+
+        String swap = backend.statements.getLast();
+        assertThat(swap, containsString("TRUNCATE \"analytics\".\"events\""));
+        assertThat(swap, containsString("INSERT INTO \"analytics\".\"events\" SELECT * FROM \"analytics\".\"events__stg\""));
+        assertThat(swap.contains("RENAME TO"), equalTo(false));
+        assertThat(swap.contains("DROP TABLE IF EXISTS \"analytics\".\"events\";"), equalTo(false));
+    }
+
+    @Test
+    void reloadRunsTheInPlaceStepsInOrderAndDropsTheStagingTable() {
+        when(glue.getTable("lake", "events")).thenReturn(csvTable());
+        materializer.ensureCurrent(backend, session(false), BINDING, "events");
+        forceReload();
+        backend.statements.clear();
+
+        materializer.ensureCurrent(backend, session(false), BINDING, "events");
+
+        String swap = backend.statements.getLast();
+        int create = swap.indexOf("CREATE TABLE IF NOT EXISTS \"analytics\".\"events\"");
+        int truncate = swap.indexOf("TRUNCATE");
+        int insert = swap.indexOf("INSERT INTO");
+        int dropStaging = swap.indexOf("DROP TABLE \"analytics\".\"events__stg\"");
+        assertThat(create >= 0 && create < truncate && truncate < insert && insert < dropStaging, equalTo(true));
+    }
+
+    @Test
+    void aLoadInsideATransactionIsNotTrustedForTheNextInPlaceReload() {
+        when(glue.getTable("lake", "events")).thenReturn(csvTable());
+        materializer.ensureCurrent(backend, session(false), BINDING, "events");
+        materializer.ensureCurrent(backend, session(true), BINDING, "events");
+        backend.statements.clear();
+
+        materializer.ensureCurrent(backend, session(false), BINDING, "events");
+
+        assertThat(backend.statements.getLast(), containsString("RENAME TO \"events\""));
+    }
+
+    @Test
+    void forgettingATableDropsItsSchemaSignatureSoItIsRecreated() {
+        when(glue.getTable("lake", "events")).thenReturn(csvTable());
+        materializer.ensureCurrent(backend, session(false), BINDING, "events");
+        materializer.forget(BINDING.clusterKey(), "dev", "analytics", "events");
+        backend.statements.clear();
+
+        materializer.ensureCurrent(backend, session(false), BINDING, "events");
+
+        assertThat(backend.statements.getLast(), containsString("RENAME TO \"events\""));
+    }
+
+    private void forceReload() {
+        when(s3.listObjectsWithPrefixes(eq("bucket"), eq("events/"), eq(""), eq(1000), any(), any()))
+                .thenReturn(new S3Service.ListObjectsResult(
+                        List.of(new S3Object("bucket", "events/p1.csv", new byte[]{9}, "text/csv", "etag-changed")),
+                        List.of(), false, null));
+    }
+
+    @Test
+    void schemaChangeReplacesTheTableInsteadOfRefillingIt() {
+        when(glue.getTable("lake", "events")).thenReturn(csvTable());
+        materializer.ensureCurrent(backend, session(false), BINDING, "events");
+        Table changed = csvTable();
+        changed.setVersionId("2");
+        changed.getStorageDescriptor().setColumns(List.of(new Column("id", "bigint")));
+        when(glue.getTable("lake", "events")).thenReturn(changed);
+        backend.statements.clear();
+
+        materializer.ensureCurrent(backend, session(false), BINDING, "events");
+
+        assertThat(backend.statements.getLast(), containsString("RENAME TO \"events\""));
+    }
+
+    @Test
+    void deniesAnIcebergMetadataLocationOutsideTheTableLocation() {
+        Table table = icebergTable("s3://other-bucket/events/metadata/v1.metadata.json");
+        when(glue.getTable("lake", "events")).thenReturn(table);
+
+        SpectrumSqlException exception = assertThrows(SpectrumSqlException.class,
+                () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
+
+        assertThat(exception.sqlState(), equalTo("42501"));
+        verify(duck, never()).execute(anyString(), any(), anyString(), anyString());
+    }
+
+    @Test
+    void authorizesTheIcebergMetadataObjectAsTheRole() {
+        when(glue.getTable("lake", "events")).thenReturn(icebergTable("s3://bucket/events/metadata/v1.metadata.json"));
+
+        materializer.ensureCurrent(backend, session(false), BINDING, "events");
+
+        verify(s3).authorizeSignedGetObject(anyString(), anyString(), eq("bucket"), eq("events/metadata/v1.metadata.json"));
+    }
+
+    @Test
+    void listsWithTheTableLocationPrefixSoPrefixConditionsApply() {
+        when(glue.getTable("lake", "events")).thenReturn(csvTable());
+        when(s3.isAuthEnforced()).thenReturn(true);
+        when(iam.resolvePrincipalContext(BINDING.iamRoleArn())).thenReturn(CallerContext.of(List.of("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:ListBucket","Resource":"arn:aws:s3:::bucket",
+                   "Condition":{"StringLike":{"s3:prefix":["events/*"]}}},
+                  {"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}
+                ]}""")));
+
+        assertThat(materializer.ensureCurrent(backend, session(false), BINDING, "events"),
+                equalTo(ExternalTableMaterializer.Outcome.LOADED));
+    }
+
+    @Test
+    void deniesListingWhenThePrefixConditionDoesNotMatchTheTableLocation() {
+        when(glue.getTable("lake", "events")).thenReturn(csvTable());
+        when(s3.isAuthEnforced()).thenReturn(true);
+        when(iam.resolvePrincipalContext(BINDING.iamRoleArn())).thenReturn(CallerContext.of(List.of("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:ListBucket","Resource":"arn:aws:s3:::bucket",
+                   "Condition":{"StringLike":{"s3:prefix":["other/*"]}}},
+                  {"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}
+                ]}""")));
+
+        SpectrumSqlException exception = assertThrows(SpectrumSqlException.class,
+                () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
+
+        assertThat(exception.sqlState(), equalTo("42501"));
+    }
+
+    @Test
+    void deniesAProjectionTemplateOutsideTheTableLocation() {
+        Table table = csvTable();
+        table.setParameters(Map.of("projection.enabled", "true",
+                "storage.location.template", "s3://other-bucket/events/${dt}/"));
+        when(glue.getTable("lake", "events")).thenReturn(table);
+
+        SpectrumSqlException exception = assertThrows(SpectrumSqlException.class,
+                () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
+
+        assertThat(exception.sqlState(), equalTo("42501"));
+        verify(duck, never()).execute(anyString(), any(), anyString(), anyString());
+    }
+
+    @Test
+    void deniesAProjectionTemplateAboveTheTableLocationPrefix() {
+        Table table = csvTable();
+        table.setParameters(Map.of("projection.enabled", "true",
+                "storage.location.template", "s3://bucket/${dt}/"));
+        when(glue.getTable("lake", "events")).thenReturn(table);
+
+        SpectrumSqlException exception = assertThrows(SpectrumSqlException.class,
+                () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
+
+        assertThat(exception.sqlState(), equalTo("42501"));
+    }
+
+    @Test
+    void allowsAProjectionTemplateInsideTheTableLocation() {
+        Table table = csvTable();
+        table.setParameters(Map.of("projection.enabled", "true",
+                "storage.location.template", "s3://bucket/events/${dt}/"));
+        when(glue.getTable("lake", "events")).thenReturn(table);
+
+        assertThat(materializer.ensureCurrent(backend, session(false), BINDING, "events"),
+                equalTo(ExternalTableMaterializer.Outcome.LOADED));
+    }
+
+    private Table icebergTable(String metadataLocation) {
+        Table table = csvTable();
+        table.setParameters(Map.of("table_type", "ICEBERG", "metadata_location", metadataLocation));
+        return table;
+    }
+
     private static SpectrumSession session(boolean inTransaction) {
         return session(BINDING.clusterKey(), inTransaction);
     }

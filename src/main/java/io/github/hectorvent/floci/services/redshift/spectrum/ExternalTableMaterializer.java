@@ -29,7 +29,9 @@ import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
@@ -37,6 +39,8 @@ public class ExternalTableMaterializer {
     private static final Logger LOG = Logger.getLogger(ExternalTableMaterializer.class);
     public static final String SCRATCH_BUCKET = S3Service.INTERNAL_BUCKET_PREFIX + "redshift-spectrum-scratch";
     private static final String SQLSTATE_LOAD_FAILED = "58030";
+    private static final String SQLSTATE_INSUFFICIENT_PRIVILEGE = "42501";
+    private static final long LOCK_TIMEOUT_SECONDS = 30;
     private static final String ICEBERG_SETUP = "INSTALL iceberg; LOAD iceberg;\n";
     private static final String COPY_OPTIONS = "WITH (FORMAT csv, HEADER true, NULL '\\N')";
     public enum Outcome { NOT_EXTERNAL, CURRENT, LOADED }
@@ -47,6 +51,8 @@ public class ExternalTableMaterializer {
     private final IamService iamService;
     private final EmulatorConfig config;
     private final ConcurrentHashMap<String, String> fingerprints = new ConcurrentHashMap<>();
+    /** Column definitions each loaded table was created with, to tell a data reload from a schema change. */
+    private final ConcurrentHashMap<String, String> schemaSignatures = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ReentrantLock> locks = new ConcurrentHashMap<>();
 
     public ExternalTableMaterializer(FlociDuckClient duckClient, GlueService glueService, S3Service s3Service,
@@ -75,6 +81,8 @@ public class ExternalTableMaterializer {
         RedshiftRoleAccess.RoleSession roleSession = openRoleSession(binding, session);
         try {
             Location location = Location.parse(table);
+            authorizeIcebergMetadata(session.accountId(), binding, roleSession, table, location);
+            requireProjectionTemplateWithin(table, location);
             List<Partition> partitions = partitions(session.accountId(), binding, table);
             List<ReadSource> sources = readSources(session.accountId(), binding, roleSession, table, location, partitions);
             List<S3Object> objects = sources.stream().flatMap(source -> source.objects().stream()).toList();
@@ -85,16 +93,19 @@ public class ExternalTableMaterializer {
                 return Outcome.CURRENT;
             }
             ReentrantLock lock = locks.computeIfAbsent(cacheKey, ignored -> new ReentrantLock());
-            lock.lock();
+            acquire(lock, label);
             try {
                 if (!session.inTransaction() && fingerprint.equals(fingerprints.get(cacheKey))) {
                     return Outcome.CURRENT;
                 }
-                load(backend, session, binding, table, sources);
+                String definitions = load(backend, session, binding, table, sources, schemaSignatures.get(cacheKey));
                 if (session.inTransaction()) {
+                    // DDL của transaction có thể bị rollback, nên không tin fingerprint và signature của lần load này
                     fingerprints.remove(cacheKey);
+                    schemaSignatures.remove(cacheKey);
                 } else {
                     fingerprints.put(cacheKey, fingerprint);
+                    schemaSignatures.put(cacheKey, definitions);
                 }
                 return Outcome.LOADED;
             } finally {
@@ -109,14 +120,37 @@ public class ExternalTableMaterializer {
         }
     }
 
+    /**
+     * A session inside a transaction can hold a PostgreSQL lock on the table until it commits, so
+     * waiting forever on the Java lock here could deadlock in a way PostgreSQL's detector cannot see.
+     */
+    private static void acquire(ReentrantLock lock, String label) {
+        try {
+            if (!lock.tryLock(LOCK_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                throw new SpectrumReadException(SQLSTATE_LOAD_FAILED,
+                        "Timed out waiting to load external table \"" + label + "\"");
+            }
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new SpectrumReadException(SQLSTATE_LOAD_FAILED,
+                    "Interrupted while waiting to load external table \"" + label + "\"", exception);
+        }
+    }
+
     public void forget(String clusterKey, String databaseName, String schemaName, String tableName) {
-        fingerprints.remove(clusterKey + "|" + databaseName + "|" + schemaName + "|" + tableName);
+        forgetMatching(key -> key.equals(clusterKey + "|" + databaseName + "|" + schemaName + "|" + tableName));
     }
 
     /** Forgets every table of one external schema, so a dropped and recreated schema is reloaded. */
     public void forgetSchema(String clusterKey, String databaseName, String schemaName) {
         String prefix = schemaPrefix(clusterKey, databaseName, schemaName);
-        fingerprints.keySet().removeIf(key -> key.startsWith(prefix));
+        forgetMatching(key -> key.startsWith(prefix));
+    }
+
+    private void forgetMatching(Predicate<String> matches) {
+        fingerprints.keySet().removeIf(matches);
+        schemaSignatures.keySet().removeIf(matches);
+        // locks giữ nguyên: xóa một lock đang được giữ sẽ cho luồng khác tạo lock mới và load song song cùng bảng
     }
 
     /** Tables of one external schema this materializer has loaded into PostgreSQL and still tracks. */
@@ -127,7 +161,7 @@ public class ExternalTableMaterializer {
     }
 
     public void forgetCluster(String clusterKey) {
-        fingerprints.keySet().removeIf(key -> key.startsWith(clusterKey + "|"));
+        forgetMatching(key -> key.startsWith(clusterKey + "|"));
     }
 
     private static String schemaPrefix(String clusterKey, String databaseName, String schemaName) {
@@ -147,7 +181,68 @@ public class ExternalTableMaterializer {
                                RedshiftRoleAccess.RoleSession roleSession, Location location) {
         try {
             RequestScopes.runAs(accountId, () -> RedshiftRoleAccess.authorizeRoleList(
-                    s3Service, iamService, roleSession, binding.iamRoleArn(), location.bucket()));
+                    s3Service, iamService, roleSession, binding.iamRoleArn(), location.bucket(), location.prefix()));
+        } catch (S3CopySimulator.S3TransferException exception) {
+            throw new SpectrumSqlException(exception.sqlState(), exception.getMessage());
+        }
+    }
+
+    /**
+     * A projecting table is read through its {@code storage.location.template}, a free-form Glue parameter.
+     * Every object under the table location is listed and authorized one by one, so the template only
+     * needs to stay inside that location for the read to be covered by those checks.
+     */
+    private static void requireProjectionTemplateWithin(Table table, Location location) {
+        String template = GlueTableResolver.projectionLocationTemplate(table);
+        if (template == null) {
+            return;
+        }
+        if (!template.startsWith("s3://")) {
+            throw new SpectrumSqlException("0A000", "Glue table \"" + table.getName() + "\" has an unsupported storage.location.template");
+        }
+        String rest = template.substring(5);
+        int slash = rest.indexOf('/');
+        String bucket = slash < 0 ? rest : rest.substring(0, slash);
+        String key = slash < 0 ? "" : rest.substring(slash + 1);
+        int placeholder = key.indexOf("${");
+        String staticPrefix = placeholder < 0 ? key : key.substring(0, placeholder);
+        // a template with no placeholder names one directory, and Location prefixes always end in a slash
+        String comparable = placeholder < 0 && !staticPrefix.isEmpty() && !staticPrefix.endsWith("/")
+                ? staticPrefix + "/" : staticPrefix;
+        boolean withinLocation = location.prefix().isEmpty() || comparable.startsWith(location.prefix());
+        if (!bucket.equals(location.bucket()) || !withinLocation) {
+            throw new SpectrumSqlException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
+                    "storage.location.template of \"" + table.getName() + "\" is outside the table location");
+        }
+    }
+
+    /**
+     * DuckDB follows an Iceberg table's {@code metadata_location}, a free-form Glue parameter, so it
+     * must stay inside the location the role was authorized for and be readable by the role itself.
+     */
+    private void authorizeIcebergMetadata(String accountId, ExternalSchemaBinding binding,
+                                          RedshiftRoleAccess.RoleSession roleSession, Table table, Location location) {
+        if (!GlueTableResolver.isIcebergTable(table)) {
+            return;
+        }
+        String metadata = GlueTableResolver.icebergMetadataLocation(table);
+        if (metadata == null || metadata.isBlank()) {
+            return;
+        }
+        if (!metadata.startsWith("s3://")) {
+            throw new SpectrumSqlException("0A000", "Iceberg table \"" + table.getName() + "\" has an unsupported metadata_location");
+        }
+        String rest = metadata.substring(5);
+        int slash = rest.indexOf('/');
+        String bucket = slash < 0 ? rest : rest.substring(0, slash);
+        String key = slash < 0 ? "" : rest.substring(slash + 1);
+        if (!bucket.equals(location.bucket()) || !key.startsWith(location.prefix())) {
+            throw new SpectrumSqlException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
+                    "Iceberg metadata_location of \"" + table.getName() + "\" is outside the table location");
+        }
+        try {
+            RequestScopes.runAs(accountId, () -> RedshiftRoleAccess.authorizeRoleRead(
+                    s3Service, iamService, roleSession, binding.iamRoleArn(), bucket, key));
         } catch (S3CopySimulator.S3TransferException exception) {
             throw new SpectrumSqlException(exception.sqlState(), exception.getMessage());
         }
@@ -255,8 +350,13 @@ public class ExternalTableMaterializer {
         }
     }
 
-    private void load(BackendSql backend, SpectrumSession session, ExternalSchemaBinding binding, Table table,
-                      List<ReadSource> sources) {
+    /**
+     * Loads the table into PostgreSQL and returns the column definitions it was created with. When they
+     * match {@code loadedDefinitions} the target table is refilled in place, so views and grants that
+     * depend on it survive; a schema change replaces the table instead.
+     */
+    private String load(BackendSql backend, SpectrumSession session, ExternalSchemaBinding binding, Table table,
+                        List<ReadSource> sources, String loadedDefinitions) {
         GlueTableResolver.ReadPlan plan = GlueTableResolver.readPlan(table);
         if (plan.columns().isEmpty()) {
             throw new SpectrumSqlException("0A000", "Glue table \"" + binding.schemaName() + "." + table.getName() + "\" declares no columns");
@@ -280,8 +380,14 @@ public class ExternalTableMaterializer {
                     throw new SpectrumReadException(SQLSTATE_LOAD_FAILED, "External table \"" + binding.schemaName() + "." + table.getName() + "\" exceeds configured row limit");
                 }
             }
-            backend.execute("DROP TABLE IF EXISTS " + target + "; ALTER TABLE " + staging + " RENAME TO " + quote(table.getName()));
+            if (definitions.equals(loadedDefinitions)) {
+                backend.execute("CREATE TABLE IF NOT EXISTS " + target + " (" + definitions + "); TRUNCATE " + target
+                        + "; INSERT INTO " + target + " SELECT * FROM " + staging + "; DROP TABLE " + staging);
+            } else {
+                backend.execute("DROP TABLE IF EXISTS " + target + "; ALTER TABLE " + staging + " RENAME TO " + quote(table.getName()));
+            }
             stagingCreated = false;
+            return definitions;
         } catch (RuntimeException exception) {
             if (stagingCreated) {
                 try {

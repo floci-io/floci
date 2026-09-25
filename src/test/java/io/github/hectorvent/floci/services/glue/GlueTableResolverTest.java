@@ -132,6 +132,18 @@ class GlueTableResolverTest {
     }
 
     @Test
+    void readPlanDefaultsTheDelimiterToACommaWhenOnlyTheHeaderCountIsDeclared() {
+        Table table = table("org.apache.hadoop.mapred.TextInputFormat", "s3://bucket/events/",
+                List.of(column("id", "int")));
+        table.setParameters(Map.of("skip.header.line.count", "0"));
+
+        String from = GlueTableResolver.readPlan(table).fromClause();
+
+        assertThat(from, equalTo("read_csv('s3://bucket/events/**', header = false, delim = ',', "
+                + "columns = {'id': 'VARCHAR'})"));
+    }
+
+    @Test
     void readPlanTreatsOneSkippedLineAsAHeaderAndMoreAsSkippedRows() {
         Table oneLine = table("org.apache.hadoop.mapred.TextInputFormat", "s3://bucket/events/",
                 List.of(column("id", "int")));

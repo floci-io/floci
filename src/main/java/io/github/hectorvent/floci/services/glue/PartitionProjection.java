@@ -50,6 +50,19 @@ public final class PartitionProjection {
         return table != null && "true".equalsIgnoreCase(parameter(table, ENABLED));
     }
 
+    /**
+     * The {@code storage.location.template} a projecting table reads from, or {@code null} when the table
+     * does not project or leaves the template unset. The template can name any location, so a caller
+     * that authorizes reads by the table's own location must check it separately.
+     */
+    public static String locationTemplate(Table table) {
+        if (!enabled(table)) {
+            return null;
+        }
+        String template = parameter(table, LOCATION_TEMPLATE);
+        return template == null || template.isBlank() ? null : template;
+    }
+
     /** Case-insensitive lookup, since table properties are not normalised on the way in. */
     static String parameter(Table table, String name) {
         Map<String, String> params = table == null ? null : table.getParameters();
