@@ -1950,22 +1950,20 @@ class DynamoDbStreamsEventSourcePollerTest {
     }
 
     @Test
-    void parkedFailureIsNotResentOnceTheMappingIsStopped() throws Exception {
+    void failedOnFailureDeliveryIsNotRetriedAfterMappingIsStopped() throws Exception {
         stubStream("s1");
         List<List<String>> invocations = failInvocationsContaining("s1");
         refuseSqsSends(1);
         EventSourceMapping esm = esmWithDlq(0);
         DynamoDbStreamsEventSourcePoller p = pollerWith(mock(EsmStore.class));
         pollOnce(p, esm);
-        assertNull(checkpoint(esm));
-        // A worker that loaded the parked entry before stopPolling cleared it sees only the tombstone.
-        p.stopped.add(esm.getUuid());
+        assertEquals("s1", checkpoint(esm));
+        p.stopPolling(esm.getUuid());
 
-        advancePastRetry(p);
         pollOnce(p, esm);
 
         verify(sqsService, times(1)).sendMessage(anyString(), anyString(), anyInt(), anyString());
-        assertNull(checkpoint(esm));
+        assertEquals("s1", checkpoint(esm));
         assertEquals(List.of(List.of("s1")), invocations);
     }
 
