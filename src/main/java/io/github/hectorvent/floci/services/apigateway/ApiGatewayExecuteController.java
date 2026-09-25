@@ -1018,6 +1018,7 @@ public class ApiGatewayExecuteController {
             return new AuthorizerResult(gatewayResponse(scope, GatewayResponseType.UNAUTHORIZED, 401, "Unauthorized"), null, null);
         }
         try {
+            // REST Authorizer clashes with the imported API Gateway V2 Authorizer.
             io.github.hectorvent.floci.services.apigateway.model.Authorizer authorizer =
                     apiGatewayService.getAuthorizer(region, apiId, method.getAuthorizerId());
             List<String> providerArns = authorizer.getProviderARNs();
