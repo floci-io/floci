@@ -14,6 +14,14 @@ import io.github.hectorvent.floci.services.kms.model.KmsKeySpec;
 import io.github.hectorvent.floci.services.kms.model.KmsKeyUsage;
 import io.github.hectorvent.floci.services.kms.model.KmsMessageType;
 import jakarta.ws.rs.core.Response;
+import org.bouncycastle.asn1.DERBitString;
+import org.bouncycastle.asn1.pkcs.PrivateKeyInfo;
+import org.bouncycastle.asn1.sec.ECPrivateKey;
+import org.bouncycastle.asn1.x509.AlgorithmIdentifier;
+import org.bouncycastle.asn1.x509.SubjectPublicKeyInfo;
+import org.bouncycastle.asn1.x9.ECNamedCurveTable;
+import org.bouncycastle.asn1.x9.X962Parameters;
+import org.bouncycastle.asn1.x9.X9ObjectIdentifiers;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -26,6 +34,7 @@ import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.OAEPParameterSpec;
 import javax.crypto.spec.PSource;
 import javax.crypto.spec.SecretKeySpec;
+import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyFactory;
 import java.security.KeyPair;
@@ -34,6 +43,7 @@ import java.security.MessageDigest;
 import java.security.PublicKey;
 import java.security.Security;
 import java.security.Signature;
+import java.security.spec.ECGenParameterSpec;
 import java.security.spec.MGF1ParameterSpec;
 import java.security.spec.PSSParameterSpec;
 import java.security.spec.X509EncodedKeySpec;
@@ -2464,6 +2474,31 @@ class KmsServiceTest {
             return generator.generateKeyPair();
         }
 
+        private KeyPair ecKeyPair(String keySpec) throws Exception {
+            KeyPairGenerator generator = KeyPairGenerator.getInstance("EC", BouncyCastleProvider.PROVIDER_NAME);
+            generator.initialize(new ECGenParameterSpec(KmsKeySpec.valueOf(keySpec).curveName()));
+            return generator.generateKeyPair();
+        }
+
+        private byte[] ecPublicPoint(KeyPair keyPair) {
+            return SubjectPublicKeyInfo.getInstance(keyPair.getPublic().getEncoded()).getPublicKeyData().getBytes();
+        }
+
+        /** Re-encodes an EC private key with the given algorithm identifier and embedded public point. */
+        private byte[] ecPkcs8(KeyPair keyPair, String curveName, AlgorithmIdentifier algorithm,
+                               byte[] embeddedPublicPoint) throws Exception {
+            BigInteger privateScalar = ECPrivateKey.getInstance(
+                    PrivateKeyInfo.getInstance(keyPair.getPrivate().getEncoded()).parsePrivateKey()).getKey();
+            int orderBits = ECNamedCurveTable.getByName(curveName).getN().bitLength();
+            ECPrivateKey ecPrivateKey = new ECPrivateKey(orderBits, privateScalar,
+                    new DERBitString(embeddedPublicPoint), null);
+            return new PrivateKeyInfo(algorithm, ecPrivateKey).getEncoded();
+        }
+
+        private AlgorithmIdentifier p256NamedCurve() {
+            return new AlgorithmIdentifier(X9ObjectIdentifiers.id_ecPublicKey, X9ObjectIdentifiers.prime256v1);
+        }
+
         private KmsKey importInto(KmsKey key, byte[] rawMaterial, String wrappingAlgorithm) throws Exception {
             return importInto(key, rawMaterial, wrappingAlgorithm, "RSA_2048");
         }
@@ -2943,10 +2978,122 @@ class KmsServiceTest {
             assertEquals("PendingImport", kmsService.describeKey(key.getKeyId(), REGION).getKeyState());
         }
 
+        @ParameterizedTest
+        @CsvSource({
+                "ECC_NIST_P256, RSA_AES_KEY_WRAP_SHA_256, RSA_2048",
+                "ECC_NIST_P384, RSA_AES_KEY_WRAP_SHA_1, RSA_3072",
+                "ECC_NIST_P521, RSA_AES_KEY_WRAP_SHA_256, RSA_4096",
+                "ECC_SECG_P256K1, RSA_AES_KEY_WRAP_SHA_256, RSA_2048",
+                "ECC_NIST_P256, RSAES_OAEP_SHA_256, RSA_2048",
+                "ECC_NIST_P521, RSAES_OAEP_SHA_1, RSA_4096",
+                "ECC_SECG_P256K1, RSAES_OAEP_SHA_256, RSA_3072"
+        })
+        void supportedEccKeyAndWrappingSpecsImportUsablePrivateKeyMaterial(
+                String keySpec, String wrappingAlgorithm, String wrappingKeySpec) throws Exception {
+            KmsKey key = externalKey(keySpec, "SIGN_VERIFY");
+            KeyPair importedKeyPair = ecKeyPair(keySpec);
+
+            KmsKey imported = importInto(key, importedKeyPair.getPrivate().getEncoded(),
+                    wrappingAlgorithm, wrappingKeySpec);
+
+            assertEquals("Enabled", imported.getKeyState());
+            assertTrue(imported.isEnabled());
+            assertArrayEquals(importedKeyPair.getPublic().getEncoded(),
+                    Base64.getDecoder().decode(imported.getPublicKeyEncoded()));
+
+            KmsKeySpec.Algorithm algorithm = KmsKeySpec.valueOf(keySpec).getAlgorithm().getFirst();
+            byte[] message = "imported ECC key".getBytes(StandardCharsets.UTF_8);
+            byte[] signature = kmsService.sign(key.getKeyId(), message, algorithm.name(), REGION);
+            Signature verifier = Signature.getInstance(algorithm.getJavaName(), BouncyCastleProvider.PROVIDER_NAME);
+            verifier.initVerify(importedKeyPair.getPublic());
+            verifier.update(message);
+            assertTrue(verifier.verify(signature));
+        }
+
         @Test
-        void nonRsaAsymmetricKeySpecsCannotUseExternalOrigin() {
+        void eccImportAcceptsACompressedEmbeddedPublicKey() throws Exception {
+            KmsKey key = externalKey("ECC_NIST_P256", "SIGN_VERIFY");
+            KeyPair keyPair = ecKeyPair("ECC_NIST_P256");
+            byte[] compressedPoint = ECNamedCurveTable.getByName("secp256r1").getCurve()
+                    .decodePoint(ecPublicPoint(keyPair)).getEncoded(true);
+
+            KmsKey imported = importInto(key, ecPkcs8(keyPair, "secp256r1", p256NamedCurve(), compressedPoint),
+                    RSA_AES_SHA_256);
+
+            assertEquals("Enabled", imported.getKeyState());
+            assertArrayEquals(keyPair.getPublic().getEncoded(),
+                    Base64.getDecoder().decode(imported.getPublicKeyEncoded()));
+        }
+
+        @Test
+        void eccImportRejectsKeyMaterialOnAnotherCurve() throws Exception {
+            KmsKey key = externalKey("ECC_NIST_P256", "SIGN_VERIFY");
+            byte[] p384Material = ecKeyPair("ECC_NIST_P384").getPrivate().getEncoded();
+
             AwsException ex = assertThrows(AwsException.class, () ->
-                    externalKey("ECC_NIST_P256", "SIGN_VERIFY"));
+                    importInto(key, p384Material, RSA_AES_SHA_256));
+
+            assertEquals("IncorrectKeyMaterialException", ex.getErrorCode());
+            assertEquals("PendingImport", kmsService.describeKey(key.getKeyId(), REGION).getKeyState());
+        }
+
+        @Test
+        void eccImportRejectsExplicitCurveParameters() throws Exception {
+            KmsKey key = externalKey("ECC_NIST_P256", "SIGN_VERIFY");
+            KeyPair keyPair = ecKeyPair("ECC_NIST_P256");
+            AlgorithmIdentifier explicitCurve = new AlgorithmIdentifier(X9ObjectIdentifiers.id_ecPublicKey,
+                    new X962Parameters(ECNamedCurveTable.getByName("secp256r1")));
+            byte[] material = ecPkcs8(keyPair, "secp256r1", explicitCurve, ecPublicPoint(keyPair));
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    importInto(key, material, RSA_AES_SHA_256));
+
+            assertEquals("IncorrectKeyMaterialException", ex.getErrorCode());
+            assertEquals("PendingImport", kmsService.describeKey(key.getKeyId(), REGION).getKeyState());
+        }
+
+        @Test
+        void eccImportRejectsAnEmbeddedPublicKeyThatDoesNotMatch() throws Exception {
+            KmsKey key = externalKey("ECC_NIST_P256", "SIGN_VERIFY");
+            KeyPair keyPair = ecKeyPair("ECC_NIST_P256");
+            byte[] otherPublicPoint = ecPublicPoint(ecKeyPair("ECC_NIST_P256"));
+            byte[] material = ecPkcs8(keyPair, "secp256r1", p256NamedCurve(), otherPublicPoint);
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    importInto(key, material, RSA_AES_SHA_256));
+
+            assertEquals("IncorrectKeyMaterialException", ex.getErrorCode());
+            assertEquals("PendingImport", kmsService.describeKey(key.getKeyId(), REGION).getKeyState());
+        }
+
+        @Test
+        void eccImportRejectsAnRsaPrivateKey() throws Exception {
+            KmsKey key = externalKey("ECC_NIST_P256", "SIGN_VERIFY");
+            byte[] rsaMaterial = rsaKeyPair("RSA_2048").getPrivate().getEncoded();
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    importInto(key, rsaMaterial, RSA_AES_SHA_256));
+
+            assertEquals("IncorrectKeyMaterialException", ex.getErrorCode());
+            assertEquals("PendingImport", kmsService.describeKey(key.getKeyId(), REGION).getKeyState());
+        }
+
+        @Test
+        void eccImportRejectsInvalidPkcs8Material() {
+            KmsKey key = externalKey("ECC_SECG_P256K1", "SIGN_VERIFY");
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    importInto(key, material(32, (byte) 7), RSA_AES_SHA_256));
+
+            assertEquals("IncorrectKeyMaterialException", ex.getErrorCode());
+            assertEquals("PendingImport", kmsService.describeKey(key.getKeyId(), REGION).getKeyState());
+        }
+
+        @ParameterizedTest
+        @ValueSource(strings = {"ECC_NIST_EDWARDS25519", "ML_DSA_44"})
+        void asymmetricKeySpecsWithoutImportSupportCannotUseExternalOrigin(String keySpec) {
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    externalKey(keySpec, "SIGN_VERIFY"));
 
             assertEquals("UnsupportedOperationException", ex.getErrorCode());
         }

@@ -1125,15 +1125,16 @@ public class KmsService implements ResourceProvider {
     }
 
     /**
-     * Allows imports for symmetric, HMAC and RSA key specs. Other key specs are not supported.
+     * Allows imports for symmetric, HMAC, RSA and ECC key specs. Other key specs are not supported.
      */
     private static String requireImportableSpec(KmsKeySpec spec) {
         if (spec != KmsKeySpec.SYMMETRIC_DEFAULT
                 && spec.getKeyType() != KmsKeySpec.KeyType.HMAC
-                && spec.getKeyType() != KmsKeySpec.KeyType.RSA) {
+                && spec.getKeyType() != KmsKeySpec.KeyType.RSA
+                && spec.getKeyType() != KmsKeySpec.KeyType.ECC) {
 
             throw new AwsException("UnsupportedOperationException",
-                    "Origin EXTERNAL is only supported for SYMMETRIC_DEFAULT, HMAC and RSA key specs, not "
+                    "Origin EXTERNAL is only supported for SYMMETRIC_DEFAULT, HMAC, RSA and ECC key specs, not "
                             + spec + ".", 400);
         }
         return EXTERNAL_ORIGIN;

@@ -34,6 +34,11 @@ final class EccSecgP256k1KeyType implements KmsKeyType {
     }
 
     @Override
+    public void importKeyMaterial(KmsKey key, byte[] material) {
+        BcEcKeys.importPrivateKey(key, material, CURVE);
+    }
+
+    @Override
     public byte[] sign(KmsKey key, byte[] message, KmsKeySpec.Algorithm algorithm, KmsMessageType messageType)
             throws GeneralSecurityException, IOException {
         ECPrivateKeyParameters privateKey = BcEcKeys.privateKeyParameters(key, CURVE);
