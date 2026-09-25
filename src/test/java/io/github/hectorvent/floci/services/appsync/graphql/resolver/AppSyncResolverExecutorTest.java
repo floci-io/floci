@@ -237,10 +237,8 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void earlyReturnInTheBeforeStepSkipsTheFunctionsAndTheAfterStep() {
-        when(appSync.getFunction(API_ID, "fn1"))
-                .thenReturn(function("fn1", "one", "accountDB", "fn1-code"));
         Resolver resolver = resolver(ResolverKind.PIPELINE, "pipeline-code");
-        resolver.setPipelineConfig(Map.of("functions", List.of("fn1")));
+        resolver.setPipelineConfig(Map.of("functions", List.of("missing")));
         jsRuntime.script("pipeline-code", "request", (h, ctx) ->
                 new JsEvaluation(Map.of("cached", true), Map.of(), true, List.of(), null, false));
 
@@ -660,7 +658,7 @@ class AppSyncResolverExecutorTest {
         assertTrue(result.errors().get(0).message().contains("VTL"),
                 result.errors().get(0).message());
         assertEquals("UnsupportedOperation", result.errors().get(0).errorType());
-        assertTrue(jsRuntime.calls.isEmpty());
+        assertEquals(List.of("pipeline-code#request"), jsRuntime.calls);
         assertTrue(invoker.requests.isEmpty());
     }
 

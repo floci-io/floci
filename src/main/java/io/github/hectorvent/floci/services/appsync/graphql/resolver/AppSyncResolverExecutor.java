@@ -203,11 +203,12 @@ public class AppSyncResolverExecutor {
             // is not the field's result, but it is what the first function sees as ctx.prev.result.
             Stage resolverStage = Stage.of(resolver);
             rejectVtlPipelineStage(resolverStage, "resolver");
-            List<FunctionConfiguration> functions = pipelineFunctions();
             Object before = callHandler(resolverStage, REQUEST, null, null, null);
             if (returned) {
                 return result(earlyReturnValue);
             }
+                        List<FunctionConfiguration> functions = pipelineFunctions();
+
             previousResult = before;
 
             for (FunctionConfiguration function : functions) {
