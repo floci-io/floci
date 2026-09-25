@@ -311,8 +311,8 @@ that publish those images.
 | DeleteRouteTable | Deletes a route table from the local EC2 store. |
 | AssociateRouteTable | Associates a route table with a subnet. |
 | DisassociateRouteTable | Removes a route table association. |
-| CreateRoute | Adds a route to a route table. Accepts `VpcPeeringConnectionId` as a target (alongside `GatewayId`/`NatGatewayId`/`EgressOnlyInternetGatewayId`) and reports it back on `DescribeRouteTables`. |
-| ReplaceRoute | Replaces the target of an existing route. |
+| CreateRoute | Adds a route to a route table. Accepts `InstanceId`, `NetworkInterfaceId`, and `VpcPeeringConnectionId` as targets (alongside `GatewayId`/`NatGatewayId`/`EgressOnlyInternetGatewayId`) and reports them back on `DescribeRouteTables`. |
+| ReplaceRoute | Replaces the target of an existing route, accepting `InstanceId`, `NetworkInterfaceId`, and `VpcPeeringConnectionId`. |
 | DeleteRoute | Removes a route from a route table. |
 
 ### VPC Peering Connections
