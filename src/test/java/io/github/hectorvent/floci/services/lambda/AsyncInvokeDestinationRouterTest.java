@@ -512,6 +512,10 @@ class AsyncInvokeDestinationRouterTest {
         return new InvokeResult(200, null, payload.getBytes(), null, "req-1");
     }
 
+    private static InvokeResult failure(String functionError, String payload) {
+        return new InvokeResult(200, functionError, payload.getBytes(), null, "req-1");
+    }
+
     @SuppressWarnings("unchecked")
     private static <T> Instance<T> instanceOf(T bean) {
         Instance<T> instance = mock(Instance.class);
