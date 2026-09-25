@@ -742,6 +742,10 @@ public class RedshiftService {
                 .orElseThrow(() -> new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404));
         boolean cloudWatch = "cloudwatch".equalsIgnoreCase(logDestinationType);
         boolean s3Table = "s3table".equalsIgnoreCase(logDestinationType);
+        if (!s3Table && (s3TableKmsKeyId != null || s3TableGranularity != null)) {
+            throw new AwsException("InvalidParameterCombination",
+                    "S3-table logging settings are valid only when LogDestinationType is s3table", 400);
+        }
         if (!cloudWatch && !s3Table && (bucketName == null || bucketName.isBlank())) {
             throw new AwsException("InvalidParameterValue", "BucketName is required for an S3 log destination", 400);
         }

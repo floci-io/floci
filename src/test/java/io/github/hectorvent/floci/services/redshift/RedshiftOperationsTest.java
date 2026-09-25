@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerM
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -46,6 +47,9 @@ public class RedshiftOperationsTest {
 
     @InjectMock
     RedshiftContainerManager containerManager;
+
+    @Inject
+    RedshiftService service;
 
     @Test
     @Order(1)
@@ -242,7 +246,10 @@ public class RedshiftOperationsTest {
             .body(containsString("<LoggingEnabled>true</LoggingEnabled>"))
             .body(containsString("<LogDestinationType>s3table</LogDestinationType>"))
             .body(containsString("<S3Tables>"))
-            .body(containsString("<S3TableGranularity>daily</S3TableGranularity>"));
+            .body(containsString("<S3TableGranularity>daily</S3TableGranularity>"))
+            .body(not(containsString("<S3TableKmsKeyId>")));
+
+        assertEquals("test-kms-key", service.describeLoggingStatus("cluster-src").getLoggingS3TableKmsKeyId());
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -254,6 +261,58 @@ public class RedshiftOperationsTest {
         .then()
             .statusCode(200)
             .contentType("application/xml")
+            .body(containsString("<LoggingEnabled>false</LoggingEnabled>"))
+            .body(not(containsString("<S3Tables>")));
+
+        // 1e.1 S3-table settings are invalid for a non-table destination
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "EnableLogging")
+            .formParam("ClusterIdentifier", "cluster-src")
+            .formParam("LogDestinationType", "cloudwatch")
+            .formParam("S3TableGranularity", "daily")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .contentType("application/xml")
+            .body(containsString("<Code>InvalidParameterCombination</Code>"));
+
+        // 1e.2 Non-table logging status must omit the S3-table status block
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "EnableLogging")
+            .formParam("ClusterIdentifier", "cluster-src")
+            .formParam("LogDestinationType", "cloudwatch")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<LogDestinationType>cloudwatch</LogDestinationType>"))
+            .body(not(containsString("<S3Tables>")));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DisableLogging")
+            .formParam("ClusterIdentifier", "cluster-src")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<LoggingEnabled>false</LoggingEnabled>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DescribeLoggingStatus")
+            .formParam("ClusterIdentifier", "cluster-src")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
             .body(containsString("<LoggingEnabled>false</LoggingEnabled>"))
             .body(not(containsString("<S3Tables>")));
 

@@ -944,6 +944,19 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void enableLoggingRejectsS3TableSettingsForOtherDestinations() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.enableLogging("my-cluster", null, null, "s3", null, null, "daily"));
+
+        assertEquals("InvalidParameterCombination", ex.getErrorCode());
+        assertFalse(cluster.isLoggingEnabled());
+    }
+
+    @Test
     void disableLoggingClearsS3TableFields() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");

@@ -952,8 +952,7 @@ public class RedshiftQueryHandler {
             }
             builder.end("LogExports");
         }
-        if ("s3table".equalsIgnoreCase(cluster.getLoggingDestinationType())
-                || cluster.getLoggingS3TableGranularity() != null) {
+        if ("s3table".equalsIgnoreCase(cluster.getLoggingDestinationType())) {
             builder.start("S3Tables");
             if (cluster.getLoggingS3TableGranularity() != null) {
                 builder.elem("S3TableGranularity", cluster.getLoggingS3TableGranularity());
