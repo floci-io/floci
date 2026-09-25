@@ -173,8 +173,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             "amazon-side-asn", "attachment.state", "attachment.vpc-id", "availability-zone",
             "state", "tag-key", "tag-value", "type", "vpn-gateway-id");
     /**
-     * The filter names DescribeVpcs documents, verbatim. "cidr-block" is not among them and is kept
-     * because matchesFilters already accepts it as an undocumented alias real EC2 honours.
+     * The filter names DescribeVpcs documents, plus three undocumented aliases matchesFilters
+     * already honours and real EC2 accepts: "cidr-block", "isDefault" and "tag-value". Being more
+     * permissive than the documentation is the safe direction, since the cost of refusing a name
+     * callers really use is higher than the cost of serving one the docs omit.
+     *
+     * <p>Every name here has a matching arm in matchesFilters. Accepting a name the matcher does
+     * not implement would be worse than refusing it, because the filter would then be accepted and
+     * silently match everything.
      */
     private static final Set<String> VPC_FILTERS = Set.of(
             "cidr", "cidr-block",
@@ -8177,6 +8183,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                         .anyMatch(a -> matchesValue(values, a.getCidrBlock()));
                 case "cidr-block-association.state" -> vpc.getCidrBlockAssociationSet().stream()
                         .anyMatch(a -> matchesValue(values, a.getCidrBlockState()));
+                case "dhcp-options-id" -> matchesValue(values, vpc.getDhcpOptionsId());
+                case "owner-id" -> matchesValue(values, vpc.getOwnerId());
+                case "ipv6-cidr-block-association.ipv6-pool" -> vpc.getIpv6CidrBlockAssociationSet()
+                        .stream().anyMatch(a -> matchesValue(values, a.getIpv6Pool()));
                 case "ipv6-cidr-block-association.association-id" -> vpc.getIpv6CidrBlockAssociationSet().stream()
                         .anyMatch(a -> matchesValue(values, a.getAssociationId()));
                 case "ipv6-cidr-block-association.ipv6-cidr-block" -> vpc.getIpv6CidrBlockAssociationSet().stream()
