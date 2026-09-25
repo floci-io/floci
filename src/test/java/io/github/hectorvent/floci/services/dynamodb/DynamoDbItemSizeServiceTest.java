@@ -34,12 +34,12 @@ class DynamoDbItemSizeServiceTest {
     private static final int SHORT_KEY_BYTES = 3;
 
     private DynamoDbService service;
-    private DynamoDbJsonHandler handler;
+    private NativeDynamoDbJsonHandler handler;
 
     @BeforeEach
     void setUp() {
         service = new DynamoDbService(new InMemoryStorage<>());
-        handler = new DynamoDbJsonHandler(service, null, null, new ObjectMapper());
+        handler = new NativeDynamoDbJsonHandler(service, null, null, new ObjectMapper());
         service.createTable(TABLE, List.of(new KeySchemaElement("pk", "HASH")),
                 List.of(new AttributeDefinition("pk", "S")), 5L, 5L, REGION);
     }

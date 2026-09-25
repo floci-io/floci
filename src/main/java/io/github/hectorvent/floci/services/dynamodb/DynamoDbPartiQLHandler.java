@@ -133,14 +133,14 @@ class DynamoDbPartiQLHandler {
     private static DynamoDbWriteCapacity.Cost readCapacity(Stmt.Select stmt, TableDefinition table,
                                                            DynamoDbAccessPath accessPath, Page page,
                                                            boolean consistentRead) {
-        double units = DynamoDbJsonHandler.readCapacityUnits(page.scannedBytes(), consistentRead);
+        double units = NativeDynamoDbJsonHandler.readCapacityUnits(page.scannedBytes(), consistentRead);
         if (!accessPath.isIndex()) {
             return new DynamoDbWriteCapacity.Cost(units, Map.of(), Map.of());
         }
         double tableUnits = 0;
         if (fetchesFromTable(stmt, table, accessPath)) {
             for (JsonNode item : page.scannedItems()) {
-                tableUnits += DynamoDbJsonHandler.readCapacityUnits(
+                tableUnits += NativeDynamoDbJsonHandler.readCapacityUnits(
                         DynamoDbItemSize.calculateItemSize(item), consistentRead);
             }
         }

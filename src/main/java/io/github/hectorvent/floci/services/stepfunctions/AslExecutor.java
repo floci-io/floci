@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.common.CsvParser;
 import io.github.hectorvent.floci.core.common.CustomResourceLiveness;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
@@ -68,9 +69,6 @@ import io.vertx.mutiny.core.Vertx;
 import io.vertx.mutiny.ext.web.client.HttpRequest;
 import io.vertx.mutiny.ext.web.client.HttpResponse;
 import io.vertx.mutiny.ext.web.client.WebClient;
-import io.quarkus.arc.Arc;
-import io.quarkus.arc.ArcContainer;
-import io.quarkus.arc.ManagedContext;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
@@ -474,33 +472,12 @@ public class AslExecutor {
      * pool would otherwise run with no active scope and resolve its Task integrations against the
      * default account instead of the execution's. Each branch thread therefore activates its own
      * scope here, mirroring how {@link #executeAsync}/{@link #executeSync} wrap {@code doExecute}.
+     * Delegates to {@link RequestScopes#callAsChecked}, which restores a previously active scope's
+     * account so a reused thread does not keep the execution's account.
      */
     private <T> T callUnderExecutionAccount(StateMachine sm, Callable<T> body) throws Exception {
         String accountId = AwsArnUtils.accountOrDefault(sm.getStateMachineArn(), null);
-        ArcContainer container = Arc.container();
-        if (accountId == null || accountId.isBlank() || container == null || !container.isRunning()) {
-            return body.call();
-        }
-        ManagedContext requestContext = container.requestContext();
-        boolean alreadyActive = requestContext.isActive();
-        if (!alreadyActive) {
-            requestContext.activate();
-        }
-        // Execution runs on a background worker that normally has no active scope. If it did run
-        // inside an already-active scope, restore its previous account afterwards so we don't leave
-        // the execution's account behind on a reused thread.
-        RequestContext ctx = container.instance(RequestContext.class).get();
-        String previousAccountId = alreadyActive ? ctx.getAccountId() : null;
-        try {
-            ctx.setAccountId(accountId);
-            return body.call();
-        } finally {
-            if (!alreadyActive) {
-                requestContext.terminate();
-            } else {
-                ctx.setAccountId(previousAccountId);
-            }
-        }
+        return RequestScopes.callAsChecked(accountId == null || accountId.isBlank() ? null : accountId, body);
     }
 
     private void doExecute(StateMachine sm, Execution exec, List<HistoryEvent> history,

@@ -42,11 +42,11 @@ class DynamoDbStreamViewTypeDurabilityTest {
         return store;
     }
 
-    private DynamoDbJsonHandler handlerFor(StorageBackend<String, TableDefinition> store,
+    private NativeDynamoDbJsonHandler handlerFor(StorageBackend<String, TableDefinition> store,
                                            DynamoDbStreamService streams) {
         DynamoDbService service = new DynamoDbService(
                 store, null, new RegionResolver(REGION, "000000000000"), streams, null);
-        return new DynamoDbJsonHandler(service, streams, null, mapper);
+        return new NativeDynamoDbJsonHandler(service, streams, null, mapper);
     }
 
     private ObjectNode createTableRequest(String viewType) {
@@ -92,7 +92,7 @@ class DynamoDbStreamViewTypeDurabilityTest {
         Path file = tmp.resolve("tables.json");
         StorageBackend<String, TableDefinition> store = diskStore(file);
         DynamoDbStreamService streams = new DynamoDbStreamService(mapper, store);
-        DynamoDbJsonHandler handler = handlerFor(store, streams);
+        NativeDynamoDbJsonHandler handler = handlerFor(store, streams);
 
         handler.handle("CreateTable", createTableRequest("NEW_AND_OLD_IMAGES"), REGION);
         handler.handle("UpdateTable", updateViewTypeRequest("KEYS_ONLY"), REGION);

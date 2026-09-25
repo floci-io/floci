@@ -1697,7 +1697,7 @@ public class DynamoDbService implements ResourceProvider {
 
     /**
      * Backward-compatible overload for callers that do not pass a ClientRequestToken.
-     * The 4-arg variant is what {@link DynamoDbJsonHandler#handleTransactWriteItems}
+     * The 4-arg variant is what {@link NativeDynamoDbJsonHandler#handleTransactWriteItems}
      * uses so the caller's ClientRequestToken is honoured.
      */
     public void transactWriteItems(List<JsonNode> transactItems, String region) {

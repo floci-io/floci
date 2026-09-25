@@ -432,8 +432,8 @@ deferred_handlers:
   - { path: src/main/java/io/github/hectorvent/floci/services/cognito/CognitoJsonHandler.java }  # non-tabular doc (grouped/inline); separate docs effort
   - { path: src/main/java/io/github/hectorvent/floci/services/configservice/ConfigServiceJsonHandler.java }  # non-tabular doc (grouped/inline)
   - { path: src/main/java/io/github/hectorvent/floci/services/cur/CurJsonHandler.java }  # no standalone action table yet
-  - { path: src/main/java/io/github/hectorvent/floci/services/dynamodb/DynamoDbJsonHandler.java }  # multi-table doc
-  - { path: src/main/java/io/github/hectorvent/floci/services/dynamodb/DynamoDbStreamsJsonHandler.java }  # multi-table doc
+  - { path: src/main/java/io/github/hectorvent/floci/services/dynamodb/NativeDynamoDbJsonHandler.java }  # multi-table doc
+  - { path: src/main/java/io/github/hectorvent/floci/services/dynamodb/NativeDynamoDbStreamsJsonHandler.java }  # multi-table doc
   - { path: src/main/java/io/github/hectorvent/floci/services/ec2/Ec2QueryHandler.java }  # non-tabular doc (grouped/inline)
   - { path: src/main/java/io/github/hectorvent/floci/services/ecr/EcrJsonHandler.java }  # doc packs multiple actions per row (`A` / `B`) + REST endpoints; needs de-grouping
   - { path: src/main/java/io/github/hectorvent/floci/services/ecs/EcsJsonHandler.java }  # non-tabular doc (grouped/inline)
