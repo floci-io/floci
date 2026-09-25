@@ -29,6 +29,7 @@ import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
 import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService;
 import io.github.hectorvent.floci.services.timestreaminfluxdb.TimestreamInfluxDbService;
+import io.quarkus.runtime.Quarkus;
 import io.quarkus.runtime.ShutdownDelayInitiatedEvent;
 import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.StartupEvent;
@@ -41,6 +42,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InOrder;
 import org.mockito.Mock;
+import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -383,6 +385,29 @@ class EmulatorLifecycleTest {
 
         verify(initializationHooksRunner, never()).run(InitializationHook.START);
         verify(initLifecycleState, never()).markStartCompleted();
+    }
+
+    @Test
+    @DisplayName("onHttpStart exits the process when a startup hook is interrupted")
+    void onHttpStart_hookInterrupted_exitsProcess() throws IOException, InterruptedException {
+        when(tlsConfig.enabled()).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(true);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+        doThrow(new InterruptedException("interrupted"))
+                .when(initializationHooksRunner).run(InitializationHook.START);
+
+        Thread.interrupted();
+        try (MockedStatic<Quarkus> quarkus = Mockito.mockStatic(Quarkus.class)) {
+            try {
+                emulatorLifecycle.onHttpStart(new HttpServerStart(new HttpServerOptions().setPort(4566)));
+
+                assertTrue(Thread.currentThread().isInterrupted(),
+                        "Interrupt flag must be restored so the JVM sees the request to stop");
+            } finally {
+                Thread.interrupted();
+            }
+            quarkus.verify(Quarkus::asyncExit);
+        }
     }
 
     @Test

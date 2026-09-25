@@ -284,6 +284,7 @@ public class EmulatorLifecycle {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             LOG.error("Startup hook execution interrupted — shutting down", e);
+            Quarkus.asyncExit();
         } catch (Exception e) {
             LOG.error("Startup hook execution failed — shutting down", e);
             Quarkus.asyncExit();
