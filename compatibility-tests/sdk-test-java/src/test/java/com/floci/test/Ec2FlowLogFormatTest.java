@@ -14,6 +14,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 class Ec2FlowLogFormatTest {
     private static final String FORMAT =
             "${version} ${account-id} ${interface-id} ${srcaddr} ${dstaddr} ${action}";
+    /** What AWS creates a flow log with when LogFormat is omitted, the version 2 fields. */
+    private static final String DEFAULT_FORMAT =
+            "${version} ${account-id} ${interface-id} ${srcaddr} ${dstaddr} ${srcport} "
+            + "${dstport} ${protocol} ${packets} ${bytes} ${start} ${end} ${action} ${log-status}";
 
     private static String createFlowLog(Ec2Client ec2, String vpcId, String logFormat) {
         return ec2.createFlowLogs(r -> {
@@ -35,7 +39,7 @@ class Ec2FlowLogFormatTest {
     }
 
     @Test
-    @DisplayName("DescribeFlowLogs returns the LogFormat the flow log was created with")
+    @DisplayName("DescribeFlowLogs returns the custom LogFormat, or the default when none was set")
     void describesTheCustomLogFormat() {
         try (Ec2Client ec2 = TestFixtures.ec2Client()) {
             String vpcId = ec2.createVpc(r -> r.cidrBlock("10.72.0.0/16")).vpc().vpcId();
@@ -46,7 +50,7 @@ class Ec2FlowLogFormatTest {
                 withoutFormat = createFlowLog(ec2, vpcId, null);
 
                 assertThat(describe(ec2, withFormat).logFormat()).isEqualTo(FORMAT);
-                assertThat(describe(ec2, withoutFormat).logFormat()).isNull();
+                assertThat(describe(ec2, withoutFormat).logFormat()).isEqualTo(DEFAULT_FORMAT);
             } finally {
                 for (String id : new String[] {withFormat, withoutFormat}) {
                     if (id != null) {

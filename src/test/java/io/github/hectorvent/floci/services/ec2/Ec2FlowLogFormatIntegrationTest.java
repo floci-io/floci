@@ -6,9 +6,7 @@ import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
-import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
-import static org.hamcrest.Matchers.not;
 
 /**
  * DescribeFlowLogs reports the custom LogFormat the flow log was created with.
@@ -65,14 +63,20 @@ class Ec2FlowLogFormatIntegrationTest {
             .body("DescribeFlowLogsResponse.flowLogSet.item.logFormat", equalTo(FORMAT));
     }
 
-    /** A flow log created without one reports no logFormat rather than an empty element. */
+    /**
+     * A flow log created without a LogFormat reports the default one.
+     *
+     * <p>The model says CreateFlowLogs builds it with the default format when the parameter is
+     * omitted, so the flow log has a format from that point on and DescribeFlowLogs reports it.
+     */
     @Test
-    void noCustomFormatReportsNoElement() {
+    void noCustomFormatReportsTheDefault() {
         String flowLogId = createFlowLog(vpc());
 
         ec2("DescribeFlowLogs", "FlowLogId.1", flowLogId)
             .statusCode(200)
             .body("DescribeFlowLogsResponse.flowLogSet.item.flowLogId", equalTo(flowLogId))
-            .body(not(containsString("<logFormat>")));
+            .body("DescribeFlowLogsResponse.flowLogSet.item.logFormat",
+                    equalTo(FlowLogService.DEFAULT_LOG_FORMAT));
     }
 }
