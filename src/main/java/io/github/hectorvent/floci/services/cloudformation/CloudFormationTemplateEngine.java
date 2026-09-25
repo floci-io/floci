@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.TextNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
@@ -279,8 +280,8 @@ public class CloudFormationTemplateEngine {
             case "AWS::Region" -> region;
             case "AWS::StackName" -> stackName;
             case "AWS::StackId" -> stackId;
-            case "AWS::Partition" -> "aws";
-            case "AWS::URLSuffix" -> "amazonaws.com";
+            case "AWS::Partition" -> AwsRegions.partitionFor(region);
+            case "AWS::URLSuffix" -> AwsRegions.dnsSuffixFor(region);
             case "AWS::NoValue" -> "";
             default -> {
                 if (physicalIds.containsKey(name)) {

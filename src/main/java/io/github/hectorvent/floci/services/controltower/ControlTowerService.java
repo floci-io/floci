@@ -183,7 +183,7 @@ public class ControlTowerService {
                     "Updating or deleting the resource can cause an inconsistent state.", 409);
         }
 
-        String arn = "arn:aws:controltower:" + region + ":" + accountId + ":landingzone/" + shortId();
+        String arn = AwsArnUtils.Arn.of("controltower", region, accountId, "landingzone/" + shortId()).toString();
         LandingZone landingZone = new LandingZone(
                 arn, version, version, STATUS_ACTIVE, DRIFT_IN_SYNC, manifest, null);
         landingZoneStore.put(region, landingZone);
@@ -474,8 +474,7 @@ public class ControlTowerService {
             reconcileControlTowerGuardrails(accountId, targetIdentifier);
         }
 
-        String arn = "arn:aws:controltower:" + region + ":" + accountId
-                + ":enabledbaseline/" + shortId();
+        String arn = AwsArnUtils.Arn.of("controltower", region, accountId, "enabledbaseline/" + shortId()).toString();
         String opId = UUID.randomUUID().toString();
         EnabledBaseline value = new EnabledBaseline(
                 arn, baselineIdentifier, baselineVersion, targetIdentifier, OP_SUCCEEDED, parameters);
@@ -588,8 +587,8 @@ public class ControlTowerService {
                 : landingZoneStore.get(region)
                         .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Landing zone not found.", 404));
         return new EnabledBaseline(
-                "arn:aws:controltower:" + region + ":" + accountId
-                        + ":enabledbaseline/" + IDENTITY_CENTER_ENABLED_BASELINE_ID,
+                AwsArnUtils.Arn.of("controltower", region, accountId,
+                        "enabledbaseline/" + IDENTITY_CENTER_ENABLED_BASELINE_ID).toString(),
                 baselineArn(region, IDENTITY_CENTER_BASELINE_ID),
                 IDENTITY_CENTER_BASELINE_VERSION,
                 lz.getArn(),
@@ -598,7 +597,7 @@ public class ControlTowerService {
     }
 
     private static String baselineArn(String region, String baselineId) {
-        return "arn:aws:controltower:" + region + "::baseline/" + baselineId;
+        return AwsArnUtils.Arn.of("controltower", region, "", "baseline/" + baselineId).toString();
     }
 
     private static String shortId() {

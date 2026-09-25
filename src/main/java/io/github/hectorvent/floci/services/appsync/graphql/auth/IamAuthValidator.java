@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.appsync.graphql.auth;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.AccountResolver;
 import io.github.hectorvent.floci.core.common.auth.CredentialScope;
@@ -82,7 +83,8 @@ public class IamAuthValidator {
             }
         }
         String userArn = iamService.resolveCallerArn(accessKeyId).orElseGet(
-                () -> isEmulatorAllow(accessKeyId) ? "arn:aws:iam::" + nullToEmpty(info.accountId()) + ":root"
+                () -> isEmulatorAllow(accessKeyId)
+                        ? AwsArnUtils.Arn.global(AwsRegions.partitionFor(info.region()), "iam", nullToEmpty(info.accountId()), "root").toString()
                         : null);
         if (userArn == null) {
             // resolveSecretKey already proved the key is registered, so this is unreachable for any

@@ -84,9 +84,9 @@ public class LambdaLayerService {
             "ruby2.5", "ruby2.6", "ruby2.7", "ruby3.2", "ruby3.3", "ruby3.4", "ruby4.0",
             "go1.x", "go1.9", "provided", "provided.al2", "provided.al2023",
             "byol", "custom", "nasa",
-            "arn:aws:greengrass:::runtime/function/executable",
-            "arn:aws-cn:greengrass:::runtime/function/executable",
-            "arn:aws-us-gov:greengrass:::runtime/function/executable");
+            "arn:aws:greengrass:::runtime/function/executable", // partition-literal: the Runtime enum lists these three ids verbatim
+            "arn:aws-cn:greengrass:::runtime/function/executable", // partition-literal: the Runtime enum lists these three ids verbatim
+            "arn:aws-us-gov:greengrass:::runtime/function/executable"); // partition-literal: the Runtime enum lists these three ids verbatim
 
     private final LambdaLayerStore layerStore;
     private final ZipExtractor zipExtractor;

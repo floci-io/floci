@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.core.common.XmlParser;
@@ -795,8 +796,8 @@ public class S3Service implements Resettable, ResourceProvider {
                 bucketName,
                 key,
                 "AWS",
-                "arn:aws:iam::cloudfront:user/CloudFront Origin Access Identity "
-                        + originAccessIdentityId,
+                regionResolver.buildGlobalArn("iam", "cloudfront",
+                        "user/CloudFront Origin Access Identity " + originAccessIdentityId),
                 Map.of(),
                 canonicalUserId);
     }
@@ -822,7 +823,7 @@ public class S3Service implements Resettable, ResourceProvider {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() ->
                         new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
-        String resourceArn = S3PublicAccessEvaluator.objectArn(bucketName, key);
+        String resourceArn = S3PublicAccessEvaluator.objectArn(regionResolver.getPartition(), bucketName, key);
         S3PublicAccessEvaluator.PublicAccessDecision decision =
                 S3PublicAccessEvaluator.principalPolicyDecision(
                         objectMapper,
@@ -843,7 +844,7 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     void authorizeBucketRead(String bucketName, String action, RequestAuthorization authorization) {
-        String bucketArn = S3PublicAccessEvaluator.bucketArn(bucketName);
+        String bucketArn = S3PublicAccessEvaluator.bucketArn(regionResolver.getPartition(), bucketName);
         authorizeS3Read(bucketName, null, null, action, bucketArn, authorization);
     }
 
@@ -871,7 +872,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 ? authorization
                 : RequestAuthorization.unsigned();
         if (requestAuthorization.signed()) {
-            String bucketArn = S3PublicAccessEvaluator.bucketArn(bucketName);
+            String bucketArn = S3PublicAccessEvaluator.bucketArn(regionResolver.getPartition(), bucketName);
             authorizeSignedBucketPolicy(bucketName, null, action, bucketArn, requestAuthorization);
             return;
         }
@@ -885,7 +886,7 @@ public class S3Service implements Resettable, ResourceProvider {
             throw accessDeniedException(bucketName, null);
         }
 
-        String bucketArn = S3PublicAccessEvaluator.bucketArn(bucketName);
+        String bucketArn = S3PublicAccessEvaluator.bucketArn(regionResolver.getPartition(), bucketName);
         S3PublicAccessEvaluator.PublicAccessDecision policyDecision =
                 S3PublicAccessEvaluator.publicPolicyDecision(objectMapper, bucket.getPolicy(), action, bucketArn);
         if (policyDecision == S3PublicAccessEvaluator.PublicAccessDecision.DENY) {
@@ -899,7 +900,7 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     void authorizeObjectRead(String bucketName, String key, String versionId, String action, RequestAuthorization authorization) {
-        String objectArn = S3PublicAccessEvaluator.objectArn(bucketName, key);
+        String objectArn = S3PublicAccessEvaluator.objectArn(regionResolver.getPartition(), bucketName, key);
         authorizeS3Read(bucketName, key, versionId, action, objectArn, authorization);
     }
 
@@ -922,7 +923,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 ? authorization
                 : RequestAuthorization.unsigned();
         if (requestAuthorization.signed()) {
-            String objectArn = S3PublicAccessEvaluator.objectArn(bucketName, key);
+            String objectArn = S3PublicAccessEvaluator.objectArn(regionResolver.getPartition(), bucketName, key);
             authorizeSignedBucketPolicy(bucketName, key, action, objectArn, requestAuthorization);
             return;
         }
@@ -933,7 +934,7 @@ public class S3Service implements Resettable, ResourceProvider {
         S3BlockPublicAccessSettings blockPublicAccess =
                 blockPublicAccessFor(bucket, ownedBucket.account());
 
-        String objectArn = S3PublicAccessEvaluator.objectArn(bucketName, key);
+        String objectArn = S3PublicAccessEvaluator.objectArn(regionResolver.getPartition(), bucketName, key);
         S3PublicAccessEvaluator.PublicAccessDecision policyDecision =
                 S3PublicAccessEvaluator.publicPolicyDecision(objectMapper, bucket.getPolicy(), action, objectArn);
         if (policyDecision == S3PublicAccessEvaluator.PublicAccessDecision.DENY) {
@@ -1112,7 +1113,7 @@ public class S3Service implements Resettable, ResourceProvider {
             }
         }
         String account = accessKeyId.matches("\\d{12}") ? accessKeyId : ownerId();
-        return Optional.of("arn:aws:iam::" + account + ":root");
+        return Optional.of(regionResolver.buildGlobalArn("iam", account, "root"));
     }
 
     private boolean isSameAccountAsBucketOwner(String accessKeyId, String principalArn, String bucketOwnerAccount) {
@@ -5375,7 +5376,8 @@ public class S3Service implements Resettable, ResourceProvider {
         List<ExplorerResource> resources = new ArrayList<>();
         for (Bucket bucket : listBuckets()) {
             resources.add(new ExplorerResource(
-                    "arn:aws:s3:::" + bucket.getName(),
+                    AwsArnUtils.Arn.global(AwsRegions.partitionFor(bucket.getRegion() != null
+                            ? bucket.getRegion() : regionResolver.getDefaultRegion()), "s3", "", bucket.getName()).toString(),
                     "s3:bucket",
                     "s3",
                     bucket.getRegion() != null ? bucket.getRegion() : regionResolver.getDefaultRegion(),

@@ -9484,7 +9484,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             }
             Instant created = createdAt.apply(resource);
             out.add(new ExplorerResource(
-                    "arn:aws:ec2:" + resourceRegion + ":" + ownerAccountId + ":" + resourceType + "/" + resourceId,
+                    AwsArnUtils.Arn.of("ec2", resourceRegion, ownerAccountId, resourceType + "/" + resourceId).toString(),
                     "ec2:" + resourceType, "ec2", resourceRegion, ownerAccountId,
                     created != null ? created : Instant.now(),
                     explorerTags(tags.apply(resource))));

@@ -491,9 +491,9 @@ public class ApplicationAutoScalingService {
             case "elasticache" -> "ElastiCacheRG";
             default -> "CustomResource";
         };
-        return "arn:aws:iam::" + regionResolver.getAccountId()
-                + ":role/aws-service-role/" + serviceNamespace + ".application-autoscaling.amazonaws.com/"
-                + "AWSServiceRoleForApplicationAutoScaling_" + suffix;
+        return regionResolver.buildGlobalArn("iam",
+                "role/aws-service-role/" + serviceNamespace + ".application-autoscaling.amazonaws.com/"
+                + "AWSServiceRoleForApplicationAutoScaling_" + suffix);
     }
 
     private static double nowEpochSeconds() {

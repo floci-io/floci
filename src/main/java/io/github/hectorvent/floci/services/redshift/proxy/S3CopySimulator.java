@@ -176,12 +176,13 @@ public final class S3CopySimulator {
         }
     }
 
-    private static String bucketArn(String bucket) {
-        return "arn:aws:s3:::" + bucket;
+    /** The bucket and object ARNs live in the role's partition: a China role authorizes China buckets. */
+    private static String bucketArn(String roleArn, String bucket) {
+        return AwsArnUtils.Arn.global(AwsArnUtils.parse(roleArn).partition(), "s3", "", bucket).toString();
     }
 
-    private static String objectArn(String bucket, String key) {
-        return "arn:aws:s3:::" + bucket + "/" + key;
+    private static String objectArn(String roleArn, String bucket, String key) {
+        return bucketArn(roleArn, bucket) + "/" + key;
     }
 
     private static String randomString(String characters, int length) {
@@ -234,14 +235,14 @@ public final class S3CopySimulator {
             try {
                 if (spec.manifest()) {
                     if (roleSession != null) {
-                        authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:GetObject", objectArn(spec.bucket(), spec.keyOrPrefix()));
+                        authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:GetObject", objectArn(spec.iamRoleArn(), spec.bucket(), spec.keyOrPrefix()));
                         s3.authorizeSignedGetObject(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket(), spec.keyOrPrefix());
                     } else {
                         s3.authorizeAnonymousGetObject(spec.bucket(), spec.keyOrPrefix());
                     }
                 } else {
                     if (roleSession != null) {
-                        authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:ListBucket", bucketArn(spec.bucket()));
+                        authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:ListBucket", bucketArn(spec.iamRoleArn(), spec.bucket()));
                         s3.authorizeSignedListBucket(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket());
                     } else {
                         s3.authorizeAnonymousListBucket(spec.bucket());
@@ -267,7 +268,7 @@ public final class S3CopySimulator {
             try {
                 for (String key : keys) {
                     if (roleSession != null) {
-                        authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:GetObject", objectArn(spec.bucket(), key));
+                        authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:GetObject", objectArn(spec.iamRoleArn(), spec.bucket(), key));
                         s3.authorizeSignedGetObject(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket(), key);
                     } else {
                         s3.authorizeAnonymousGetObject(spec.bucket(), key);
@@ -321,15 +322,15 @@ public final class S3CopySimulator {
         String probeKey = unloadDataKey(spec, 0);
         try {
             if (roleSession != null) {
-                authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:PutObject", objectArn(spec.bucket(), probeKey));
+                authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:PutObject", objectArn(spec.iamRoleArn(), spec.bucket(), probeKey));
                 s3.authorizeSignedPutObject(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket(), probeKey);
                 if (spec.manifest()) {
                     String manifestKey = spec.prefix() + "manifest";
-                    authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:PutObject", objectArn(spec.bucket(), manifestKey));
+                    authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:PutObject", objectArn(spec.iamRoleArn(), spec.bucket(), manifestKey));
                     s3.authorizeSignedPutObject(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket(), manifestKey);
                 }
                 if (!spec.allowOverwrite()) {
-                    authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:ListBucket", bucketArn(spec.bucket()));
+                    authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:ListBucket", bucketArn(spec.iamRoleArn(), spec.bucket()));
                     s3.authorizeSignedListBucket(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket());
                     if (targetPrefixHasObjects(spec, s3)) {
                         throw new S3TransferException(SQLSTATE_INTERNAL,
@@ -558,7 +559,7 @@ public final class S3CopySimulator {
         byte[] buffer = new byte[CHUNK];
         for (int i = 0; i < keys.size(); i++) {
             if (roleSession != null) {
-                authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:GetObject", objectArn(spec.bucket(), keys.get(i)));
+                authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:GetObject", objectArn(spec.iamRoleArn(), spec.bucket(), keys.get(i)));
                 s3.authorizeSignedGetObject(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket(), keys.get(i));
             } else {
                 s3.authorizeAnonymousGetObject(spec.bucket(), keys.get(i));
@@ -1130,7 +1131,7 @@ public final class S3CopySimulator {
                 try {
                     String key = spec.prefix() + "manifest";
                     if (roleSession != null) {
-                        authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:PutObject", objectArn(spec.bucket(), key));
+                        authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:PutObject", objectArn(spec.iamRoleArn(), spec.bucket(), key));
                         s3.authorizeSignedPutObject(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket(), key);
                     } else {
                         s3.authorizeAnonymousPutObject(spec.bucket(), key);
@@ -1193,7 +1194,7 @@ public final class S3CopySimulator {
             String key = unloadDataKey(spec, index);
             try {
                 if (roleSession != null) {
-                    authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:PutObject", objectArn(spec.bucket(), key));
+                    authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:PutObject", objectArn(spec.iamRoleArn(), spec.bucket(), key));
                     s3.authorizeSignedPutObject(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket(), key);
                 } else {
                     s3.authorizeAnonymousPutObject(spec.bucket(), key);
@@ -1317,7 +1318,7 @@ public final class S3CopySimulator {
         for (String k : keys) {
             try {
                 if (roleSession != null) {
-                    authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:DeleteObject", objectArn(spec.bucket(), k));
+                    authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:DeleteObject", objectArn(spec.iamRoleArn(), spec.bucket(), k));
                     s3.authorizeSignedDeleteObject(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket(), k);
                 } else {
                     s3.authorizeAnonymousDeleteObject(spec.bucket(), k);

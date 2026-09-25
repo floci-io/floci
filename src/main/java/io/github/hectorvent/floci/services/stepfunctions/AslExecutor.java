@@ -3037,8 +3037,8 @@ public class AslExecutor {
             label = UUID.randomUUID().toString();
         }
         var id = UUID.randomUUID().toString();
-        return new MapRunIdentity(label, id, "arn:aws:states:" + region + ":" + account + ":mapRun:"
-                + smName + "/" + label + ":" + id);
+        return new MapRunIdentity(label, id, AwsArnUtils.Arn.of("states", region, account,
+                "mapRun:" + smName + "/" + label + ":" + id).toString());
     }
 
     private JsonNode applyResultWriter(String mapStateName, JsonNode stateDef, JsonNode input,
@@ -3189,15 +3189,15 @@ public class AslExecutor {
         }
         // NONE: emit an execution record per child, mirroring the AWS export format. The child
         // executions run under a derived state machine "<parentName>/<mapRunLabel>".
-        String childSmArn = "arn:aws:states:" + region + ":" + account + ":stateMachine:"
-                + smName + "/" + mapRunLabel;
+        String childSmArn = AwsArnUtils.Arn.of("states", region, account,
+                "stateMachine:" + smName + "/" + mapRunLabel).toString();
         for (int i = 0; i < results.size(); i++) {
             String childId = UUID.randomUUID().toString();
             long start = childTimings != null && i < childTimings.size() ? childTimings.get(i)[0] : 0L;
             long stop = childTimings != null && i < childTimings.size() ? childTimings.get(i)[1] : 0L;
             ObjectNode record = out.addObject();
-            record.put("ExecutionArn", "arn:aws:states:" + region + ":" + account + ":execution:"
-                    + smName + "/" + mapRunLabel + ":" + childId);
+            record.put("ExecutionArn", AwsArnUtils.Arn.of("states", region, account,
+                    "execution:" + smName + "/" + mapRunLabel + ":" + childId).toString());
             record.put("Input", stringifyResult(childInputs != null && i < childInputs.size()
                     ? childInputs.get(i) : NullNode.getInstance()));
             record.putObject("InputDetails").put("Included", true);
@@ -3223,13 +3223,13 @@ public class AslExecutor {
     private ArrayNode formatFailedChildren(List<FailedChild> failedChildren, String region, String account,
                                            String smName, String mapRunLabel) {
         ArrayNode out = objectMapper.createArrayNode();
-        String childSmArn = "arn:aws:states:" + region + ":" + account + ":stateMachine:"
-                + smName + "/" + mapRunLabel;
+        String childSmArn = AwsArnUtils.Arn.of("states", region, account,
+                "stateMachine:" + smName + "/" + mapRunLabel).toString();
         for (FailedChild child : failedChildren) {
             String childId = UUID.randomUUID().toString();
             ObjectNode record = out.addObject();
-            record.put("ExecutionArn", "arn:aws:states:" + region + ":" + account + ":execution:"
-                    + smName + "/" + mapRunLabel + ":" + childId);
+            record.put("ExecutionArn", AwsArnUtils.Arn.of("states", region, account,
+                    "execution:" + smName + "/" + mapRunLabel + ":" + childId).toString());
             record.put("Input", stringifyResult(child.input()));
             record.putObject("InputDetails").put("Included", true);
             record.put("Name", childId);

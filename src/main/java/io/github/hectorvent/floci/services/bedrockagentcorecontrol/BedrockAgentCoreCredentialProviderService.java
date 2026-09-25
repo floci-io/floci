@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
@@ -296,23 +297,23 @@ public class BedrockAgentCoreCredentialProviderService {
     }
 
     private String credentialProviderArn(String region, String name) {
-        return "arn:aws:acps:" + region + ":" + regionResolver.getAccountId()
-                + ":token-vault/default/apikeycredentialprovider/" + name;
+        return AwsArnUtils.Arn.of("acps", region, regionResolver.getAccountId(),
+                "token-vault/default/apikeycredentialprovider/" + name).toString();
     }
 
     private String managedSecretArn(String region, String name) {
-        return "arn:aws:secretsmanager:" + region + ":" + regionResolver.getAccountId()
-                + ":secret:agentcore-" + name;
+        return AwsArnUtils.Arn.of("secretsmanager", region, regionResolver.getAccountId(),
+                "secret:agentcore-" + name).toString();
     }
 
     private String oauthCredentialProviderArn(String region, String name) {
-        return "arn:aws:acps:" + region + ":" + regionResolver.getAccountId()
-                + ":token-vault/default/oauth2credentialprovider/" + name;
+        return AwsArnUtils.Arn.of("acps", region, regionResolver.getAccountId(),
+                "token-vault/default/oauth2credentialprovider/" + name).toString();
     }
 
     private String managedOauthSecretArn(String region, String name) {
-        return "arn:aws:secretsmanager:" + region + ":" + regionResolver.getAccountId()
-                + ":secret:agentcore-oauth2-" + name;
+        return AwsArnUtils.Arn.of("secretsmanager", region, regionResolver.getAccountId(),
+                "secret:agentcore-oauth2-" + name).toString();
     }
 
     private static ObjectNode oauthOutputConfig(String vendor, ObjectNode config) {

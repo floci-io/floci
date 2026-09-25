@@ -5,7 +5,9 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -142,7 +144,7 @@ public class Route53ResolverService {
         String id = id("rslvr-fdl");
         ObjectNode list = objectMapper.createObjectNode();
         list.put("Id", id);
-        list.put("Arn", "arn:aws:route53resolver:" + region + ":" + accountId + ":firewall-domain-list/" + id);
+        list.put("Arn", AwsArnUtils.Arn.of("route53resolver", region, accountId, "firewall-domain-list/" + id).toString());
         list.put("Name", name);
         list.put("DomainCount", 0);
         list.put("Status", "COMPLETE");
@@ -190,7 +192,7 @@ public class Route53ResolverService {
         String id = id(idPrefix);
         ObjectNode endpoint = objectMapper.createObjectNode();
         endpoint.put("Id", id);
-        endpoint.put("Arn", "arn:aws:route53resolver:" + region + ":" + accountId + ":resolver-endpoint/" + id);
+        endpoint.put("Arn", AwsArnUtils.Arn.of("route53resolver", region, accountId, "resolver-endpoint/" + id).toString());
         endpoint.put("Name", text(request, "Name"));
         endpoint.put("Direction", direction);
         endpoint.set("SecurityGroupIds", request.path("SecurityGroupIds").deepCopy());
@@ -257,7 +259,7 @@ public class Route53ResolverService {
         String id = id("rslvr-rr");
         ObjectNode rule = objectMapper.createObjectNode();
         rule.put("Id", id);
-        rule.put("Arn", "arn:aws:route53resolver:" + region + ":" + accountId + ":resolver-rule/" + id);
+        rule.put("Arn", AwsArnUtils.Arn.of("route53resolver", region, accountId, "resolver-rule/" + id).toString());
         rule.put("DomainName", domainName);
         rule.put("Status", "COMPLETE");
         rule.put("RuleType", text(request, "RuleType"));
@@ -377,7 +379,7 @@ public class Route53ResolverService {
         if (creatorRequestId == null || creatorRequestId.isBlank()) {
             return java.util.Optional.empty();
         }
-        String regionPrefix = "arn:aws:route53resolver:" + region + ":";
+        String regionPrefix = "arn:" + AwsRegions.partitionFor(region) + ":route53resolver:" + region + ":";
         return store.scan(key -> true).stream()
                 .filter(existing -> creatorRequestId.equals(text(existing, "CreatorRequestId")))
                 .filter(existing -> {
@@ -559,7 +561,7 @@ public class Route53ResolverService {
     private static FirewallDomainList managedList(String region, String name) {
         String id = "rslvr-fdl-" + deterministicHex(region + "|" + name, 17);
         // Managed lists are AWS-owned: their ARNs carry no account id.
-        String arn = "arn:aws:route53resolver:" + region + "::firewall-domain-list/" + id;
+        String arn = AwsArnUtils.Arn.of("route53resolver", region, "", "firewall-domain-list/" + id).toString();
         return new FirewallDomainList(id, arn, name, MANAGED_OWNER_NAME);
     }
 

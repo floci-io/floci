@@ -4020,7 +4020,7 @@ public class RdsService implements Resettable, ResourceProvider {
         global.setGlobalClusterIdentifier(id.toLowerCase(Locale.ROOT));
         global.setGlobalClusterResourceId("cluster-" + java.util.UUID.randomUUID().toString()
                 .replace("-", "").substring(0, 24).toUpperCase());
-        global.setGlobalClusterArn(globalClusterArn(accountId, global.getGlobalClusterIdentifier()));
+        global.setGlobalClusterArn(globalClusterArn(regionResolver.getPartition(), accountId, global.getGlobalClusterIdentifier()));
         global.setStatus("available");
         global.setDeletionProtection(Boolean.TRUE.equals(deletionProtection));
         global.setTags(tags);
@@ -4210,7 +4210,7 @@ public class RdsService implements Resettable, ResourceProvider {
             }
             deleteGlobalClusterRecord(accountId, global.getGlobalClusterIdentifier());
             global.setGlobalClusterIdentifier(newId);
-            global.setGlobalClusterArn(globalClusterArn(accountId, newId));
+            global.setGlobalClusterArn(globalClusterArn(regionResolver.getPartition(), accountId, newId));
             for (GlobalClusterMember member : global.getMembers()) {
                 DbCluster cluster = findClusterByArn(accountId, member.getDbClusterArn());
                 if (cluster != null) {
@@ -4477,8 +4477,8 @@ public class RdsService implements Resettable, ResourceProvider {
         return "global:" + id.toLowerCase(Locale.ROOT);
     }
 
-    private static String globalClusterArn(String accountId, String id) {
-        return "arn:aws:rds::" + accountId + ":global-cluster:" + id;
+    private static String globalClusterArn(String partition, String accountId, String id) {
+        return AwsArnUtils.Arn.global(partition, "rds", accountId, "global-cluster:" + id).toString();
     }
 
     private static void requireGlobalClusterEngine(String engine, String clusterId) {

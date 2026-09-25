@@ -2886,7 +2886,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     private String rootPrincipalArn() {
-        return "arn:aws:iam::" + regionResolver.getAccountId() + ":root";
+        return regionResolver.buildGlobalArn("iam", "root");
     }
 
     private static void requireAccountSettingName(String name) {

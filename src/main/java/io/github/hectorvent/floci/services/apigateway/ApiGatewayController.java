@@ -16,6 +16,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.apigateway.model.ApiGatewayResource;
@@ -2436,7 +2437,7 @@ public class ApiGatewayController {
     private ObjectNode toV2DomainNode(String region, CustomDomain d) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("domainName", d.getDomainName());
-        node.put("domainNameArn", "arn:aws:apigateway:" + region + "::/domainnames/" + d.getDomainName());
+        node.put("domainNameArn", AwsArnUtils.Arn.of("apigateway", region, "", "/domainnames/" + d.getDomainName()).toString());
         node.put("apiMappingSelectionExpression", "$request.basepath");
         // AWS reports both of these on every domain.
         node.put("routingMode", "API_MAPPING_ONLY");
@@ -2522,7 +2523,7 @@ public class ApiGatewayController {
     private ObjectNode toDomainNode(String region, CustomDomain d) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("domainName", d.getDomainName());
-        node.put("domainNameArn", "arn:aws:apigateway:" + region + "::/domainnames/" + d.getDomainName());
+        node.put("domainNameArn", AwsArnUtils.Arn.of("apigateway", region, "", "/domainnames/" + d.getDomainName()).toString());
         node.put("domainNameStatus", d.getDomainNameStatus());
         node.put("endpointConfigurationType", d.getEndpointConfigurationType());
         node.putObject("endpointConfiguration").putArray("types").add(d.getEndpointConfigurationType());

@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -94,7 +95,7 @@ public class ControlCatalogService implements Resettable {
         return response;
     }
 
-    public ObjectNode listControls(JsonNode request, String maxResultsRaw, String nextToken) {
+    public ObjectNode listControls(JsonNode request, String maxResultsRaw, String nextToken, String partition) {
         ensureDefaults();
         int maxResults = parseMaxResults(maxResultsRaw);
         int offset = parseNextToken(nextToken);
@@ -139,7 +140,7 @@ public class ControlCatalogService implements Resettable {
         ArrayNode controls = response.putArray("Controls");
         for (ControlDefinition definition : definitions.subList(offset, end)) {
             ObjectNode item = controls.addObject();
-            item.put("Arn", "arn:aws:controlcatalog:::control/" + definition.globalIdentifier());
+            item.put("Arn", AwsArnUtils.Arn.global(partition, "controlcatalog", "", "control/" + definition.globalIdentifier()).toString());
             item.set("Aliases", stringArray(definition.aliases()));
             item.put("Name", definition.name());
             item.put("Description", definition.description());

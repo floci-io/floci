@@ -3361,7 +3361,8 @@ public class S3Controller {
         rejectUnknownPostRegion(credential);
         if (credential != null && !credential.isEmpty()) {
             iamEnforcementFilter.authorizeAdditionalResource(
-                    "Credential=" + credential, "s3:PutObject", S3PublicAccessEvaluator.objectArn(bucket, key));
+                    "Credential=" + credential, "s3:PutObject",
+                    S3PublicAccessEvaluator.objectArn(regionResolver.getPartition(), bucket, key));
         }
 
         if (s3Service.isAuthEnforced()) {
@@ -3941,7 +3942,7 @@ public class S3Controller {
     private void authorizeCopySourceRead(HttpHeaders httpHeaders, CopySourceRef source,
                                          S3Service.RequestAuthorization authorization) {
         String action = source.versionId() == null ? "s3:GetObject" : "s3:GetObjectVersion";
-        String resource = S3PublicAccessEvaluator.objectArn(source.bucket(), source.objectKey());
+        String resource = S3PublicAccessEvaluator.objectArn(regionResolver.getPartition(), source.bucket(), source.objectKey());
         S3Service.SignedPrincipalResourcePolicyEvaluation resourcePolicyEvaluation =
                 s3Service.signedPrincipalResourcePolicyDecision(
                         source.bucket(), action, resource, authorization);

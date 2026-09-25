@@ -1507,15 +1507,8 @@ class ResourceExplorer2IntegrationTest {
                 String arn = (String) resource.get("Arn");
                 String service = (String) resource.get("Service");
                 Arn parsed = AwsArnUtils.parse(arn);
-                String expectedPartition = AwsRegions.partitionFor(parsed.region());
-                // Only commercial regions are held to their partition here: resources another test
-                // leaves in a China or GovCloud region are still minted arn:aws: by build sites that
-                // have not moved to Arn.of yet, which the partition plan's build-site phase fixes and
-                // then tightens this assertion to every region.
-                if ("aws".equals(expectedPartition)) {
-                    assertEquals(expectedPartition, parsed.partition(),
-                            "ARN partition must be the one its region belongs to, got: " + arn);
-                }
+                assertEquals(AwsRegions.partitionFor(parsed.region()), parsed.partition(),
+                        "ARN partition must be the one its region belongs to, got: " + arn);
                 assertTrue(arn.contains(service),
                         "ARN should contain service '" + service + "', got: " + arn);
             }

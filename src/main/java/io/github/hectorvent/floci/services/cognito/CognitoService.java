@@ -1389,7 +1389,7 @@ public class CognitoService implements ResourceProvider {
         domainStore.put(domain, userPoolDomain);
         if (certificateChanged) {
             acmService.removeInUseBy(previousCertificateArn,
-                    cloudFrontDistributionArn(userPoolDomain), CERTIFICATE_REGION);
+                    cloudFrontDistributionArn(regionResolver.getPartition(), userPoolDomain), CERTIFICATE_REGION);
         }
         LOG.infov("Updated User Pool Domain: {0} for pool {1}", domain, userPoolId);
         return userPoolDomain;
@@ -1403,7 +1403,7 @@ public class CognitoService implements ResourceProvider {
         domainStore.delete(domain);
         if (userPoolDomain.isCustomDomain()) {
             acmService.removeInUseBy(userPoolDomain.getCertificateArn(),
-                    cloudFrontDistributionArn(userPoolDomain), CERTIFICATE_REGION);
+                    cloudFrontDistributionArn(regionResolver.getPartition(), userPoolDomain), CERTIFICATE_REGION);
         }
         LOG.infov("Deleted User Pool Domain: {0} for pool {1}", domain, userPoolId);
     }
@@ -1414,7 +1414,7 @@ public class CognitoService implements ResourceProvider {
      */
     private void registerCertificateUse(String certificateArn, UserPoolDomain userPoolDomain) {
         try {
-            acmService.addInUseBy(certificateArn, cloudFrontDistributionArn(userPoolDomain), CERTIFICATE_REGION);
+            acmService.addInUseBy(certificateArn, cloudFrontDistributionArn(regionResolver.getPartition(), userPoolDomain), CERTIFICATE_REGION);
         } catch (AwsException e) {
             if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
                 throw e;
@@ -1457,10 +1457,10 @@ public class CognitoService implements ResourceProvider {
      * it, which is what ACM lists on AWS. Floci has no distribution object, so the id is the label
      * of the generated CloudFront name.
      */
-    private static String cloudFrontDistributionArn(UserPoolDomain userPoolDomain) {
+    private static String cloudFrontDistributionArn(String partition, UserPoolDomain userPoolDomain) {
         String name = userPoolDomain.getCloudFrontDistribution();
         String id = name.substring(0, name.indexOf('.')).toUpperCase(Locale.ROOT);
-        return "arn:aws:cloudfront::" + userPoolDomain.getAwsAccountId() + ":distribution/" + id;
+        return AwsArnUtils.Arn.global(partition, "cloudfront", userPoolDomain.getAwsAccountId(), "distribution/" + id).toString();
     }
 
     private String generateCloudFrontDomain() {

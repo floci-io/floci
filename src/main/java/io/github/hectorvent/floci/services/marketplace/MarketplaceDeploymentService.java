@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -119,8 +120,8 @@ public class MarketplaceDeploymentService implements Resettable {
         ObjectNode record = create ? mapper.createObjectNode() : existing;
         String id = create ? "dp-" + compactId() : record.path("deploymentParameterId").asText();
         String arn = create
-                ? "arn:aws:aws-marketplace:" + region + ":" + accountId
-                    + ":DeploymentParameter:catalogs/" + catalog + "/products/" + productId + "/" + id
+                ? AwsArnUtils.Arn.of("aws-marketplace", region, accountId,
+                    "DeploymentParameter:catalogs/" + catalog + "/products/" + productId + "/" + id).toString()
                 : record.path("resourceArn").asText();
 
         record.put("catalog", parameter.catalog());

@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudwatch.logs;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -1356,8 +1357,8 @@ public class CloudWatchLogsService implements ResourceProvider {
             }
             String region = key.substring(0, separator);
             resources.add(new ExplorerResource(
-                    "arn:aws:logs:" + region + ":" + regionResolver.getAccountId()
-                            + ":log-group:" + group.getLogGroupName() + ":*",
+                    AwsArnUtils.Arn.of("logs", region, regionResolver.getAccountId(),
+                            "log-group:" + group.getLogGroupName() + ":*").toString(),
                     "logs:log-group", "logs",
                     region, regionResolver.getAccountId(),
                     group.getCreatedTime() > 0 ? Instant.ofEpochMilli(group.getCreatedTime()) : Instant.now(),

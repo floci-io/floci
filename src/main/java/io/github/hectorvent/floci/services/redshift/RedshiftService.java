@@ -370,8 +370,8 @@ public class RedshiftService {
         String integrationId = UUID.randomUUID().toString();
         Integration integration = new Integration();
         integration.setAccountId(integrations.accountId());
-        integration.setIntegrationArn("arn:aws:redshift:" + region + ":" + regionResolver.getAccountId()
-                + ":integration:" + integrationId);
+        integration.setIntegrationArn(AwsArnUtils.Arn.of("redshift", region, regionResolver.getAccountId(),
+                "integration:" + integrationId).toString());
         integration.setIntegrationName(integrationName);
         integration.setSourceArn(sourceArn);
         integration.setTargetArn(targetArn);

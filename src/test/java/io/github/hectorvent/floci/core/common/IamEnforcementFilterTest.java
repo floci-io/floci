@@ -68,6 +68,7 @@ class IamEnforcementFilterTest {
     @BeforeEach
     void setUp() {
         config = mock(EmulatorConfig.class);
+        when(config.partitions()).thenReturn(mock(EmulatorConfig.PartitionsConfig.class));
         services = mock(EmulatorConfig.ServicesConfig.class);
         iamConfig = mock(EmulatorConfig.IamServiceConfig.class);
         accountResolver = mock(AccountResolver.class);

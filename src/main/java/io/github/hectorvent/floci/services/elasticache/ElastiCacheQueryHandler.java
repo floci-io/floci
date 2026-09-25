@@ -544,8 +544,8 @@ public class ElastiCacheQueryHandler {
                 .end("Subnet"));
         xml.end("Subnets")
                 .start("SupportedNetworkTypes").elem("member", "ipv4").end("SupportedNetworkTypes")
-                .elem("ARN", "arn:aws:elasticache:" + regionResolver.getRegion() + ":"
-                        + regionResolver.getAccountId() + ":subnetgroup:" + group.getName())
+                .elem("ARN", AwsArnUtils.Arn.of("elasticache", regionResolver.getRegion(),
+                        regionResolver.getAccountId(), "subnetgroup:" + group.getName()).toString())
                 .end("CacheSubnetGroup");
     }
 
@@ -741,8 +741,8 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
     }
 
     private String parameterGroupArn(String name) {
-        return "arn:aws:elasticache:" + regionResolver.getRegion() + ":"
-                + regionResolver.getAccountId() + ":parametergroup:" + name;
+        return AwsArnUtils.Arn.of("elasticache", regionResolver.getRegion(),
+                regionResolver.getAccountId(), "parametergroup:" + name).toString();
     }
 
     /**

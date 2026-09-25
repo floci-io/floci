@@ -90,6 +90,8 @@ These values have no published source Floci can cite, so it does not guess them;
 the commercial value or Floci's own base host until sourced:
 
 - the China CloudFront distribution domain suffix (only the API host is published);
+- the console device-authorization client ids (`arn:aws:signin:::devtools/...`) outside the
+  commercial partition;
 - the STS web-identity audience outside the commercial partition;
 - the Lambda function-URL host outside the commercial partition;
 - whether AWS managed policy documents differ in content in China or GovCloud;

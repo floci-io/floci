@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudwatch.logs;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -70,7 +71,7 @@ public class CloudWatchLogsCrossAccountService {
         destination.setDestinationName(destinationName);
         destination.setTargetArn(targetArn);
         destination.setRoleArn(roleArn);
-        destination.setArn("arn:aws:logs:" + region + ":" + regionResolver.getAccountId() + ":destination:" + destinationName);
+        destination.setArn(AwsArnUtils.Arn.of("logs", region, regionResolver.getAccountId(), "destination:" + destinationName).toString());
         if (destination.getCreationTime() == 0) {
             destination.setCreationTime(System.currentTimeMillis());
         }

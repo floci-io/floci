@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.swf;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
@@ -1981,7 +1982,7 @@ public class SwfService implements Resettable {
     }
 
     private String domainArn(String name, String region) {
-        return "arn:aws:swf:" + region + ":" + regionResolver.getAccountId() + ":/domain/" + name;
+        return AwsArnUtils.Arn.of("swf", region, regionResolver.getAccountId(), "/domain/" + name).toString();
     }
 
     public String domainArnFor(SwfDomain domain, String region) {

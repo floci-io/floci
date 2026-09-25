@@ -237,7 +237,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         // stand-in the same way it enforces SCPs against it (the account-root SCP change above);
         // leaving it absent here would have made the two forms of root enforcement inconsistent.
         Optional<String> principalArn = accountRootPrincipal
-                ? Optional.of("arn:aws:iam::" + accountId + ":root")
+                ? Optional.of(AwsArnUtils.Arn.global(requestPartition(), "iam", accountId, "root").toString())
                 : iamService.resolveCallerArn(akid);
         if (principalArn.isPresent()) {
             caller = caller.withPrincipalArn(principalArn.get());
@@ -302,8 +302,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                     continue;
                 }
                 LOG.infov("IAM enforcement DENY: akid={0} action={1} resource={2}", akid, action, resource);
-                String denyMessage = "User: arn:aws:iam::" + accountId
-                        + ":user/" + akid + " is not authorized to perform: " + action
+                String denyMessage = "User: " + AwsArnUtils.Arn.global(requestPartition(), "iam", accountId, "user/" + akid)
+                        + " is not authorized to perform: " + action
                         + " on resource: \"" + resource + "\""
                         + " because no identity-based policy allows the " + action + " action";
                 emitS3DenialIfApplicable(akid, action, resource, ctx, region, denyMessage);
@@ -467,7 +467,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
 
             Map<String, List<String>> conditionContext = null;
             Optional<String> principalArn = accountRootPrincipal
-                    ? Optional.of("arn:aws:iam::" + accountId + ":root")
+                    ? Optional.of(AwsArnUtils.Arn.global(requestPartition(), "iam", accountId, "root").toString())
                     : iamService.resolveCallerArn(akid);
             if (principalArn.isPresent()) {
                 caller = caller.withPrincipalArn(principalArn.get());
@@ -487,7 +487,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             }
             LOG.infov("IAM enforcement DENY: akid={0} action={1} resource={2}", akid, action, resource);
             throw new AwsException("AccessDenied",
-                    "User: arn:aws:iam::" + accountId + ":user/" + akid
+                    "User: " + AwsArnUtils.Arn.global(requestPartition(), "iam", accountId, "user/" + akid)
                             + " is not authorized to perform: " + action
                             + " on resource: \"" + resource + "\""
                             + " because no identity-based policy allows the " + action + " action",
@@ -593,6 +593,17 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             case "s3:DeleteObjectTagging" -> "DeleteObjectTagging";
             default -> null;
         };
+    }
+
+    /**
+     * The partition the request belongs to, for the principals this filter synthesizes. Set by
+     * {@link AccountContextFilter}; the deployment partition covers a call that reaches here first.
+     */
+    private String requestPartition() {
+        String partition = requestContext.getPartition();
+        return partition != null
+                ? partition
+                : RegionResolver.effectivePartition(config.defaultRegion(), config.partitions().id());
     }
 
     /** Returns [bucket, key] (key may be null if the resource is a bucket-level ARN). */

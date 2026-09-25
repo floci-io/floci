@@ -513,7 +513,14 @@ class S3PublicAccessEvaluatorTest {
 
     @Test
     void arnHelpersBuildBucketAndObjectArns() {
-        assertEquals(BUCKET_ARN, S3PublicAccessEvaluator.bucketArn(BUCKET));
-        assertEquals(OBJECT_ARN, S3PublicAccessEvaluator.objectArn(BUCKET, "folder/object.txt"));
+        assertEquals(BUCKET_ARN, S3PublicAccessEvaluator.bucketArn("aws", BUCKET));
+        assertEquals(OBJECT_ARN, S3PublicAccessEvaluator.objectArn("aws", BUCKET, "folder/object.txt"));
+    }
+
+    /** The policy-evaluation ARNs carry the request's partition, or a China bucket policy never matches. */
+    @Test
+    void arnHelpersCarryTheGivenPartition() {
+        assertEquals("arn:aws-cn:s3:::" + BUCKET, S3PublicAccessEvaluator.bucketArn("aws-cn", BUCKET));
+        assertEquals("arn:aws-us-gov:s3:::" + BUCKET + "/k", S3PublicAccessEvaluator.objectArn("aws-us-gov", BUCKET, "k"));
     }
 }

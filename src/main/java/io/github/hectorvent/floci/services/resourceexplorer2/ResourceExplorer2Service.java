@@ -174,7 +174,7 @@ public class ResourceExplorer2Service {
         String viewArn = regionResolver.buildArn("resource-explorer-2", region,
                 "view/default-view/" + viewId);
         View view = new View(viewArn, "default-view", accountId,
-                "arn:aws:iam::" + accountId + ":root",
+                regionResolver.buildGlobalArn("iam", accountId, "root"),
                 null,
                 List.of(new IncludedProperty("tags")),
                 new HashMap<>(), Instant.now());
@@ -318,7 +318,7 @@ public class ResourceExplorer2Service {
         String accountId = regionResolver.getAccountId();
         String viewArn = regionResolver.buildArn("resource-explorer-2", region,
                 "view/" + viewName + "/" + UUID.randomUUID());
-        String effectiveScope = (scope != null) ? scope : "arn:aws:iam::" + accountId + ":root";
+        String effectiveScope = (scope != null) ? scope : regionResolver.buildGlobalArn("iam", accountId, "root");
         View view = new View(viewArn, viewName, accountId,
                 effectiveScope,
                 filters, includedProperties,

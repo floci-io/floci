@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ses;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntry;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntryResult;
@@ -937,7 +938,7 @@ public class SesService {
             return;
         }
         Tenant tenant = tenantService.tenantForSending(tenantName, region, accountId);
-        String arnPrefix = "arn:aws:ses:" + region + ":" + accountId + ":";
+        String arnPrefix = "arn:" + AwsRegions.partitionFor(region) + ":ses:" + region + ":" + accountId + ":";
         List<SesTenantService.AssociationResource> used = new ArrayList<>();
         if (fromEmailAddress != null && !fromEmailAddress.isBlank()) {
             String identityName = sendIdentityName(fromEmailAddress, region);

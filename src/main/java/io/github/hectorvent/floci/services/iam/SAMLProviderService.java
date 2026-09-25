@@ -36,8 +36,9 @@ public class SAMLProviderService {
         this.providers = providers;
     }
 
-    public SAMLProvider create(String accountId, String name, String metadata, Map<String, String> tags) {
-        String arn = "arn:aws:iam::" + accountId + ":saml-provider/" + name;
+    public SAMLProvider create(String partition, String accountId, String name, String metadata,
+                               Map<String, String> tags) {
+        String arn = AwsArnUtils.Arn.global(partition, "iam", accountId, "saml-provider/" + name).toString();
         if (!ARN.matcher(arn).matches()) {
             throw new AwsException("InvalidInput", "Invalid SAML provider name.", 400);
         }

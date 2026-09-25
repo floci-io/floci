@@ -5,7 +5,9 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.JsonErrorResponseUtils;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
@@ -399,7 +401,8 @@ public class CodeArtifactController {
         node.put("owner", view.domain().getOwner());
         node.put("repositoryCount", view.repositoryCount());
         // AWS's internal per-domain bucket naming is not publicly documented; this is a synthesized placeholder.
-        node.put("s3BucketArn", "arn:aws:s3:::codeartifact-" + view.domain().getRegion() + "-" + view.domain().getOwner());
+        node.put("s3BucketArn", AwsArnUtils.Arn.global(AwsRegions.partitionFor(view.domain().getRegion()), "s3", "",
+                "codeartifact-" + view.domain().getRegion() + "-" + view.domain().getOwner()).toString());
         node.put("status", "Active");
         return node;
     }

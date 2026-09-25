@@ -53,7 +53,7 @@ public class ControlTowerControlService {
         }
 
         String operationId = UUID.randomUUID().toString();
-        String arn = "arn:aws:controltower:" + region + ":" + accountId + ":enabledcontrol/" + shortId();
+        String arn = AwsArnUtils.Arn.of("controltower", region, accountId, "enabledcontrol/" + shortId()).toString();
         EnabledControl control = new EnabledControl(arn, controlIdentifier, targetIdentifier,
                 SUCCEEDED, IN_SYNC, operationId, parameters, tags);
         controls.put(key, control);

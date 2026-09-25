@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.iam;
 
 import io.github.hectorvent.floci.core.common.*;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.iam.model.AccessKey;
 import io.github.hectorvent.floci.services.iam.model.AccountPasswordPolicy;
 import io.github.hectorvent.floci.services.iam.model.IamGroup;
@@ -42,14 +43,17 @@ public class IamQueryHandler {
     private final IamPolicyEvaluator policyEvaluator;
     private final AccountResolver accountResolver;
     private final SAMLProviderService samlProviderService;
+    private final RegionResolver regionResolver;
 
     @Inject
     public IamQueryHandler(IamService iamService, IamPolicyEvaluator policyEvaluator,
-                           AccountResolver accountResolver, SAMLProviderService samlProviderService) {
+                           AccountResolver accountResolver, SAMLProviderService samlProviderService,
+                           RegionResolver regionResolver) {
         this.iamService = iamService;
         this.policyEvaluator = policyEvaluator;
         this.accountResolver = accountResolver;
         this.samlProviderService = samlProviderService;
+        this.regionResolver = regionResolver;
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params, String authorization) {
@@ -377,8 +381,9 @@ public class IamQueryHandler {
 
     private Response handleCreateSAMLProvider(MultivaluedMap<String, String> params, String authorization) {
         checkSamlTagMembers(params);
-        SAMLProvider provider = samlProviderService.create(accountResolver.resolve(authorization),
-                getParam(params, "Name"), getParam(params, "SAMLMetadataDocument"), extractTags(params));
+        SAMLProvider provider = samlProviderService.create(regionResolver.getPartition(),
+                accountResolver.resolve(authorization), getParam(params, "Name"),
+                getParam(params, "SAMLMetadataDocument"), extractTags(params));
         return Response.ok(AwsQueryResponse.envelope("CreateSAMLProvider", AwsNamespaces.IAM,
                 new XmlBuilder().elem("SAMLProviderArn", provider.getArn())
                         .raw(tagsElement(new TreeMap<>(provider.getTags()))).build())).build();

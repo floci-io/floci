@@ -2,7 +2,9 @@ package io.github.hectorvent.floci.services.ec2;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -262,7 +264,7 @@ public class Ec2IpamService {
         }
         Ipam ipam = new Ipam();
         ipam.setIpamId("ipam-" + randomHex(17));
-        ipam.setIpamArn("arn:aws:ec2::" + ownerId + ":ipam/" + ipam.getIpamId());
+        ipam.setIpamArn(AwsArnUtils.Arn.global(AwsRegions.partitionFor(region), "ec2", ownerId, "ipam/" + ipam.getIpamId()).toString());
         ipam.setOwnerId(ownerId);
         ipam.setRegion(region);
         ipam.setDescription(description);
@@ -285,7 +287,7 @@ public class Ec2IpamService {
     private static IpamScope defaultScope(Ipam ipam, String ownerId, String scopeType) {
         IpamScope scope = new IpamScope();
         scope.setIpamScopeId("ipam-scope-" + randomHex(17));
-        scope.setIpamScopeArn("arn:aws:ec2::" + ownerId + ":ipam-scope/" + scope.getIpamScopeId());
+        scope.setIpamScopeArn(AwsArnUtils.Arn.global(AwsRegions.partitionFor(ipam.getRegion()), "ec2", ownerId, "ipam-scope/" + scope.getIpamScopeId()).toString());
         scope.setIpamId(ipam.getIpamId());
         scope.setScopeType(scopeType);
         scope.setDefault(true);
@@ -462,7 +464,7 @@ public class Ec2IpamService {
         }
         IpamPool pool = new IpamPool();
         pool.setIpamPoolId("ipam-pool-" + randomHex(17));
-        pool.setIpamPoolArn("arn:aws:ec2::" + ownerId + ":ipam-pool/" + pool.getIpamPoolId());
+        pool.setIpamPoolArn(AwsArnUtils.Arn.global(AwsRegions.partitionFor(region), "ec2", ownerId, "ipam-pool/" + pool.getIpamPoolId()).toString());
         pool.setIpamId(ipamIdOfScope(ipamScopeId));
         pool.setIpamScopeId(ipamScopeId);
         pool.setOwnerId(ownerId);
