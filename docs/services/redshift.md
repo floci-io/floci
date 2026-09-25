@@ -291,13 +291,27 @@ generalized path.
 | `binary` | `bytea` |
 | `array`, `map`, `struct` | `jsonb` |
 
-Writes to external tables (`INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`) fail with SQLSTATE `0A000`.
-Views depending on an external table can prevent its reload; drop those views before querying the
-table again. `IAM_ROLE default` and cross-account roles are unsupported. Both read paths authorize the
+Changes to external tables and schemas other than the DDL above (`INSERT`, `UPDATE`, `DELETE`,
+`TRUNCATE`, `COPY`, `ALTER TABLE`, a plain `CREATE TABLE`, or a `DROP` naming several objects) fail
+with SQLSTATE `0A000`. `CREATE EXTERNAL SCHEMA`, `CREATE EXTERNAL TABLE`, `ALTER TABLE ... ADD
+PARTITION` and `DROP` of an external schema or table fail with `25001` inside a transaction block,
+because Glue cannot roll back. `CREATE EXTERNAL TABLE`, `ADD PARTITION` and `DROP TABLE` also
+require the `CREATE` privilege on the schema in PostgreSQL and fail with `42501` without it. `WITH SERDEPROPERTIES` is
+stored on the Glue table, so an `OpenCSVSerde` table keeps its `separatorChar`, `quoteChar` and
+`escapeChar`. A materialized table is owned by the user whose query first loaded it, so a different
+user can hit a permission error when a later query has to reload it. A table using partition
+projection must keep its `storage.location.template` inside the table location, otherwise the query
+fails with `42501`. A reload refills the table in place, so views and grants that depend on an external table survive
+it; only a change to the Glue column definitions replaces the table, and that can be blocked by a
+dependent view. `IAM_ROLE default` and cross-account roles are unsupported. Both read paths authorize the
 listing and every object as the role bound to the external schema, with the same signed
 authorization COPY uses: with `FLOCI_SERVICES_S3_ENFORCE_AUTH` on, the role's identity policy must
 allow the action and a bucket policy denying the role blocks the read. DuckDB then reads as the
-account, so the role's access is enforced by this check ahead of the read. Extended Query loads generalized materializations at `Parse`, so a
+account, so the role's access is enforced by this check ahead of the read. The listing check passes
+the table location as the `s3:prefix` condition key to the identity policy; the bucket policy check
+is per bucket. An Iceberg table's `metadata_location` must sit under the table location and be
+readable by the role, otherwise the query fails with `42501`. The data files the Iceberg manifests
+reference are read by DuckDB without a per-file role check. Extended Query loads generalized materializations at `Parse`, so a
 prepared statement sees the data as of its parse; the Phase 1 path materializes at execution.
 
 | SQLSTATE | Meaning |

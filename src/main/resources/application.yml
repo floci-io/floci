@@ -405,8 +405,8 @@ floci:
       proxy-handshake-timeout-millis: 10000       # Max time a client has to complete the startup/auth handshake
       proxy-backend-connect-timeout-millis: 5000  # Max time to wait for the backend TCP connect
       proxy-max-connections: 100                  # Max concurrent proxy connections before new ones are refused
-      spectrum-enabled: true
-      spectrum-max-rows: 1000000
+      spectrum-enabled: true                      # FLOCI_SERVICES_REDSHIFT_SPECTRUM_ENABLED; false = no external-schema interception, no floci-duck needed
+      spectrum-max-rows: 1000000                  # FLOCI_SERVICES_REDSHIFT_SPECTRUM_MAX_ROWS; rows loaded per external table per query
     rds:
       enabled: true
       mock: false                                 # FLOCI_SERVICES_RDS_MOCK — true = metadata only, no Docker (useful for CI)
