@@ -351,7 +351,7 @@ public class StsQueryHandler {
         try {
             verified = SAMLAssertionVerifier.verify(getParam(params, "SAMLAssertion"), provider, Instant.now());
         } catch (SAMLAssertionVerifier.InvalidAssertionException e) {
-            throw new AwsException("InvalidIdentityToken", "The SAML assertion is invalid.", 400);
+            throw new AwsException("InvalidIdentityToken", e.awsMessage(), 400);
         }
         boolean rolePair = verified.roles().stream().anyMatch(pair ->
                 roleArn.equals(pair.roleArn()) && principalArn.equals(pair.principalArn()));
