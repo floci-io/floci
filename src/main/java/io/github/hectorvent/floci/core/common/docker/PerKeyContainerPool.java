@@ -76,17 +76,26 @@ public class PerKeyContainerPool {
             }
             long startedGeneration = generation.get();
             StartedContainer started = starter.start();
+            // Registered before checking the generation, not after: checking first and only then
+            // registering leaves a gap between the two where a concurrent stopAll() can run and
+            // see nothing (this container isn't in the map yet) without the generation bump alone
+            // catching it either, since that only tells this call a reset happened, not whether
+            // stopAll()'s own sweep already passed the point where it could have found this
+            // container. Registering first means stopAll() either sees it in the map and stops it,
+            // or runs entirely before this put and gets caught by the generation check below;
+            // there is no window where neither happens.
+            containers.put(key, started);
             if (generation.get() != startedGeneration) {
-                // A stopAll() ran while this container was being built and could not have seen
-                // it: it was not in the map yet. Stop it now rather than register it, so a reset
-                // racing a first-use does not leave this one running behind.
+                // A stopAll() ran while this container was being built and may have already swept
+                // past this key (its forEach found nothing, since the put above hadn't happened
+                // yet) before clearing the map out from under this registration. Remove and stop
+                // it directly rather than trust the map state, which that same stopAll() may have
+                // already cleared.
                 LOG.warnv("Sidecar pool was reset while starting a container for key {0}; stopping it", key);
+                containers.remove(key);
                 lifecycleManager.stopAndRemove(started.containerId(), null);
                 throw new IllegalStateException("Sidecar pool was reset while starting a container for key " + key);
             }
-            // Tracked before the health wait, not after: a timeout below must not stop
-            // stopContainer()/stopAll() from ever finding this already-running container again.
-            containers.put(key, started);
             SidecarHealthHelper.waitForHealth(started.baseUrl(), healthPath);
             return started.baseUrl();
         }
