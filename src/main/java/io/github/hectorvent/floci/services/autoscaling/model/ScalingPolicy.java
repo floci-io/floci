@@ -89,6 +89,7 @@ public class ScalingPolicy {
         private String unit;
         private Integer period;
         private List<MetricDimension> dimensions = new ArrayList<>();
+        private List<TargetTrackingMetricDataQuery> metrics = new ArrayList<>();
 
         public CustomizedMetricSpecification() {}
 
@@ -102,6 +103,72 @@ public class ScalingPolicy {
         public void setUnit(String v) { this.unit = v; }
         public Integer getPeriod() { return period; }
         public void setPeriod(Integer v) { this.period = v; }
+        public List<MetricDimension> getDimensions() { return dimensions; }
+        public void setDimensions(List<MetricDimension> v) { this.dimensions = v; }
+        public List<TargetTrackingMetricDataQuery> getMetrics() { return metrics; }
+        public void setMetrics(List<TargetTrackingMetricDataQuery> v) { this.metrics = v; }
+    }
+
+    /**
+     * One entry of CustomizedMetricSpecification.Metrics, the metric data query form. It carries
+     * either an Expression for metric math or a MetricStat naming a raw metric, never both. The
+     * model requires Id.
+     */
+    @RegisterForReflection
+    public static class TargetTrackingMetricDataQuery {
+        private String id;
+        private String expression;
+        private String label;
+        private Boolean returnData;
+        private TargetTrackingMetricStat metricStat;
+
+        public TargetTrackingMetricDataQuery() {}
+
+        public String getId() { return id; }
+        public void setId(String v) { this.id = v; }
+        public String getExpression() { return expression; }
+        public void setExpression(String v) { this.expression = v; }
+        public String getLabel() { return label; }
+        public void setLabel(String v) { this.label = v; }
+        public Boolean getReturnData() { return returnData; }
+        public void setReturnData(Boolean v) { this.returnData = v; }
+        public TargetTrackingMetricStat getMetricStat() { return metricStat; }
+        public void setMetricStat(TargetTrackingMetricStat v) { this.metricStat = v; }
+    }
+
+    /** MetricStat, which the model requires to carry both a Metric and a Stat. */
+    @RegisterForReflection
+    public static class TargetTrackingMetricStat {
+        private String stat;
+        private String unit;
+        private Integer period;
+        private Metric metric;
+
+        public TargetTrackingMetricStat() {}
+
+        public String getStat() { return stat; }
+        public void setStat(String v) { this.stat = v; }
+        public String getUnit() { return unit; }
+        public void setUnit(String v) { this.unit = v; }
+        public Integer getPeriod() { return period; }
+        public void setPeriod(Integer v) { this.period = v; }
+        public Metric getMetric() { return metric; }
+        public void setMetric(Metric v) { this.metric = v; }
+    }
+
+    /** The raw metric a MetricStat names. The model requires Namespace and MetricName. */
+    @RegisterForReflection
+    public static class Metric {
+        private String namespace;
+        private String metricName;
+        private List<MetricDimension> dimensions = new ArrayList<>();
+
+        public Metric() {}
+
+        public String getNamespace() { return namespace; }
+        public void setNamespace(String v) { this.namespace = v; }
+        public String getMetricName() { return metricName; }
+        public void setMetricName(String v) { this.metricName = v; }
         public List<MetricDimension> getDimensions() { return dimensions; }
         public void setDimensions(List<MetricDimension> v) { this.dimensions = v; }
     }

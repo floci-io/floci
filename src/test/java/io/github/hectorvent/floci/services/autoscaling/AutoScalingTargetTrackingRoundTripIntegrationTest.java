@@ -83,6 +83,71 @@ class AutoScalingTargetTrackingRoundTripIntegrationTest {
             .body(containsString("<TargetValue>42.5</TargetValue>"));
     }
 
+    /**
+     * A customized metric can be defined by Metrics queries instead of MetricName, which is how
+     * metric math reaches a target tracking policy. Those were accepted and never read back.
+     */
+    @Test
+    void aMetricsQuerySurvivesTheRoundTrip() {
+        String name = group();
+        String q = "TargetTrackingConfiguration.CustomizedMetricSpecification.Metrics.member.";
+        asg("PutScalingPolicy",
+                "AutoScalingGroupName", name,
+                "PolicyName", "mathy",
+                "PolicyType", "TargetTrackingScaling",
+                "TargetTrackingConfiguration.TargetValue", "10",
+                q + "1.Id", "m1",
+                q + "1.ReturnData", "false",
+                q + "1.MetricStat.Stat", "Sum",
+                q + "1.MetricStat.Unit", "Count",
+                q + "1.MetricStat.Period", "60",
+                q + "1.MetricStat.Metric.Namespace", "AWS/SQS",
+                q + "1.MetricStat.Metric.MetricName", "ApproximateNumberOfMessagesVisible",
+                q + "1.MetricStat.Metric.Dimensions.member.1.Name", "QueueName",
+                q + "1.MetricStat.Metric.Dimensions.member.1.Value", "orders",
+                q + "2.Id", "e1",
+                q + "2.Expression", "m1 / 4",
+                q + "2.Label", "backlog per instance",
+                q + "2.ReturnData", "true")
+            .statusCode(200);
+
+        asg("DescribePolicies", "AutoScalingGroupName", name)
+            .statusCode(200)
+            .body(containsString("<Id>m1</Id>"))
+            .body(containsString("<Stat>Sum</Stat>"))
+            .body(containsString("<Namespace>AWS/SQS</Namespace>"))
+            .body(containsString("<MetricName>ApproximateNumberOfMessagesVisible</MetricName>"))
+            .body(containsString("<Name>QueueName</Name>"))
+            .body(containsString("<Id>e1</Id>"))
+            .body(containsString("<Expression>m1 / 4</Expression>"))
+            .body(containsString("<Label>backlog per instance</Label>"))
+            .body(containsString("<ReturnData>true</ReturnData>"));
+    }
+
+    /** A bad Period is the client's error, and used to come back as InternalFailure. */
+    @Test
+    void aNonNumericPeriodIsAParameterError() {
+        String name = group();
+        asg("PutScalingPolicy",
+                "AutoScalingGroupName", name,
+                "PolicyName", "badperiod",
+                "PolicyType", "TargetTrackingScaling",
+                "TargetTrackingConfiguration.TargetValue", "10",
+                "TargetTrackingConfiguration.CustomizedMetricSpecification.MetricName", "m",
+                "TargetTrackingConfiguration.CustomizedMetricSpecification.Period", "not-a-number")
+            .statusCode(400)
+            .body(containsString("ValidationError"));
+
+        asg("PutScalingPolicy",
+                "AutoScalingGroupName", name,
+                "PolicyName", "zeroperiod",
+                "PolicyType", "TargetTrackingScaling",
+                "TargetTrackingConfiguration.TargetValue", "10",
+                "TargetTrackingConfiguration.CustomizedMetricSpecification.MetricName", "m",
+                "TargetTrackingConfiguration.CustomizedMetricSpecification.Period", "0")
+            .statusCode(400);
+    }
+
     @Test
     void aPredefinedSpecificationKeepsItsResourceLabel() {
         String name = group();
@@ -119,6 +184,7 @@ class AutoScalingTargetTrackingRoundTripIntegrationTest {
         asg("DescribePolicies", "AutoScalingGroupName", name)
             .statusCode(200)
             .body(not(containsString("<CustomizedMetricSpecification>")))
+            .body(not(containsString("<Metrics>")))
             .body(not(containsString("<DisableScaleIn>")))
             .body(not(containsString("<ResourceLabel>")));
     }

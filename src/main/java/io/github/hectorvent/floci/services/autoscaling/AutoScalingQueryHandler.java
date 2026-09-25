@@ -967,9 +967,10 @@ public class AutoScalingQueryHandler {
     private static ScalingPolicy.TargetTrackingConfiguration parseTargetTrackingConfiguration(MultivaluedMap<String, String> p) {
         String predefinedMetricType = p.getFirst(TTC + "PredefinedMetricSpecification.PredefinedMetricType");
         String customMetricName = p.getFirst(CUSTOM + "MetricName");
+        String firstMetricQueryId = p.getFirst(CUSTOM + "Metrics.member.1.Id");
         Double targetValue = nullableDoubleParam(p, TTC + "TargetValue");
         String disableScaleIn = p.getFirst(TTC + "DisableScaleIn");
-        if (predefinedMetricType == null && customMetricName == null
+        if (predefinedMetricType == null && customMetricName == null && firstMetricQueryId == null
                 && targetValue == null && disableScaleIn == null) {
             return null;
         }
@@ -982,7 +983,7 @@ public class AutoScalingQueryHandler {
                     p.getFirst(TTC + "PredefinedMetricSpecification.ResourceLabel"));
             configuration.setPredefinedMetricSpecification(specification);
         }
-        if (customMetricName != null) {
+        if (customMetricName != null || firstMetricQueryId != null) {
             configuration.setCustomizedMetricSpecification(parseCustomizedMetricSpecification(p));
         }
         configuration.setTargetValue(targetValue);
@@ -999,10 +1000,7 @@ public class AutoScalingQueryHandler {
         spec.setNamespace(p.getFirst(CUSTOM + "Namespace"));
         spec.setStatistic(p.getFirst(CUSTOM + "Statistic"));
         spec.setUnit(p.getFirst(CUSTOM + "Unit"));
-        String period = p.getFirst(CUSTOM + "Period");
-        if (period != null && !period.isBlank()) {
-            spec.setPeriod(Integer.valueOf(period));
-        }
+        spec.setPeriod(parseMetricPeriod(p.getFirst(CUSTOM + "Period"), "Period"));
         // Numbered members are read from 1 up to the first gap, the same reading the other Query
         // handlers apply. The model requires both Name and Value on a dimension.
         List<ScalingPolicy.MetricDimension> dimensions = new ArrayList<>();
@@ -1013,7 +1011,74 @@ public class AutoScalingQueryHandler {
             dimensions.add(dimension);
         }
         spec.setDimensions(dimensions);
+        spec.setMetrics(parseMetricDataQueries(p));
         return spec;
+    }
+
+    /**
+     * Integer.valueOf on a client-supplied value threw straight out of the handler, so a
+     * non-numeric Period was reported as InternalFailure. A bad request member is a parameter
+     * error.
+     */
+    private static Integer parseMetricPeriod(String value, String member) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        int parsed;
+        try {
+            parsed = Integer.parseInt(value.trim());
+        } catch (NumberFormatException e) {
+            throw new AwsException("ValidationError",
+                    member + " must be an integer.", 400);
+        }
+        if (parsed <= 0) {
+            throw new AwsException("ValidationError",
+                    member + " must be greater than zero.", 400);
+        }
+        return parsed;
+    }
+
+    /** CustomizedMetricSpecification.Metrics, the metric data query form. */
+    private static List<ScalingPolicy.TargetTrackingMetricDataQuery> parseMetricDataQueries(
+            MultivaluedMap<String, String> p) {
+        List<ScalingPolicy.TargetTrackingMetricDataQuery> queries = new ArrayList<>();
+        for (int i = 1; p.getFirst(CUSTOM + "Metrics.member." + i + ".Id") != null; i++) {
+            String base = CUSTOM + "Metrics.member." + i + ".";
+            ScalingPolicy.TargetTrackingMetricDataQuery query =
+                    new ScalingPolicy.TargetTrackingMetricDataQuery();
+            query.setId(p.getFirst(base + "Id"));
+            query.setExpression(p.getFirst(base + "Expression"));
+            query.setLabel(p.getFirst(base + "Label"));
+            String returnData = p.getFirst(base + "ReturnData");
+            if (returnData != null) {
+                query.setReturnData(Boolean.parseBoolean(returnData));
+            }
+            String stat = p.getFirst(base + "MetricStat.Stat");
+            if (stat != null) {
+                ScalingPolicy.TargetTrackingMetricStat metricStat =
+                        new ScalingPolicy.TargetTrackingMetricStat();
+                metricStat.setStat(stat);
+                metricStat.setUnit(p.getFirst(base + "MetricStat.Unit"));
+                metricStat.setPeriod(parseMetricPeriod(
+                        p.getFirst(base + "MetricStat.Period"), "MetricStat.Period"));
+                ScalingPolicy.Metric metric = new ScalingPolicy.Metric();
+                metric.setNamespace(p.getFirst(base + "MetricStat.Metric.Namespace"));
+                metric.setMetricName(p.getFirst(base + "MetricStat.Metric.MetricName"));
+                List<ScalingPolicy.MetricDimension> metricDimensions = new ArrayList<>();
+                String dimensionBase = base + "MetricStat.Metric.Dimensions.member.";
+                for (int d = 1; p.getFirst(dimensionBase + d + ".Name") != null; d++) {
+                    ScalingPolicy.MetricDimension dimension = new ScalingPolicy.MetricDimension();
+                    dimension.setName(p.getFirst(dimensionBase + d + ".Name"));
+                    dimension.setValue(p.getFirst(dimensionBase + d + ".Value"));
+                    metricDimensions.add(dimension);
+                }
+                metric.setDimensions(metricDimensions);
+                metricStat.setMetric(metric);
+                query.setMetricStat(metricStat);
+            }
+            queries.add(query);
+        }
+        return queries;
     }
 
     private static void appendTargetTrackingConfigurationXml(
@@ -1065,7 +1130,51 @@ public class AutoScalingQueryHandler {
         if (spec.getStatistic() != null) { xml.elem("Statistic", spec.getStatistic()); }
         if (spec.getUnit() != null) { xml.elem("Unit", spec.getUnit()); }
         if (spec.getPeriod() != null) { xml.elem("Period", String.valueOf(spec.getPeriod())); }
+        appendMetricDataQueriesXml(xml, spec.getMetrics());
         xml.end("CustomizedMetricSpecification");
+    }
+
+    private static void appendMetricDataQueriesXml(
+            XmlBuilder xml, List<ScalingPolicy.TargetTrackingMetricDataQuery> queries) {
+        if (queries == null || queries.isEmpty()) {
+            return;
+        }
+        xml.start("Metrics");
+        for (ScalingPolicy.TargetTrackingMetricDataQuery query : queries) {
+            xml.start("member").elem("Id", query.getId());
+            if (query.getExpression() != null) { xml.elem("Expression", query.getExpression()); }
+            if (query.getLabel() != null) { xml.elem("Label", query.getLabel()); }
+            if (query.getReturnData() != null) {
+                xml.elem("ReturnData", String.valueOf(query.getReturnData()));
+            }
+            ScalingPolicy.TargetTrackingMetricStat stat = query.getMetricStat();
+            if (stat != null) {
+                xml.start("MetricStat");
+                ScalingPolicy.Metric metric = stat.getMetric();
+                if (metric != null) {
+                    xml.start("Metric")
+                       .elem("Namespace", metric.getNamespace())
+                       .elem("MetricName", metric.getMetricName());
+                    if (!metric.getDimensions().isEmpty()) {
+                        xml.start("Dimensions");
+                        for (ScalingPolicy.MetricDimension dimension : metric.getDimensions()) {
+                            xml.start("member")
+                               .elem("Name", dimension.getName())
+                               .elem("Value", dimension.getValue())
+                               .end("member");
+                        }
+                        xml.end("Dimensions");
+                    }
+                    xml.end("Metric");
+                }
+                xml.elem("Stat", stat.getStat());
+                if (stat.getUnit() != null) { xml.elem("Unit", stat.getUnit()); }
+                if (stat.getPeriod() != null) { xml.elem("Period", String.valueOf(stat.getPeriod())); }
+                xml.end("MetricStat");
+            }
+            xml.end("member");
+        }
+        xml.end("Metrics");
     }
 
     // ── Activities ────────────────────────────────────────────────────────────
