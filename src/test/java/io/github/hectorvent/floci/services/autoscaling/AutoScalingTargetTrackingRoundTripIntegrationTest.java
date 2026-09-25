@@ -148,6 +148,44 @@ class AutoScalingTargetTrackingRoundTripIntegrationTest {
             .statusCode(400);
     }
 
+    /**
+     * Boolean.parseBoolean turns anything that is not "true" into false, so an unintended value was
+     * accepted and read back as a setting the caller never asked for. This handler already has a
+     * strict helper for exactly that.
+     */
+    @Test
+    void anUnparseableBooleanIsAParameterError() {
+        String name = group();
+        asg("PutScalingPolicy",
+                "AutoScalingGroupName", name, "PolicyName", "badbool",
+                "PolicyType", "TargetTrackingScaling",
+                "TargetTrackingConfiguration.TargetValue", "10",
+                "TargetTrackingConfiguration.PredefinedMetricSpecification.PredefinedMetricType",
+                "ASGAverageCPUUtilization",
+                "TargetTrackingConfiguration.DisableScaleIn", "maybe")
+            .statusCode(400)
+            .body(containsString("ValidationError"));
+
+        String q = "TargetTrackingConfiguration.CustomizedMetricSpecification.Metrics.member.";
+        asg("PutScalingPolicy",
+                "AutoScalingGroupName", name, "PolicyName", "badreturn",
+                "PolicyType", "TargetTrackingScaling",
+                "TargetTrackingConfiguration.TargetValue", "10",
+                q + "1.Id", "m1", q + "1.Expression", "1", q + "1.ReturnData", "maybe")
+            .statusCode(400)
+            .body(containsString("ValidationError"));
+
+        // The documented values still work, in either case.
+        asg("PutScalingPolicy",
+                "AutoScalingGroupName", name, "PolicyName", "goodbool",
+                "PolicyType", "TargetTrackingScaling",
+                "TargetTrackingConfiguration.TargetValue", "10",
+                "TargetTrackingConfiguration.PredefinedMetricSpecification.PredefinedMetricType",
+                "ASGAverageCPUUtilization",
+                "TargetTrackingConfiguration.DisableScaleIn", "TRUE")
+            .statusCode(200);
+    }
+
     @Test
     void aPredefinedSpecificationKeepsItsResourceLabel() {
         String name = group();

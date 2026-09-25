@@ -987,9 +987,8 @@ public class AutoScalingQueryHandler {
             configuration.setCustomizedMetricSpecification(parseCustomizedMetricSpecification(p));
         }
         configuration.setTargetValue(targetValue);
-        if (disableScaleIn != null) {
-            configuration.setDisableScaleIn(Boolean.parseBoolean(disableScaleIn));
-        }
+        configuration.setDisableScaleIn(
+                parseOptionalBoolean(disableScaleIn, "DisableScaleIn"));
         return configuration;
     }
 
@@ -1049,10 +1048,8 @@ public class AutoScalingQueryHandler {
             query.setId(p.getFirst(base + "Id"));
             query.setExpression(p.getFirst(base + "Expression"));
             query.setLabel(p.getFirst(base + "Label"));
-            String returnData = p.getFirst(base + "ReturnData");
-            if (returnData != null) {
-                query.setReturnData(Boolean.parseBoolean(returnData));
-            }
+            query.setReturnData(parseOptionalBoolean(
+                    p.getFirst(base + "ReturnData"), "ReturnData"));
             String stat = p.getFirst(base + "MetricStat.Stat");
             if (stat != null) {
                 ScalingPolicy.TargetTrackingMetricStat metricStat =
@@ -1811,7 +1808,7 @@ public class AutoScalingQueryHandler {
         }
     }
 
-    private Boolean parseOptionalBoolean(String value, String name) {
+    private static Boolean parseOptionalBoolean(String value, String name) {
         if (value == null || value.isBlank()) {
             return null;
         }
