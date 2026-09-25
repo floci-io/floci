@@ -469,6 +469,58 @@ class StepFunctionsJsonataIntegrationTest {
     }
 
     @Test
+    void distributedMapWithS3JsonItemReader_maxItemsPathReadsTheContextObject() throws Exception {
+        createBucket("map-inputs-max-items-context-path");
+        putObject("map-inputs-max-items-context-path", "workers.json", """
+                [{"workerId":"w1"},{"workerId":"w2"},{"workerId":"w3"}]
+                """);
+
+        String definition = """
+                {
+                    "StartAt": "ProcessWorkers",
+                    "States": {
+                        "ProcessWorkers": {
+                            "Type": "Map",
+                            "ItemReader": {
+                                "Resource": "arn:aws:states:::s3:getObject",
+                                "ReaderConfig": {
+                                    "InputType": "JSON",
+                                    "MaxItemsPath": "$$.Execution.Input.limit"
+                                },
+                                "Parameters": {
+                                    "Bucket": "map-inputs-max-items-context-path",
+                                    "Key": "workers.json"
+                                }
+                            },
+                            "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
+                                "StartAt": "PassItem",
+                                "States": {
+                                    "PassItem": {
+                                        "Type": "Pass",
+                                        "End": true
+                                    }
+                                }
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("map-itemreader-s3-max-items-context-path-test", definition);
+        String execArn = startExecution(smArn, "{\"limit\":2}");
+        String output = waitForExecution(execArn);
+
+        assertTrue(output.contains("\"workerId\":\"w1\"") || output.contains("\"workerId\": \"w1\""));
+        assertTrue(output.contains("\"workerId\":\"w2\"") || output.contains("\"workerId\": \"w2\""));
+        assertFalse(output.contains("\"workerId\":\"w3\"") || output.contains("\"workerId\": \"w3\""));
+    }
+
+    @Test
     void distributedMapWithS3JsonItemReader_maxItemsLimitsObjectDataset() throws Exception {
         createBucket("map-inputs-max-items-object");
         putObject("map-inputs-max-items-object", "workers.json", """

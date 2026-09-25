@@ -740,7 +740,7 @@ public class AslExecutor {
             return new StateResult(output, stateDef.path("Next").asText(null));
         }
 
-        JsonNode effectiveInput = applyInputPath(stateDef, input);
+        JsonNode effectiveInput = applyInputPath(stateDef, input, context);
 
         // Pass states transform their input through Parameters (with intrinsics), then a static
         // Result overrides if present.
@@ -753,7 +753,7 @@ public class AslExecutor {
         }
 
         JsonNode output = mergeResult(stateDef, input, result);
-        output = applyOutputPath(stateDef, input, output);
+        output = applyOutputPath(stateDef, input, output, context);
         return new StateResult(output, stateDef.path("Next").asText(null));
     }
 
@@ -787,7 +787,7 @@ public class AslExecutor {
                         stateDef.get("Arguments"), "Arguments", statesVar, variables);
             }
         } else {
-            effectiveInput = applyInputPath(stateDef, input);
+            effectiveInput = applyInputPath(stateDef, input, context);
             if (stateDef.has("Parameters")) {
                 effectiveInput = resolveParameters(stateDef.get("Parameters"), effectiveInput, context);
             }
@@ -849,7 +849,7 @@ public class AslExecutor {
                 taskResult = resolveParameters(stateDef.get("ResultSelector"), taskResult, context);
             }
             JsonNode output = mergeResult(stateDef, input, taskResult);
-            output = applyOutputPath(stateDef, input, output);
+            output = applyOutputPath(stateDef, input, output, context);
             return new StateResult(output, stateDef.path("Next").asText(null));
         }
     }
@@ -2241,18 +2241,18 @@ public class AslExecutor {
             throw new FailStateException("States.Runtime", NO_NEXT_STATE_CAUSE);
         }
 
-        JsonNode effectiveInput = applyInputPath(stateDef, input);
+        JsonNode effectiveInput = applyInputPath(stateDef, input, context);
         JsonNode choices = stateDef.path("Choices");
         for (JsonNode choice : choices) {
             if (evaluateCondition(choice, effectiveInput, context)) {
-                JsonNode output = applyOutputPath(stateDef, input, effectiveInput);
+                JsonNode output = applyOutputPath(stateDef, input, effectiveInput, context);
                 return new StateResult(output, choice.path("Next").asText());
             }
         }
         // Default branch
         String defaultState = stateDef.path("Default").asText(null);
         if (defaultState != null) {
-            JsonNode output = applyOutputPath(stateDef, input, effectiveInput);
+            JsonNode output = applyOutputPath(stateDef, input, effectiveInput, context);
             return new StateResult(output, defaultState);
         }
         throw new FailStateException("States.Runtime", NO_NEXT_STATE_CAUSE);
@@ -2298,16 +2298,16 @@ public class AslExecutor {
                 }
             }
         } else {
-            effectiveInput = applyInputPath(stateDef, input);
+            effectiveInput = applyInputPath(stateDef, input, context);
             if (stateDef.has("Seconds")) {
                 waitNanos = secondsToNanos(stateDef.get("Seconds").asLong());
             } else if (stateDef.has("SecondsPath")) {
-                JsonNode val = resolvePath(stateDef.get("SecondsPath").asText(), effectiveInput);
+                JsonNode val = resolvePath(stateDef.get("SecondsPath").asText(), effectiveInput, context);
                 waitNanos = secondsToNanos(val.asLong());
             } else if (stateDef.has("Timestamp")) {
                 waitNanos = nanosUntil(stateDef.get("Timestamp").asText());
             } else if (stateDef.has("TimestampPath")) {
-                JsonNode val = resolvePath(stateDef.get("TimestampPath").asText(), effectiveInput);
+                JsonNode val = resolvePath(stateDef.get("TimestampPath").asText(), effectiveInput, context);
                 waitNanos = nanosUntil(val.asText());
             }
         }
@@ -2318,7 +2318,7 @@ public class AslExecutor {
             JsonNode output = applyJsonataOutput(stateDef, input, null, context, variables);
             return new StateResult(output, stateDef.path("Next").asText(null));
         }
-        JsonNode output = applyOutputPath(stateDef, input, effectiveInput);
+        JsonNode output = applyOutputPath(stateDef, input, effectiveInput, context);
         return new StateResult(output, stateDef.path("Next").asText(null));
     }
 
@@ -2378,8 +2378,8 @@ public class AslExecutor {
             JsonNode output = applyJsonataOutput(stateDef, input, input, context, variables);
             return new StateResult(output, null);
         }
-        JsonNode effectiveInput = applyInputPath(stateDef, input);
-        return new StateResult(applyOutputPath(stateDef, input, effectiveInput), null);
+        JsonNode effectiveInput = applyInputPath(stateDef, input, context);
+        return new StateResult(applyOutputPath(stateDef, input, effectiveInput, context), null);
     }
 
     private StateResult executeFail(JsonNode stateDef, JsonNode input, boolean jsonata, JsonNode context,
@@ -2428,7 +2428,7 @@ public class AslExecutor {
                                               String topLevelQueryLanguage, JsonNode context,
                                               ObjectNode variables, long executionDeadlineNanos)
             throws Exception {
-        JsonNode effectiveInput = jsonata ? input : applyInputPath(stateDef, input);
+        JsonNode effectiveInput = jsonata ? input : applyInputPath(stateDef, input, context);
         JsonNode branches = stateDef.path("Branches");
         chain.publish("ParallelStateStarted", null);
         var branchChains = new ArrayList<HistoryChain>();
@@ -2519,7 +2519,7 @@ public class AslExecutor {
                 ? resolveParameters(stateDef.get("ResultSelector"), results, context)
                 : results;
         JsonNode output = mergeResult(stateDef, input, selected);
-        output = applyOutputPath(stateDef, input, output);
+        output = applyOutputPath(stateDef, input, output, context);
         return new StateResult(output, stateDef.path("Next").asText(null));
     }
 
@@ -2559,7 +2559,7 @@ public class AslExecutor {
 
         // Map input-processing fields, including ItemsPath and MaxConcurrencyPath, resolve against
         // the effective state input after InputPath has been applied.
-        JsonNode mapInput = applyInputPath(stateDef, input);
+        JsonNode mapInput = applyInputPath(stateDef, input, context);
         ResolvedMapItems resolvedItems = resolveMapItems(stateDef, mapInput, jsonata, context, variables);
         JsonNode items = resolvedItems.items();
 
@@ -2767,7 +2767,7 @@ public class AslExecutor {
                 ? resolveParameters(stateDef.get("ResultSelector"), mapResult, context)
                 : mapResult;
         JsonNode output = mergeResult(stateDef, input, selected);
-        output = applyOutputPath(stateDef, input, output);
+        output = applyOutputPath(stateDef, input, output, context);
         return new StateResult(output, stateDef.path("Next").asText(null));
     }
 
@@ -2775,14 +2775,16 @@ public class AslExecutor {
      * Resolves an integer Map field from its literal, {@code <field>Path} or JSONata expression form,
      * as MaxConcurrency and the ItemBatcher limits all take. An absent field is 0. {@code minimum} is
      * the smallest accepted value, which is what separates MaxConcurrency, where 0 means the service
-     * ceiling, from a batch limit, where it is meaningless.
+     * ceiling, from a batch limit, where it is meaningless. The {@code <field>Path} form is a
+     * Reference Path, so it reads the Context Object as readily as the state input and the resolver
+     * is given both.
      */
     private int resolveMapIntegerField(JsonNode container, String field, int minimum, JsonNode mapInput,
                                        boolean jsonata, JsonNode context, ObjectNode variables) {
         JsonNode value;
         boolean jsonataExpression = false;
         if (container.has(field + "Path")) {
-            value = resolvePath(container.get(field + "Path").asText(), mapInput);
+            value = resolvePath(container.get(field + "Path").asText(), mapInput, context);
         } else if (container.has(field)) {
             value = container.get(field);
             if (jsonata && value.isTextual() && JsonataEvaluator.isExpression(value.asText())) {
@@ -3431,7 +3433,7 @@ public class AslExecutor {
                 && readerConfig.get("MaxItems").isTextual()
                 && JsonataEvaluator.isExpression(readerConfig.get("MaxItems").asText());
         if (hasMaxItemsPath) {
-            JsonNode value = resolvePath(readerConfig.get("MaxItemsPath").asText(), mapInput);
+            JsonNode value = resolvePath(readerConfig.get("MaxItemsPath").asText(), mapInput, context);
             long maxItems;
             try {
                 maxItems = Long.parseLong(value.asText());
@@ -3710,7 +3712,12 @@ public class AslExecutor {
 
     // ──────────────────────────── Path resolution ────────────────────────────
 
-    private JsonNode applyInputPath(JsonNode stateDef, JsonNode input) {
+    /**
+     * {@code InputPath} is a Reference Path, so it may be rooted at the Context Object as well as
+     * at the state input; {@code context} is what makes a {@code $$} path resolve instead of
+     * narrowing the input to null.
+     */
+    private JsonNode applyInputPath(JsonNode stateDef, JsonNode input, JsonNode context) {
         if (!stateDef.has("InputPath")) {
             return input;
         }
@@ -3718,7 +3725,7 @@ public class AslExecutor {
         if (path == null || path.equals("null")) {
             return objectMapper.createObjectNode();
         }
-        return resolvePath(path, input);
+        return resolvePath(path, input, context);
     }
 
     private JsonNode mergeResult(JsonNode stateDef, JsonNode input, JsonNode result) throws Exception {
@@ -3735,7 +3742,9 @@ public class AslExecutor {
         }
     }
 
-    private JsonNode applyOutputPath(JsonNode stateDef, JsonNode input, JsonNode output) {
+    /** {@code OutputPath} is a Reference Path, so it reads the Context Object as InputPath does. */
+    private JsonNode applyOutputPath(JsonNode stateDef, JsonNode input, JsonNode output,
+                                     JsonNode context) {
         if (!stateDef.has("OutputPath")) {
             return output;
         }
@@ -3743,7 +3752,7 @@ public class AslExecutor {
         if (path == null || path.equals("null")) {
             return objectMapper.createObjectNode();
         }
-        return resolvePath(path, output);
+        return resolvePath(path, output, context);
     }
 
     JsonNode resolveParameters(JsonNode parameters, JsonNode input, JsonNode context) throws Exception {

@@ -452,7 +452,7 @@ class StepFunctionsValidateStateMachineDefinitionIntegrationTest {
     void mapNumberPathFieldsMustBeMutuallyExclusiveAndReferencePaths() {
         String def = mapDefinition("", "\"ItemBatcher\":{\"MaxItemsPerBatch\":2,"
                 + "\"MaxItemsPerBatchPath\":\"$.batch\"},"
-                + "\"ToleratedFailureCountPath\":\"$$.Execution.Input.count\",");
+                + "\"ToleratedFailureCountPath\":\"$.counts[*]\",");
 
         validateDefinition(def)
                 .then().statusCode(200)
@@ -462,6 +462,26 @@ class StepFunctionsValidateStateMachineDefinitionIntegrationTest {
                 .body("diagnostics[0].location", equalTo("/States/M/ItemBatcher/MaxItemsPerBatch"))
                 .body("diagnostics[1].message", equalTo("Value is not a Reference Path"))
                 .body("diagnostics[1].location", equalTo("/States/M/ToleratedFailureCountPath"));
+    }
+
+    /**
+     * ASL accepts a {@code string_sampler} wherever it accepts a Reference Path, and a Context
+     * Object path is one of its spellings, so every Map numeric path field takes {@code $$.} as
+     * readily as {@code $.}.
+     */
+    @Test
+    void mapNumberPathFieldsAcceptContextObjectPaths() {
+        String def = mapDefinition("", "\"MaxConcurrencyPath\":\"$$.Execution.Input.limit\","
+                + "\"ItemBatcher\":{\"MaxItemsPerBatchPath\":\"$$.Execution.Input.batch\","
+                + "\"MaxInputBytesPerBatchPath\":\"$$.Execution.Input.bytes\"},"
+                + "\"ToleratedFailureCountPath\":\"$$.Execution.Input.count\","
+                + "\"ToleratedFailurePercentagePath\":\"$$.Execution.Input.percentage\","
+                + "\"ItemReader\":{\"ReaderConfig\":{\"MaxItemsPath\":\"$$.Execution.Input.max\"}},");
+
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("OK"))
+                .body("diagnostics", hasSize(0));
     }
 
     @Test
