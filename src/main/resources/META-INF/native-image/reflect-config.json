@@ -1,28 +1,5 @@
 [
   {
-    "name": "java.util.Map",
-    "methods": [
-      { "name": "isEmpty", "parameterTypes": [] },
-      { "name": "size", "parameterTypes": [] },
-      { "name": "entrySet", "parameterTypes": [] }
-    ]
-  },
-  {
-    "name": "java.util.Map$Entry",
-    "methods": [
-      { "name": "getKey", "parameterTypes": [] },
-      { "name": "getValue", "parameterTypes": [] }
-    ]
-  },
-  {
-    "name": "java.util.Collection",
-    "methods": [
-      { "name": "isEmpty", "parameterTypes": [] },
-      { "name": "size", "parameterTypes": [] },
-      { "name": "iterator", "parameterTypes": [] }
-    ]
-  },
-  {
     "name": "io.github.hectorvent.floci.services.apigateway.VtlTemplateEngine$InputVariable",
     "allDeclaredConstructors": true,
     "allDeclaredMethods": true,
