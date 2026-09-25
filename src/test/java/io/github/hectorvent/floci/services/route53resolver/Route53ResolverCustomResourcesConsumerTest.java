@@ -138,7 +138,7 @@ class Route53ResolverCustomResourcesConsumerTest {
     @Test
     void createResolverEndpoint_replayedCreatorRequestId_returnsOriginalEndpoint() {
         String body = "{\"Name\":\"ab-idem-endpoint\",\"Direction\":\"INBOUND\","
-                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddressRequests\":[{\"SubnetId\":\"subnet-abc\","
+                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddresses\":[{\"SubnetId\":\"subnet-abc\","
                 + "\"Ip\":\"10.0.0.5\"}],\"CreatorRequestId\":\"tok-idem-endpoint\"}";
 
         String first = call("CreateResolverEndpoint", body)
@@ -157,7 +157,7 @@ class Route53ResolverCustomResourcesConsumerTest {
     @Test
     void createResolverEndpoint_withoutCreatorRequestId_createsDistinctEndpoints() {
         String body = "{\"Name\":\"ab-noidem-endpoint\",\"Direction\":\"INBOUND\","
-                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddressRequests\":[{\"SubnetId\":\"subnet-abc\","
+                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddresses\":[{\"SubnetId\":\"subnet-abc\","
                 + "\"Ip\":\"10.0.0.5\"}]}";
 
         String first = call("CreateResolverEndpoint", body)
@@ -171,7 +171,7 @@ class Route53ResolverCustomResourcesConsumerTest {
     @Test
     void createResolverEndpoint_replayedCreatorRequestIdWithInvalidBody_stillValidates() {
         String valid = "{\"Name\":\"ab-idem-validate\",\"Direction\":\"INBOUND\","
-                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddressRequests\":[{\"SubnetId\":\"subnet-abc\","
+                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddresses\":[{\"SubnetId\":\"subnet-abc\","
                 + "\"Ip\":\"10.0.0.5\"}],\"CreatorRequestId\":\"tok-idem-validate\"}";
         call("CreateResolverEndpoint", valid).then().statusCode(200);
 
@@ -184,7 +184,7 @@ class Route53ResolverCustomResourcesConsumerTest {
 
         // ... including an unrecognised Direction.
         call("CreateResolverEndpoint", "{\"Name\":\"ab-idem-validate\",\"Direction\":\"SIDEWAYS\","
-                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddressRequests\":[{\"SubnetId\":\"subnet-abc\","
+                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddresses\":[{\"SubnetId\":\"subnet-abc\","
                 + "\"Ip\":\"10.0.0.5\"}],\"CreatorRequestId\":\"tok-idem-validate\"}")
         .then()
             .statusCode(400)
@@ -230,14 +230,14 @@ class Route53ResolverCustomResourcesConsumerTest {
     void createResolverEndpoint_replayedCreatorRequestIdWithDifferentParameters_returnsResourceExists() {
         String token = "tok-conflict-endpoint";
         call("CreateResolverEndpoint", "{\"Name\":\"ab-conflict-endpoint\",\"Direction\":\"INBOUND\","
-                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddressRequests\":[{\"SubnetId\":\"subnet-abc\","
+                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddresses\":[{\"SubnetId\":\"subnet-abc\","
                 + "\"Ip\":\"10.0.0.5\"}],\"CreatorRequestId\":\"" + token + "\"}")
         .then().statusCode(200);
 
         // Same token, same region, different (but individually valid) Name: AWS models
         // ResourceExistsException for this rather than silently returning the original.
         call("CreateResolverEndpoint", "{\"Name\":\"ab-conflict-endpoint-renamed\",\"Direction\":\"INBOUND\","
-                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddressRequests\":[{\"SubnetId\":\"subnet-abc\","
+                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddresses\":[{\"SubnetId\":\"subnet-abc\","
                 + "\"Ip\":\"10.0.0.5\"}],\"CreatorRequestId\":\"" + token + "\"}")
         .then()
             .statusCode(400)
@@ -248,7 +248,7 @@ class Route53ResolverCustomResourcesConsumerTest {
     void createResolverEndpoint_replayedCreatorRequestIdWithDifferentIpValues_returnsResourceExists() {
         String token = "tok-conflict-endpoint-ips";
         call("CreateResolverEndpoint", "{\"Name\":\"ab-conflict-ips\",\"Direction\":\"INBOUND\","
-                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddressRequests\":["
+                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddresses\":["
                 + "{\"SubnetId\":\"subnet-aaa\",\"Ip\":\"10.0.0.5\"},"
                 + "{\"SubnetId\":\"subnet-bbb\",\"Ip\":\"10.0.1.5\"}],"
                 + "\"CreatorRequestId\":\"" + token + "\"}")
@@ -257,7 +257,7 @@ class Route53ResolverCustomResourcesConsumerTest {
         // Same COUNT of IP requests, different subnet and IP values. Comparing counts alone
         // would read this as an equivalent replay and silently return the original endpoint.
         call("CreateResolverEndpoint", "{\"Name\":\"ab-conflict-ips\",\"Direction\":\"INBOUND\","
-                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddressRequests\":["
+                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddresses\":["
                 + "{\"SubnetId\":\"subnet-ccc\",\"Ip\":\"10.0.2.5\"},"
                 + "{\"SubnetId\":\"subnet-ddd\",\"Ip\":\"10.0.3.5\"}],"
                 + "\"CreatorRequestId\":\"" + token + "\"}")
@@ -270,7 +270,7 @@ class Route53ResolverCustomResourcesConsumerTest {
     void createResolverEndpoint_replayedCreatorRequestIdWithIdenticalIps_returnsTheOriginal() {
         String token = "tok-replay-endpoint-ips";
         String body = "{\"Name\":\"ab-replay-ips\",\"Direction\":\"INBOUND\","
-                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddressRequests\":["
+                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddresses\":["
                 + "{\"SubnetId\":\"subnet-aaa\",\"Ip\":\"10.0.0.5\"},"
                 + "{\"SubnetId\":\"subnet-bbb\",\"Ip\":\"10.0.1.5\"}],"
                 + "\"CreatorRequestId\":\"" + token + "\"}";
@@ -294,12 +294,12 @@ class Route53ResolverCustomResourcesConsumerTest {
         // by SubnetId, subnet-aaa sorts first; by Ip, 10.0.0.1 sorts first — opposite entries.
         String token = "tok-field-order";
         String subnetFirst = "{\"Name\":\"ab-field-order\",\"Direction\":\"INBOUND\","
-                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddressRequests\":["
+                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddresses\":["
                 + "{\"SubnetId\":\"subnet-zzz\",\"Ip\":\"10.0.0.1\"},"
                 + "{\"SubnetId\":\"subnet-aaa\",\"Ip\":\"10.9.9.9\"}],"
                 + "\"CreatorRequestId\":\"" + token + "\"}";
         String ipFirst = "{\"Name\":\"ab-field-order\",\"Direction\":\"INBOUND\","
-                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddressRequests\":["
+                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddresses\":["
                 + "{\"Ip\":\"10.0.0.1\",\"SubnetId\":\"subnet-zzz\"},"
                 + "{\"Ip\":\"10.9.9.9\",\"SubnetId\":\"subnet-aaa\"}],"
                 + "\"CreatorRequestId\":\"" + token + "\"}";
@@ -317,7 +317,7 @@ class Route53ResolverCustomResourcesConsumerTest {
     void createResolverEndpoint_replayResponseOmitsInternalIpFingerprint() {
         String token = "tok-replay-endpoint-nofingerprint";
         call("CreateResolverEndpoint", "{\"Name\":\"ab-nofingerprint\",\"Direction\":\"INBOUND\","
-                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddressRequests\":[{\"SubnetId\":\"subnet-aaa\","
+                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddresses\":[{\"SubnetId\":\"subnet-aaa\","
                 + "\"Ip\":\"10.0.0.5\"}],\"CreatorRequestId\":\"" + token + "\"}")
         .then()
             .statusCode(200)
@@ -388,7 +388,7 @@ class Route53ResolverCustomResourcesConsumerTest {
     @Test
     void createResolverEndpoint_sameCreatorRequestIdInAnotherRegion_createsRegionalEndpoint() {
         String body = "{\"Name\":\"ab-xregion-endpoint\",\"Direction\":\"INBOUND\","
-                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddressRequests\":[{\"SubnetId\":\"subnet-abc\","
+                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddresses\":[{\"SubnetId\":\"subnet-abc\","
                 + "\"Ip\":\"10.0.0.5\"}],\"CreatorRequestId\":\"tok-xregion-endpoint\"}";
 
         String east = callAs(AUTH_HEADER, "CreateResolverEndpoint", body)
@@ -438,7 +438,7 @@ class Route53ResolverCustomResourcesConsumerTest {
 
     private static String createEndpoint(String name) {
         return call("CreateResolverEndpoint", "{\"Name\":\"" + name + "\",\"Direction\":\"INBOUND\","
-                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddressRequests\":[{\"SubnetId\":\"subnet-abc\","
+                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddresses\":[{\"SubnetId\":\"subnet-abc\","
                 + "\"Ip\":\"10.0.0.5\"}],\"CreatorRequestId\":\"tok-" + name + "\"}")
         .then().statusCode(200)
         .extract().path("ResolverEndpoint.Id");
@@ -447,7 +447,7 @@ class Route53ResolverCustomResourcesConsumerTest {
     @Test
     void createResolverEndpoint_returnsOperationalEndpoint() {
         call("CreateResolverEndpoint", "{\"Name\":\"ab-endpoint-create\",\"Direction\":\"INBOUND\","
-                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddressRequests\":[{\"SubnetId\":\"subnet-abc\","
+                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddresses\":[{\"SubnetId\":\"subnet-abc\","
                 + "\"Ip\":\"10.0.0.5\"}],\"CreatorRequestId\":\"tok-endpoint-create\"}")
         .then()
             .statusCode(200)
@@ -460,7 +460,7 @@ class Route53ResolverCustomResourcesConsumerTest {
     @Test
     void createResolverEndpoint_inboundGetsInboundIdPrefix() {
         call("CreateResolverEndpoint", "{\"Name\":\"ab-endpoint-inbound\",\"Direction\":\"INBOUND\","
-                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddressRequests\":[{\"SubnetId\":\"subnet-abc\","
+                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddresses\":[{\"SubnetId\":\"subnet-abc\","
                 + "\"Ip\":\"10.0.0.5\"}],\"CreatorRequestId\":\"tok-endpoint-inbound\"}")
         .then()
             .statusCode(200)
@@ -471,7 +471,7 @@ class Route53ResolverCustomResourcesConsumerTest {
     @Test
     void createResolverEndpoint_outboundGetsOutboundIdPrefix() {
         call("CreateResolverEndpoint", "{\"Name\":\"ab-endpoint-outbound\",\"Direction\":\"OUTBOUND\","
-                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddressRequests\":[{\"SubnetId\":\"subnet-abc\","
+                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddresses\":[{\"SubnetId\":\"subnet-abc\","
                 + "\"Ip\":\"10.0.0.6\"}],\"CreatorRequestId\":\"tok-endpoint-outbound\"}")
         .then()
             .statusCode(200)
@@ -482,7 +482,7 @@ class Route53ResolverCustomResourcesConsumerTest {
     @Test
     void createResolverEndpoint_unknownDirection_returnsInvalidParameters() {
         call("CreateResolverEndpoint", "{\"Name\":\"ab-endpoint-sideways\",\"Direction\":\"SIDEWAYS\","
-                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddressRequests\":[{\"SubnetId\":\"subnet-abc\","
+                + "\"SecurityGroupIds\":[\"sg-abc123\"],\"IpAddresses\":[{\"SubnetId\":\"subnet-abc\","
                 + "\"Ip\":\"10.0.0.7\"}],\"CreatorRequestId\":\"tok-endpoint-sideways\"}")
         .then()
             .statusCode(400)
@@ -490,12 +490,41 @@ class Route53ResolverCustomResourcesConsumerTest {
     }
 
     @Test
-    void createResolverEndpoint_missingIpAddressRequests_returnsInvalidParameters() {
+    void createResolverEndpoint_missingIpAddresses_returnsInvalidParameters() {
         call("CreateResolverEndpoint", "{\"Name\":\"ab-endpoint-noip\",\"Direction\":\"INBOUND\","
                 + "\"SecurityGroupIds\":[\"sg-abc123\"],\"CreatorRequestId\":\"tok-noip\"}")
         .then()
             .statusCode(400)
             .body("__type", equalTo("InvalidParameterException"));
+    }
+
+    /**
+     * github.com/floci-io/floci/issues/4108: the request member is IpAddresses (shape
+     * IpAddressRequest); every real AWS SDK and the CLI serialize to that name and nothing
+     * else. Pins the exact two cases the issue reported: the real member succeeds, and the
+     * unmodeled name it used to require - which no client can actually send - is now rejected
+     * as a missing required parameter instead of accepted.
+     */
+    @Test
+    void createResolverEndpoint_withTheAwsModeledIpAddressesMember_succeeds() {
+        call("CreateResolverEndpoint", "{\"Name\":\"ab-endpoint-real-member\",\"Direction\":\"INBOUND\","
+                + "\"SecurityGroupIds\":[\"sg-1\"],\"IpAddresses\":[{\"SubnetId\":\"subnet-1\"}],"
+                + "\"CreatorRequestId\":\"tok-real-member\"}")
+        .then()
+            .statusCode(200)
+            .body("ResolverEndpoint.Direction", equalTo("INBOUND"))
+            .body("ResolverEndpoint.IpAddressCount", equalTo(1));
+    }
+
+    @Test
+    void createResolverEndpoint_withOnlyTheUnmodeledIpAddressRequestsName_isRejectedAsMissingIpAddresses() {
+        call("CreateResolverEndpoint", "{\"Name\":\"ab-endpoint-wrong-member\",\"Direction\":\"INBOUND\","
+                + "\"SecurityGroupIds\":[\"sg-1\"],\"IpAddressRequests\":[{\"SubnetId\":\"subnet-1\"}],"
+                + "\"CreatorRequestId\":\"tok-wrong-member\"}")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterException"))
+            .body("message", equalTo("IpAddresses is required"));
     }
 
     @Test

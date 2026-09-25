@@ -176,9 +176,13 @@ public class Route53ResolverService {
         requireText(request, "Name", INVALID_PARAMETER);
         String direction = requireText(request, "Direction", INVALID_PARAMETER);
         String idPrefix = endpointIdPrefix(direction);
-        JsonNode ipAddresses = request.path("IpAddressRequests");
+        // The wire member is IpAddresses (shape IpAddressRequest, which is where the similarly
+        // named internal store below gets its name from) - not to be confused with
+        // endpointIpRequestStore/"IpAddressRequests", an internal-only persistence field never
+        // sent on the wire.
+        JsonNode ipAddresses = request.path("IpAddresses");
         if (!ipAddresses.isArray() || ipAddresses.isEmpty()) {
-            throw new AwsException(INVALID_PARAMETER, "IpAddressRequests is required", 400);
+            throw new AwsException(INVALID_PARAMETER, "IpAddresses is required", 400);
         }
         java.util.Optional<ObjectNode> replay = replayOf(endpointStore, request, region);
         if (replay.isPresent()) {
@@ -445,7 +449,7 @@ public class Route53ResolverService {
         // written before the ordering was corrected still compares as equal.
         if (recorded == null
                 || !normalizedIpRequests(recorded).equals(normalizedIpRequests(ipAddresses))) {
-            throw replayConflict(request, existing, "IpAddressRequests");
+            throw replayConflict(request, existing, "IpAddresses");
         }
     }
 

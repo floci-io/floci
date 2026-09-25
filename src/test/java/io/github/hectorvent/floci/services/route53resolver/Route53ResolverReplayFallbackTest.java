@@ -45,7 +45,7 @@ class Route53ResolverReplayFallbackTest {
         request.put("Direction", "INBOUND");
         request.put("CreatorRequestId", token);
         request.putArray("SecurityGroupIds").add("sg-abc123");
-        ObjectNode ipRequest = request.putArray("IpAddressRequests").addObject();
+        ObjectNode ipRequest = request.putArray("IpAddresses").addObject();
         ipRequest.put("SubnetId", "subnet-aaa");
         ipRequest.put("Ip", ip);
         return request;
