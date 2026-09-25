@@ -240,12 +240,18 @@ class CodeArtifactNpmDataPlaneTest {
         if (bearerToken != null) {
             req.putHeader("Authorization", "Bearer " + bearerToken);
         }
-        HttpClientResponse resp = (body != null
-                ? req.send(body)
-                : req.send())
-                .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
-        String responseBody = resp.body().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS)
+        // Attach the body handler in the same chain as the response head. Awaiting send() on the
+        // test thread first leaves a window in which the body arrives with nowhere to go, and any
+        // chunk delivered in that window is lost, which reads as an empty body.
+        AtomicReference<HttpClientResponse> head = new AtomicReference<>();
+        String responseBody = (body != null ? req.send(body) : req.send())
+                .compose(resp -> {
+                    head.set(resp);
+                    return resp.body();
+                })
+                .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS)
                 .toString(StandardCharsets.UTF_8);
+        HttpClientResponse resp = head.get();
         Map<String, String> headers = new HashMap<>();
         resp.headers().forEach(h -> headers.put(h.getKey().toLowerCase(), h.getValue()));
         return new HttpResponse(resp.statusCode(), responseBody, headers);
