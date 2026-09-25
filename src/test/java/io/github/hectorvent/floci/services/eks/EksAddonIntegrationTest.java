@@ -451,6 +451,7 @@ class EksAddonIntegrationTest {
                     .body("addons[0].addonVersions.addonVersion", hasItem("v1.38.1-eksbuild.1"));
         } finally {
             deleteCluster(account, name);
+            deleteRole(account, roleName);
         }
     }
 
@@ -466,6 +467,16 @@ class EksAddonIntegrationTest {
                 .formParam("RoleName", roleName)
                 .formParam("Path", "/")
                 .formParam("AssumeRolePolicyDocument", "{}")
+                .post("/")
+                .then()
+                .statusCode(200);
+    }
+
+    private static void deleteRole(String account, String roleName) {
+        given().header("Authorization", auth(account, "iam"))
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DeleteRole")
+                .formParam("RoleName", roleName)
                 .post("/")
                 .then()
                 .statusCode(200);
