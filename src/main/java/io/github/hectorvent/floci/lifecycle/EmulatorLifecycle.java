@@ -21,6 +21,7 @@ import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheCont
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheMemcachedContainerManager;
 import io.github.hectorvent.floci.services.elasticache.proxy.ElastiCacheProxyManager;
 import io.github.hectorvent.floci.services.docdb.container.DocDbContainerManager;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbRuntime;
 import io.github.hectorvent.floci.services.lambda.DynamoDbStreamsEventSourcePoller;
 import io.github.hectorvent.floci.services.lambda.KinesisEventSourcePoller;
 import io.github.hectorvent.floci.services.lambda.SqsEventSourcePoller;
@@ -36,6 +37,7 @@ import io.github.hectorvent.floci.services.memorydb.container.MemoryDbContainerM
 import io.github.hectorvent.floci.services.memorydb.proxy.MemoryDbProxyManager;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
+import io.github.hectorvent.floci.services.redshift.RedshiftDynamoDbZeroEtlConsumer;
 import io.github.hectorvent.floci.services.timestreaminfluxdb.TimestreamInfluxDbService;
 import io.quarkus.runtime.Quarkus;
 import io.quarkus.runtime.ShutdownDelayInitiatedEvent;
@@ -106,6 +108,8 @@ public class EmulatorLifecycle {
     private final StepFunctionsService stepFunctionsService;
     private final Instance<ContainerTeardown> containerTeardowns;
     private final PersistentPathValidator persistentPathValidator;
+    private final DynamoDbRuntime dynamoDbRuntime;
+    private final RedshiftDynamoDbZeroEtlConsumer redshiftZeroEtlConsumer;
 
     @Inject
     public EmulatorLifecycle(StorageFactory storageFactory, ServiceRegistry serviceRegistry,
@@ -142,7 +146,9 @@ public class EmulatorLifecycle {
                              SchemaCreationWorker schemaCreationWorker,
                              StepFunctionsService stepFunctionsService,
                              Instance<ContainerTeardown> containerTeardowns,
-                             PersistentPathValidator persistentPathValidator) {
+                             PersistentPathValidator persistentPathValidator,
+                             DynamoDbRuntime dynamoDbRuntime,
+                             RedshiftDynamoDbZeroEtlConsumer redshiftZeroEtlConsumer) {
         this.storageFactory = storageFactory;
         this.serviceRegistry = serviceRegistry;
         this.config = config;
@@ -179,6 +185,8 @@ public class EmulatorLifecycle {
         this.stepFunctionsService = stepFunctionsService;
         this.containerTeardowns = containerTeardowns;
         this.persistentPathValidator = persistentPathValidator;
+        this.dynamoDbRuntime = dynamoDbRuntime;
+        this.redshiftZeroEtlConsumer = redshiftZeroEtlConsumer;
     }
 
     void onStart(@Observes StartupEvent ignored) {
@@ -224,10 +232,13 @@ public class EmulatorLifecycle {
         schemaCreationWorker.rehydrateSchemas();
         stepFunctionsService.abortAbandonedExecutions();
 
+        // The selected DynamoDB backend is ready before any persisted stream consumer reads it.
+        dynamoDbRuntime.start();
         sqsPoller.startPersistedPollers();
         kinesisPoller.startPersistedPollers();
         dynamodbStreamsPoller.startPersistedPollers();
         pipesService.startPersistedPollers();
+        redshiftZeroEtlConsumer.startPersistedIntegrations();
         rdsService.restorePersistedRuntime();
         if (config.services().timestreamInfluxdb().enabled()) {
             timestreamInfluxDbService.restorePersistedRuntime();
@@ -343,6 +354,9 @@ public class EmulatorLifecycle {
         // SIGTERM grace window and trigger SIGKILL; if the flush ran last it would be skipped and
         // in-memory (hybrid) data would be lost on an otherwise-graceful shutdown. shutdownAll()
         // still runs at the end to stop the flush schedulers and capture any shutdown-time writes.
+        // DynamoDB stream consumers stop first, so the flush holds their final checkpoints.
+        runCleanup("DynamoDB Streams poller", dynamodbStreamsPoller::shutdown);
+        runCleanup("Redshift zero-ETL consumer", redshiftZeroEtlConsumer::shutdown);
         runCleanup("storage flush", storageFactory::flushAll);
         runCleanup("EC2 metadata server", () -> {
             if (isMetadataServerNeeded()) {
@@ -372,6 +386,7 @@ public class EmulatorLifecycle {
         // EC2 instances, in-flight build/job containers). Runs before shutdownAll() so any
         // state written while stopping is captured by the final flush.
         ContainerTeardowns.stopAll(containerTeardowns, LOG);
+        runCleanup("DynamoDB backend", dynamoDbRuntime::stop);
         runCleanup("storage shutdown", storageFactory::shutdownAll);
 
         LOG.info("=== AWS Local Emulator Stopped ===");

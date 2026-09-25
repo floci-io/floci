@@ -54,6 +54,9 @@ class DynamoDbBackendSelectionTest {
     @Inject
     DynamoDbStreamReader streamReader;
 
+    @Inject
+    DynamoDbBackendLifecycle lifecycle;
+
     // Collected exactly as ResourceExplorer2Service collects its providers.
     @Inject
     Instance<ResourceProvider> providers;
@@ -68,6 +71,13 @@ class DynamoDbBackendSelectionTest {
         assertInstanceOf(NativeDynamoDbBackend.class, backend);
         assertSame(backend, ClientProxy.unwrap(items));
         assertSame(backend, ClientProxy.unwrap(tables));
+        assertSame(backend, ClientProxy.unwrap(lifecycle));
+    }
+
+    @Test
+    void startupSchedulesTheTtlSweep() {
+        assertTrue(Thread.getAllStackTraces().keySet().stream()
+                .anyMatch(thread -> thread.isAlive() && "dynamodb-ttl-sweeper".equals(thread.getName())));
     }
 
     @Test

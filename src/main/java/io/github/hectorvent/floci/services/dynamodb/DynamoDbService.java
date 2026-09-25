@@ -227,6 +227,26 @@ public class DynamoDbService {
         recoverInterruptedJobs();
     }
 
+    /** Emulator reset: drops the in-process item cache, locks and idempotency tokens, and stream state. */
+    public void clearProcessState() {
+        itemsByTable.clear();
+        itemLocks.clear();
+        txIdempotency.clear();
+        if (streamService != null) {
+            streamService.clear();
+        }
+        if (kinesisForwarder != null) {
+            kinesisForwarder.clear();
+        }
+    }
+
+    /** Shutdown: ends Kinesis forwarding drains so none writes to Kinesis during the final storage flush. */
+    public void stopKinesisForwarding() {
+        if (kinesisForwarder != null) {
+            kinesisForwarder.clear();
+        }
+    }
+
     private void loadPersistedItems() {
         if (itemStore == null) return;
         Map<String, TableDefinition> persistedTables = persistedTablesByScopedKey();
@@ -2687,7 +2707,8 @@ public class DynamoDbService {
     }
 
     record ExpiredTableScan(String rawKey, String accountId, String storageKey, String region,
-                             TableDefinition table, List<String> itemKeys) {}
+                             TableDefinition table, List<String> itemKeys,
+                             ConcurrentSkipListMap<String, JsonNode> items) {}
 
     void deleteExpiredItems() {
         deleteScannedItems(scanExpiredItems());
@@ -2726,7 +2747,7 @@ public class DynamoDbService {
             String accountId = slash >= 0 ? rawKey.substring(0, slash) : null;
             String storageKey = slash >= 0 ? rawKey.substring(slash + 1) : rawKey;
             String region = storageKey.split("::", 2)[0];
-            scans.add(new ExpiredTableScan(rawKey, accountId, storageKey, region, table, expiredKeys));
+            scans.add(new ExpiredTableScan(rawKey, accountId, storageKey, region, table, expiredKeys, items));
         }
         return scans;
     }
@@ -2734,13 +2755,14 @@ public class DynamoDbService {
     void deleteScannedItems(List<ExpiredTableScan> scans) {
         int totalDeleted = 0;
         for (ExpiredTableScan scan : scans) {
-            ConcurrentSkipListMap<String, JsonNode> items = itemsByTable.get(scan.rawKey());
-            if (items == null) {
-                continue;
-            }
+            ConcurrentSkipListMap<String, JsonNode> items = scan.items();
 
             int deletedForTable = 0;
             for (String itemKey : scan.itemKeys()) {
+                // A table deleted, or deleted and recreated, since the scan or during this sweep: its items are not this scan's.
+                if (itemsByTable.get(scan.rawKey()) != items) {
+                    break;
+                }
                 JsonNode removed = withScopedItemLock(scan.rawKey(), itemKey, () -> {
                     JsonNode current = items.get(itemKey);
                     if (current == null || !isExpired(current, scan.table())) {
@@ -2762,7 +2784,15 @@ public class DynamoDbService {
                 }
             }
             if (deletedForTable > 0) {
-                persistItemsForAccount(scan.accountId(), scan.storageKey(), items);
+                // A DeleteTable during the loop detached this map; writing it back would revive its items.
+                // Persisting under the entry's lock holds off DeleteTable, which removes the entry before
+                // it deletes the stored items.
+                itemsByTable.computeIfPresent(scan.rawKey(), (key, live) -> {
+                    if (live == items) {
+                        persistItemsForAccount(scan.accountId(), scan.storageKey(), items);
+                    }
+                    return live;
+                });
                 totalDeleted += deletedForTable;
             }
         }

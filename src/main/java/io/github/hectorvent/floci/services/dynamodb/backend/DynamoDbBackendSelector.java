@@ -9,7 +9,7 @@ import jakarta.inject.Inject;
  * The one immutable DynamoDB backend selection. Native is the only engine today; a configurable
  * choice arrives with the alternative engine. {@link NativeDynamoDbBackend} is typed to its concrete
  * class and {@link DynamoDbApiStreamReader} is not a bean, so these producers are the only
- * unqualified beans for the four seam interfaces.
+ * unqualified beans for the five seam interfaces.
  */
 @ApplicationScoped
 public class DynamoDbBackendSelector {
@@ -33,6 +33,11 @@ public class DynamoDbBackendSelector {
 
     @Produces
     DynamoDbTableAccess tableAccess() {
+        return nativeBackend;
+    }
+
+    @Produces
+    DynamoDbBackendLifecycle lifecycle() {
         return nativeBackend;
     }
 

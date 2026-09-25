@@ -1956,6 +1956,50 @@ class DynamoDbStreamsEventSourcePollerTest {
     }
 
     @Test
+    void checkpointIsNotSavedAfterShutdown() throws Exception {
+        stubStream("s1");
+        EventSourceMapping esm = filterEsm();
+        EsmStore store = mock(EsmStore.class);
+        DynamoDbStreamsEventSourcePoller p = pollerWith(store);
+        AtomicBoolean shutdownDuringInvoke = new AtomicBoolean(true);
+        List<List<String>> invocations = recordInvocations(seqs -> {
+            if (shutdownDuringInvoke.getAndSet(false)) {
+                p.shutdown();
+            }
+            return new InvokeResult();
+        });
+
+        pollOnce(p, esm);
+
+        assertEquals(List.of(List.of("s1")), invocations);
+        assertNull(checkpoint(esm));
+        verify(store, never()).saveForAccount(anyString(), any());
+    }
+
+    @Test
+    void aResetEndingAfterShutdownKeepsThePollerQuiesced() throws Exception {
+        stubStream("s1");
+        EventSourceMapping esm = filterEsm();
+        EsmStore store = mock(EsmStore.class);
+        DynamoDbStreamsEventSourcePoller p = pollerWith(store);
+        AtomicBoolean resetAcrossShutdownDuringInvoke = new AtomicBoolean(true);
+        List<List<String>> invocations = recordInvocations(seqs -> {
+            if (resetAcrossShutdownDuringInvoke.getAndSet(false)) {
+                p.beforeReset();
+                p.shutdown();
+                p.afterReset();
+            }
+            return new InvokeResult();
+        });
+
+        pollOnce(p, esm);
+
+        assertEquals(List.of(List.of("s1")), invocations);
+        assertNull(checkpoint(esm));
+        verify(store, never()).saveForAccount(anyString(), any());
+    }
+
+    @Test
     void pollDuringAResetDoesNotInvokeUntilTheResetEnds() throws Exception {
         stubStream("s1");
         List<List<String>> invocations = recordInvocations(seqs -> new InvokeResult());

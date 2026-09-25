@@ -59,6 +59,17 @@ Redshift zero-ETL integrations can consume these stream records directly. See th
 [Redshift DynamoDB zero-ETL](redshift.md#dynamodb-zero-etl) section for the supported target,
 landing table, checkpoint, and retry behavior.
 
+Stream records are held in memory. `POST /_floci/state/reset` removes every stream along with the
+tables, so `ListStreams` and `DescribeStream` no longer return the streams of tables created before
+the reset.
+
+## Time to Live
+
+With TTL enabled, a sweep runs every 60 seconds and deletes the items whose TTL attribute holds an
+epoch time in the past. Each deletion writes a `REMOVE` record to the table's stream and is
+forwarded to an active Kinesis streaming destination. Between sweeps, reads already leave expired
+items out.
+
 ## Configuration
 
 | Variable | Default | Description |

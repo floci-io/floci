@@ -46,7 +46,7 @@ class DynamoDbCfnProvisionerTest {
 
     private final DynamoDbService dynamoDb = mock(DynamoDbService.class);
     private final ObjectMapper mapper = new ObjectMapper();
-    private final NativeDynamoDbBackend backend = new NativeDynamoDbBackend(null, null, dynamoDb, mapper);
+    private final NativeDynamoDbBackend backend = new NativeDynamoDbBackend(null, null, dynamoDb, null, null, mapper);
     private final DynamoDbCfnProvisioner provisioner = new DynamoDbCfnProvisioner(
             new DynamoDbFacade(backend, backend, new RegionResolver("us-east-1", "000000000000")));
 

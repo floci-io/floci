@@ -268,7 +268,7 @@ final class CfnProvisionerFixture {
                 discovered.add(new SnsCfnProvisioner(snsService));
             }
             if (dynamoDbService != null) {
-                NativeDynamoDbBackend backend = new NativeDynamoDbBackend(null, null, dynamoDbService, objectMapper);
+                NativeDynamoDbBackend backend = new NativeDynamoDbBackend(null, null, dynamoDbService, null, null, objectMapper);
                 discovered.add(new DynamoDbCfnProvisioner(new DynamoDbFacade(backend, backend,
                         new RegionResolver("us-east-1", "000000000000"))));
             }

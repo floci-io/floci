@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.lifecycle.inithook.InitializationHook;
 import io.github.hectorvent.floci.lifecycle.inithook.InitializationHooksRunner;
 import io.github.hectorvent.floci.services.appsync.graphql.SchemaCreationWorker;
 import io.github.hectorvent.floci.services.docdb.container.DocDbContainerManager;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbRuntime;
 import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
 import io.github.hectorvent.floci.services.ecs.container.EcsTaskRoleCredentialsServer;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
@@ -28,6 +29,7 @@ import io.github.hectorvent.floci.services.pipes.PipesService;
 import io.github.hectorvent.floci.services.rds.RdsService;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
+import io.github.hectorvent.floci.services.redshift.RedshiftDynamoDbZeroEtlConsumer;
 import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService;
 import io.github.hectorvent.floci.services.timestreaminfluxdb.TimestreamInfluxDbService;
 import io.quarkus.runtime.Quarkus;
@@ -113,6 +115,8 @@ class EmulatorLifecycleTest {
     @Mock private SchemaCreationWorker schemaCreationWorker;
     @Mock private StepFunctionsService stepFunctionsService;
     @Mock private Instance<ContainerTeardown> containerTeardowns;
+    @Mock private DynamoDbRuntime dynamoDbRuntime;
+    @Mock private RedshiftDynamoDbZeroEtlConsumer redshiftZeroEtlConsumer;
 
     private EmulatorLifecycle emulatorLifecycle;
 
@@ -151,7 +155,8 @@ class EmulatorLifecycleTest {
                 elbV2Service, elbClassicService,
                 initializationHooksRunner, sqsPoller, kinesisPoller, dynamodbStreamsPoller,
                 pipesService, ec2MetadataServer, ecsTaskRoleCredentialsServer, ecrRegistryManager, flociUiManager, initLifecycleState,
-                schemaCreationWorker, stepFunctionsService, containerTeardowns, persistentPathValidator);
+                schemaCreationWorker, stepFunctionsService, containerTeardowns, persistentPathValidator,
+                dynamoDbRuntime, redshiftZeroEtlConsumer);
         Mockito.lenient().when(containerTeardowns.iterator())
                 .thenReturn(java.util.Collections.emptyIterator());
     }
@@ -179,6 +184,46 @@ class EmulatorLifecycleTest {
         inOrder.verify(iamService).sweepOrphanedLambdaExecutionRoleSessions();
         inOrder.verify(iamService).sweepOrphanedEc2InstanceSessions();
         inOrder.verify(rdsService).restorePersistedRuntime();
+    }
+
+    @Test
+    void startsTheDynamoDbBackendAfterStorageLoadAndBeforeItsStreamConsumers() {
+        stubStorageConfig();
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        InOrder inOrder = Mockito.inOrder(storageFactory, dynamoDbRuntime, dynamodbStreamsPoller, pipesService,
+                redshiftZeroEtlConsumer);
+        inOrder.verify(storageFactory).loadAll();
+        inOrder.verify(dynamoDbRuntime).start();
+        inOrder.verify(dynamodbStreamsPoller).startPersistedPollers();
+        inOrder.verify(pipesService).startPersistedPollers();
+        inOrder.verify(redshiftZeroEtlConsumer).startPersistedIntegrations();
+    }
+
+    @Test
+    void stopsDynamoDbStreamConsumersBeforeTheFlushAndTheBackendBeforeStorageShutdown() {
+        emulatorLifecycle.onStop(Mockito.mock(ShutdownEvent.class));
+
+        InOrder inOrder = Mockito.inOrder(dynamodbStreamsPoller, redshiftZeroEtlConsumer, storageFactory,
+                flociUiManager, dynamoDbRuntime);
+        inOrder.verify(dynamodbStreamsPoller).shutdown();
+        inOrder.verify(redshiftZeroEtlConsumer).shutdown();
+        inOrder.verify(storageFactory).flushAll();
+        inOrder.verify(flociUiManager).shutdown();
+        inOrder.verify(dynamoDbRuntime).stop();
+        inOrder.verify(storageFactory).shutdownAll();
+    }
+
+    @Test
+    void stopsTheZeroEtlConsumerWhenTheStreamsPollerShutdownFails() {
+        doThrow(new IllegalStateException("poller shutdown failed")).when(dynamodbStreamsPoller).shutdown();
+
+        emulatorLifecycle.onStop(Mockito.mock(ShutdownEvent.class));
+
+        verify(redshiftZeroEtlConsumer).shutdown();
     }
 
     @Test

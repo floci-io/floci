@@ -25,11 +25,17 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
@@ -199,6 +205,127 @@ class DynamoDbTtlForwardingTest {
             key.set("pk", stringAttr("row-" + i));
             assertNull(reloaded.getItem("TtlTable", key, REGION), "expired removal must be persisted");
         }
+    }
+
+    @Test
+    void ttlSweepDoesNotPersistItemsOfATableDeletedMidSweep() {
+        StorageBackend<String, TableDefinition> tableStore = new InMemoryStorage<>();
+        StorageBackend<String, Map<String, JsonNode>> itemStore = new InMemoryStorage<>();
+        DynamoDbStreamService streamService = mock(DynamoDbStreamService.class);
+        DynamoDbService svc = new DynamoDbService(
+                tableStore, itemStore, new RegionResolver("us-east-1", "000000000000"), streamService, null);
+        seedTtlTable(svc, 1);
+        doAnswer(invocation -> {
+            svc.deleteTable("TtlTable", REGION);
+            return null;
+        }).when(streamService).captureEvent(eq("REMOVE"), any(), any(), any(), any());
+
+        svc.deleteExpiredItems();
+
+        assertTrue(itemStore.get("us-east-1::TtlTable").isEmpty(),
+                "the sweep must not write items back for a table deleted while it ran");
+    }
+
+    @Test
+    void aSweepDoesNotDeleteFromATableRecreatedAfterItsScan() {
+        StorageBackend<String, TableDefinition> tableStore = new InMemoryStorage<>();
+        StorageBackend<String, Map<String, JsonNode>> itemStore = new InMemoryStorage<>();
+        DynamoDbService svc = new DynamoDbService(
+                tableStore, itemStore, new RegionResolver("us-east-1", "000000000000"));
+        long past = Instant.now().getEpochSecond() - 3600;
+        svc.createTable("TtlTable",
+                List.of(new KeySchemaElement("pk", "HASH")),
+                List.of(new AttributeDefinition("pk", "S")),
+                5L, 5L, REGION);
+        svc.updateTimeToLive("TtlTable", "expireAt", true, REGION);
+        ObjectNode expired = mapper.createObjectNode();
+        expired.set("pk", stringAttr("row-0"));
+        expired.set("expireAt", numberAttr(past));
+        svc.putItem("TtlTable", expired, REGION);
+        List<DynamoDbService.ExpiredTableScan> scans = svc.scanExpiredItems();
+        assertEquals(1, scans.stream().mapToInt(scan -> scan.itemKeys().size()).sum(),
+                "the expired row must be a scan candidate");
+
+        svc.deleteTable("TtlTable", REGION);
+        svc.createTable("TtlTable",
+                List.of(new KeySchemaElement("pk", "HASH")),
+                List.of(new AttributeDefinition("pk", "S")),
+                5L, 5L, REGION);
+        ObjectNode recreated = mapper.createObjectNode();
+        recreated.set("pk", stringAttr("row-0"));
+        recreated.set("expireAt", numberAttr(past));
+        svc.putItem("TtlTable", recreated, REGION);
+        svc.deleteScannedItems(scans);
+
+        ObjectNode key = mapper.createObjectNode();
+        key.set("pk", stringAttr("row-0"));
+        assertNotNull(svc.getItem("TtlTable", key, REGION),
+                "a scan of the deleted table must not delete the recreated table's item");
+    }
+
+    @Test
+    void aTableDeletedDuringASweepEmitsNoFurtherRemoves() {
+        StorageBackend<String, TableDefinition> tableStore = new InMemoryStorage<>();
+        StorageBackend<String, Map<String, JsonNode>> itemStore = new InMemoryStorage<>();
+        DynamoDbStreamService streamService = mock(DynamoDbStreamService.class);
+        DynamoDbService svc = new DynamoDbService(
+                tableStore, itemStore, new RegionResolver("us-east-1", "000000000000"), streamService, null);
+        seedTtlTable(svc, 3);
+        List<DynamoDbService.ExpiredTableScan> scans = svc.scanExpiredItems();
+        assertEquals(3, scans.stream().mapToInt(scan -> scan.itemKeys().size()).sum(),
+                "every expired row must be a scan candidate");
+        doAnswer(invocation -> {
+            svc.deleteTable("TtlTable", REGION);
+            return null;
+        }).doNothing().when(streamService).captureEvent(eq("REMOVE"), any(), any(), any(), any());
+
+        svc.deleteScannedItems(scans);
+
+        verify(streamService, times(1)).captureEvent(eq("REMOVE"), any(), any(), any(), any());
+    }
+
+    @Test
+    void deleteTableWaitsForASweepPersistingTheTable() throws Exception {
+        CountDownLatch persisting = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        StorageBackend<String, TableDefinition> tableStore = new InMemoryStorage<>();
+        StorageBackend<String, Map<String, JsonNode>> itemStore = new InMemoryStorage<>() {
+            @Override
+            public void put(String key, Map<String, JsonNode> value) {
+                if ("ttl-sweep".equals(Thread.currentThread().getName())) {
+                    persisting.countDown();
+                    try {
+                        release.await(10, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+                super.put(key, value);
+            }
+        };
+        DynamoDbService svc = new DynamoDbService(
+                tableStore, itemStore, new RegionResolver("us-east-1", "000000000000"));
+        seedTtlTable(svc, 1);
+        Thread sweep = new Thread(svc::deleteExpiredItems, "ttl-sweep");
+        sweep.start();
+        assertTrue(persisting.await(10, TimeUnit.SECONDS));
+
+        Thread delete = new Thread(() -> svc.deleteTable("TtlTable", REGION));
+        delete.start();
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (delete.getState() != Thread.State.BLOCKED) {
+            if (System.nanoTime() > deadline) {
+                fail("DeleteTable did not wait for the sweep persisting the table");
+            }
+            Thread.onSpinWait();
+        }
+        release.countDown();
+        sweep.join(10_000);
+        delete.join(10_000);
+
+        assertEquals(Thread.State.TERMINATED, delete.getState());
+        assertTrue(itemStore.get("us-east-1::TtlTable").isEmpty(),
+                "DeleteTable must delete the stored items after the sweep wrote them");
     }
 
     // A write landing between scanExpiredItems() and deleteScannedItems() must not be lost.

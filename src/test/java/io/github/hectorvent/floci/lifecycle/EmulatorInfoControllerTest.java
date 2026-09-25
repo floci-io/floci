@@ -18,12 +18,16 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -147,5 +151,22 @@ class EmulatorInfoControllerTest {
         verify(storageFactory, never()).clearAll();
         verify(resettable, never()).clear();
         verify(later, never()).clear();
+    }
+
+    @Test
+    void resetRefusedByPreflightChangesNothing() {
+        Resettable refusing = mock(Resettable.class);
+        IllegalStateException refusal = new IllegalStateException("backend refuses reset");
+        doThrow(refusal).when(refusing).checkReset();
+        lenient().when(containerTeardowns.iterator()).thenReturn(List.of(sageMakerTeardown).iterator());
+        when(resettables.iterator()).thenReturn(List.of(resettable, refusing).iterator());
+
+        assertSame(refusal, assertThrows(IllegalStateException.class, controller::reset));
+
+        verify(resettable).checkReset();
+        verify(refusing).checkReset();
+        verifyNoMoreInteractions(resettable, refusing);
+        verify(sageMakerTeardown, never()).stopManagedContainers();
+        verifyNoInteractions(storageFactory);
     }
 }

@@ -75,7 +75,8 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
     final Set<String> stopped = ConcurrentHashMap.newKeySet();
     /** {@code uuid:shardId} of shards a mapping read to their end; re-derived from committed progress. */
     private final Set<String> finishedShards = ConcurrentHashMap.newKeySet();
-    private volatile boolean resetting;
+    /** Set during a reset and after shutdown: no invocation starts and no checkpoint is saved. */
+    private volatile boolean quiesced;
     private final ExecutorService pollExecutor = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "dynamodb-streams-esm-poller");
         t.setDaemon(true);
@@ -185,8 +186,13 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
         }
     }
 
+    /**
+     * Stops polling for good. Taking the monitor drains an in-flight advanceCheckpoint save, and no
+     * checkpoint is saved after this returns. Idempotent, so it may run again from {@code @PreDestroy}.
+     */
     @PreDestroy
-    void shutdown() {
+    public synchronized void shutdown() {
+        quiesced = true;
         pollExecutor.shutdownNow();
         timerIds.values().forEach(vertx::cancelTimer);
         timerIds.clear();
@@ -195,12 +201,12 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
     @Override
     public synchronized void beforeReset() {
         // Taking the monitor drains an in-flight advanceCheckpoint save; it is released before the wipe.
-        resetting = true;
+        quiesced = true;
     }
 
     @Override
     public synchronized void afterReset() {
-        resetting = false;
+        quiesced = pollExecutor.isShutdown();
     }
 
     public void clear() {
@@ -326,7 +332,7 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
         boolean enabled = esmStore.getForAccount(esm.getAccountId(), esm.getUuid())
                 .map(EventSourceMapping::isEnabled)
                 .orElse(false);
-        if (resetting || !enabled) {
+        if (quiesced || !enabled) {
             return;
         }
 
@@ -755,7 +761,7 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
     }
 
     private boolean isStopped(EventSourceMapping esm) {
-        return resetting || stopped.contains(esm.getUuid()) || !exists(esm);
+        return quiesced || stopped.contains(esm.getUuid()) || !exists(esm);
     }
 
     private boolean exists(EventSourceMapping esm) {
