@@ -53,7 +53,7 @@ import static io.github.hectorvent.floci.services.ses.SesV2Json.stringMemberOrAb
  * <p>Deviations, all documented in {@code docs/services/ses.md}: real SES writes into a bucket it
  * owns, while Floci writes into its own S3 emulation so the presigned URL resolves; the metrics
  * export lists only the dimension values Floci has seen rather than AWS's fixed ISP catalogue; and
- * and the concurrent-job ceiling is the published quota of 20, since the probe hit AWS's own
+ * the concurrent-job ceiling is the published quota of 20, since the probe hit AWS's own
  * limit before it could measure one.
  */
 @ApplicationScoped

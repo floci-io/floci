@@ -145,6 +145,7 @@ class SesExportJobServiceTest {
     @Test
     void aResetWaitsForAWorkerAlreadyInsideItsWrite() throws Exception {
         CountDownLatch writing = new CountDownLatch(1);
+        CountDownLatch releaseWrite = new CountDownLatch(1);
         AtomicBoolean workerFinishedTheWrite = new AtomicBoolean();
         SesExportJobService threaded = new SesExportJobService(new InMemoryStorage<>(),
                 sentEmailService, s3Service, presigner, objectMapper,
@@ -153,17 +154,21 @@ class SesExportJobServiceTest {
         when(s3Service.putObject(anyString(), anyString(), any(), anyString(), any()))
                 .thenAnswer(invocation -> {
                     writing.countDown();
-                    Thread.sleep(200);
+                    releaseWrite.await(5, TimeUnit.SECONDS);
                     workerFinishedTheWrite.set(true);
                     return null;
                 });
 
         threaded.createExportJob(REGION, ACCOUNT, insightsSource(), destination(), () -> { });
         assertTrue(writing.await(5, TimeUnit.SECONDS), "the worker never reached its write");
-        threaded.beforeReset();
+        Thread reset = new Thread(threaded::beforeReset);
+        reset.start();
+        awaitParked(reset, "the reset waiting on the in-flight write");
+        releaseWrite.countDown();
+        reset.join(5_000);
 
         assertTrue(workerFinishedTheWrite.get(),
-                "beforeReset returned while a worker was still inside its write");
+                "the reset returned before the in-flight write finished");
     }
 
     private void recordSend(Instant sentAt, String source) {
@@ -256,7 +261,7 @@ class SesExportJobServiceTest {
         creator.start();
         // Waiting for the thread to actually park proves the reset blocked it. A plain sleep would
         // pass while the thread was merely unscheduled, and stay green with the blocking removed.
-        awaitParked(creator);
+        awaitParked(creator, "the create waiting on the reset");
         assertFalse(admitted.get(), "a create must not be admitted while the reset is in progress");
         service.afterReset();
         creator.join(5_000);
@@ -304,8 +309,8 @@ class SesExportJobServiceTest {
         assertEquals(20, SesExportJobService.MAX_CONCURRENT_JOBS);
     }
 
-    /** {@code awaitResetFinished} parks in {@code Object.wait(timeout)}, so the state is timed. */
-    private static void awaitParked(Thread thread) {
+    /** Both waits here park in {@code Object.wait(timeout)}, so the state is timed, not WAITING. */
+    private static void awaitParked(Thread thread, String what) {
         long deadline = System.currentTimeMillis() + 5_000;
         while (System.currentTimeMillis() < deadline) {
             Thread.State state = thread.getState();
@@ -314,7 +319,7 @@ class SesExportJobServiceTest {
             }
             Thread.onSpinWait();
         }
-        throw new AssertionError("the create never parked on the reset, it was " + thread.getState());
+        throw new AssertionError(what + " never parked, it was " + thread.getState());
     }
 
     @Test
