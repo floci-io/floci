@@ -5,6 +5,10 @@
 <module name="Checker">
     <property name="charset" value="UTF-8"/>
     <property name="severity" value="error"/>
+    <!-- config_loc is the directory of this file in IDE plugins. Maven sets it in pom.xml. -->
+    <module name="SuppressionFilter">
+        <property name="file" value="${config_loc}/suppressions.xml"/>
+    </module>
     <module name="TreeWalker">
         <!-- Reviewers need the concrete type, such as LinkedHashMap versus Map.
              Record pattern components (case Node(var left, var right)) are allowed. -->

@@ -461,7 +461,7 @@
                 </dependencies>
                 <configuration>
                     <configLocation>tools/checkstyle/checkstyle.xml</configLocation>
-                    <suppressionsLocation>tools/checkstyle/suppressions.xml</suppressionsLocation>
+                    <propertyExpansion>config_loc=${project.basedir}/tools/checkstyle</propertyExpansion>
                     <!-- compatibility-tests is checked from here because its Docker image builds on JDK 17. -->
                     <sourceDirectories>
                         <sourceDirectory>${project.basedir}/src/main/java</sourceDirectory>
