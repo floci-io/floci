@@ -1,5 +1,11 @@
 package io.github.hectorvent.floci.services.eks;
 
+import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.async.ResultCallback;
+import com.github.dockerjava.api.command.ExecCreateCmdResponse;
+import com.github.dockerjava.api.command.InspectContainerResponse;
+import com.github.dockerjava.api.model.ContainerNetwork;
+import com.github.dockerjava.api.model.Frame;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.AwsRegions;
@@ -14,19 +20,6 @@ import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import io.github.hectorvent.floci.core.common.docker.UserDataPipeline;
-import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
-import io.github.hectorvent.floci.services.eks.model.CertificateAuthority;
-import io.github.hectorvent.floci.services.eks.model.Cluster;
-import io.github.hectorvent.floci.services.eks.model.ClusterIdentity;
-import io.github.hectorvent.floci.services.eks.model.ClusterOidcKey;
-import io.github.hectorvent.floci.services.eks.model.LogSetup;
-import io.github.hectorvent.floci.services.eks.model.OidcIdentity;
-import com.github.dockerjava.api.DockerClient;
-import com.github.dockerjava.api.async.ResultCallback;
-import com.github.dockerjava.api.command.ExecCreateCmdResponse;
-import com.github.dockerjava.api.command.InspectContainerResponse;
-import com.github.dockerjava.api.model.ContainerNetwork;
-import com.github.dockerjava.api.model.Frame;
 import io.github.hectorvent.floci.services.ec2.ClusterNodeInstanceProvider;
 import io.github.hectorvent.floci.services.ec2.Ec2MetadataProxy;
 import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
@@ -34,6 +27,15 @@ import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InstanceState;
 import io.github.hectorvent.floci.services.ec2.model.Placement;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
+import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
+import io.github.hectorvent.floci.services.eks.model.CertificateAuthority;
+import io.github.hectorvent.floci.services.eks.model.Cluster;
+import io.github.hectorvent.floci.services.eks.model.ClusterIdentity;
+import io.github.hectorvent.floci.services.eks.model.ClusterOidcKey;
+import io.github.hectorvent.floci.services.eks.model.LogSetup;
+import io.github.hectorvent.floci.services.eks.model.OidcIdentity;
+import io.github.hectorvent.floci.services.eks.model.RegistryEndpoint;
+import io.github.hectorvent.floci.services.eks.model.RegistryHostConfig;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
@@ -58,6 +60,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -85,6 +88,14 @@ public class EksClusterManager implements ClusterNodeInstanceProvider {
     // Tar entry extracted at /etc; the archive path creates /etc/rancher/k3s, which does not
     // exist yet in a created-but-not-started k3s container.
     private static final String REGISTRIES_TAR_ENTRY = "rancher/k3s/registries.yaml";
+    // k3s templates registries.yaml into containerd hosts.toml files under this path (inside the
+    // k3s data volume) once, at agent startup; containerd itself re-reads whatever is there on
+    // every image resolution afterward, so files placed here take effect without a restart. k3s's
+    // own regeneration only touches the host directories it is about to (re)write: the ones named
+    // in registries.yaml, so a caller-configured host absent from registries.yaml is never
+    // clobbered. See #buildRegistriesYaml for how a colliding host name is kept out of
+    // registries.yaml so the caller's file always wins on that host.
+    static final String CONTAINERD_CERTS_DIR = "agent/etc/containerd/certs.d";
     // k3s applies every manifest in its server manifests directory at startup, and again whenever
     // one changes on disk, so dropping the file in before the container starts is enough to get the
     // MutatingWebhookConfiguration registered. The directory sits under the cluster's named data
@@ -434,7 +445,8 @@ public class EksClusterManager implements ClusterNodeInstanceProvider {
         if (auditPolicyLocalFile != null) {
             copyAuditPolicyIntoContainer(containerId, auditPolicyLocalFile, cluster.getName());
         }
-        injectEcrRegistryMirror(containerId, cluster.getName());
+        injectEcrRegistryMirror(containerId, cluster.getName(), registryHostNames(cluster));
+        injectRegistryHosts(containerId, cluster);
         registerPodIdentityWebhook(containerId, cluster);
         if (signingKeyFiles != null) {
             copySigningKeysIntoContainer(containerId, signingKeyFiles, cluster.getName());
@@ -1410,23 +1422,39 @@ public class EksClusterManager implements ClusterNodeInstanceProvider {
      * mirror for this cluster but does not abort its startup, matching the webhook contract.
      */
     void injectEcrRegistryMirror(String containerId, String clusterName) {
+        injectEcrRegistryMirror(containerId, clusterName, Set.of());
+    }
+
+    /**
+     * Same as {@link #injectEcrRegistryMirror(String, String)}, except {@code callerHosts} - the
+     * hostnames a caller has configured via {@code _floci/eks/clusters/{name}/registry-hosts} - are
+     * left out of the generated mirror list. Those hosts are instead served entirely by the
+     * caller's own certs.d entry (see {@link #injectRegistryHosts}), so a caller-configured host
+     * always wins on a name collision with a generated ECR mirror.
+     */
+    void injectEcrRegistryMirror(String containerId, String clusterName, Set<String> callerHosts) {
+        injectEcrRegistryMirror(containerId, clusterName, callerHosts, true);
+    }
+
+    private void injectEcrRegistryMirror(String containerId, String clusterName,
+            Set<String> callerHosts, boolean ensureRegistryStarted) {
         if (!config.services().eks().ecrRegistryMirror() || !config.services().ecr().enabled()) {
             return;
         }
-        try {
-            ecrRegistryManager.ensureStarted();
-        } catch (Exception e) {
-            LOG.warnv("EKS cluster {0} gets no ECR registry mirror: registry unavailable: {1}",
-                    clusterName, e.getMessage());
-            return;
+        if (ensureRegistryStarted) {
+            try {
+                ecrRegistryManager.ensureStarted();
+            } catch (Exception e) {
+                LOG.warnv("EKS cluster {0} gets no ECR registry mirror: registry unavailable: {1}",
+                        clusterName, e.getMessage());
+                return;
+            }
         }
-        List<String> regions = new ArrayList<>(AwsRegions.advertised(AwsRegions.partitionFor(config.defaultRegion())));
-        if (!regions.contains(config.defaultRegion())) {
-            regions.add(config.defaultRegion());
-        }
-        String endpoint = "http://" + dockerHostResolver.resolve() + ":" + config.port();
-        boolean tlsUri = config.services().ecr().tlsUri() && config.tls().enabled();
-        String content = buildRegistriesYaml(config.defaultAccountId(), regions, config.port(), endpoint, tlsUri);
+        List<String> regions = ecrRegistryRegions();
+        String endpoint = ecrRegistryEndpoint();
+        boolean tlsUri = ecrTlsUriEnabled();
+        String content = buildRegistriesYaml(
+                config.defaultAccountId(), regions, config.port(), endpoint, tlsUri, callerHosts);
         writeLocalCopy(Paths.get(config.services().eks().dataPath(), "registries", clusterName,
                 "registries.yaml"), content, clusterName);
         try {
@@ -1571,29 +1599,249 @@ public class EksClusterManager implements ClusterNodeInstanceProvider {
      * so the hostnames are enumerated explicitly.
      */
     static String buildRegistriesYaml(String accountId, List<String> regions, int dataPlanePort, String endpoint) {
-        return buildRegistriesYaml(accountId, regions, dataPlanePort, endpoint, false);
+        return buildRegistriesYaml(accountId, regions, dataPlanePort, endpoint, false, Set.of());
     }
 
     static String buildRegistriesYaml(String accountId, List<String> regions, int dataPlanePort,
                                      String endpoint, boolean tlsUri) {
+        return buildRegistriesYaml(accountId, regions, dataPlanePort, endpoint, tlsUri, Set.of());
+    }
+
+    static String buildRegistriesYaml(String accountId, List<String> regions, int dataPlanePort,
+                                      String endpoint, Set<String> excludedHosts) {
+        return buildRegistriesYaml(accountId, regions, dataPlanePort, endpoint, false, excludedHosts);
+    }
+
+    /**
+     * Adds TLS URI aliases when enabled and omits any caller-configured hosts. Excluding a host
+     * keeps k3s from regenerating its certs.d entry, leaving the caller's hosts.toml as its only config.
+     */
+    static String buildRegistriesYaml(String accountId, List<String> regions, int dataPlanePort,
+                                      String endpoint, boolean tlsUri, Set<String> excludedHosts) {
         StringBuilder yaml = new StringBuilder("mirrors:\n");
-        for (String region : regions) {
-            appendMirror(yaml, accountId + ".dkr.ecr." + region + ".localhost:" + dataPlanePort, endpoint);
-            if (tlsUri) {
-                appendMirror(yaml, accountId + ".dkr.ecr." + region + ".localhost.floci.io:" + dataPlanePort, endpoint);
+        for (String host : buildEcrRegistryMirrorHosts(accountId, regions, dataPlanePort, tlsUri)) {
+            if (!excludedHosts.contains(host)) {
+                appendMirror(yaml, host, endpoint);
             }
         }
-        appendMirror(yaml, "localhost:" + dataPlanePort, endpoint);
-        if (tlsUri) {
-            appendMirror(yaml, "localhost.floci.io:" + dataPlanePort, endpoint);
-        }
         return yaml.toString();
+    }
+
+    private static Set<String> buildEcrRegistryMirrorHosts(String accountId, List<String> regions,
+                                                           int dataPlanePort, boolean tlsUri) {
+        Set<String> hosts = new LinkedHashSet<>();
+        for (String region : regions) {
+            hosts.add(accountId + ".dkr.ecr." + region + ".localhost:" + dataPlanePort);
+            if (tlsUri) {
+                hosts.add(accountId + ".dkr.ecr." + region + ".localhost.floci.io:" + dataPlanePort);
+            }
+        }
+        hosts.add("localhost:" + dataPlanePort);
+        if (tlsUri) {
+            hosts.add("localhost.floci.io:" + dataPlanePort);
+        }
+        return hosts;
     }
 
     private static void appendMirror(StringBuilder yaml, String host, String endpoint) {
         yaml.append("  \"").append(host).append("\":\n")
                 .append("    endpoint:\n")
                 .append("      - \"").append(endpoint).append("\"\n");
+    }
+
+    /** The hostnames a caller has configured on the cluster, or an empty set if none. */
+    static Set<String> registryHostNames(Cluster cluster) {
+        List<RegistryHostConfig> hosts = cluster.getRegistryHosts();
+        if (hosts == null || hosts.isEmpty()) {
+            return Set.of();
+        }
+        Set<String> names = new LinkedHashSet<>();
+        for (RegistryHostConfig host : hosts) {
+            if (host != null && host.host() != null) {
+                names.add(host.host());
+            }
+        }
+        return names;
+    }
+
+    /** Reconciles caller hosts and the generated ECR mirror after a runtime update. */
+    void updateRegistryHosts(String containerId, Cluster cluster, Set<String> previousHosts) {
+        Set<String> currentHosts = registryHostNames(cluster);
+        injectEcrRegistryMirror(containerId, cluster.getName(), currentHosts, false);
+
+        Set<String> removedHosts = new HashSet<>(previousHosts);
+        removedHosts.removeAll(currentHosts);
+        for (String host : removedHosts) {
+            removeRegistryHost(containerId, cluster.getName(), host);
+            restoreEcrRegistryHost(containerId, cluster.getName(), host);
+        }
+
+        injectRegistryHosts(containerId, cluster);
+    }
+
+    /**
+     * Writes the caller's containerd host configuration into the (created, not-yet-started) k3s
+     * container, one {@code certs.d/<host>/hosts.toml} file per configured host. Unlike
+     * {@code registries.yaml}, containerd re-reads these on every image resolution, so a host added
+     * to a cluster that is already running (see the {@code _floci/eks/clusters/{name}/registry-hosts}
+     * controller) takes effect without a restart. A per-host copy failure is logged and skipped so
+     * one bad host does not disable the others.
+     */
+    void injectRegistryHosts(String containerId, Cluster cluster) {
+        List<RegistryHostConfig> hosts = cluster.getRegistryHosts();
+        if (hosts == null || hosts.isEmpty()) {
+            return;
+        }
+        String clusterName = cluster.getName();
+        for (RegistryHostConfig hostConfig : hosts) {
+            String content = buildHostsToml(hostConfig);
+            writeLocalCopy(Paths.get(config.services().eks().dataPath(), "registries", clusterName,
+                    hostConfig.host(), "hosts.toml"), content, clusterName);
+            copyRegistryHostsToml(containerId, clusterName, hostConfig.host(), content);
+        }
+    }
+
+    private void restoreEcrRegistryHost(String containerId, String clusterName, String host) {
+        if (!config.services().eks().ecrRegistryMirror() || !config.services().ecr().enabled()) {
+            return;
+        }
+        if (!buildEcrRegistryMirrorHosts(config.defaultAccountId(), ecrRegistryRegions(), config.port(),
+                ecrTlsUriEnabled()).contains(host)) {
+            return;
+        }
+
+        RegistryHostConfig mirror = new RegistryHostConfig(host,
+                List.of(new RegistryEndpoint(ecrRegistryEndpoint(), null)), null, null);
+        copyRegistryHostsToml(containerId, clusterName, host, buildHostsToml(mirror));
+    }
+
+    private List<String> ecrRegistryRegions() {
+        List<String> regions = new ArrayList<>(AwsRegions.advertised(AwsRegions.partitionFor(config.defaultRegion())));
+        if (!regions.contains(config.defaultRegion())) {
+            regions.add(config.defaultRegion());
+        }
+        return regions;
+    }
+
+    private boolean ecrTlsUriEnabled() {
+        return config.services().ecr().tlsUri() && config.tls().enabled();
+    }
+
+    private String ecrRegistryEndpoint() {
+        return "http://" + dockerHostResolver.resolve() + ":" + config.port();
+    }
+
+    private void copyRegistryHostsToml(String containerId, String clusterName, String host, String content) {
+        String tarEntry = CONTAINERD_CERTS_DIR + "/" + host + "/hosts.toml";
+        try {
+            lifecycleManager.getDockerClient()
+                    .copyArchiveToContainerCmd(containerId)
+                    .withTarInputStream(new ByteArrayInputStream(tarSingleFile(tarEntry, content)))
+                    .withRemotePath(K3S_DATA_DIR)
+                    .exec();
+            LOG.infov("Injected registry host {0} for k3s cluster {1}", host, clusterName);
+        } catch (Exception e) {
+            LOG.warnv("EKS cluster {0} registry host {1} not configured: hosts.toml copy failed: {2}",
+                    clusterName, host, e.getMessage());
+        }
+    }
+
+    private void removeRegistryHost(String containerId, String clusterName, String host) {
+        Path localDirectory = Paths.get(config.services().eks().dataPath(), "registries", clusterName, host);
+        try {
+            Files.deleteIfExists(localDirectory.resolve("hosts.toml"));
+            Files.deleteIfExists(localDirectory);
+        } catch (IOException e) {
+            LOG.warnv("Could not remove local registry host copy for EKS cluster {0}, host {1}: {2}",
+                    clusterName, host, e.getMessage());
+        }
+
+        String containerDirectory = K3S_DATA_DIR + "/" + CONTAINERD_CERTS_DIR + "/" + host;
+        try {
+            ContainerExecResult result = execInContainerForResult(containerId,
+                    new String[] {"rm", "-rf", "--", containerDirectory}, 10);
+            if (result.exitCode() != 0) {
+                LOG.warnv("Could not remove registry host {0} from EKS cluster {1}: {2}",
+                        host, clusterName, result.summary());
+            }
+        } catch (Exception e) {
+            LOG.warnv("Could not remove registry host {0} from EKS cluster {1}: {2}",
+                    host, clusterName, e.getMessage());
+        }
+    }
+
+    /**
+     * Renders one {@code hosts.toml} file: a {@code server} pointing at the host itself so
+     * unlisted paths still resolve normally, followed by one {@code [host."<url>"]} table per
+     * endpoint. Capabilities default to pull and resolve, matching containerd's own default. A
+     * nested {@code .header} table is written when an endpoint carries request headers.
+     */
+    static String buildHostsToml(RegistryHostConfig hostConfig) {
+        StringBuilder toml = new StringBuilder();
+        toml.append("server = ").append(tomlBasicString("https://" + hostConfig.host())).append('\n');
+        List<String> capabilities = hostConfig.capabilities() != null && !hostConfig.capabilities().isEmpty()
+                ? hostConfig.capabilities() : List.of("pull", "resolve");
+        for (RegistryEndpoint endpoint : hostConfig.endpoints()) {
+            String quotedUrl = tomlBasicString(endpoint.url());
+            toml.append("\n[host.").append(quotedUrl).append("]\n")
+                    .append("  capabilities = [");
+            for (int index = 0; index < capabilities.size(); index++) {
+                if (index > 0) {
+                    toml.append(", ");
+                }
+                toml.append(tomlBasicString(capabilities.get(index)));
+            }
+            toml.append("]\n");
+            if (Boolean.TRUE.equals(hostConfig.skipVerify())) {
+                toml.append("  skip_verify = true\n");
+            }
+            if (endpoint.headers() != null && !endpoint.headers().isEmpty()) {
+                toml.append("  [host.").append(quotedUrl).append(".header]\n");
+                for (Map.Entry<String, String> header : endpoint.headers().entrySet()) {
+                    toml.append("    ").append(tomlBasicString(header.getKey())).append(" = ")
+                            .append(tomlBasicString(header.getValue())).append('\n');
+                }
+            }
+        }
+        return toml.toString();
+    }
+
+    private static String tomlBasicString(String value) {
+        StringBuilder quoted = new StringBuilder(value.length() + 2).append('"');
+        for (int index = 0; index < value.length(); index++) {
+            char character = value.charAt(index);
+            switch (character) {
+                case '\b' -> quoted.append("\\b");
+                case '\t' -> quoted.append("\\t");
+                case '\n' -> quoted.append("\\n");
+                case '\f' -> quoted.append("\\f");
+                case '\r' -> quoted.append("\\r");
+                case '"' -> quoted.append("\\\"");
+                case '\\' -> quoted.append("\\\\");
+                default -> {
+                    if (character < 0x20 || character == 0x7f) {
+                        appendTomlUnicodeEscape(quoted, character);
+                    } else if (Character.isHighSurrogate(character)) {
+                        if (index + 1 >= value.length() || !Character.isLowSurrogate(value.charAt(index + 1))) {
+                            throw new IllegalArgumentException("TOML strings cannot contain unpaired surrogates");
+                        }
+                        quoted.append(character).append(value.charAt(++index));
+                    } else if (Character.isLowSurrogate(character)) {
+                        throw new IllegalArgumentException("TOML strings cannot contain unpaired surrogates");
+                    } else {
+                        quoted.append(character);
+                    }
+                }
+            }
+        }
+        return quoted.append('"').toString();
+    }
+
+    private static void appendTomlUnicodeEscape(StringBuilder target, char character) {
+        target.append("\\u");
+        for (int shift = 12; shift >= 0; shift -= 4) {
+            target.append(Character.forDigit((character >> shift) & 0xF, 16));
+        }
     }
 
     /** The Floci token-webhook URL as reachable from inside the k3s container. */

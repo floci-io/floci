@@ -1,27 +1,5 @@
 package io.github.hectorvent.floci.services.eks;
 
-import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.config.FlociCertificateAuthority;
-import io.github.hectorvent.floci.core.common.AwsRegions;
-import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
-import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
-import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
-import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
-import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
-import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
-import io.github.hectorvent.floci.core.common.docker.PortAllocator;
-import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
-import io.github.hectorvent.floci.services.eks.model.CertificateAuthority;
-import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
-import io.github.hectorvent.floci.services.eks.model.Cluster;
-import io.github.hectorvent.floci.services.eks.model.ClusterIdentity;
-import io.github.hectorvent.floci.services.eks.model.ClusterOidcKey;
-import io.github.hectorvent.floci.services.eks.model.LogSetup;
-import io.github.hectorvent.floci.services.eks.model.Logging;
-import io.github.hectorvent.floci.services.eks.model.OidcIdentity;
-import io.github.hectorvent.floci.services.eks.model.ResourcesVpcConfig;
-
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.dockerjava.api.DockerClient;
@@ -38,8 +16,33 @@ import com.github.dockerjava.api.command.InspectVolumeCmd;
 import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.NetworkSettings;
+import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.FlociCertificateAuthority;
+import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
+import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
+import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
+import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
+import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
+import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
+import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
+import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
+import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
+import io.github.hectorvent.floci.services.eks.model.CertificateAuthority;
+import io.github.hectorvent.floci.services.eks.model.Cluster;
+import io.github.hectorvent.floci.services.eks.model.ClusterIdentity;
+import io.github.hectorvent.floci.services.eks.model.ClusterOidcKey;
+import io.github.hectorvent.floci.services.eks.model.LogSetup;
+import io.github.hectorvent.floci.services.eks.model.Logging;
+import io.github.hectorvent.floci.services.eks.model.OidcIdentity;
+import io.github.hectorvent.floci.services.eks.model.RegistryEndpoint;
+import io.github.hectorvent.floci.services.eks.model.RegistryHostConfig;
+import io.github.hectorvent.floci.services.eks.model.ResourcesVpcConfig;
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -48,6 +51,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
 import java.io.Closeable;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -76,6 +80,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -206,13 +211,95 @@ class EksClusterManagerTest {
 
         assertEquals("""
                 mirrors:
-                  "111122223333.dkr.ecr.eu-central-1.localhost:4566":
+                  \"111122223333.dkr.ecr.eu-central-1.localhost:4566\":
                     endpoint:
-                      - "http://floci:4566"
-                  "localhost:4566":
+                      - \"http://floci:4566\"
+                  \"localhost:4566\":
                     endpoint:
-                      - "http://floci:4566"
+                      - \"http://floci:4566\"
                 """, yaml);
+    }
+
+    @Test
+    void registriesYamlWithNoExcludedHostsMatchesTheDefaultOverload() {
+        String defaulted = EksClusterManager.buildRegistriesYaml(
+                "000000000000", List.of("us-east-1"), 4566, "http://floci:4566");
+        String explicit = EksClusterManager.buildRegistriesYaml(
+                "000000000000", List.of("us-east-1"), 4566, "http://floci:4566", Set.of());
+
+        assertEquals(defaulted, explicit);
+    }
+
+    @Test
+    void registriesYamlOmitsAHostConfiguredByTheCaller() {
+        String excludedHost = "000000000000.dkr.ecr.us-east-1.localhost:4566";
+        String yaml = EksClusterManager.buildRegistriesYaml("000000000000", List.of("us-east-1", "eu-west-1"),
+                4566, "http://floci:4566", Set.of(excludedHost));
+
+        assertFalse(yaml.contains("\"" + excludedHost + "\":"), "a caller-configured host must win");
+        assertTrue(yaml.contains("\"000000000000.dkr.ecr.eu-west-1.localhost:4566\":"),
+                "other generated hosts keep working");
+        assertTrue(yaml.contains("\"localhost:4566\":"), "the path-style form keeps working");
+    }
+
+    @Test
+    void registriesYamlCanOmitThePathStyleHost() {
+        String yaml = EksClusterManager.buildRegistriesYaml("000000000000", List.of("us-east-1"),
+                4566, "http://floci:4566", Set.of("localhost:4566"));
+
+        assertFalse(yaml.contains("\"localhost:4566\":"));
+        assertTrue(yaml.contains("\"000000000000.dkr.ecr.us-east-1.localhost:4566\":"));
+    }
+
+    @Test
+    void registryHostNamesReturnsTheConfiguredHostsOrEmpty() {
+        Cluster cluster = new Cluster();
+        assertEquals(Set.of(), EksClusterManager.registryHostNames(cluster));
+
+        cluster.setRegistryHosts(List.of(
+                new RegistryHostConfig("mirror.internal", List.of(new RegistryEndpoint("https://cache:5000", null)),
+                        null, null)));
+        assertEquals(Set.of("mirror.internal"), EksClusterManager.registryHostNames(cluster));
+    }
+
+    @Test
+    void hostsTomlRendersEndpointsCapabilitiesAndHeaders() {
+        RegistryHostConfig config = new RegistryHostConfig("pull-through.internal",
+                List.of(new RegistryEndpoint("https://cache.internal:5000",
+                        Map.of("Authorization", "Bearer secret-token"))),
+                null, true);
+
+        String toml = EksClusterManager.buildHostsToml(config);
+
+        assertTrue(toml.contains("server = \"https://pull-through.internal\""));
+        assertTrue(toml.contains("[host.\"https://cache.internal:5000\"]"));
+        assertTrue(toml.contains("capabilities = [\"pull\", \"resolve\"]"));
+        assertTrue(toml.contains("skip_verify = true"));
+        assertTrue(toml.contains("[host.\"https://cache.internal:5000\".header]"));
+        assertTrue(toml.contains("\"Authorization\" = \"Bearer secret-token\""));
+    }
+
+    @Test
+    void hostsTomlEscapesQuotedHeaderNamesAndValues() {
+        RegistryHostConfig config = new RegistryHostConfig("plain.internal",
+                List.of(new RegistryEndpoint("https://cache.internal:5000",
+                        Map.of("X-Test.Name", "Bearer \"quoted\"\\path\tok"))), null, null);
+
+        String toml = EksClusterManager.buildHostsToml(config);
+
+        assertTrue(toml.contains("\"X-Test.Name\" = \"Bearer \\\"quoted\\\"\\\\path\\tok\""));
+    }
+
+    @Test
+    void hostsTomlDefaultsCapabilitiesAndOmitsTheHeaderTableWhenThereAreNoHeaders() {
+        RegistryHostConfig config = new RegistryHostConfig("plain.internal",
+                List.of(new RegistryEndpoint("https://plain-mirror.internal", null)), null, null);
+
+        String toml = EksClusterManager.buildHostsToml(config);
+
+        assertTrue(toml.contains("capabilities = [\"pull\", \"resolve\"]"));
+        assertFalse(toml.contains("skip_verify"));
+        assertFalse(toml.contains(".header]"));
     }
 
     @Test
@@ -649,6 +736,7 @@ class EksClusterManagerTest {
         private ContainerLifecycleManager lifecycleManager;
         private DockerClient dockerClient;
         private CopyArchiveToContainerCmd copyCmd;
+        private ExecCreateCmd execCreate;
         private EcrRegistryManager registryManager;
         private EmulatorConfig config;
         private EmulatorConfig.EksServiceConfig eks;
@@ -662,6 +750,24 @@ class EksClusterManagerTest {
             copyCmd = Mockito.mock(CopyArchiveToContainerCmd.class, Mockito.RETURNS_SELF);
             when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
             when(dockerClient.copyArchiveToContainerCmd(anyString())).thenReturn(copyCmd);
+
+            execCreate = Mockito.mock(ExecCreateCmd.class, Mockito.withSettings().defaultAnswer(Mockito.RETURNS_SELF));
+            ExecCreateCmdResponse execResponse = Mockito.mock(ExecCreateCmdResponse.class);
+            when(execResponse.getId()).thenReturn("registry-host-cleanup");
+            when(dockerClient.execCreateCmd(anyString())).thenReturn(execCreate);
+            when(execCreate.exec()).thenReturn(execResponse);
+            ExecStartCmd execStart = Mockito.mock(ExecStartCmd.class);
+            when(dockerClient.execStartCmd(anyString())).thenReturn(execStart);
+            when(execStart.exec(any())).thenAnswer(invocation -> {
+                ResultCallback<Frame> callback = invocation.getArgument(0);
+                callback.onComplete();
+                return callback;
+            });
+            InspectExecCmd inspectExec = Mockito.mock(InspectExecCmd.class);
+            InspectExecResponse inspectResponse = Mockito.mock(InspectExecResponse.class);
+            when(inspectResponse.getExitCodeLong()).thenReturn(0L);
+            when(inspectExec.exec()).thenReturn(inspectResponse);
+            when(dockerClient.inspectExecCmd(anyString())).thenReturn(inspectExec);
 
             registryManager = Mockito.mock(EcrRegistryManager.class);
 
@@ -766,6 +872,119 @@ class EksClusterManagerTest {
             manager.injectEcrRegistryMirror("container-1", "demo");
 
             verify(copyCmd).exec();
+        }
+
+        @Test
+        void runtimeUpdatesKeepEcrCollisionStateInSyncAndRemoveDeletedHosts() throws Exception {
+            String host = "000000000000.dkr.ecr.us-east-1.localhost:4566";
+            Cluster cluster = new Cluster();
+            cluster.setName("demo");
+            cluster.setRegistryHosts(List.of(new RegistryHostConfig(host,
+                    List.of(new RegistryEndpoint("http://floci:4566", null)), null, null)));
+
+            manager.updateRegistryHosts("container-1", cluster, Set.of());
+
+            Path localHostsToml = tempDir.resolve("registries/demo/" + host + "/hosts.toml");
+            assertTrue(Files.exists(localHostsToml));
+            String yaml = Files.readString(tempDir.resolve("registries/demo/registries.yaml"));
+            assertFalse(yaml.contains("\"" + host + "\":"));
+
+            cluster.setRegistryHosts(List.of());
+            manager.updateRegistryHosts("container-1", cluster, Set.of(host));
+
+            yaml = Files.readString(tempDir.resolve("registries/demo/registries.yaml"));
+            assertTrue(yaml.contains("\"" + host + "\":"));
+            assertFalse(Files.exists(localHostsToml));
+
+            ArgumentCaptor<InputStream> archives = ArgumentCaptor.forClass(InputStream.class);
+            verify(copyCmd, times(4)).withTarInputStream(archives.capture());
+            try (TarArchiveInputStream tar = new TarArchiveInputStream(archives.getAllValues().get(3))) {
+                TarArchiveEntry entry = tar.getNextEntry();
+                assertEquals("agent/etc/containerd/certs.d/" + host + "/hosts.toml", entry.getName());
+                String hostsToml = new String(tar.readAllBytes(), StandardCharsets.UTF_8);
+                assertTrue(hostsToml.contains("server = \"https://" + host + "\""));
+                assertTrue(hostsToml.contains("[host.\"http://floci:4566\"]"));
+                assertTrue(hostsToml.contains("capabilities = [\"pull\", \"resolve\"]"));
+            }
+
+            ArgumentCaptor<String[]> command = ArgumentCaptor.forClass(String[].class);
+            verify(execCreate).withCmd(command.capture());
+            assertTrue(Arrays.equals(new String[] {"rm", "-rf", "--",
+                    "/var/lib/rancher/k3s/agent/etc/containerd/certs.d/" + host}, command.getValue()));
+        }
+    }
+
+    /** Caller-supplied containerd host configuration injection, without a Docker daemon. */
+    @Nested
+    class InjectRegistryHosts {
+
+        @TempDir
+        Path tempDir;
+
+        private ContainerLifecycleManager lifecycleManager;
+        private DockerClient dockerClient;
+        private CopyArchiveToContainerCmd copyCmd;
+        private EksClusterManager manager;
+        private Cluster cluster;
+
+        @BeforeEach
+        void setUp() {
+            lifecycleManager = Mockito.mock(ContainerLifecycleManager.class);
+            dockerClient = Mockito.mock(DockerClient.class);
+            copyCmd = Mockito.mock(CopyArchiveToContainerCmd.class, Mockito.RETURNS_SELF);
+            when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+            when(dockerClient.copyArchiveToContainerCmd(anyString())).thenReturn(copyCmd);
+
+            EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
+            EmulatorConfig.EksServiceConfig eks = Mockito.mock(EmulatorConfig.EksServiceConfig.class);
+            when(config.services()).thenReturn(Mockito.mock(EmulatorConfig.ServicesConfig.class));
+            when(config.services().eks()).thenReturn(eks);
+            when(eks.dataPath()).thenReturn(tempDir.toString());
+
+            manager = new EksClusterManager(
+                    Mockito.mock(ContainerBuilder.class), lifecycleManager,
+                    Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
+                    Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class), config,
+                    Mockito.mock(RegionResolver.class));
+
+            cluster = new Cluster();
+            cluster.setName("demo");
+        }
+
+        @Test
+        void skipsWhenNoHostsAreConfigured() {
+            manager.injectRegistryHosts("container-1", cluster);
+
+            verifyNoInteractions(dockerClient);
+        }
+
+        @Test
+        void copiesOneHostsTomlPerConfiguredHost() {
+            cluster.setRegistryHosts(List.of(
+                    new RegistryHostConfig("mirror-a.internal",
+                            List.of(new RegistryEndpoint("https://cache-a:5000", null)), null, null),
+                    new RegistryHostConfig("mirror-b.internal",
+                            List.of(new RegistryEndpoint("https://cache-b:5000", null)), null, null)));
+
+            manager.injectRegistryHosts("container-1", cluster);
+
+            verify(dockerClient, times(2)).copyArchiveToContainerCmd("container-1");
+            verify(copyCmd, times(2)).withRemotePath(EksClusterManager.K3S_DATA_DIR);
+            verify(copyCmd, times(2)).exec();
+        }
+
+        @Test
+        void aFailedCopyForOneHostDoesNotStopTheOthers() {
+            cluster.setRegistryHosts(List.of(
+                    new RegistryHostConfig("mirror-a.internal",
+                            List.of(new RegistryEndpoint("https://cache-a:5000", null)), null, null),
+                    new RegistryHostConfig("mirror-b.internal",
+                            List.of(new RegistryEndpoint("https://cache-b:5000", null)), null, null)));
+            doThrow(new RuntimeException("copy failed")).doNothing().when(copyCmd).exec();
+
+            manager.injectRegistryHosts("container-1", cluster);
+
+            verify(copyCmd, times(2)).exec();
         }
     }
 
