@@ -2033,7 +2033,7 @@ public class CloudFormationService implements ResourceProvider {
         return ordered;
     }
 
-    private void deleteStackResources(Stack stack, String region, String accountId) {
+    void deleteStackResources(Stack stack, String region, String accountId) {
         try {
             List<StackResource> resources = resourcesInCreationOrder(stack, region);
             Collections.reverse(resources); // Dependents go before what they depend on
@@ -2047,16 +2047,7 @@ public class CloudFormationService implements ResourceProvider {
                 failedResources.add(displacedFailure.logicalId());
             }
             for (StackResource resource : resources) {
-                // CREATE_COMPLETE/UPDATE_COMPLETE: first delete attempt. DELETE_FAILED: a previous
-                // delete left the resource behind (e.g. the bucket was non-empty); AWS re-attempts
-                // it on retry. Failed updates are included only when their provisioner still
-                // tracks an ownership-aware cleanup obligation.
-                boolean deletable = "CREATE_COMPLETE".equals(resource.getStatus())
-                        || "UPDATE_COMPLETE".equals(resource.getStatus())
-                        || "DELETE_FAILED".equals(resource.getStatus())
-                        || ("UPDATE_FAILED".equals(resource.getStatus())
-                                && dispatcher.hasPendingRollbackCleanup(resource));
-                if (resource.getPhysicalId() == null || !deletable) {
+                if (resource.getPhysicalId() == null || !isDeletableOnStackDelete(resource)) {
                     continue;
                 }
                 if (skipRetainedResource(stack, resource, false)) {
@@ -2128,6 +2119,25 @@ public class CloudFormationService implements ResourceProvider {
             persistStack(stack);
             throw (e instanceof RuntimeException re ? re : new RuntimeException(e));
         }
+    }
+
+    /**
+     * Whether {@code DeleteStack} owes a delete to a resource that has a physical id. AWS deletes
+     * everything the stack manages, whatever status the last operation left it in.
+     *
+     * <p>{@code UPDATE_FAILED} is what a failed update rollback leaves on a resource it could not
+     * restore; its physical id names the committed entity, or an entity a cancelled create made
+     * and the rollback already tried to delete. {@code DELETE_FAILED} is a delete to retry.
+     * {@code CREATE_FAILED} is deleted only when the provisioner marked the entity as created by
+     * this stack, as the create rollback does: a failed create can carry the physical id of an
+     * entity that already existed, which the stack must not delete.
+     */
+    private static boolean isDeletableOnStackDelete(StackResource resource) {
+        return switch (resource.getStatus() == null ? "" : resource.getStatus()) {
+            case "CREATE_COMPLETE", "UPDATE_COMPLETE", "UPDATE_FAILED", "DELETE_FAILED" -> true;
+            case "CREATE_FAILED" -> "true".equals(resource.getAttributes().get(CfnRollback.ROLLBACK_OWNED_ATTR));
+            default -> false;
+        };
     }
 
     /**
@@ -2525,6 +2535,11 @@ public class CloudFormationService implements ResourceProvider {
             resource.setStatus("CREATE_COMPLETE");
         } else {
             resource.setStatus("CREATE_FAILED");
+            if (childCreate) {
+                // This operation created the child, so rolling back or deleting the parent owes it
+                // a delete; a child an update only re-applied stays tracked by the prior resource.
+                resource.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
+            }
             String reason = childStack.getStatusReason();
             if (reason == null || reason.isBlank()) {
                 reason = "Nested stack " + childStackName + " rolled back or failed with status " + childStack.getStatus();
