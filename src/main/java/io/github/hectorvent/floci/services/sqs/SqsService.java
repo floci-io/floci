@@ -780,82 +780,84 @@ public class SqsService implements Resettable, ResourceProvider {
             // Use NUL as the delimiter — it is outside the SQS-allowed character set for
             // MessageGroupId/MessageDeduplicationId, so the composite key is unambiguous.
             String dedupCacheKey = groupScoped ? messageGroupId + "\0" + dedupId : dedupId;
-            cleanupDeduplicationCache(storageKey);
             ConcurrentHashMap<String, Instant> dedupMap = deduplicationCache.computeIfAbsent(storageKey, k -> new ConcurrentHashMap<>());
-            Instant now = clock.instant();
-            Instant expiry = now.plusSeconds(DEDUP_WINDOW_SECONDS);
-            Instant previous = dedupMap.putIfAbsent(dedupCacheKey, expiry);
-            persistDedup(storageKey);
-            if (previous != null && now.isBefore(previous)) {
-                // Duplicate within window — keep the original messageId and
-                // sequenceNumber but compute response MD5s from this request's
-                // body and attributes, otherwise SDK clients (which validate
-                // MD5 against what they sent) reject the response.
-                Message existing = getOrCreateQueue(storageKey).findByDeduplicationId(
-                        dedupId, groupScoped ? messageGroupId : null);
-                if (existing != null) {
-                    DeduplicationIdentity identity = new DeduplicationIdentity(
-                            existing.getMessageId(), existing.getSequenceNumber());
-                    deduplicationIdentityCache.computeIfAbsent(storageKey, k -> new ConcurrentHashMap<>())
-                            .putIfAbsent(dedupCacheKey, identity);
-                    persistDedupIdentities(storageKey);
+            synchronized (dedupMap) {
+                cleanupDeduplicationCache(storageKey);
+                Instant now = clock.instant();
+                Instant expiry = now.plusSeconds(DEDUP_WINDOW_SECONDS);
+                Instant previous = dedupMap.putIfAbsent(dedupCacheKey, expiry);
+                persistDedup(storageKey);
+                if (previous != null && now.isBefore(previous)) {
+                    // Duplicate within window — keep the original messageId and
+                    // sequenceNumber but compute response MD5s from this request's
+                    // body and attributes, otherwise SDK clients (which validate
+                    // MD5 against what they sent) reject the response.
+                    Message existing = getOrCreateQueue(storageKey).findByDeduplicationId(
+                            dedupId, groupScoped ? messageGroupId : null);
+                    if (existing != null) {
+                        DeduplicationIdentity identity = new DeduplicationIdentity(
+                                existing.getMessageId(), existing.getSequenceNumber());
+                        deduplicationIdentityCache.computeIfAbsent(storageKey, k -> new ConcurrentHashMap<>())
+                                .putIfAbsent(dedupCacheKey, identity);
+                        persistDedupIdentities(storageKey);
+                        Message response = new Message(body);
+                        response.setMessageId(existing.getMessageId());
+                        response.setMessageGroupId(messageGroupId);
+                        response.setMessageDeduplicationId(dedupId);
+                        response.setSequenceNumber(existing.getSequenceNumber());
+                        if (messageAttributes != null && !messageAttributes.isEmpty()) {
+                            response.getMessageAttributes().putAll(messageAttributes);
+                            response.updateMd5OfMessageAttributes();
+                        }
+                        return response;
+                    }
+                    // The original message may have been received and deleted, but SQS
+                    // continues tracking the deduplication ID for the full interval.
+                    // Return the original identity without re-enqueueing a message.
                     Message response = new Message(body);
-                    response.setMessageId(existing.getMessageId());
+                    ConcurrentHashMap<String, DeduplicationIdentity> identities =
+                            deduplicationIdentityCache.get(storageKey);
+                    DeduplicationIdentity identity = identities == null ? null : identities.get(dedupCacheKey);
+                    if (identity != null) {
+                        response.setMessageId(identity.messageId());
+                        response.setSequenceNumber(identity.sequenceNumber());
+                    } else {
+                        response.setSequenceNumber(sequenceCounter.incrementAndGet());
+                    }
                     response.setMessageGroupId(messageGroupId);
                     response.setMessageDeduplicationId(dedupId);
-                    response.setSequenceNumber(existing.getSequenceNumber());
                     if (messageAttributes != null && !messageAttributes.isEmpty()) {
                         response.getMessageAttributes().putAll(messageAttributes);
                         response.updateMd5OfMessageAttributes();
                     }
                     return response;
                 }
-                // The original message may have been received and deleted, but SQS
-                // continues tracking the deduplication ID for the full interval.
-                // Return the original identity without re-enqueueing a message.
-                Message response = new Message(body);
-                ConcurrentHashMap<String, DeduplicationIdentity> identities =
-                        deduplicationIdentityCache.get(storageKey);
-                DeduplicationIdentity identity = identities == null ? null : identities.get(dedupCacheKey);
-                if (identity != null) {
-                    response.setMessageId(identity.messageId());
-                    response.setSequenceNumber(identity.sequenceNumber());
-                } else {
-                    response.setSequenceNumber(sequenceCounter.incrementAndGet());
+
+                Message message = new Message(body);
+                message.setMessageGroupId(messageGroupId);
+                message.setMessageDeduplicationId(dedupId);
+                message.setSequenceNumber(sequenceCounter.incrementAndGet());
+                message.setAwsTraceHeader(awsTraceHeader);
+                if (effectiveDelaySeconds > 0) {
+                    message.setVisibleAt(Instant.now().plusSeconds(effectiveDelaySeconds));
                 }
-                response.setMessageGroupId(messageGroupId);
-                response.setMessageDeduplicationId(dedupId);
                 if (messageAttributes != null && !messageAttributes.isEmpty()) {
-                    response.getMessageAttributes().putAll(messageAttributes);
-                    response.updateMd5OfMessageAttributes();
+                    message.getMessageAttributes().putAll(messageAttributes);
+                    message.updateMd5OfMessageAttributes();
                 }
-                return response;
-            }
 
-            Message message = new Message(body);
-            message.setMessageGroupId(messageGroupId);
-            message.setMessageDeduplicationId(dedupId);
-            message.setSequenceNumber(sequenceCounter.incrementAndGet());
-            message.setAwsTraceHeader(awsTraceHeader);
-            if (effectiveDelaySeconds > 0) {
-                message.setVisibleAt(Instant.now().plusSeconds(effectiveDelaySeconds));
+                getOrCreateQueue(storageKey).addMessage(message);
+                deduplicationIdentityCache.computeIfAbsent(storageKey, k -> new ConcurrentHashMap<>())
+                        .putIfAbsent(dedupCacheKey,
+                                new DeduplicationIdentity(message.getMessageId(), message.getSequenceNumber()));
+                persistDedupIdentities(storageKey);
+                notifyReceivers(storageKey);
+                LOG.debugv("Sent FIFO message {0} to queue {1}, group={2}, seq={3}",
+                        message.getMessageId(), queueUrl, messageGroupId, message.getSequenceNumber());
+                LOG.tracev("Sent message {0} to queue {1} body={2} attributes={3}",
+                        message.getMessageId(), queueUrl, body, message.getMessageAttributes());
+                return message;
             }
-            if (messageAttributes != null && !messageAttributes.isEmpty()) {
-                message.getMessageAttributes().putAll(messageAttributes);
-                message.updateMd5OfMessageAttributes();
-            }
-
-            getOrCreateQueue(storageKey).addMessage(message);
-            deduplicationIdentityCache.computeIfAbsent(storageKey, k -> new ConcurrentHashMap<>())
-                    .putIfAbsent(dedupCacheKey,
-                            new DeduplicationIdentity(message.getMessageId(), message.getSequenceNumber()));
-            persistDedupIdentities(storageKey);
-            notifyReceivers(storageKey);
-            LOG.debugv("Sent FIFO message {0} to queue {1}, group={2}, seq={3}",
-                    message.getMessageId(), queueUrl, messageGroupId, message.getSequenceNumber());
-            LOG.tracev("Sent message {0} to queue {1} body={2} attributes={3}",
-                    message.getMessageId(), queueUrl, body, message.getMessageAttributes());
-            return message;
         }
 
         // Standard queue. MessageGroupId is retained for ReceiveMessage to

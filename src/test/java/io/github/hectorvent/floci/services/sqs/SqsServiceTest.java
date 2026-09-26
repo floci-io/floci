@@ -24,6 +24,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -625,6 +628,45 @@ class SqsServiceTest {
         List<Message> received = sqsService.receiveMessage(queue.getQueueUrl(), 2, 30, 0, region);
         assertEquals(2, received.size());
         assertTrue(received.stream().anyMatch(message -> "after-window".equals(message.getBody())));
+    }
+
+    @Test
+    void concurrentFifoSendsAfterExpiryKeepTheNewDeduplicationEntry() throws Exception {
+        String region = "eu-west-1";
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            for (int round = 0; round < 25; round++) {
+                Queue queue = sqsService.createQueue("expired-concurrent-" + round + ".fifo", null, region);
+                String queueUrl = queue.getQueueUrl();
+                sqsService.sendMessage(queueUrl, "original", 0, "group-a", "dedup-a", region);
+                Message original = sqsService.receiveMessage(queueUrl, 1, 30, 0, region).getFirst();
+                sqsService.deleteMessage(queueUrl, original.getReceiptHandle(), region);
+                clock.advance(Duration.ofMinutes(5));
+
+                CountDownLatch ready = new CountDownLatch(2);
+                CountDownLatch start = new CountDownLatch(1);
+                Future<Message> first = executor.submit(() -> {
+                    ready.countDown();
+                    start.await();
+                    return sqsService.sendMessage(queueUrl, "renewed", 0, "group-a", "dedup-a", region);
+                });
+                Future<Message> second = executor.submit(() -> {
+                    ready.countDown();
+                    start.await();
+                    return sqsService.sendMessage(queueUrl, "renewed", 0, "group-a", "dedup-a", region);
+                });
+                assertTrue(ready.await(5, TimeUnit.SECONDS));
+                start.countDown();
+
+                Message firstResponse = first.get(5, TimeUnit.SECONDS);
+                Message secondResponse = second.get(5, TimeUnit.SECONDS);
+                assertEquals(firstResponse.getMessageId(), secondResponse.getMessageId());
+                assertEquals(firstResponse.getSequenceNumber(), secondResponse.getSequenceNumber());
+                assertEquals(1, sqsService.peekMessages(queueUrl, region).size());
+            }
+        } finally {
+            executor.shutdownNow();
+        }
     }
 
     @Test

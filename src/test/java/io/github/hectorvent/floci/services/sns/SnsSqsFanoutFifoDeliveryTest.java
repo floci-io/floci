@@ -304,7 +304,7 @@ class SnsSqsFanoutFifoDeliveryTest {
     }
 
     @Test
-    void clearFifoDedupForSubscribedQueue_thenRepublishWithSameDedupId_deliversAgain() {
+    void clearingTopicDedupOnSeparatePurgeServiceDoesNotClearSubscribedQueueDedup() {
         RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT);
         SqsService purgeSqsService = SqsServiceFactory.createInMemoryWithFifoDedupPurgeAndSns(
                 BASE_URL, regionResolver, snsService);
@@ -329,7 +329,6 @@ class SnsSqsFanoutFifoDeliveryTest {
 
         snsService.publish(topicArn, null, null, "after-clear", null, null, "group-1", "shared-dedup", REGION);
         List<Message> after = sqsService.receiveMessage(queueUrl, 10, 30, 0, REGION);
-        assertEquals(1, after.size());
-        assertTrue(after.getFirst().getBody().contains("after-clear"));
+        assertTrue(after.isEmpty(), "The delivery queue must still suppress the duplicate within five minutes");
     }
 }
