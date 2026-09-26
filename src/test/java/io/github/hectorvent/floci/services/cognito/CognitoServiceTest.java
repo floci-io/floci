@@ -2428,6 +2428,60 @@ class CognitoServiceTest {
     }
 
     @Test
+    void initiateAuthWithUserAuthHidesAnUnknownUserWhenPreventionIsEnabled() {
+        UserPool pool = service.createUserPool(Map.of(
+                "PoolName", "TestPool",
+                "Policies", Map.of("SignInPolicy", Map.of(
+                        "AllowedFirstAuthFactors", List.of("PASSWORD", "SMS_OTP")))), "us-east-1");
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
+        service.describeUserPoolClient(client.getClientId()).setPreventUserExistenceErrors("ENABLED");
+
+        Map<String, Object> result = service.initiateAuth(client.getClientId(), "USER_AUTH", Map.of(
+                "USERNAME", "+5511900000000",
+                "PREFERRED_CHALLENGE", "SMS_OTP"));
+
+        String challenge = (String) result.get("ChallengeName");
+        assertTrue(List.of("PASSWORD", "SMS_OTP").contains(challenge),
+                "the simulated challenge must come from the pool's allowed factors: " + challenge);
+        assertEquals(List.of("PASSWORD", "SMS_OTP"), result.get("AvailableChallenges"));
+        String session = (String) result.get("Session");
+        assertNotNull(session);
+
+        Map<String, String> response = "SMS_OTP".equals(challenge)
+                ? Map.of("USERNAME", "+5511900000000", "SMS_OTP_CODE", "123456")
+                : Map.of("USERNAME", "+5511900000000", "PASSWORD", "anything");
+        AwsException exception = assertThrows(AwsException.class, () -> service.respondToAuthChallenge(
+                client.getClientId(), challenge, session, response));
+        assertEquals("NotAuthorizedException", exception.getErrorCode());
+        assertEquals("Incorrect username or password", exception.getMessage());
+    }
+
+    @Test
+    void initiateAuthWithUserAuthDefaultsAnUnknownUserToPasswordWithoutASignInPolicy() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
+        service.describeUserPoolClient(client.getClientId()).setPreventUserExistenceErrors("ENABLED");
+
+        Map<String, Object> result = service.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "missing"));
+
+        assertEquals("PASSWORD", result.get("ChallengeName"));
+        assertEquals(List.of("PASSWORD"), result.get("AvailableChallenges"));
+    }
+
+    @Test
+    void initiateAuthWithUserAuthKeepsUserNotFoundForLegacyClients() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
+        service.describeUserPoolClient(client.getClientId()).setPreventUserExistenceErrors("LEGACY");
+
+        AwsException exception = assertThrows(AwsException.class, () -> service.initiateAuth(
+                client.getClientId(), "USER_AUTH", Map.of("USERNAME", "missing")));
+
+        assertEquals("UserNotFoundException", exception.getErrorCode());
+    }
+
+    @Test
     void initiateAuthWithUserAuthPreferredChallengePasswordThenRespondCompletesAuth() {
         UserPool pool = createPoolAndUser();
         UserPoolClient client = openClient(service, pool.getId(), "c", false);
