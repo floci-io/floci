@@ -9,9 +9,11 @@ import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.bedrockagentcorecontrol.model.AgentRuntime;
 import io.github.hectorvent.floci.services.bedrockagentcorecontrol.model.AgentRuntimeEndpoint;
 import io.github.hectorvent.floci.services.bedrockagentcorecontrol.model.AgentRuntimeVersion;
+import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
@@ -28,12 +30,13 @@ class BedrockAgentCoreControlServiceTest {
 
     private static final String REGION = "us-east-1";
     private final ObjectMapper mapper = new ObjectMapper();
+    private final MutableClock clock = new MutableClock();
     private BedrockAgentCoreControlService service;
 
     @BeforeEach
     void setUp() {
         service = new BedrockAgentCoreControlService(
-                new InMemoryStorage<>(), new RegionResolver(REGION, "000000000000"));
+                new InMemoryStorage<>(), new RegionResolver(REGION, "000000000000"), null, clock);
     }
 
     private ObjectNode artifact() {
@@ -218,6 +221,76 @@ class BedrockAgentCoreControlServiceTest {
     }
 
     @Test
+    void deleteRuntimeTokenExpiresAfterWindowReturns404() {
+        AgentRuntime rt = create("myAgent");
+        String id = rt.getAgentRuntimeId();
+        assertEquals("DELETING", service.deleteAgentRuntime(id, "del-1", REGION).getStatus());
+
+        clock.advance(DeletedTokenLedger.TTL.plusSeconds(1));
+
+        assertEquals(404, assertThrows(AwsException.class,
+                () -> service.deleteAgentRuntime(id, "del-1", REGION)).getHttpStatus());
+    }
+
+    @Test
+    void deleteRuntimeTokenCanBeReusedAfterItExpires() {
+        // Once a token's record expires it must behave as if it had never been recorded,
+        // not merely as "expired but still occupying the map": a later delete that reuses
+        // the same token value records it again, and that fresh record is honored.
+        AgentRuntime first = create("firstAgent");
+        String firstId = first.getAgentRuntimeId();
+        assertEquals("DELETING", service.deleteAgentRuntime(firstId, "reused-token", REGION).getStatus());
+
+        clock.advance(DeletedTokenLedger.TTL.plusSeconds(1));
+
+        AgentRuntime second = create("secondAgent");
+        String secondId = second.getAgentRuntimeId();
+        assertEquals("DELETING", service.deleteAgentRuntime(secondId, "reused-token", REGION).getStatus());
+
+        // The replay right after is still within the fresh token's own window.
+        assertEquals("DELETING", service.deleteAgentRuntime(secondId, "reused-token", REGION).getStatus());
+        // The old runtime's id is unrelated to the reused token and stays gone.
+        assertEquals(404, assertThrows(AwsException.class,
+                () -> service.deleteAgentRuntime(firstId, "some-other-token", REGION)).getHttpStatus());
+    }
+
+    @Test
+    void deleteRuntimeTokenReusedWithinItsWindowStillExpiresFromItsFirstUse() {
+        // The window runs from the first request that used the token, so reusing it does
+        // not extend the window.
+        String firstId = create("firstAgent").getAgentRuntimeId();
+        assertEquals("DELETING", service.deleteAgentRuntime(firstId, "reused-token", REGION).getStatus());
+
+        clock.advance(Duration.ofHours(7));
+        String secondId = create("secondAgent").getAgentRuntimeId();
+        assertEquals("DELETING", service.deleteAgentRuntime(secondId, "reused-token", REGION).getStatus());
+
+        clock.advance(Duration.ofHours(1).plusSeconds(1));
+
+        assertEquals(404, assertThrows(AwsException.class,
+                () -> service.deleteAgentRuntime(secondId, "reused-token", REGION)).getHttpStatus());
+    }
+
+    @Test
+    void deleteRuntimeTokenReusedAfterExpiryIsHonouredEvenWhenTheClockMovedBack() {
+        // A wall clock stepping back can leave an expired token behind a live one, where the
+        // front purge cannot reach it. Reusing that token must still start a fresh window.
+        clock.advance(Duration.ofHours(2));
+        String liveId = create("liveAgent").getAgentRuntimeId();
+        assertEquals("DELETING", service.deleteAgentRuntime(liveId, "live-token", REGION).getStatus());
+
+        clock.advance(Duration.ofHours(-3));
+        String staleId = create("staleAgent").getAgentRuntimeId();
+        assertEquals("DELETING", service.deleteAgentRuntime(staleId, "stale-token", REGION).getStatus());
+
+        clock.advance(DeletedTokenLedger.TTL.plusSeconds(1));
+        String reusedId = create("reusedAgent").getAgentRuntimeId();
+        assertEquals("DELETING", service.deleteAgentRuntime(reusedId, "stale-token", REGION).getStatus());
+
+        assertEquals("DELETING", service.deleteAgentRuntime(reusedId, "stale-token", REGION).getStatus());
+    }
+
+    @Test
     void deleteRemovesAndReportsDeleting() {
         AgentRuntime rt = create("myAgent");
         String id = rt.getAgentRuntimeId();
@@ -285,5 +358,32 @@ class BedrockAgentCoreControlServiceTest {
         // The auto-created DEFAULT endpoint also conflicts.
         assertEquals(409, assertThrows(AwsException.class,
                 () -> service.createEndpoint(id, "DEFAULT", null, null, null, REGION)).getHttpStatus());
+    }
+
+    @Test
+    void deleteEndpointIsIdempotentByClientToken() {
+        AgentRuntime rt = create("myAgent");
+        String id = rt.getAgentRuntimeId();
+        service.createEndpoint(id, "prod", null, null, null, REGION);
+
+        assertEquals("DELETING", service.deleteEndpoint(id, "prod", "ep-del-1", REGION).getStatus());
+        // Replayed delete with the same token succeeds instead of 404ing.
+        assertEquals("DELETING", service.deleteEndpoint(id, "prod", "ep-del-1", REGION).getStatus());
+        // A different token against the now-missing endpoint still 404s.
+        assertEquals(404, assertThrows(AwsException.class,
+                () -> service.deleteEndpoint(id, "prod", "other", REGION)).getHttpStatus());
+    }
+
+    @Test
+    void deleteEndpointTokenExpiresAfterWindowReturns404() {
+        AgentRuntime rt = create("myAgent");
+        String id = rt.getAgentRuntimeId();
+        service.createEndpoint(id, "prod", null, null, null, REGION);
+        assertEquals("DELETING", service.deleteEndpoint(id, "prod", "ep-del-1", REGION).getStatus());
+
+        clock.advance(DeletedTokenLedger.TTL.plusSeconds(1));
+
+        assertEquals(404, assertThrows(AwsException.class,
+                () -> service.deleteEndpoint(id, "prod", "ep-del-1", REGION)).getHttpStatus());
     }
 }

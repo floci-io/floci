@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.bedrockagentcorecontrol.model.Memory;
+import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -21,12 +22,13 @@ class BedrockAgentCoreMemoryServiceTest {
     private static final String KEY_ARN = "arn:aws:kms:us-east-1:000000000000:key/mem-key";
     private static final String ROLE_ARN = "arn:aws:iam::000000000000:role/mem-role";
 
+    private final MutableClock clock = new MutableClock();
     private BedrockAgentCoreMemoryService service;
 
     @BeforeEach
     void setUp() {
         service = new BedrockAgentCoreMemoryService(
-                new InMemoryStorage<>(), new RegionResolver(REGION, "000000000000"));
+                new InMemoryStorage<>(), new RegionResolver(REGION, "000000000000"), clock);
     }
 
     private Memory create(String name) {
@@ -100,6 +102,30 @@ class BedrockAgentCoreMemoryServiceTest {
         assertEquals("desc", after.getDescription());
         assertEquals(30, after.getEventExpiryDuration());
         assertEquals(ROLE_ARN, after.getMemoryExecutionRoleArn());
+    }
+
+    @Test
+    void deleteIsIdempotentByClientToken() {
+        Memory memory = create("myMemory");
+        String id = memory.getMemoryId();
+        assertEquals("DELETING", service.delete(id, "del-1", REGION).getStatus());
+        // Replayed delete with the same token succeeds instead of 404ing.
+        assertEquals("DELETING", service.delete(id, "del-1", REGION).getStatus());
+        // A different token against the now-missing id still 404s.
+        assertEquals(404, assertThrows(AwsException.class,
+                () -> service.delete(id, "other", REGION)).getHttpStatus());
+    }
+
+    @Test
+    void deleteTokenExpiresAfterWindowReturns404() {
+        Memory memory = create("myMemory");
+        String id = memory.getMemoryId();
+        assertEquals("DELETING", service.delete(id, "del-1", REGION).getStatus());
+
+        clock.advance(DeletedTokenLedger.TTL.plusSeconds(1));
+
+        assertEquals(404, assertThrows(AwsException.class,
+                () -> service.delete(id, "del-1", REGION)).getHttpStatus());
     }
 
     @Test

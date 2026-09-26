@@ -15,14 +15,13 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.time.Clock;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.regex.Pattern;
 
@@ -49,15 +48,16 @@ public class BedrockAgentCoreControlService {
     private final RegionResolver regionResolver;
     private final BedrockAgentCoreIdentityService identityService;
     // clientToken idempotency: tokens of completed deletes, so a replayed delete succeeds
-    // instead of 404ing. In-memory only (reset on restart) — sufficient for an emulator.
-    private final Set<String> deletedRuntimeTokens = ConcurrentHashMap.newKeySet();
-    private final Set<String> deletedEndpointTokens = ConcurrentHashMap.newKeySet();
+    // instead of 404ing. In-memory only (reset on restart), and each entry expires after
+    // DeletedTokenLedger.TTL, after which a replay 404s like an unknown token.
+    private final DeletedTokenLedger deletedRuntimeTokens;
+    private final DeletedTokenLedger deletedEndpointTokens;
 
     @Inject
     public BedrockAgentCoreControlService(StorageFactory storageFactory, RegionResolver regionResolver,
-                                          BedrockAgentCoreIdentityService identityService) {
+                                          BedrockAgentCoreIdentityService identityService, Clock clock) {
         this(storageFactory.create("bedrockagentcore", "bedrock-agentcore-runtimes.json",
-                new TypeReference<Map<String, AgentRuntime>>() {}), regionResolver, identityService);
+                new TypeReference<Map<String, AgentRuntime>>() {}), regionResolver, identityService, clock);
     }
 
     BedrockAgentCoreControlService(StorageBackend<String, AgentRuntime> storage, RegionResolver regionResolver) {
@@ -66,9 +66,16 @@ public class BedrockAgentCoreControlService {
 
     BedrockAgentCoreControlService(StorageBackend<String, AgentRuntime> storage, RegionResolver regionResolver,
                                    BedrockAgentCoreIdentityService identityService) {
+        this(storage, regionResolver, identityService, Clock.systemUTC());
+    }
+
+    BedrockAgentCoreControlService(StorageBackend<String, AgentRuntime> storage, RegionResolver regionResolver,
+                                   BedrockAgentCoreIdentityService identityService, Clock clock) {
         this.storage = storage;
         this.regionResolver = regionResolver;
         this.identityService = identityService;
+        this.deletedRuntimeTokens = new DeletedTokenLedger(clock);
+        this.deletedEndpointTokens = new DeletedTokenLedger(clock);
     }
 
     public AgentRuntime createAgentRuntime(String name, JsonNode artifact, JsonNode networkConfiguration,
@@ -204,7 +211,7 @@ public class BedrockAgentCoreControlService {
         AgentRuntime runtime = found.get();
         storage.delete(key(region, id));
         if (clientToken != null) {
-            deletedRuntimeTokens.add(tokenKey(region, clientToken));
+            deletedRuntimeTokens.record(tokenKey(region, clientToken));
         }
         runtime.setStatus(STATUS_DELETING);
         LOG.infov("Deleted AgentCore runtime {0}", id);
@@ -381,7 +388,7 @@ public class BedrockAgentCoreControlService {
         AgentRuntimeEndpoint endpoint = found.get();
         runtime.getEndpoints().removeIf(e -> name.equals(e.getName()));
         if (clientToken != null) {
-            deletedEndpointTokens.add(tokenKey(region, clientToken));
+            deletedEndpointTokens.record(tokenKey(region, clientToken));
         }
         endpoint.setStatus(STATUS_DELETING);
         storage.put(key(region, runtimeId), runtime);
