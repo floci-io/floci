@@ -745,6 +745,8 @@ class CloudFormationDeletionPolicyIntegrationTest {
         try {
             awaitStackStatus(parentStackId, "ROLLBACK_COMPLETE");
             assertBucketDeleted(bucketName);
+            // The child this create made goes with the parent's rollback instead of outliving it.
+            cfnQuery("DescribeStacks", stackName + "-ChildStack").then().statusCode(400);
 
             // The parent must have stopped at the failed ChildStack resource and never reached
             // ConsumerParam: proof the child's failure was detected before its (never-computed)

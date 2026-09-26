@@ -2535,6 +2535,11 @@ public class CloudFormationService implements ResourceProvider {
             resource.setStatus("CREATE_COMPLETE");
         } else {
             resource.setStatus("CREATE_FAILED");
+            if (childCreate) {
+                // This operation created the child, so rolling back or deleting the parent owes it
+                // a delete; a child an update only re-applied stays tracked by the prior resource.
+                resource.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
+            }
             String reason = childStack.getStatusReason();
             if (reason == null || reason.isBlank()) {
                 reason = "Nested stack " + childStackName + " rolled back or failed with status " + childStack.getStatus();
