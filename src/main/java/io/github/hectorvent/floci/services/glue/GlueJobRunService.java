@@ -19,7 +19,6 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
-import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
@@ -227,6 +226,11 @@ public class GlueJobRunService {
         return String.format("%020d", bookkeepingOf(run.getId()).getCompletionOrder());
     }
 
+    /** The run count an origin job run recorded before counts moved out of run bookkeeping; 0 if none. */
+    public synchronized int legacyTriggeredRuns(String originRunId) {
+        return bookkeepingStore.get(originRunId).map(JobRunBookkeeping::getLegacyTriggeredRuns).orElse(0);
+    }
+
     /** Runs belong to their job: deleting the job removes them, as it does on AWS. */
     public synchronized void deleteRuns(String jobName) {
         for (JobRun run : runsOf(jobName)) {
@@ -285,20 +289,6 @@ public class GlueJobRunService {
             fresh.setOriginRunId(runId);
             return fresh;
         });
-    }
-
-    /**
-     * Records that triggers are about to start {@code runs} more runs on behalf of the origin job run,
-     * if that keeps the origin within {@code limit}. False when the origin run no longer exists.
-     */
-    public synchronized boolean claimTriggeredRuns(String originRunId, int runs, int limit) {
-        Optional<JobRunBookkeeping> origin = bookkeepingStore.get(originRunId);
-        if (origin.isEmpty() || origin.get().getTriggeredRuns() + runs > limit) {
-            return false;
-        }
-        origin.get().setTriggeredRuns(origin.get().getTriggeredRuns() + runs);
-        bookkeepingStore.put(originRunId, origin.get());
-        return true;
     }
 
     private JobRun findRun(String jobName, String runId) {

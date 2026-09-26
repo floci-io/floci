@@ -175,30 +175,36 @@ public class GlueCrawlerRunService {
         for (FinishedCrawl crawl : record.getRecentCrawls()) {
             if (crawl.getSequence() > after) {
                 completions.add(new GlueRunCompletion(Long.toString(crawl.getSequence()), crawl.getFinishedAt(),
-                        crawl.getStatus(), crawl.getOriginRunId()));
+                        crawl.getStatus(), originOf(name, crawl)));
             }
         }
         return completions;
     }
 
-    /**
-     * Records that triggers are about to start {@code runs} more runs on behalf of the origin crawl, if
-     * that keeps it within {@code limit}. False when the crawl is no longer in its crawler's history.
-     */
-    public synchronized boolean claimTriggeredRuns(String originCrawlId, int runs, int limit) {
+    /** The run count an origin crawl recorded before counts moved out of crawl history; 0 if none. */
+    public synchronized int legacyTriggeredRuns(String originCrawlId) {
         for (CrawlerRunRecord record : recordStore.scan(key -> true)) {
             for (FinishedCrawl crawl : record.getRecentCrawls()) {
                 if (originCrawlId.equals(crawl.getCrawlId())) {
-                    if (crawl.getTriggeredRuns() + runs > limit) {
-                        return false;
-                    }
-                    crawl.setTriggeredRuns(crawl.getTriggeredRuns() + runs);
-                    recordStore.put(record.getCrawlerName(), record);
-                    return true;
+                    return crawl.getLegacyTriggeredRuns();
                 }
             }
         }
-        return false;
+        return 0;
+    }
+
+    /**
+     * A crawl persisted before crawls recorded their origin (or their id) is its own origin; the
+     * crawler name and sequence number still identify it.
+     */
+    private static String originOf(String crawlerName, FinishedCrawl crawl) {
+        if (crawl.getOriginRunId() != null) {
+            return crawl.getOriginRunId();
+        }
+        if (crawl.getCrawlId() != null) {
+            return crawl.getCrawlId();
+        }
+        return CRAWL_ID_PREFIX + crawlerName + ":" + crawl.getSequence();
     }
 
     public synchronized void updateCrawler(Crawler update) {

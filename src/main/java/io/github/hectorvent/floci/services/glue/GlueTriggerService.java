@@ -4,14 +4,17 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.core.storage.WriteProfile;
 import io.github.hectorvent.floci.services.glue.model.JobRun;
 import io.github.hectorvent.floci.services.glue.model.Trigger;
 import io.github.hectorvent.floci.services.glue.model.TriggerAction;
+import io.github.hectorvent.floci.services.glue.model.TriggerChainBudget;
 import io.github.hectorvent.floci.services.glue.model.TriggerCondition;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -48,6 +51,11 @@ public class GlueTriggerService {
     // that no trigger started (the origin of a chain). Here every run succeeds, so without it a trigger
     // loop of any shape, branching or not, would never stop.
     static final int MAX_TRIGGERED_RUNS_PER_ORIGIN = 100;
+    // Chains whose counts are kept; beyond it the least recently used is forgotten, so the store stays
+    // bounded however many runs set off chains. The trade-off: a chain forgotten while a descendant still
+    // runs starts a fresh count. It takes this many newer chains to push an active one out, so the bound
+    // is set well above what a local pipeline produces.
+    static final int MAX_TRACKED_CHAINS = 10_000;
     private static final String JOB_KEY = "job:";
     private static final String CRAWLER_KEY = "crawler:";
     // Per watched job or crawler, the seen map holds the last processed position and that outcome's state.
@@ -55,6 +63,8 @@ public class GlueTriggerService {
     private static final String STATE = "state:";
 
     private final StorageBackend<String, Map<String, String>> seenStore;
+    private final StorageBackend<String, TriggerChainBudget> budgetStore;
+    private final int maxTrackedChains;
     private final GlueService glueService;
     private final GlueJobRunService jobRunService;
     private final GlueCrawlerRunService crawlerRunService;
@@ -63,12 +73,26 @@ public class GlueTriggerService {
     public GlueTriggerService(StorageFactory storageFactory, GlueService glueService,
                               GlueJobRunService jobRunService, GlueCrawlerRunService crawlerRunService) {
         this(storageFactory.create("glue", "trigger_seen_runs.json", new TypeReference<>() {}),
+                // Every claimed run writes here, so under persistent mode the store is journaled rather
+                // than rewritten in full on each claim.
+                storageFactory.create("glue", "trigger_chain_budgets.json", new TypeReference<>() {},
+                        WriteProfile.APPEND_HEAVY),
                 glueService, jobRunService, crawlerRunService);
     }
 
-    GlueTriggerService(StorageBackend<String, Map<String, String>> seenStore, GlueService glueService,
+    GlueTriggerService(StorageBackend<String, Map<String, String>> seenStore,
+                       StorageBackend<String, TriggerChainBudget> budgetStore, GlueService glueService,
                        GlueJobRunService jobRunService, GlueCrawlerRunService crawlerRunService) {
+        this(seenStore, budgetStore, glueService, jobRunService, crawlerRunService, MAX_TRACKED_CHAINS);
+    }
+
+    GlueTriggerService(StorageBackend<String, Map<String, String>> seenStore,
+                       StorageBackend<String, TriggerChainBudget> budgetStore, GlueService glueService,
+                       GlueJobRunService jobRunService, GlueCrawlerRunService crawlerRunService,
+                       int maxTrackedChains) {
         this.seenStore = seenStore;
+        this.budgetStore = budgetStore;
+        this.maxTrackedChains = maxTrackedChains;
         this.glueService = glueService;
         this.jobRunService = jobRunService;
         this.crawlerRunService = crawlerRunService;
@@ -141,14 +165,7 @@ public class GlueTriggerService {
                     continue;
                 }
                 for (GlueRunCompletion cause : newFirings(trigger)) {
-                    String origin = cause.originRunId();
-                    if (!claimTriggeredRuns(origin, trigger.getActions().size())) {
-                        LOG.warnv("Glue trigger {0} not fired: triggers already started {1} runs on behalf of {2}, "
-                                + "so they probably form a loop", trigger.getName(), MAX_TRIGGERED_RUNS_PER_ORIGIN, origin);
-                        continue;
-                    }
-                    fire(trigger, origin, false);
-                    anyFired = true;
+                    anyFired |= fire(trigger, cause.originRunId(), false) > 0;
                 }
             }
             if (!anyFired) {
@@ -246,22 +263,77 @@ public class GlueTriggerService {
         return crawlerRunService.completionsAfter(key.substring(CRAWLER_KEY.length()), position);
     }
 
-    private boolean claimTriggeredRuns(String originRunId, int runs) {
-        if (originRunId == null) {
+    /**
+     * Counts one more run started on behalf of the chain's origin, if the chain is still within its
+     * budget. The count lives in its own store rather than on the origin run, so it survives the origin
+     * run or crawl being deleted or aging out of history; a chain seen for the first time, including one
+     * started before this bookkeeping existed, starts at zero.
+     */
+    private boolean claimTriggeredRun(String originRunId) {
+        TriggerChainBudget budget = budgetStore.get(originRunId).orElseGet(() -> {
+            TriggerChainBudget fresh = new TriggerChainBudget();
+            fresh.setTriggeredRuns(legacyTriggeredRuns(originRunId));
+            return fresh;
+        });
+        if (budget.getTriggeredRuns() >= MAX_TRIGGERED_RUNS_PER_ORIGIN) {
             return false;
         }
+        if (budget.getLastUsed() == null) {
+            forgetLeastRecentlyUsedChainIfFull();
+        }
+        budget.setTriggeredRuns(budget.getTriggeredRuns() + 1);
+        budget.setLastUsed(Instant.now());
+        budgetStore.put(originRunId, budget);
+        return true;
+    }
+
+    /** A chain counted before its count moved here carries on from that count. */
+    private int legacyTriggeredRuns(String originRunId) {
         return originRunId.startsWith(GlueCrawlerRunService.CRAWL_ID_PREFIX)
-                ? crawlerRunService.claimTriggeredRuns(originRunId, runs, MAX_TRIGGERED_RUNS_PER_ORIGIN)
-                : jobRunService.claimTriggeredRuns(originRunId, runs, MAX_TRIGGERED_RUNS_PER_ORIGIN);
+                ? crawlerRunService.legacyTriggeredRuns(originRunId)
+                : jobRunService.legacyTriggeredRuns(originRunId);
+    }
+
+    /** Gives back a claim for a run that could not be started. */
+    private void releaseTriggeredRun(String originRunId) {
+        budgetStore.get(originRunId).ifPresent(budget -> {
+            budget.setTriggeredRuns(Math.max(0, budget.getTriggeredRuns() - 1));
+            budgetStore.put(originRunId, budget);
+        });
+    }
+
+    private void forgetLeastRecentlyUsedChainIfFull() {
+        Set<String> origins = budgetStore.keys();
+        if (origins.size() < maxTrackedChains) {
+            return;
+        }
+        String oldest = null;
+        Instant oldestUse = null;
+        for (String origin : origins) {
+            Instant lastUsed = budgetStore.get(origin).map(TriggerChainBudget::getLastUsed).orElse(Instant.MIN);
+            if (oldestUse == null || lastUsed.isBefore(oldestUse)) {
+                oldest = origin;
+                oldestUse = lastUsed;
+            }
+        }
+        budgetStore.delete(oldest);
     }
 
     /**
-     * Starts the trigger's actions on behalf of {@code originRunId}; with a null origin (StartTrigger on
-     * an ON_DEMAND trigger) each run or crawl started is its own origin.
+     * Starts the trigger's actions on behalf of {@code originRunId} and returns how many started; with a
+     * null origin (StartTrigger on an ON_DEMAND trigger) each run or crawl started is its own origin and
+     * no budget applies. With an origin, each action claims one run of the chain's budget before it
+     * starts and gives it back if it cannot start, so only runs that actually start are counted.
      */
-    private void fire(Trigger trigger, String originRunId, boolean propagateFailures) {
+    private int fire(Trigger trigger, String originRunId, boolean propagateFailures) {
         LOG.infov("Firing Glue trigger {0}", trigger.getName());
+        int started = 0;
         for (TriggerAction action : trigger.getActions()) {
+            if (originRunId != null && !claimTriggeredRun(originRunId)) {
+                LOG.warnv("Glue trigger {0} not fired further: triggers already started {1} runs on behalf of {2}, "
+                        + "so they probably form a loop", trigger.getName(), MAX_TRIGGERED_RUNS_PER_ORIGIN, originRunId);
+                return started;
+            }
             try {
                 if (action.getJobName() != null) {
                     JobRun overrides = new JobRun();
@@ -274,7 +346,11 @@ public class GlueTriggerService {
                 } else {
                     crawlerRunService.startCrawler(action.getCrawlerName(), originRunId);
                 }
+                started++;
             } catch (AwsException e) {
+                if (originRunId != null) {
+                    releaseTriggeredRun(originRunId);
+                }
                 if (propagateFailures) {
                     throw e;
                 }
@@ -282,6 +358,7 @@ public class GlueTriggerService {
                         action.getJobName() != null ? action.getJobName() : action.getCrawlerName(), e.getMessage());
             }
         }
+        return started;
     }
 
     private static String expectedState(TriggerCondition condition) {

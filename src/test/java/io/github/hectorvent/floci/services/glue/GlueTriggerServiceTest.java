@@ -1,21 +1,26 @@
 package io.github.hectorvent.floci.services.glue;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.glue.model.Crawler;
+import io.github.hectorvent.floci.services.glue.model.CrawlerRunRecord;
 import io.github.hectorvent.floci.services.glue.model.CrawlerTargets;
 import io.github.hectorvent.floci.services.glue.model.ExecutionProperty;
+import io.github.hectorvent.floci.services.glue.model.FinishedCrawl;
 import io.github.hectorvent.floci.services.glue.model.Job;
 import io.github.hectorvent.floci.services.glue.model.JobCommand;
 import io.github.hectorvent.floci.services.glue.model.JobRun;
+import io.github.hectorvent.floci.services.glue.model.JobRunBookkeeping;
 import io.github.hectorvent.floci.services.glue.model.Predicate;
 import io.github.hectorvent.floci.services.glue.model.S3Target;
 import io.github.hectorvent.floci.services.glue.model.Trigger;
 import io.github.hectorvent.floci.services.glue.model.TriggerAction;
+import io.github.hectorvent.floci.services.glue.model.TriggerChainBudget;
 import io.github.hectorvent.floci.services.glue.model.TriggerCondition;
 import io.github.hectorvent.floci.services.glue.schemaregistry.GlueSchemaRegistryService;
 import io.github.hectorvent.floci.services.kms.KmsService;
@@ -38,6 +43,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -62,7 +68,7 @@ class GlueTriggerServiceTest {
                 new KmsService(storageFactory, regionResolver));
         jobRuns = new GlueJobRunService(new InMemoryStorage<>(), new InMemoryStorage<>(), glueService, 0, Clock.systemUTC());
         crawls = new GlueCrawlerRunService(new InMemoryStorage<>(), glueService, 0, Clock.systemUTC());
-        triggers = new GlueTriggerService(new InMemoryStorage<>(), glueService, jobRuns, crawls);
+        triggers = new GlueTriggerService(new InMemoryStorage<>(), new InMemoryStorage<>(), glueService, jobRuns, crawls);
         for (String job : List.of("extract", "load", "report")) {
             createJob(job);
         }
@@ -317,6 +323,137 @@ class GlueTriggerServiceTest {
         assertEquals(1 + GlueTriggerService.MAX_TRIGGERED_RUNS_PER_ORIGIN, runsOf("extract").size());
     }
 
+    /** A run that could not start gives its claim back, so a failing action does not shorten the chain. */
+    @Test
+    void actionsThatFailToStartDoNotUseUpTheBudget() {
+        GlueCrawlerRunService slowCrawls = new GlueCrawlerRunService(new InMemoryStorage<>(), glueService, 600,
+                new MutableClock());
+        GlueTriggerService loopTriggers = new GlueTriggerService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                glueService, jobRuns, slowCrawls);
+        slowCrawls.startCrawler("raw");
+        Trigger loop = conditional("loop", null, List.of(jobIs("extract", "SUCCEEDED")), "extract");
+        TriggerAction crawl = new TriggerAction();
+        crawl.setCrawlerName("raw");
+        loop.setActions(List.of(crawl, startJob("extract")));
+        loopTriggers.createTrigger(loop, true, null, REGION);
+
+        jobRuns.startJobRun("extract", null, new JobRun());
+        for (int request = 0; request < 20; request++) {
+            loopTriggers.fireConditionalTriggers();
+        }
+
+        assertEquals(1 + GlueTriggerService.MAX_TRIGGERED_RUNS_PER_ORIGIN, runsOf("extract").size());
+    }
+
+    /** The chain's count does not live on the origin, so deleting the origin's crawler does not end the chain. */
+    @Test
+    void aChainKeepsFiringAfterItsOriginCrawlerIsDeleted() {
+        MutableClock clock = new MutableClock();
+        GlueJobRunService slowRuns = new GlueJobRunService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                glueService, 60, clock);
+        GlueTriggerService chain = new GlueTriggerService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                glueService, slowRuns, crawls);
+        chain.createTrigger(conditional("after-crawl", "ANY", List.of(crawlIs("raw", "SUCCEEDED")), "extract"),
+                true, null, REGION);
+        chain.createTrigger(conditional("after-extract", null, List.of(jobIs("extract", "SUCCEEDED")), "load"),
+                true, null, REGION);
+        crawls.startCrawler("raw");
+        chain.fireConditionalTriggers();
+        assertEquals(1, slowRuns.getJobRuns("extract", null, null).items().size());
+
+        chain.deleteTrigger("after-crawl", REGION);
+        crawls.deleteCrawler("raw", REGION);
+        clock.advance(Duration.ofSeconds(61));
+        chain.fireConditionalTriggers();
+
+        assertEquals(1, slowRuns.getJobRuns("load", null, null).items().size());
+    }
+
+    /** Runs persisted before origins were recorded finish as their own origins and still fire triggers. */
+    @Test
+    void runsPersistedBeforeOriginsWereRecordedStillFireTriggers() {
+        MutableClock clock = new MutableClock();
+        InMemoryStorage<String, JobRunBookkeeping> bookkeeping = new InMemoryStorage<>();
+        GlueJobRunService slowRuns = new GlueJobRunService(new InMemoryStorage<>(), bookkeeping, glueService, 60, clock);
+        InMemoryStorage<String, CrawlerRunRecord> crawlRecords = new InMemoryStorage<>();
+        GlueCrawlerRunService slowCrawls = new GlueCrawlerRunService(crawlRecords, glueService, 60, clock);
+        GlueTriggerService legacy = new GlueTriggerService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                glueService, slowRuns, slowCrawls);
+        legacy.createTrigger(conditional("after-extract", null, List.of(jobIs("extract", "SUCCEEDED")), "load"),
+                true, null, REGION);
+        legacy.createTrigger(conditional("after-crawl", "ANY", List.of(crawlIs("raw", "SUCCEEDED")), "report"),
+                true, null, REGION);
+
+        String runId = slowRuns.startJobRun("extract", null, new JobRun()).getId();
+        bookkeeping.delete(runId);
+        slowCrawls.startCrawler("raw");
+        CrawlerRunRecord record = crawlRecords.get("raw").orElseThrow();
+        record.setCurrentCrawlId(null);
+        record.setCurrentOriginRunId(null);
+        crawlRecords.put("raw", record);
+        clock.advance(Duration.ofSeconds(61));
+        legacy.fireConditionalTriggers();
+
+        assertEquals(1, slowRuns.getJobRuns("load", null, null).items().size());
+        assertEquals(1, slowRuns.getJobRuns("report", null, null).items().size());
+    }
+
+    /** Records persisted before the count moved keep it readable, and it is never written back to them. */
+    @Test
+    void aLegacyRunCountIsReadButNotWritten() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        JobRunBookkeeping legacy = mapper.readValue(
+                "{\"originRunId\":\"jr_a\",\"completionOrder\":3,\"triggeredRuns\":42}", JobRunBookkeeping.class);
+        FinishedCrawl legacyCrawl = mapper.readValue(
+                "{\"crawlId\":\"crawl:x\",\"sequence\":1,\"triggeredRuns\":7}", FinishedCrawl.class);
+
+        assertEquals(42, legacy.getLegacyTriggeredRuns());
+        assertEquals(7, legacyCrawl.getLegacyTriggeredRuns());
+        assertFalse(mapper.writeValueAsString(legacy).contains("riggeredRuns"));
+        assertFalse(mapper.writeValueAsString(legacyCrawl).contains("riggeredRuns"));
+    }
+
+    /** A chain in flight across the upgrade carries on from the count its origin recorded. */
+    @Test
+    void aChainCountedBeforeTheUpgradeCarriesOnFromItsCount() {
+        MutableClock clock = new MutableClock();
+        InMemoryStorage<String, JobRunBookkeeping> bookkeeping = new InMemoryStorage<>();
+        GlueJobRunService slowRuns = new GlueJobRunService(new InMemoryStorage<>(), bookkeeping, glueService, 60, clock);
+        GlueTriggerService upgraded = new GlueTriggerService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                glueService, slowRuns, crawls);
+        upgraded.createTrigger(conditional("loop", null, List.of(jobIs("extract", "SUCCEEDED")), "extract"),
+                true, null, REGION);
+        String origin = slowRuns.startJobRun("extract", null, new JobRun()).getId();
+        JobRunBookkeeping record = bookkeeping.get(origin).orElseThrow();
+        record.setLegacyTriggeredRuns(GlueTriggerService.MAX_TRIGGERED_RUNS_PER_ORIGIN - 1);
+        bookkeeping.put(origin, record);
+
+        for (int request = 0; request < 5; request++) {
+            clock.advance(Duration.ofSeconds(61));
+            upgraded.fireConditionalTriggers();
+        }
+
+        assertEquals(2, slowRuns.getJobRuns("extract", null, null).items().size());
+    }
+
+    @Test
+    void theBudgetStoreKeepsAtMostTheTrackedChains() {
+        int cap = 20;
+        InMemoryStorage<String, TriggerChainBudget> budgets = new InMemoryStorage<>();
+        GlueTriggerService bounded = new GlueTriggerService(new InMemoryStorage<>(), budgets, glueService, jobRuns,
+                crawls, cap);
+        bounded.createTrigger(conditional("after", null, List.of(jobIs("extract", "SUCCEEDED")), "load"),
+                true, null, REGION);
+
+        for (int origin = 0; origin < cap + 5; origin++) {
+            jobRuns.startJobRun("extract", null, new JobRun());
+            bounded.fireConditionalTriggers();
+        }
+
+        assertEquals(cap, budgets.keys().size());
+        assertEquals(cap + 5, runsOf("load").size());
+    }
+
     /** Every crawl has its own id, so a crawler deleted and created again never inherits old bookkeeping. */
     @Test
     void aRecreatedCrawlerStartsANewChainWithItsOwnBudget() {
@@ -496,7 +633,7 @@ class GlueTriggerServiceTest {
     void aSuccessIsNotLostWhenALaterRunOfTheSameJobIsStoppedFirst() {
         MutableClock clock = new MutableClock();
         GlueJobRunService slowRuns = new GlueJobRunService(new InMemoryStorage<>(), new InMemoryStorage<>(), glueService, 60, clock);
-        GlueTriggerService slowTriggers = new GlueTriggerService(new InMemoryStorage<>(), glueService, slowRuns, crawls);
+        GlueTriggerService slowTriggers = new GlueTriggerService(new InMemoryStorage<>(), new InMemoryStorage<>(), glueService, slowRuns, crawls);
         slowTriggers.createTrigger(conditional("after", null, List.of(jobIs("extract", "SUCCEEDED")), "load"),
                 true, null, REGION);
         slowRuns.startJobRun("extract", null, new JobRun());
@@ -515,7 +652,7 @@ class GlueTriggerServiceTest {
         Clock frozen = Clock.fixed(Instant.parse("2026-09-25T12:00:00Z"), ZoneOffset.UTC);
         GlueJobRunService frozenRuns =
                 new GlueJobRunService(new InMemoryStorage<>(), new InMemoryStorage<>(), glueService, 0, frozen);
-        GlueTriggerService frozenTriggers = new GlueTriggerService(new InMemoryStorage<>(), glueService, frozenRuns, crawls);
+        GlueTriggerService frozenTriggers = new GlueTriggerService(new InMemoryStorage<>(), new InMemoryStorage<>(), glueService, frozenRuns, crawls);
         frozenTriggers.createTrigger(conditional("each", "ANY", List.of(jobIs("extract", "SUCCEEDED")), "load"),
                 true, null, REGION);
 
@@ -532,7 +669,7 @@ class GlueTriggerServiceTest {
         Clock frozen = Clock.fixed(Instant.parse("2026-09-25T12:00:00Z"), ZoneOffset.UTC);
         GlueCrawlerRunService frozenCrawls = new GlueCrawlerRunService(new InMemoryStorage<>(), glueService, 0, frozen);
         GlueTriggerService frozenTriggers =
-                new GlueTriggerService(new InMemoryStorage<>(), glueService, jobRuns, frozenCrawls);
+                new GlueTriggerService(new InMemoryStorage<>(), new InMemoryStorage<>(), glueService, jobRuns, frozenCrawls);
         frozenTriggers.createTrigger(conditional("each", "ANY", List.of(crawlIs("raw", "SUCCEEDED")), "load"),
                 true, null, REGION);
 
