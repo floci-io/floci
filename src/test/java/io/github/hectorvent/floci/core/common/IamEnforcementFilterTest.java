@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.iam.ResourcePolicyProvider;
 import io.github.hectorvent.floci.services.iam.ScpProvider;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.s3.S3Controller;
+import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
 import jakarta.enterprise.inject.Instance;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ResourceInfo;
@@ -106,7 +107,7 @@ class IamEnforcementFilterTest {
                 config, accountResolver, iamService, evaluator, actionRegistry, arnBuilder,
                 requestContext, conditionContextResolver,
                 mock(CloudTrailService.class),
-                mock(io.quarkus.vertx.http.runtime.CurrentVertxRequest.class),
+                mock(CurrentVertxRequest.class),
                 catalog, scpProvider, sessionAccountLookup);
     }
 
@@ -118,7 +119,7 @@ class IamEnforcementFilterTest {
                 config, accountResolver, iamService, evaluator, actionRegistry,
                 new AwsQueryServiceResolver(catalog), arnBuilder, requestContext,
                 conditionContextResolver, mock(CloudTrailService.class),
-                mock(io.quarkus.vertx.http.runtime.CurrentVertxRequest.class),
+                mock(CurrentVertxRequest.class),
                 catalog, scpProvider, sessionAccountLookup, null, resourceInfo);
     }
 
@@ -852,7 +853,7 @@ class IamEnforcementFilterTest {
                 config, accountResolver, iamService, new IamPolicyEvaluator(new ObjectMapper()),
                 actionRegistry, arnBuilder, requestContext, conditionContextResolver,
                 mock(CloudTrailService.class),
-                mock(io.quarkus.vertx.http.runtime.CurrentVertxRequest.class),
+                mock(CurrentVertxRequest.class),
                 catalog, scpProvider, sessionAccountLookup);
     }
 
@@ -1403,7 +1404,7 @@ class IamEnforcementFilterTest {
                 config, accountResolver, iamService, evaluator, actionRegistry, arnBuilder,
                 requestContext, conditionContextResolver,
                 mock(CloudTrailService.class),
-                mock(io.quarkus.vertx.http.runtime.CurrentVertxRequest.class),
+                mock(CurrentVertxRequest.class),
                 catalog, scpProvider, sessionAccountLookup, providers);
     }
 }
