@@ -214,6 +214,12 @@ challenge. It requires the user pool's tier to be Essentials or higher. `WEB_AUT
 
 Any other `AuthFlow` value is rejected with `InvalidParameterException` and no tokens are issued.
 
+The challenge `Session` of a `USER_SRP_AUTH`, `CUSTOM_AUTH` or `USER_AUTH` sign-in is valid for 3 minutes
+from when it was issued, the AWS default for the client's `AuthSessionValidity`. Answering the challenge with
+an older session fails with `NotAuthorizedException` (`Invalid session for the user, session is expired.`)
+and the sign-in has to start again. A per-client `AuthSessionValidity` is not supported yet, and the
+`NEW_PASSWORD_REQUIRED` challenge does not check its session.
+
 An app client only accepts the flows in its `ExplicitAuthFlows`: `ALLOW_USER_PASSWORD_AUTH`,
 `ALLOW_USER_SRP_AUTH`, `ALLOW_CUSTOM_AUTH`, `ALLOW_USER_AUTH`, `ALLOW_ADMIN_USER_PASSWORD_AUTH` and
 `ALLOW_REFRESH_TOKEN_AUTH`, or the legacy `USER_PASSWORD_AUTH`, `ADMIN_NO_SRP_AUTH` and
