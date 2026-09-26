@@ -529,6 +529,46 @@ class CognitoServiceTest {
     }
 
     @Test
+    void createUserPoolRejectsOversizedMinimumLengthBeforeIntNarrowing() {
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.createUserPool(Map.of(
+                        "PoolName", "OversizedMinimumLengthPool",
+                        "Policies", Map.of("PasswordPolicy", Map.of("MinimumLength", 4_294_967_302L))
+                ), "us-east-1"));
+
+        assertEquals("InvalidParameterException", exception.getErrorCode());
+        assertTrue(exception.getMessage().contains("Member must have value less than or equal to 99"));
+    }
+
+    @Test
+    void createUserPoolRejectsOversizedTemporaryPasswordValidityBeforeIntNarrowing() {
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.createUserPool(Map.of(
+                        "PoolName", "OversizedTemporaryPasswordValidityPool",
+                        "Policies", Map.of("PasswordPolicy", Map.of(
+                                "MinimumLength", 8,
+                                "TemporaryPasswordValidityDays", 4_294_967_302L))
+                ), "us-east-1"));
+
+        assertEquals("InvalidParameterException", exception.getErrorCode());
+        assertTrue(exception.getMessage().contains("Member must have value less than or equal to 365"));
+    }
+
+    @Test
+    void createUserPoolRejectsOversizedPasswordHistorySizeBeforeIntNarrowing() {
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.createUserPool(Map.of(
+                        "PoolName", "OversizedPasswordHistoryPool",
+                        "Policies", Map.of("PasswordPolicy", Map.of(
+                                "MinimumLength", 8,
+                                "PasswordHistorySize", 4_294_967_302L))
+                ), "us-east-1"));
+
+        assertEquals("InvalidParameterException", exception.getErrorCode());
+        assertTrue(exception.getMessage().contains("Member must have value less than or equal to 24"));
+    }
+
+    @Test
     void updateUserPoolValidatesPasswordPolicy() {
         UserPool pool = service.createUserPool(Map.of(
                 "PoolName", "ValidPool",

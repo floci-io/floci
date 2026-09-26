@@ -47,6 +47,8 @@ import org.jspecify.annotations.Nullable;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyFactory;
 import java.security.KeyPair;
@@ -372,15 +374,15 @@ public class CognitoService implements ResourceProvider {
                     400
             );
         }
-        int minLength = policyInt(passwordPolicy, "MinimumLength");
-        if (minLength < 6) {
+        BigInteger minLength = policyInteger(passwordPolicy, "MinimumLength");
+        if (minLength.compareTo(BigInteger.valueOf(6)) < 0) {
             throw new AwsException(
                     "InvalidParameterException",
                     "1 validation error detected: Value '" + minLengthVal + "' at 'policies.passwordPolicy.minimumLength' failed to satisfy constraint: Member must have value greater than or equal to 6",
                     400
             );
         }
-        if (minLength > 99) {
+        if (minLength.compareTo(BigInteger.valueOf(99)) > 0) {
             throw new AwsException(
                     "InvalidParameterException",
                     "1 validation error detected: Value '" + minLengthVal + "' at 'policies.passwordPolicy.minimumLength' failed to satisfy constraint: Member must have value less than or equal to 99",
@@ -391,15 +393,15 @@ public class CognitoService implements ResourceProvider {
         if (passwordPolicy.containsKey("TemporaryPasswordValidityDays")) {
             Object tempDaysVal = passwordPolicy.get("TemporaryPasswordValidityDays");
             if (tempDaysVal != null) {
-                int tempDays = policyInt(passwordPolicy, "TemporaryPasswordValidityDays");
-                if (tempDays < 0) {
+                BigInteger tempDays = policyInteger(passwordPolicy, "TemporaryPasswordValidityDays");
+                if (tempDays.compareTo(BigInteger.ZERO) < 0) {
                     throw new AwsException(
                             "InvalidParameterException",
                             "1 validation error detected: Value '" + tempDaysVal + "' at 'policies.passwordPolicy.temporaryPasswordValidityDays' failed to satisfy constraint: Member must have value greater than or equal to 0",
                             400
                     );
                 }
-                if (tempDays > 365) {
+                if (tempDays.compareTo(BigInteger.valueOf(365)) > 0) {
                     throw new AwsException(
                             "InvalidParameterException",
                             "1 validation error detected: Value '" + tempDaysVal + "' at 'policies.passwordPolicy.temporaryPasswordValidityDays' failed to satisfy constraint: Member must have value less than or equal to 365",
@@ -412,15 +414,15 @@ public class CognitoService implements ResourceProvider {
         if (passwordPolicy.containsKey("PasswordHistorySize")) {
             Object historySizeVal = passwordPolicy.get("PasswordHistorySize");
             if (historySizeVal != null) {
-                int historySize = policyInt(passwordPolicy, "PasswordHistorySize");
-                if (historySize < 0) {
+                BigInteger historySize = policyInteger(passwordPolicy, "PasswordHistorySize");
+                if (historySize.compareTo(BigInteger.ZERO) < 0) {
                     throw new AwsException(
                             "InvalidParameterException",
                             "1 validation error detected: Value '" + historySizeVal + "' at 'policies.passwordPolicy.passwordHistorySize' failed to satisfy constraint: Member must have value greater than or equal to 0",
                             400
                     );
                 }
-                if (historySize > 24) {
+                if (historySize.compareTo(BigInteger.valueOf(24)) > 0) {
                     throw new AwsException(
                             "InvalidParameterException",
                             "1 validation error detected: Value '" + historySizeVal + "' at 'policies.passwordPolicy.passwordHistorySize' failed to satisfy constraint: Member must have value less than or equal to 24",
@@ -3951,6 +3953,28 @@ public class CognitoService implements ResourceProvider {
             }
         }
         return 0;
+    }
+
+    private BigInteger policyInteger(Map<String, Object> policy, String key) {
+        Object value = policy.get(key);
+        if (value instanceof BigInteger integer) {
+            return integer;
+        }
+        if (value instanceof Number number) {
+            try {
+                return new BigDecimal(number.toString()).toBigInteger();
+            } catch (NumberFormatException ignored) {
+                return BigInteger.ZERO;
+            }
+        }
+        if (value instanceof String stringValue) {
+            try {
+                return new BigInteger(stringValue);
+            } catch (NumberFormatException ignored) {
+                return BigInteger.ZERO;
+            }
+        }
+        return BigInteger.ZERO;
     }
 
     private boolean policyBoolean(Map<String, Object> policy, String key) {
