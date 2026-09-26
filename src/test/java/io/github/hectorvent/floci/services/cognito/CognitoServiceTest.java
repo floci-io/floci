@@ -2543,6 +2543,39 @@ class CognitoServiceTest {
     }
 
     @Test
+    void initiateAuthWithUserAuthPurgesExpiredSessionsAfterClockRollback() {
+        MutableClock clock = new MutableClock();
+        CognitoService clockedService = serviceWithClock(clock);
+        UserPool pool = clockedService.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        UserPoolClient client = openClient(clockedService, pool.getId(), "c", false);
+        clockedService.adminCreateUser(pool.getId(), "alice", Map.of(), "Temp1234!");
+        clockedService.adminSetUserPassword(pool.getId(), "alice", "Perm1234!", true);
+
+        Map<String, Object> firstResult = clockedService.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice", "PREFERRED_CHALLENGE", "PASSWORD"));
+        String firstSession = (String) firstResult.get("Session");
+        clock.advance(Duration.ofMinutes(-10));
+
+        Map<String, Object> rolledBackResult = clockedService.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice", "PREFERRED_CHALLENGE", "PASSWORD"));
+        String rolledBackSession = (String) rolledBackResult.get("Session");
+        clock.advance(Duration.ofMinutes(7));
+
+        clockedService.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice", "PREFERRED_CHALLENGE", "PASSWORD"));
+
+        AwsException expiredException = assertThrows(AwsException.class, () ->
+                clockedService.respondToAuthChallenge(client.getClientId(), "PASSWORD", rolledBackSession,
+                        Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!")));
+        assertEquals("Session not found", expiredException.getMessage());
+
+        Map<String, Object> authResult = clockedService.respondToAuthChallenge(
+                client.getClientId(), "PASSWORD", firstSession,
+                Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"));
+        assertNotNull(authResult.get("AuthenticationResult"));
+    }
+
+    @Test
     void initiateAuthWithUserAuthCapsSimulatedSessionsWithoutEvictingRealSessions() {
         MutableClock clock = new MutableClock();
         CognitoService clockedService = serviceWithClock(clock);

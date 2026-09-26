@@ -65,6 +65,8 @@ final class CognitoAuthFlowHandler {
     private final Object userAuthSessionLock = new Object();
     private final LinkedHashMap<String, UserAuthSession> userAuthSessions = new LinkedHashMap<>();
     private final LinkedHashMap<String, UserAuthSession> simulatedUserAuthSessions = new LinkedHashMap<>();
+    private boolean userAuthSessionExpiriesOrdered = true;
+    private boolean simulatedUserAuthSessionExpiriesOrdered = true;
 
     private record SrpSession(String userPoolId, String username, String clientId,
                               String aHex, String bHex, String bPublicHex,
@@ -780,10 +782,20 @@ final class CognitoAuthFlowHandler {
             Instant now = clock.instant();
             UserAuthSession state = new UserAuthSession(userPoolId, username, clientId, challengeName,
                     userExists, now.plus(AUTH_SESSION_VALIDITY));
-            purgeExpiredUserAuthSessions(userAuthSessions, now);
-            purgeExpiredUserAuthSessions(simulatedUserAuthSessions, now);
+            userAuthSessionExpiriesOrdered = purgeExpiredUserAuthSessions(
+                    userAuthSessions, now, userAuthSessionExpiriesOrdered);
+            simulatedUserAuthSessionExpiriesOrdered = purgeExpiredUserAuthSessions(
+                    simulatedUserAuthSessions, now, simulatedUserAuthSessionExpiriesOrdered);
             LinkedHashMap<String, UserAuthSession> sessionStore = state.userExists()
                     ? userAuthSessions : simulatedUserAuthSessions;
+            Map.Entry<String, UserAuthSession> lastSession = sessionStore.lastEntry();
+            boolean expiresInOrder = lastSession == null
+                    || !state.expiresAt().isBefore(lastSession.getValue().expiresAt());
+            if (state.userExists()) {
+                userAuthSessionExpiriesOrdered &= expiresInOrder;
+            } else {
+                simulatedUserAuthSessionExpiriesOrdered &= expiresInOrder;
+            }
             if (sessionStore.size() >= MAX_USER_AUTH_SESSIONS_PER_PARTITION) {
                 Iterator<String> sessionTokens = sessionStore.keySet().iterator();
                 sessionTokens.next();
@@ -793,16 +805,23 @@ final class CognitoAuthFlowHandler {
         }
     }
 
-    private static void purgeExpiredUserAuthSessions(LinkedHashMap<String, UserAuthSession> sessions,
-                                                      Instant now) {
+    private static boolean purgeExpiredUserAuthSessions(LinkedHashMap<String, UserAuthSession> sessions,
+                                                         Instant now, boolean expiriesOrdered) {
         Iterator<Map.Entry<String, UserAuthSession>> entries = sessions.entrySet().iterator();
+        Instant previousExpiry = null;
+        boolean remainingExpiriesOrdered = true;
         while (entries.hasNext()) {
-            if (sessionExpired(entries.next().getValue().expiresAt(), now)) {
+            Instant expiresAt = entries.next().getValue().expiresAt();
+            if (sessionExpired(expiresAt, now)) {
                 entries.remove();
-            } else {
+            } else if (expiriesOrdered) {
                 break;
+            } else {
+                remainingExpiriesOrdered &= previousExpiry == null || !expiresAt.isBefore(previousExpiry);
+                previousExpiry = expiresAt;
             }
         }
+        return expiriesOrdered || remainingExpiriesOrdered;
     }
 
     private static boolean sessionExpired(Instant expiresAt, Instant now) {
