@@ -15,13 +15,21 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.Socket;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.Iterator;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -40,21 +48,52 @@ public class WebSocketIntegrationInvoker {
      */
     private static final Pattern STAGE_VAR_PATTERN =
             Pattern.compile("\\$\\{stageVariables\\.([^}]+)}");
+    private static final String APPLICATION_JSON = "application/json";
+    private static final String CONNECTION_CLOSE = "close";
+    private static final String CONTENT_LENGTH_HEADER = "Content-Length";
+    private static final String CONTENT_TYPE_HEADER = "Content-Type";
+    private static final String CONNECTION_HEADER = "Connection";
+    private static final String CRLF = "\r\n";
+    private static final String HTTP_SCHEME = "http";
+    private static final String HOST_HEADER = "Host";
+    private static final String TRANSFER_ENCODING_HEADER = "Transfer-Encoding";
+    private static final String CHUNKED_TRANSFER_ENCODING = "chunked";
+    private static final int DEFAULT_HTTP_PORT = 80;
+    private static final int HEADER_NAME_VALUE_PARTS = 2;
+    private static final int MAX_HTTP_STATUS_PARTS = 3;
+    private static final int CONNECT_TIMEOUT_MILLIS = 10_000;
+    private static final long NO_CONTENT_LENGTH = -1L;
 
     private final LambdaService lambdaService;
     private final AwsServiceRouter serviceRouter;
     private final ObjectMapper objectMapper;
     private final VtlTemplateEngine vtlEngine;
     private final HttpClient httpClient;
+    private final AddressResolver addressResolver;
 
     @Inject
     public WebSocketIntegrationInvoker(LambdaService lambdaService, AwsServiceRouter serviceRouter,
                                        ObjectMapper objectMapper, VtlTemplateEngine vtlEngine) {
+        this(lambdaService, serviceRouter, objectMapper, vtlEngine, InetAddress::getAllByName);
+    }
+
+    WebSocketIntegrationInvoker(LambdaService lambdaService, AwsServiceRouter serviceRouter,
+                                ObjectMapper objectMapper, VtlTemplateEngine vtlEngine,
+                                AddressResolver addressResolver) {
         this.lambdaService = lambdaService;
         this.serviceRouter = serviceRouter;
         this.objectMapper = objectMapper;
         this.vtlEngine = vtlEngine;
         this.httpClient = HttpClient.newHttpClient();
+        this.addressResolver = addressResolver;
+    }
+
+    @FunctionalInterface
+    interface AddressResolver {
+        InetAddress[] resolve(String host) throws IOException;
+    }
+
+    private record HttpBackendResponse(int statusCode, String body) {
     }
 
     @PreDestroy
@@ -155,11 +194,11 @@ public class WebSocketIntegrationInvoker {
                 }
                 // Extract response headers (used by $connect to propagate to upgrade response)
                 if (responseNode.has("headers") && responseNode.get("headers").isObject()) {
-                    responseHeaders = new java.util.HashMap<>();
-                    var headersNode = responseNode.get("headers");
-                    var fields = headersNode.fields();
+                    responseHeaders = new HashMap<>();
+                    JsonNode headersNode = responseNode.get("headers");
+                    Iterator<Map.Entry<String, JsonNode>> fields = headersNode.fields();
                     while (fields.hasNext()) {
-                        var field = fields.next();
+                        Map.Entry<String, JsonNode> field = fields.next();
                         responseHeaders.put(field.getKey(), field.getValue().asText());
                     }
                 }
@@ -244,15 +283,7 @@ public class WebSocketIntegrationInvoker {
 
         try {
             URI target = URI.create(uri);
-            SsrfProtection.rejectMetadataAddresses(InetAddress.getAllByName(target.getHost()), target.getHost());
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(target)
-                    .header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(eventJson, StandardCharsets.UTF_8))
-                    .build();
-
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-
+            HttpBackendResponse response = postToHttpEndpoint(target, eventJson);
             return new IntegrationResult(response.statusCode(), response.body(), null);
         } catch (Exception e) {
             LOG.warnv("HTTP_PROXY integration call failed: {0}", e.getMessage());
@@ -294,15 +325,7 @@ public class WebSocketIntegrationInvoker {
 
         try {
             URI target = URI.create(uri);
-            SsrfProtection.rejectMetadataAddresses(InetAddress.getAllByName(target.getHost()), target.getHost());
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(target)
-                    .header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(transformedPayload, StandardCharsets.UTF_8))
-                    .build();
-
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-
+            HttpBackendResponse response = postToHttpEndpoint(target, transformedPayload);
             int statusCode = response.statusCode();
             String body = response.body();
 
@@ -317,6 +340,158 @@ public class WebSocketIntegrationInvoker {
             LOG.warnv("HTTP integration call failed: {0}", e.getMessage());
             return new IntegrationResult(500, null, "HTTP integration error: " + e.getMessage());
         }
+    }
+
+    private HttpBackendResponse postToHttpEndpoint(URI target, String payload)
+            throws IOException, InterruptedException {
+        if (HTTP_SCHEME.equalsIgnoreCase(target.getScheme())) {
+            return postToPinnedHttpEndpoint(target, payload);
+        }
+
+        resolveNonMetadataTarget(target.getHost());
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(target)
+                .header(CONTENT_TYPE_HEADER, APPLICATION_JSON)
+                .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8))
+                .build();
+        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+        return new HttpBackendResponse(response.statusCode(), response.body());
+    }
+
+    private InetAddress[] resolveNonMetadataTarget(String host) throws IOException {
+        if (host == null || host.isBlank()) {
+            throw new IOException("integration URI has no host");
+        }
+        return SsrfProtection.rejectMetadataAddresses(addressResolver.resolve(host), host);
+    }
+
+    private HttpBackendResponse postToPinnedHttpEndpoint(URI target, String payload) throws IOException {
+        InetAddress[] targets = resolveNonMetadataTarget(target.getHost());
+        int port = target.getPort() == -1 ? DEFAULT_HTTP_PORT : target.getPort();
+        byte[] body = payload.getBytes(StandardCharsets.UTF_8);
+
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress(targets[0], port), CONNECT_TIMEOUT_MILLIS);
+            socket.setSoTimeout(CONNECT_TIMEOUT_MILLIS);
+
+            OutputStream output = socket.getOutputStream();
+            output.write(buildPinnedHttpRequest(target, body.length).getBytes(StandardCharsets.ISO_8859_1));
+            output.write(body);
+            output.flush();
+
+            return readPinnedHttpResponse(socket.getInputStream());
+        }
+    }
+
+    private static String buildPinnedHttpRequest(URI target, int contentLength) {
+        String path = target.getRawPath();
+        if (path == null || path.isBlank()) {
+            path = "/";
+        }
+        if (target.getRawQuery() != null) {
+            path += "?" + target.getRawQuery();
+        }
+
+        StringBuilder request = new StringBuilder()
+                .append("POST ").append(path).append(" HTTP/1.1").append(CRLF)
+                .append(HOST_HEADER).append(": ").append(target.getRawAuthority()).append(CRLF)
+                .append(CONTENT_TYPE_HEADER).append(": ").append(APPLICATION_JSON).append(CRLF)
+                .append(CONNECTION_HEADER).append(": ").append(CONNECTION_CLOSE).append(CRLF)
+                .append(CONTENT_LENGTH_HEADER).append(": ").append(contentLength).append(CRLF)
+                .append(CRLF);
+        return request.toString();
+    }
+
+    private static HttpBackendResponse readPinnedHttpResponse(InputStream input) throws IOException {
+        String headersText = readHeaders(input);
+        String[] lines = headersText.split(CRLF);
+        if (lines.length == 0 || !lines[0].startsWith("HTTP/")) {
+            throw new IOException("invalid HTTP response");
+        }
+        String[] status = lines[0].split(" ", MAX_HTTP_STATUS_PARTS);
+        int statusCode = Integer.parseInt(status[1]);
+        long contentLength = NO_CONTENT_LENGTH;
+        boolean chunked = false;
+        for (int i = 1; i < lines.length; i++) {
+            String[] header = lines[i].split(":", HEADER_NAME_VALUE_PARTS);
+            if (header.length != HEADER_NAME_VALUE_PARTS) {
+                continue;
+            }
+            String name = header[0].trim();
+            String value = header[1].trim();
+            if (CONTENT_LENGTH_HEADER.equalsIgnoreCase(name)) {
+                contentLength = Long.parseLong(value);
+            } else if (TRANSFER_ENCODING_HEADER.equalsIgnoreCase(name)
+                    && CHUNKED_TRANSFER_ENCODING.equalsIgnoreCase(value)) {
+                chunked = true;
+            }
+        }
+
+        byte[] body;
+        if (chunked) {
+            body = readChunkedBody(input);
+        } else if (contentLength >= 0) {
+            body = input.readNBytes(Math.toIntExact(contentLength));
+        } else {
+            body = input.readAllBytes();
+        }
+        return new HttpBackendResponse(statusCode, new String(body, StandardCharsets.UTF_8));
+    }
+
+    private static String readHeaders(InputStream input) throws IOException {
+        ByteArrayOutputStream headerBytes = new ByteArrayOutputStream();
+        int previous3 = -1;
+        int previous2 = -1;
+        int previous1 = -1;
+        int current;
+        while ((current = input.read()) != -1) {
+            headerBytes.write(current);
+            if (previous3 == '\r' && previous2 == '\n' && previous1 == '\r' && current == '\n') {
+                break;
+            }
+            previous3 = previous2;
+            previous2 = previous1;
+            previous1 = current;
+        }
+        return headerBytes.toString(StandardCharsets.ISO_8859_1);
+    }
+
+    private static byte[] readChunkedBody(InputStream input) throws IOException {
+        ByteArrayOutputStream body = new ByteArrayOutputStream();
+        while (true) {
+            String line = readAsciiLine(input);
+            int extensionIndex = line.indexOf(';');
+            String sizeText = extensionIndex >= 0 ? line.substring(0, extensionIndex) : line;
+            int size = Integer.parseInt(sizeText.trim(), 16);
+            if (size == 0) {
+                while (!readAsciiLine(input).isEmpty()) {
+                    // Discard trailers.
+                }
+                return body.toByteArray();
+            }
+            body.write(input.readNBytes(size));
+            readAsciiLine(input);
+        }
+    }
+
+    private static String readAsciiLine(InputStream input) throws IOException {
+        ByteArrayOutputStream line = new ByteArrayOutputStream();
+        int current;
+        while ((current = input.read()) != -1) {
+            if (current == '\r') {
+                int next = input.read();
+                if (next == '\n') {
+                    break;
+                }
+                line.write(current);
+                if (next != -1) {
+                    line.write(next);
+                }
+            } else {
+                line.write(current);
+            }
+        }
+        return line.toString(StandardCharsets.ISO_8859_1);
     }
 
     /**
