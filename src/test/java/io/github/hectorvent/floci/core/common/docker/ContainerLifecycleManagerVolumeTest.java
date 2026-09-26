@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.core.common.docker;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.CreateContainerCmd;
 import com.github.dockerjava.api.command.CreateContainerResponse;
+import com.github.dockerjava.api.command.CreateVolumeCmd;
 import com.github.dockerjava.api.command.InspectVolumeCmd;
 import com.github.dockerjava.api.command.InspectVolumeResponse;
 import com.github.dockerjava.api.command.ListVolumesCmd;
@@ -331,6 +332,47 @@ class ContainerLifecycleManagerVolumeTest {
                 "chown 1001:1001 /floci-shared-volume && chmod 2775 /floci-shared-volume && true");
         verify(dockerClient, times(1)).createContainerCmd("busybox:stable");
         verify(dockerClient, times(1)).removeContainerCmd("helper-id");
+    }
+
+    @Test
+    void ensureSharedVolume_volumeRecreated_reinitialisesOwnership() {
+        // The volume exists on the first launch, then is removed (e.g. DeleteApplication in memory
+        // mode) and recreated root:root on the next one: the run-once guard must not skip the chown.
+        InspectVolumeCmd ivc = mock(InspectVolumeCmd.class);
+        when(dockerClient.inspectVolumeCmd("shared")).thenReturn(ivc);
+        when(ivc.exec())
+                .thenReturn(mock(InspectVolumeResponse.class))
+                .thenThrow(new NotFoundException("No such volume"));
+
+        CreateVolumeCmd cvc = mock(CreateVolumeCmd.class, RETURNS_SELF);
+        when(dockerClient.createVolumeCmd()).thenReturn(cvc);
+
+        CreateContainerCmd ccc = mock(CreateContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.createContainerCmd("busybox:stable")).thenReturn(ccc);
+        CreateContainerResponse resp = mock(CreateContainerResponse.class);
+        when(resp.getId()).thenReturn("helper-id");
+        when(ccc.exec()).thenReturn(resp);
+
+        StartContainerCmd scc = mock(StartContainerCmd.class);
+        when(dockerClient.startContainerCmd("helper-id")).thenReturn(scc);
+
+        WaitContainerCmd wcc = mock(WaitContainerCmd.class);
+        when(dockerClient.waitContainerCmd("helper-id")).thenReturn(wcc);
+        WaitContainerResultCallback wcb = mock(WaitContainerResultCallback.class);
+        when(wcc.exec(any(WaitContainerResultCallback.class))).thenReturn(wcb);
+        when(wcb.awaitStatusCode(anyLong(), any())).thenReturn(0);
+
+        RemoveContainerCmd rcc = mock(RemoveContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.removeContainerCmd("helper-id")).thenReturn(rcc);
+
+        manager.ensureSharedVolume("shared", OptionalInt.of(9999), OptionalInt.of(9999),
+                Optional.empty(), "busybox:stable");
+        manager.ensureSharedVolume("shared", OptionalInt.of(9999), OptionalInt.of(9999),
+                Optional.empty(), "busybox:stable");
+
+        verify(dockerClient, times(1)).createVolumeCmd();
+        verify(dockerClient, times(2)).createContainerCmd("busybox:stable");
+        verify(ccc, times(2)).withCmd("sh", "-c", "chown 9999:9999 /floci-shared-volume && true");
     }
 
     @Test

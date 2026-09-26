@@ -40,6 +40,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
@@ -65,6 +66,8 @@ public class FlinkContainerManager {
     private static final Logger LOG = Logger.getLogger(FlinkContainerManager.class);
     private static final int JOBMANAGER_REST_PORT = 8081;
     private static final String SAVEPOINTS_MOUNT = "/opt/flink/savepoints";
+    private static final int FLINK_UID = 9999;
+    private static final int FLINK_GID = 9999;
 
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
@@ -178,8 +181,12 @@ public class FlinkContainerManager {
         // Stop/StartApplication cycle — stopCluster() removes the JobManager container, but this
         // volume is only removed on DeleteApplication (removeSavepointsVolume), mirroring how other
         // Docker-backed services keep persistent data outside the container lifecycle.
-        ContainerStorageHelper.applyNamedVolume(jmSpec, lifecycleManager,
-                resolveVolumeName(app), SAVEPOINTS_MOUNT);
+        // Docker creates the volume root:root, but the official apache/flink images run Flink as
+        // uid/gid 9999, so the volume root is chowned to that user before the JobManager starts.
+        String savepointsVolume = resolveVolumeName(app);
+        lifecycleManager.ensureSharedVolume(savepointsVolume, OptionalInt.of(FLINK_UID),
+                OptionalInt.of(FLINK_GID), Optional.empty(), config.storage().efs().initImage());
+        jmSpec.withNamedVolume(savepointsVolume, SAVEPOINTS_MOUNT);
         if (!containerDetector.isRunningInContainer()) {
             jmSpec.withDynamicPort(JOBMANAGER_REST_PORT);
         } else {

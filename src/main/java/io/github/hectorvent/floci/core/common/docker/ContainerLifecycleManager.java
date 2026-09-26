@@ -468,13 +468,20 @@ public class ContainerLifecycleManager {
      * {@code --filter label=floci_emulator=floci-aws} (this emulator only) work.
      */
     public void ensureVolume(String volumeName) {
-        if (!volumeExists(volumeName)) {
-            dockerClient.createVolumeCmd()
-                    .withName(volumeName)
-                    .withLabels(ContainerStorageHelper.defaultLabels(config))
-                    .exec();
-            LOG.debugv("Created volume {0}", volumeName);
+        createVolumeIfAbsent(volumeName);
+    }
+
+    /** Creates the named volume when it is missing; returns whether it was created. */
+    private boolean createVolumeIfAbsent(String volumeName) {
+        if (volumeExists(volumeName)) {
+            return false;
         }
+        dockerClient.createVolumeCmd()
+                .withName(volumeName)
+                .withLabels(ContainerStorageHelper.defaultLabels(config))
+                .exec();
+        LOG.debugv("Created volume {0}", volumeName);
+        return true;
     }
 
     /**
@@ -511,7 +518,11 @@ public class ContainerLifecycleManager {
      */
     public void ensureSharedVolume(String volumeName, OptionalInt ownerUid, OptionalInt ownerGid,
                                    Optional<String> rootPermissions, String initImage) {
-        ensureVolume(volumeName);
+        // A volume created now is root:root 0755 again, so a memo left by a volume of the same name
+        // that was removed since (e.g. DeleteApplication, docker volume rm) is stale.
+        if (createVolumeIfAbsent(volumeName)) {
+            initializedSharedVolumes.remove(volumeName);
+        }
         if (rootPermissions.isEmpty() && ownerUid.isEmpty() && ownerGid.isEmpty()) {
             return;
         }
