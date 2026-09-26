@@ -86,6 +86,17 @@ class CloudFormationDeleteAfterFailedRollbackIntegrationTest {
             assertDeleteComplete(events, "Role", roleName);
             assertDeleteComplete(events, "LogGroup", logGroup);
         } finally {
+            // Best effort and unchecked, so a failed assertion above is not masked. The role and log
+            // group are deleted directly because a regression would leave them behind DeleteStack.
+            cfn("DeleteStack", stackName, null);
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", IAM_AUTH)
+                .formParam("Action", "DeleteRole")
+                .formParam("RoleName", roleName)
+            .when()
+                .post("/");
+            logs("DeleteLogGroup", "{\"logGroupName\":\"" + logGroup + "\"}");
             logs("DeleteLogGroup", "{\"logGroupName\":\"" + outsideGroup + "\"}");
         }
     }
