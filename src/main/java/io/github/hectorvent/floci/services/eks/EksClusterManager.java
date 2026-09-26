@@ -360,6 +360,10 @@ public class EksClusterManager implements ClusterNodeInstanceProvider {
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                         "eks", cluster.getName(), labelAccountId, clusterRegion(cluster)));
 
+        if (config.services().eks().embeddedDns()) {
+            specBuilder.withEmbeddedDns();
+        }
+
         if (config.services().eks().ecrRegistryMirror() && config.services().ecr().enabled()) {
             specBuilder.withHostDockerInternalOnLinux();
         }

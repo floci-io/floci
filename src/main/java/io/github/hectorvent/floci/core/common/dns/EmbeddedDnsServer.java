@@ -16,6 +16,7 @@ import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.InetAddress;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -50,7 +51,7 @@ import java.util.regex.Pattern;
 public class EmbeddedDnsServer {
 
     private static final Logger LOG = Logger.getLogger(EmbeddedDnsServer.class);
-    private static final int DNS_PORT = 53;
+    static final int DNS_PORT = 53;
     private static final int TTL = 60;
     private static final String FALLBACK_UPSTREAM = "127.0.0.11";
     // EDNS0-capable resolvers (Node/c-ares, glibc) advertise UDP payloads well above the
@@ -255,7 +256,14 @@ public class EmbeddedDnsServer {
         return Optional.of(address.toString());
     }
 
-    String readName(ByteBuffer buf, byte[] data) {
+    static String readName(ByteBuffer buf, byte[] data) {
+        return readName(buf, data, 0);
+    }
+
+    private static String readName(ByteBuffer buf, byte[] data, int depth) {
+        if (depth > 16) {
+            return "";
+        }
         StringBuilder sb = new StringBuilder();
         int safety = 0;
         while (buf.hasRemaining() && safety++ < 128) {
@@ -265,21 +273,31 @@ public class EmbeddedDnsServer {
             }
             if ((len & 0xC0) == 0xC0) {
                 // compression pointer
+                if (!buf.hasRemaining()) {
+                    break;
+                }
                 int offset = ((len & 0x3F) << 8) | (buf.get() & 0xFF);
+                if (offset >= data.length) {
+                    break;
+                }
                 ByteBuffer ptr = ByteBuffer.wrap(data);
                 ptr.position(offset);
                 if (sb.length() > 0) {
                     sb.append('.');
                 }
-                sb.append(readName(ptr, data));
+                sb.append(readName(ptr, data, depth + 1));
                 return sb.toString();
+            }
+            if (buf.remaining() < len) {
+                buf.position(buf.limit());
+                break;
             }
             if (sb.length() > 0) {
                 sb.append('.');
             }
             byte[] label = new byte[len];
             buf.get(label);
-            sb.append(new String(label));
+            sb.append(new String(label, StandardCharsets.US_ASCII));
         }
         return sb.toString();
     }
@@ -336,7 +354,7 @@ public class EmbeddedDnsServer {
      * Throws if every upstream times out or errors, so the caller can log a single warning.
      * The {@code upstreamPort} is parameterised for tests; production always uses {@link #DNS_PORT}.
      */
-    byte[] forwardToUpstreams(byte[] query, List<String> upstreams, int upstreamPort) throws Exception {
+    static byte[] forwardToUpstreams(byte[] query, List<String> upstreams, int upstreamPort) throws Exception {
         Exception last = null;
         for (String upstream : upstreams) {
             try (java.net.DatagramSocket fwd = new java.net.DatagramSocket()) {
@@ -386,13 +404,16 @@ public class EmbeddedDnsServer {
         return server != null && !server.isBlank() && !server.trim().equals("127.0.0.1");
     }
 
-    private List<String> readResolvConfNameservers() {
+    static List<String> readResolvConfNameservers() {
         List<String> servers = new ArrayList<>();
         try {
-            for (String line : Files.readAllLines(Path.of("/etc/resolv.conf"))) {
-                line = line.trim();
-                if (line.startsWith("nameserver ")) {
-                    servers.add(line.substring("nameserver ".length()).trim());
+            Path path = Path.of("/etc/resolv.conf");
+            if (Files.exists(path)) {
+                for (String line : Files.readAllLines(path)) {
+                    line = line.trim();
+                    if (line.startsWith("nameserver ")) {
+                        servers.add(line.substring("nameserver ".length()).trim());
+                    }
                 }
             }
         } catch (Exception e) {

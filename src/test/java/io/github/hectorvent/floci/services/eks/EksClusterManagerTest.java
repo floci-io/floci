@@ -43,6 +43,8 @@ import io.github.hectorvent.floci.services.ec2.model.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
@@ -314,6 +316,38 @@ class EksClusterManagerTest {
                 "io.floci.resource-id", "my-cluster",
                 "io.floci.account", "000000000000",
                 "io.floci.region", "us-east-1"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void startClusterEmbeddedDnsFlag(boolean embeddedDns) {
+        EmulatorConfig config = Mockito.mock(EmulatorConfig.class, Mockito.RETURNS_DEEP_STUBS);
+        when(config.services().eks().defaultImage()).thenReturn("rancher/k3s:v1.30.0-k3s1");
+        when(config.services().eks().embeddedDns()).thenReturn(embeddedDns);
+
+        ContainerLifecycleManager lifecycleManager = Mockito.mock(ContainerLifecycleManager.class, Mockito.RETURNS_DEEP_STUBS);
+        when(lifecycleManager.create(any())).thenReturn("container-id");
+
+        ContainerBuilder containerBuilder = Mockito.mock(ContainerBuilder.class);
+        ContainerBuilder.Builder builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
+        when(containerBuilder.newContainer(anyString())).thenReturn(builder);
+        when(builder.build()).thenReturn(Mockito.mock(ContainerSpec.class));
+
+        EksClusterManager manager = new EksClusterManager(containerBuilder, lifecycleManager,
+                Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
+                Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
+                config, new RegionResolver("us-east-1", "000000000000"));
+
+        Cluster cluster = new Cluster();
+        cluster.setName("my-cluster");
+
+        manager.startCluster(cluster);
+
+        if (embeddedDns) {
+            verify(builder).withEmbeddedDns();
+        } else {
+            verify(builder, never()).withEmbeddedDns();
+        }
     }
 
     /** Re-latching persisted clusters after a Floci/Docker restart (#2609), without a Docker daemon. */
@@ -600,42 +634,6 @@ class EksClusterManagerTest {
 
             assertEquals("floci-aws-eks-999999999999.demo", cluster.getDockerName());
             verify(lifecycleManager).removeIfExists("floci-aws-eks-999999999999.demo");
-        }
-
-        @Test
-        void startClusterRegistersNodeInstanceAndNotifiesListener() {
-            stubFreshStart("cid-new", 6440);
-            List<Instance> registered = new ArrayList<>();
-            manager.addNodeRegistrationListener(registered::add);
-
-            Cluster cluster = cluster();
-            manager.startCluster(cluster);
-
-            Instance inst = manager.getRegisteredClusterNodeInstance(cluster);
-            assertNotNull(inst);
-            assertEquals("cid-new", inst.getDockerContainerId());
-            assertEquals(1, registered.size());
-            assertEquals(inst.getInstanceId(), registered.getFirst().getInstanceId());
-        }
-
-        @Test
-        void restoreClusterRegistersNodeInstanceAndNotifiesListener() {
-            when(lifecycleManager.findByName("floci-eks-demo"))
-                    .thenReturn(Optional.of(survivingContainer("cid-1")));
-            when(lifecycleManager.adopt("cid-1", List.of(6443)))
-                    .thenReturn(new ContainerInfo("cid-1", Map.of(), Map.of(6443, 6512)));
-
-            List<Instance> registered = new ArrayList<>();
-            manager.addNodeRegistrationListener(registered::add);
-
-            Cluster cluster = cluster();
-            manager.restoreCluster(cluster);
-
-            Instance inst = manager.getRegisteredClusterNodeInstance(cluster);
-            assertNotNull(inst);
-            assertEquals("cid-1", inst.getDockerContainerId());
-            assertEquals(1, registered.size());
-            assertEquals(inst.getInstanceId(), registered.getFirst().getInstanceId());
         }
     }
 

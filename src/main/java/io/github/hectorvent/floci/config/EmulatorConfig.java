@@ -3173,6 +3173,13 @@ public interface EmulatorConfig {
          */
         @WithDefault("true")
         boolean podIdentityWebhook();
+
+        /**
+         * When true, configures cluster containers with Floci's embedded DNS server so that
+         * Route 53 private hosted zone records resolve from inside cluster pods.
+         */
+        @WithDefault("true")
+        boolean embeddedDns();
     }
 
     /**
