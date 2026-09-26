@@ -242,6 +242,19 @@ class CloudFormationRollbackCompleteUpdateIntegrationTest {
 
         CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(stackName);
         assertEquals("UPDATE_ROLLBACK_COMPLETE", state.status(), state.reason());
+        given()
+            .head("/cfn-rollback-" + suffix)
+        .then()
+            .statusCode(200);
+        given()
+            .header("X-Amz-Target", "Logs_20140328.DescribeLogGroups")
+            .contentType("application/x-amz-json-1.1")
+            .body("{\"logGroupNamePrefix\":\"/cfn/rollback-" + suffix + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("/cfn/rollback-" + suffix));
         deleteStack(stackName);
     }
 

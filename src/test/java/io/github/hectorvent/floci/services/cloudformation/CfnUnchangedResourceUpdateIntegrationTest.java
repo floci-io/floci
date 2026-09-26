@@ -8,7 +8,9 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * UpdateStack must leave an unchanged resource alone, whatever its type.
@@ -28,6 +30,8 @@ class CfnUnchangedResourceUpdateIntegrationTest {
 
     private static final String CFN_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260808/us-west-2/cloudformation/aws4_request";
+    private static final String SQS_AUTH =
+            "AWS4-HMAC-SHA256 Credential=test/20260808/us-west-2/sqs/aws4_request";
 
     private static String stackWith(String namedResourceJson, String queueName) {
         return """
@@ -63,6 +67,25 @@ class CfnUnchangedResourceUpdateIntegrationTest {
             .when().post("/").then().statusCode(200)
             .extract().body().asString();
         return physicalIdOf(body, "Named");
+    }
+
+    private String queueAttribute(String queueUrl, String attributeName) {
+        String body = given()
+                .header("Authorization", SQS_AUTH)
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "GetQueueAttributes")
+                .formParam("QueueUrl", queueUrl)
+                .formParam("AttributeName.1", attributeName)
+            .when().post("/").then().statusCode(200)
+                .extract().body().asString();
+        return XmlParser.extractPairs(body, "Attribute", "Name", "Value").get(attributeName);
+    }
+
+    private void deleteStack(String stackName) {
+        given().contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
+            .formParam("Action", "DeleteStack").formParam("StackName", stackName)
+        .when().post("/").then().statusCode(200);
+        CfnStackWaits.awaitStackDeleted(stackName);
     }
 
     /**
@@ -284,6 +307,74 @@ class CfnUnchangedResourceUpdateIntegrationTest {
                   "Type": "AWS::SQS::Queue",
                   "Properties": {"QueueName": "probe-queue-SUFFIX"}
                 }""");
+    }
+
+    @Test
+    void updatesAResourceWhenItsReferencedQueueIsReplaced() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "probe-sqs-redrive-" + suffix;
+        String oldDeadLetterName = "probe-dlq-old-" + suffix;
+        String newDeadLetterName = "probe-dlq-new-" + suffix;
+        String mainQueueName = "probe-main-" + suffix;
+        String initialTemplate = redriveTemplate(oldDeadLetterName, mainQueueName);
+        String updatedTemplate = redriveTemplate(newDeadLetterName, mainQueueName);
+
+        given().contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
+            .formParam("Action", "CreateStack").formParam("StackName", stackName)
+            .formParam("TemplateBody", initialTemplate)
+        .when().post("/").then().statusCode(200);
+        given().contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
+            .formParam("Action", "DescribeStacks").formParam("StackName", stackName)
+        .when().post("/").then().statusCode(200).body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+
+        String beforeXml = given().contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
+            .formParam("Action", "DescribeStackResources").formParam("StackName", stackName)
+        .when().post("/").then().statusCode(200).extract().body().asString();
+        String oldDeadLetterUrl = physicalIdOf(beforeXml, "DeadLetterQueue");
+        String mainQueueUrl = physicalIdOf(beforeXml, "MainQueue");
+        String oldDeadLetterArn = queueAttribute(oldDeadLetterUrl, "QueueArn");
+        assertTrue(queueAttribute(mainQueueUrl, "RedrivePolicy").contains(oldDeadLetterArn));
+
+        given().contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
+            .formParam("Action", "UpdateStack").formParam("StackName", stackName)
+            .formParam("TemplateBody", updatedTemplate)
+        .when().post("/").then().statusCode(200);
+        given().contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
+            .formParam("Action", "DescribeStacks").formParam("StackName", stackName)
+        .when().post("/").then().statusCode(200).body(containsString("<StackStatus>UPDATE_COMPLETE</StackStatus>"));
+
+        String afterXml = given().contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
+            .formParam("Action", "DescribeStackResources").formParam("StackName", stackName)
+        .when().post("/").then().statusCode(200).extract().body().asString();
+        String newDeadLetterUrl = physicalIdOf(afterXml, "DeadLetterQueue");
+        String newDeadLetterArn = queueAttribute(newDeadLetterUrl, "QueueArn");
+        assertNotEquals(oldDeadLetterArn, newDeadLetterArn);
+        assertTrue(queueAttribute(mainQueueUrl, "RedrivePolicy").contains(newDeadLetterArn));
+
+        deleteStack(stackName);
+    }
+
+    private static String redriveTemplate(String deadLetterQueueName, String mainQueueName) {
+        return """
+                {
+                  "Resources": {
+                    "DeadLetterQueue": {
+                      "Type": "AWS::SQS::Queue",
+                      "Properties": {"QueueName": "%s"}
+                    },
+                    "MainQueue": {
+                      "Type": "AWS::SQS::Queue",
+                      "Properties": {
+                        "QueueName": "%s",
+                        "RedrivePolicy": {
+                          "deadLetterTargetArn": {"Fn::GetAtt": ["DeadLetterQueue", "Arn"]},
+                          "maxReceiveCount": 3
+                        }
+                      }
+                    }
+                  }
+                }
+                """.formatted(deadLetterQueueName, mainQueueName);
     }
 
     @Test
