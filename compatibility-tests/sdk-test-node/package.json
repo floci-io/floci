@@ -23,6 +23,7 @@
     "@aws-sdk/client-lambda": "^3.500.0",
     "@aws-sdk/client-neptune": "^3.500.0",
     "@aws-sdk/client-pipes": "^3.500.0",
+    "@aws-sdk/client-rds": "^3.500.0",
     "@aws-sdk/client-s3": "^3.500.0",
     "@aws-sdk/client-s3tables": "3.1111.0",
     "@aws-sdk/client-secrets-manager": "^3.500.0",
@@ -31,6 +32,7 @@
     "@aws-sdk/client-ssm": "^3.500.0",
     "@aws-sdk/client-sts": "^3.500.0",
     "@aws-sdk/lib-storage": "^3.500.0",
+    "mysql2": "^3.24.2",
     "selfsigned": "^5.5.0",
     "ws": "^8.0.0"
   },

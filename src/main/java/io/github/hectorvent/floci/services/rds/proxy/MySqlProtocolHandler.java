@@ -12,6 +12,7 @@ import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Arrays;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -879,10 +880,17 @@ public class MySqlProtocolHandler {
             return;
         }
 
+        AtomicBoolean closed = new AtomicBoolean();
+        Runnable closeBoth = () -> {
+            if (closed.compareAndSet(false, true)) {
+                closeQuietly(client);
+                closeQuietly(backend);
+            }
+        };
         Thread t1 = Thread.ofVirtual().name("rds-mysql-c2b")
-                .start(() -> relayClientCommands(clientIn, backendOut));
+                .start(() -> relayClientCommands(clientIn, backendOut, closeBoth));
         Thread t2 = Thread.ofVirtual().name("rds-mysql-b2c")
-                .start(() -> relay(backendIn, clientOut));
+                .start(() -> relay(backendIn, clientOut, closeBoth));
         try {
             t1.join();
             t2.join();
@@ -894,7 +902,7 @@ public class MySqlProtocolHandler {
         }
     }
 
-    private static void relayClientCommands(InputStream from, OutputStream to) {
+    private static void relayClientCommands(InputStream from, OutputStream to, Runnable onDone) {
         try {
             byte[] raw;
             while ((raw = readMysqlPacketRaw(from)) != null) {
@@ -910,7 +918,11 @@ public class MySqlProtocolHandler {
                 }
                 to.flush();
             }
-        } catch (IOException ignored) {}
+        } catch (IOException ignored) {
+            // Either peer closing the connection ends the relay.
+        } finally {
+            onDone.run();
+        }
     }
 
     static byte[] rewriteIamAuthPlugin(byte[] payload) {
@@ -923,7 +935,7 @@ public class MySqlProtocolHandler {
                 .getBytes(StandardCharsets.ISO_8859_1);
     }
 
-    private static void relay(InputStream from, OutputStream to) {
+    private static void relay(InputStream from, OutputStream to, Runnable onDone) {
         try {
             byte[] buf = new byte[8192];
             int n;
@@ -931,7 +943,11 @@ public class MySqlProtocolHandler {
                 to.write(buf, 0, n);
                 to.flush();
             }
-        } catch (IOException ignored) {}
+        } catch (IOException ignored) {
+            // Either peer closing the connection ends the relay.
+        } finally {
+            onDone.run();
+        }
     }
 
     static void closeQuietly(Socket s) {
