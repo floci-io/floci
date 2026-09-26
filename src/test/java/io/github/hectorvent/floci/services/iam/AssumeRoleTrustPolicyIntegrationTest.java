@@ -81,17 +81,18 @@ class AssumeRoleTrustPolicyIntegrationTest {
     }
 
     @Test
-    void unknownRoleStaysPermissive() {
-        // No role created — enforcement must not block roles Floci has never seen.
+    void unknownRoleIsDenied() {
+        String roleArn = "arn:aws:iam::" + ACCOUNT_B + ":role/never-created-"
+                + UUID.randomUUID().toString().substring(0, 8);
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "AssumeRole")
-            .formParam("RoleArn", "arn:aws:iam::" + ACCOUNT_B + ":role/never-created-"
-                    + UUID.randomUUID().toString().substring(0, 8))
+            .formParam("RoleArn", roleArn)
             .formParam("RoleSessionName", "s")
             .header("Authorization", auth(ACCOUNT_C, "sts"))
         .when().post("/")
-        .then().statusCode(200)
-            .body("AssumeRoleResponse.AssumeRoleResult.Credentials.AccessKeyId", startsWith("ASIA"));
+        .then().statusCode(403)
+            .body(containsString("<Code>AccessDenied</Code>"))
+            .body(containsString("is not authorized to perform: sts:AssumeRole on resource: " + roleArn));
     }
 }

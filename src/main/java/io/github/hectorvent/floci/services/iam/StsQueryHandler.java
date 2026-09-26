@@ -147,24 +147,22 @@ public class StsQueryHandler {
     }
 
     /**
-     * When IAM enforcement is enabled, denies AssumeRole if the target role's trust policy does not
-     * permit the caller. Returns {@code null} to allow — enforcement disabled, the role is unknown
-     * to Floci (permissive, backward-compatible), or the caller is permitted.
+     * Denies AssumeRole when the target role does not exist, as AWS does. When IAM enforcement is
+     * enabled, also denies it if the role's trust policy does not permit the caller. Returns
+     * {@code null} to allow.
      */
     private Response enforceTrustPolicy(String roleArn, String roleName, String roleAccountId) {
-        if (!config.services().iam().enforcementEnabled()) {
-            return null;
-        }
         Optional<IamRole> role = iamService.findRole(roleAccountId, roleName);
-        if (role.isEmpty()) {
-            return null;
-        }
+        boolean enforcement = config.services().iam().enforcementEnabled();
         String auth = headers == null ? null : headers.getHeaderString("Authorization");
         String callerAccount = accountResolver.resolve(auth);
         String callerArn = iamService.resolveCallerArn(
                         auth == null ? null : accountResolver.extractAccessKeyId(auth))
                 .orElse(AwsArnUtils.Arn.of("iam", "", callerAccount, "root").toString());
-        if (trustPolicyEvaluator.allows(role.get().getAssumeRolePolicyDocument(), callerArn, callerAccount)) {
+        boolean permitted = role.isPresent()
+                && (!enforcement
+                    || trustPolicyEvaluator.allows(role.get().getAssumeRolePolicyDocument(), callerArn, callerAccount));
+        if (permitted) {
             return null;
         }
         return AwsQueryResponse.error("AccessDenied",
