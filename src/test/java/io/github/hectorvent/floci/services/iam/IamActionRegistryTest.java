@@ -41,6 +41,53 @@ class IamActionRegistryTest {
     }
 
     @Test
+    void resolvesOperationFromFormEncodedBody() {
+        ContainerRequestContext ctx = mockCtx(
+                "POST", "/",
+                new MultivaluedHashMap<>(),
+                MediaType.APPLICATION_FORM_URLENCODED_TYPE,
+                "Operation=CreateUser&Version=2010-05-08&UserName=alice");
+        assertEquals("CreateUser", registry.queryAction(ctx));
+    }
+
+    @Test
+    void actionTakesPrecedenceOverOperation() {
+        ContainerRequestContext ctx = mockCtx(
+                "POST", "/",
+                new MultivaluedHashMap<>(),
+                MediaType.APPLICATION_FORM_URLENCODED_TYPE,
+                "Action=ListUsers&Operation=CreateUser");
+        assertEquals("ListUsers", registry.queryAction(ctx));
+    }
+
+    @Test
+    void restActionIgnoresOperationFromFormBody() {
+        ContainerRequestContext ctx = mockCtx(
+                "PUT", "/bucket/key",
+                new MultivaluedHashMap<>(),
+                MediaType.APPLICATION_FORM_URLENCODED_TYPE,
+                "Operation=ListBucket");
+        assertEquals("s3:PutObject", registry.resolve("s3", ctx));
+    }
+
+    @Test
+    void restActionIgnoresActionFromUrl() {
+        MultivaluedMap<String, String> query = new MultivaluedHashMap<>();
+        query.add("Action", "ListBucket");
+        ContainerRequestContext ctx = mockCtx(
+                "PUT", "/bucket/key", query, null, "");
+        assertEquals("s3:PutObject", registry.resolve("s3", ctx));
+    }
+
+    @Test
+    void restActionIgnoresActionFromFormBody() {
+        ContainerRequestContext ctx = mockCtx(
+                "PUT", "/bucket/key", new MultivaluedHashMap<>(),
+                MediaType.APPLICATION_FORM_URLENCODED_TYPE, "Action=ListBucket");
+        assertEquals("s3:PutObject", registry.resolve("s3", ctx));
+    }
+
+    @Test
     void resolvesUrlEncodedActionValueFromFormBody() {
         ContainerRequestContext ctx = mockCtx(
                 "POST", "/",

@@ -210,7 +210,7 @@ public class AwsQueryController {
     private final AutoScalingQueryHandler autoScalingQueryHandler;
     private final ElasticBeanstalkQueryHandler elasticBeanstalkQueryHandler;
     private final RedshiftQueryHandler redshiftQueryHandler;
-    private final ResolvedServiceCatalog catalog;
+    private final AwsQueryServiceResolver serviceResolver;
     private final RegionResolver regionResolver;
 
     @Inject
@@ -233,7 +233,7 @@ public class AwsQueryController {
                               AutoScalingQueryHandler autoScalingQueryHandler,
                               ElasticBeanstalkQueryHandler elasticBeanstalkQueryHandler,
                               RedshiftQueryHandler redshiftQueryHandler,
-                              ResolvedServiceCatalog catalog,
+                              AwsQueryServiceResolver serviceResolver,
                               RegionResolver regionResolver) {
         this.cloudFormationQueryHandler = cloudFormationQueryHandler;
         this.elastiCacheQueryHandler = elastiCacheQueryHandler;
@@ -256,7 +256,7 @@ public class AwsQueryController {
         this.autoScalingQueryHandler = autoScalingQueryHandler;
         this.elasticBeanstalkQueryHandler = elasticBeanstalkQueryHandler;
         this.redshiftQueryHandler = redshiftQueryHandler;
-        this.catalog = catalog;
+        this.serviceResolver = serviceResolver;
         this.regionResolver = regionResolver;
     }
 
@@ -268,16 +268,13 @@ public class AwsQueryController {
             @Context HttpHeaders httpHeaders,
             MultivaluedMap<String, String> formParams) {
 
-        String action = formParams.getFirst("Action");
-        if (action == null) {
-            action = formParams.getFirst("Operation");
-        }
+        String action = AwsQueryServiceResolver.action(formParams);
         if (action == null) {
             return xmlErrorResponse("MissingAction",
                     "The request must contain the parameter Action", 400);
         }
 
-        String service = resolveService(authorization, action);
+        String service = serviceResolver.resolve(authorization, action);
         LOG.debugv("Query protocol service={0} action={1}", service, action);
 
         String region = regionResolver.resolveRegion(httpHeaders);
@@ -618,17 +615,7 @@ public class AwsQueryController {
             "GetClusterCredentials", "GetClusterCredentialsWithIAM"
     );
 
-    private String resolveService(String authorization, String action) {
-        ServiceDescriptor descriptor = SigV4CredentialScope.serviceName(authorization)
-                .flatMap(catalog::byCredentialScope)
-                .orElse(null);
-        if (descriptor != null && descriptor.supportsProtocol(ServiceProtocol.QUERY)) {
-            return descriptor.externalKey();
-        }
-        return inferServiceFromAction(action);
-    }
-
-    private String inferServiceFromAction(String action) {
+    static String inferServiceFromAction(String action) {
         if (STS_ACTIONS.contains(action)) {
             return "sts";
         }
