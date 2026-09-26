@@ -379,6 +379,12 @@ Floci-side rules:
 
 ## Code Style
 
+### Checkstyle
+
+- Java code must pass `./mvnw checkstyle:check` (CI: Checkstyle). The rules live in
+  `tools/checkstyle/checkstyle.xml`. Code excluded in `tools/checkstyle/suppressions.xml`
+  is not checked yet, but the rules below still apply to it.
+
 ### General
 
 - Use constructor injection

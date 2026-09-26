@@ -145,6 +145,8 @@ ln -s AGENTS.md COPILOT.md
 [AGENTS.md](AGENTS.md#code-style) carries the full list. The rules worth knowing
 before your first PR:
 
+- **Pass Checkstyle.** Run `./mvnw checkstyle:check`. The rules live in
+  `tools/checkstyle/checkstyle.xml`.
 - **Write explicit types. Do not use `var`.** Floci reproduces AWS wire contracts,
   so the concrete type at a call site is usually what a reviewer needs to see:
   whether a value is a `LinkedHashMap` or a `Map`, an AWS model type or a JDK one.
