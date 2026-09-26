@@ -44,49 +44,50 @@ class CloudFormationDeleteAfterFailedRollbackIntegrationTest {
         String outsideGroup = "/delete-after-rollback-failed/" + suffix + "/outside";
 
         logs("CreateLogGroup", "{\"logGroupName\":\"" + outsideGroup + "\"}").then().statusCode(200);
+        try {
+            String stackId = XmlParser.extractFirst(
+                    cfn("CreateStack", stackName, template(roleName, logGroup, null)).then().statusCode(200)
+                            .extract().asString(),
+                    "StackId", null);
+            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
 
-        String stackId = XmlParser.extractFirst(
-                cfn("CreateStack", stackName, template(roleName, logGroup, null)).then().statusCode(200)
-                        .extract().asString(),
-                "StackId", null);
-        assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            // Role and LogGroup both change, then Dup collides with the group created outside the stack.
+            // Neither type rolls an update back, so both are left UPDATE_FAILED with their physical ids.
+            cfn("UpdateStack", stackName, template(roleName, logGroup, outsideGroup)).then().statusCode(200);
+            assertEquals("UPDATE_ROLLBACK_FAILED", CfnStackWaits.awaitTerminal(stackName).status());
+            Map<String, String> statuses = resourceStatuses(stackName);
+            assertEquals("UPDATE_FAILED", statuses.get("Role"), statuses.toString());
+            assertEquals("UPDATE_FAILED", statuses.get("LogGroup"), statuses.toString());
 
-        // Role and LogGroup both change, then Dup collides with the group created outside the stack.
-        // Neither type rolls an update back, so both are left UPDATE_FAILED with their physical ids.
-        cfn("UpdateStack", stackName, template(roleName, logGroup, outsideGroup)).then().statusCode(200);
-        assertEquals("UPDATE_ROLLBACK_FAILED", CfnStackWaits.awaitTerminal(stackName).status());
-        Map<String, String> statuses = resourceStatuses(stackName);
-        assertEquals("UPDATE_FAILED", statuses.get("Role"), statuses.toString());
-        assertEquals("UPDATE_FAILED", statuses.get("LogGroup"), statuses.toString());
+            cfn("DeleteStack", stackName, null).then().statusCode(200);
+            CfnStackWaits.awaitStackDeleted(stackName);
 
-        cfn("DeleteStack", stackName, null).then().statusCode(200);
-        CfnStackWaits.awaitStackDeleted(stackName);
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", IAM_AUTH)
+                .formParam("Action", "GetRole")
+                .formParam("RoleName", roleName)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(404)
+                .body(containsString("<Code>NoSuchEntity</Code>"));
+            logs("DescribeLogGroups", "{\"logGroupNamePrefix\":\"" + logGroup + "\"}").then()
+                .statusCode(200)
+                .body(not(containsString(logGroup)));
+            // The group Dup collided with was never the stack's, so it survives.
+            logs("DescribeLogGroups", "{\"logGroupNamePrefix\":\"" + outsideGroup + "\"}").then()
+                .statusCode(200)
+                .body(containsString(outsideGroup));
 
-        given()
-            .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", IAM_AUTH)
-            .formParam("Action", "GetRole")
-            .formParam("RoleName", roleName)
-        .when()
-            .post("/")
-        .then()
-            .statusCode(404)
-            .body(containsString("<Code>NoSuchEntity</Code>"));
-        logs("DescribeLogGroups", "{\"logGroupNamePrefix\":\"" + logGroup + "\"}").then()
-            .statusCode(200)
-            .body(not(containsString(logGroup)));
-        // The group Dup collided with was never the stack's, so it survives.
-        logs("DescribeLogGroups", "{\"logGroupNamePrefix\":\"" + outsideGroup + "\"}").then()
-            .statusCode(200)
-            .body(containsString(outsideGroup));
-
-        List<Map<String, String>> events = XmlParser.extractGroups(
-                cfn("DescribeStackEvents", stackId, null).then().statusCode(200).extract().asString(),
-                "member");
-        assertDeleteComplete(events, "Role", roleName);
-        assertDeleteComplete(events, "LogGroup", logGroup);
-
-        logs("DeleteLogGroup", "{\"logGroupName\":\"" + outsideGroup + "\"}").then().statusCode(200);
+            List<Map<String, String>> events = XmlParser.extractGroups(
+                    cfn("DescribeStackEvents", stackId, null).then().statusCode(200).extract().asString(),
+                    "member");
+            assertDeleteComplete(events, "Role", roleName);
+            assertDeleteComplete(events, "LogGroup", logGroup);
+        } finally {
+            logs("DeleteLogGroup", "{\"logGroupName\":\"" + outsideGroup + "\"}");
+        }
     }
 
     private static void assertDeleteComplete(List<Map<String, String>> events, String logicalId,
