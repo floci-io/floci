@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.SsrfProtection;
 import io.github.hectorvent.floci.services.apigateway.AwsServiceRouter;
 import io.github.hectorvent.floci.services.apigateway.VtlTemplateEngine;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Integration;
+import io.github.hectorvent.floci.services.apigatewayv2.proxy.PinnedHttpClient;
 import io.github.hectorvent.floci.services.lambda.LambdaArnUtils;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
@@ -15,13 +16,18 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.IOException;
 import java.net.InetAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -40,21 +46,41 @@ public class WebSocketIntegrationInvoker {
      */
     private static final Pattern STAGE_VAR_PATTERN =
             Pattern.compile("\\$\\{stageVariables\\.([^}]+)}");
+    private static final String APPLICATION_JSON = "application/json";
+    private static final String CONTENT_TYPE_HEADER = "Content-Type";
+    private static final String HTTP_SCHEME = "http";
+    private static final Duration BACKEND_TIMEOUT = Duration.ofSeconds(10);
 
     private final LambdaService lambdaService;
     private final AwsServiceRouter serviceRouter;
     private final ObjectMapper objectMapper;
     private final VtlTemplateEngine vtlEngine;
     private final HttpClient httpClient;
+    private final AddressResolver addressResolver;
 
     @Inject
     public WebSocketIntegrationInvoker(LambdaService lambdaService, AwsServiceRouter serviceRouter,
                                        ObjectMapper objectMapper, VtlTemplateEngine vtlEngine) {
+        this(lambdaService, serviceRouter, objectMapper, vtlEngine, InetAddress::getAllByName);
+    }
+
+    WebSocketIntegrationInvoker(LambdaService lambdaService, AwsServiceRouter serviceRouter,
+                                ObjectMapper objectMapper, VtlTemplateEngine vtlEngine,
+                                AddressResolver addressResolver) {
         this.lambdaService = lambdaService;
         this.serviceRouter = serviceRouter;
         this.objectMapper = objectMapper;
         this.vtlEngine = vtlEngine;
         this.httpClient = HttpClient.newHttpClient();
+        this.addressResolver = addressResolver;
+    }
+
+    @FunctionalInterface
+    interface AddressResolver {
+        InetAddress[] resolve(String host) throws IOException;
+    }
+
+    private record HttpBackendResponse(int statusCode, String body) {
     }
 
     @PreDestroy
@@ -155,11 +181,11 @@ public class WebSocketIntegrationInvoker {
                 }
                 // Extract response headers (used by $connect to propagate to upgrade response)
                 if (responseNode.has("headers") && responseNode.get("headers").isObject()) {
-                    responseHeaders = new java.util.HashMap<>();
-                    var headersNode = responseNode.get("headers");
-                    var fields = headersNode.fields();
+                    responseHeaders = new HashMap<>();
+                    JsonNode headersNode = responseNode.get("headers");
+                    Iterator<Map.Entry<String, JsonNode>> fields = headersNode.fields();
                     while (fields.hasNext()) {
-                        var field = fields.next();
+                        Map.Entry<String, JsonNode> field = fields.next();
                         responseHeaders.put(field.getKey(), field.getValue().asText());
                     }
                 }
@@ -244,15 +270,7 @@ public class WebSocketIntegrationInvoker {
 
         try {
             URI target = URI.create(uri);
-            SsrfProtection.rejectMetadataAddresses(InetAddress.getAllByName(target.getHost()), target.getHost());
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(target)
-                    .header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(eventJson, StandardCharsets.UTF_8))
-                    .build();
-
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-
+            HttpBackendResponse response = postToHttpEndpoint(target, eventJson);
             return new IntegrationResult(response.statusCode(), response.body(), null);
         } catch (Exception e) {
             LOG.warnv("HTTP_PROXY integration call failed: {0}", e.getMessage());
@@ -294,15 +312,7 @@ public class WebSocketIntegrationInvoker {
 
         try {
             URI target = URI.create(uri);
-            SsrfProtection.rejectMetadataAddresses(InetAddress.getAllByName(target.getHost()), target.getHost());
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(target)
-                    .header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(transformedPayload, StandardCharsets.UTF_8))
-                    .build();
-
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-
+            HttpBackendResponse response = postToHttpEndpoint(target, transformedPayload);
             int statusCode = response.statusCode();
             String body = response.body();
 
@@ -317,6 +327,44 @@ public class WebSocketIntegrationInvoker {
             LOG.warnv("HTTP integration call failed: {0}", e.getMessage());
             return new IntegrationResult(500, null, "HTTP integration error: " + e.getMessage());
         }
+    }
+
+    private HttpBackendResponse postToHttpEndpoint(URI target, String payload)
+            throws IOException, InterruptedException {
+        if (HTTP_SCHEME.equalsIgnoreCase(target.getScheme())) {
+            return postToPinnedHttpEndpoint(target, payload);
+        }
+
+        resolveNonMetadataTarget(target.getHost());
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(target)
+                .header(CONTENT_TYPE_HEADER, APPLICATION_JSON)
+                .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8))
+                .build();
+        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+        return new HttpBackendResponse(response.statusCode(), response.body());
+    }
+
+    private InetAddress[] resolveNonMetadataTarget(String host) throws IOException {
+        if (host == null || host.isBlank()) {
+            throw new IOException("integration URI has no host");
+        }
+        return SsrfProtection.rejectMetadataAddresses(addressResolver.resolve(host), host);
+    }
+
+    /**
+     * Sends the payload to the address the host resolved to, instead of letting a client resolve
+     * the name a second time. The shared {@link PinnedHttpClient} owns the request writing and the
+     * bounded response parsing, so HTTP_PROXY and the WebSocket integrations keep the same limits.
+     */
+    private HttpBackendResponse postToPinnedHttpEndpoint(URI target, String payload) throws IOException {
+        InetAddress[] targets = resolveNonMetadataTarget(target.getHost());
+        PinnedHttpClient.Response response = PinnedHttpClient.send(
+                targets[0], target, "POST", null,
+                Map.of(CONTENT_TYPE_HEADER, List.of(APPLICATION_JSON)),
+                payload.getBytes(StandardCharsets.UTF_8), BACKEND_TIMEOUT);
+        return new HttpBackendResponse(
+                response.statusCode(), new String(response.body(), StandardCharsets.UTF_8));
     }
 
     /**

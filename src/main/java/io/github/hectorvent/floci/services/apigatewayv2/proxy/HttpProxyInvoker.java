@@ -9,13 +9,9 @@ import javax.net.ssl.SSLParameters;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.OutputStream;
 import java.net.InetAddress;
-import java.net.InetSocketAddress;
-import java.net.Socket;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.UnknownHostException;
@@ -55,9 +51,6 @@ import java.util.StringJoiner;
  */
 public class HttpProxyInvoker {
     private static final Logger LOG = Logger.getLogger(HttpProxyInvoker.class);
-
-    /** API Gateway's integration payload quota: 10 MB, not adjustable. */
-    private static final int MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
 
     /** RFC 7230 hop-by-hop headers that must not be forwarded across proxies. */
     private static final Set<String> HOP_BY_HOP = Set.of(
@@ -332,7 +325,7 @@ public class HttpProxyInvoker {
         if (finalUrl.startsWith("http://") && (hasHeader(builder, "Host") || isNamedHost(finalUrl))) {
             try {
                 return invokeHttpPinned(finalUrl, method, builder, options.timeout());
-            } catch (ResponseTooLargeException ignored) {
+            } catch (PinnedHttpClient.ResponseTooLargeException ignored) {
                 return tooLargeResult();
             } catch (Exception e) {
                 LOG.warnv("HTTP_PROXY backend call failed: {0}", e.getMessage());
@@ -374,7 +367,7 @@ public class HttpProxyInvoker {
                     clientFor(options).send(hrb.build(), HttpResponse.BodyHandlers.ofInputStream());
             byte[] body;
             try (InputStream in = resp.body()) {
-                body = readBounded(in);
+                body = PinnedHttpClient.readBounded(in);
             }
             Map<String, List<String>> respHeaders = new LinkedHashMap<>();
             for (Map.Entry<String, List<String>> e : resp.headers().map().entrySet()) {
@@ -382,7 +375,7 @@ public class HttpProxyInvoker {
                 respHeaders.put(e.getKey(), List.copyOf(e.getValue()));
             }
             return new ProxyResult(resp.statusCode(), respHeaders, body);
-        } catch (ResponseTooLargeException ignored) {
+        } catch (PinnedHttpClient.ResponseTooLargeException ignored) {
             return tooLargeResult();
         } catch (Exception e) {
             LOG.warnv("HTTP_PROXY backend call failed: {0}", e.getMessage());
@@ -419,184 +412,25 @@ public class HttpProxyInvoker {
                                          ProxyRequestBuilder builder, Duration timeout)
             throws IOException {
         URI uri = URI.create(finalUrl);
-        int port = uri.getPort() == -1 ? 80 : uri.getPort();
-        String path = uri.getRawPath();
-        if (path == null || path.isBlank()) {
-            path = "/";
-        }
-        if (uri.getRawQuery() != null) {
-            path += "?" + uri.getRawQuery();
-        }
-
         InetAddress[] targets = resolveNonMetadataTarget(uri.getHost());
-        String hostHeader = firstHeader(builder, "Host");
-        if (hostHeader == null) {
-            hostHeader = uri.getRawAuthority();
-        }
-        try (Socket socket = new Socket()) {
-            socket.connect(new InetSocketAddress(targets[0], port), 10_000);
-            socket.setSoTimeout((int) Math.min(timeout.toMillis(), Integer.MAX_VALUE));
 
-            OutputStream out = socket.getOutputStream();
-            byte[] body = builder.body() == null ? new byte[0] : builder.body();
-            StringBuilder request = new StringBuilder()
-                    .append(method.toUpperCase(Locale.ROOT)).append(' ').append(path).append(" HTTP/1.1\r\n")
-                    .append("Host: ").append(hostHeader).append("\r\n")
-                    .append("Connection: close\r\n");
-            for (Map.Entry<String, List<String>> header : builder.headers().entrySet()) {
-                String name = header.getKey();
-                String lower = name.toLowerCase(Locale.ROOT);
-                if (RESTRICTED.contains(lower) || lower.equals("connection")) {
-                    continue;
-                }
-                for (String value : header.getValue()) {
-                    request.append(name).append(": ").append(value).append("\r\n");
-                }
+        Map<String, List<String>> requestHeaders = new LinkedHashMap<>();
+        for (Map.Entry<String, List<String>> header : builder.headers().entrySet()) {
+            if (!RESTRICTED.contains(header.getKey().toLowerCase(Locale.ROOT))) {
+                requestHeaders.put(header.getKey(), header.getValue());
             }
-            if (body.length > 0) {
-                request.append("Content-Length: ").append(body.length).append("\r\n");
-            }
-            request.append("\r\n");
-            out.write(request.toString().getBytes(StandardCharsets.ISO_8859_1));
-            out.write(body);
-            out.flush();
-
-            return readRawHttpResponse(socket.getInputStream(), method);
-        }
-    }
-
-    private static ProxyResult readRawHttpResponse(InputStream input, String method) throws IOException {
-        ByteArrayOutputStream headerBytes = new ByteArrayOutputStream();
-        int previous3 = -1;
-        int previous2 = -1;
-        int previous1 = -1;
-        int current;
-        while ((current = input.read()) != -1) {
-            headerBytes.write(current);
-            if (previous3 == '\r' && previous2 == '\n' && previous1 == '\r' && current == '\n') {
-                break;
-            }
-            previous3 = previous2;
-            previous2 = previous1;
-            previous1 = current;
         }
 
-        String headersText = headerBytes.toString(StandardCharsets.ISO_8859_1);
-        String[] lines = headersText.split("\r\n");
-        if (lines.length == 0 || !lines[0].startsWith("HTTP/")) {
-            throw new IOException("invalid HTTP response");
-        }
-        String[] status = lines[0].split(" ", 3);
-        int statusCode = Integer.parseInt(status[1]);
-        Map<String, List<String>> headers = new LinkedHashMap<>();
-        String transferEncoding = null;
-        long contentLength = -1;
-        for (int i = 1; i < lines.length; i++) {
-            int separator = lines[i].indexOf(':');
-            if (separator <= 0) {
-                continue;
-            }
-            String name = lines[i].substring(0, separator);
-            String value = lines[i].substring(separator + 1).trim();
-            if (name.equalsIgnoreCase("Transfer-Encoding")) {
-                transferEncoding = value;
-            }
-            if (name.equalsIgnoreCase("Content-Length")) {
-                contentLength = Long.parseLong(value);
-            }
-            if (!HOP_BY_HOP.contains(name.toLowerCase(Locale.ROOT))) {
-                // Repeated header lines (Set-Cookie) accumulate rather than overwrite.
-                headers.computeIfAbsent(name, k -> new java.util.ArrayList<>()).add(value);
-            }
-        }
-        boolean bodyless = "HEAD".equalsIgnoreCase(method) || statusCode == 204 || statusCode == 304
-                || (statusCode >= 100 && statusCode < 200);
-        byte[] body = bodyless
-                ? new byte[0]
-                : transferEncoding != null && transferEncoding.toLowerCase(Locale.ROOT).contains("chunked")
-                ? readChunkedBody(input)
-                : contentLength >= 0 ? readContentLength(input, contentLength) : readBounded(input);
-        return new ProxyResult(statusCode, headers, body);
-    }
+        PinnedHttpClient.Response response = PinnedHttpClient.send(
+                targets[0], uri, method, firstHeader(builder, "Host"),
+                requestHeaders, builder.body(), timeout);
 
-    private static byte[] readChunkedBody(InputStream input) throws IOException {
-        ByteArrayOutputStream body = new ByteArrayOutputStream();
-        while (true) {
-            String sizeLine = readAsciiLine(input);
-            if (sizeLine == null) {
-                throw new IOException("unexpected end of chunked response");
-            }
-            int extension = sizeLine.indexOf(';');
-            int size = Integer.parseInt((extension >= 0 ? sizeLine.substring(0, extension) : sizeLine).trim(), 16);
-            if (size == 0) {
-                while (true) {
-                    String trailer = readAsciiLine(input);
-                    if (trailer == null || trailer.isEmpty()) {
-                        return body.toByteArray();
-                    }
-                }
-            }
-            if (size < 0 || size > MAX_RESPONSE_BYTES - body.size()) {
-                throw new ResponseTooLargeException();
-            }
-            body.write(input.readNBytes(size));
-            expectCrlf(input);
+        Map<String, List<String>> respHeaders = new LinkedHashMap<>();
+        for (Map.Entry<String, List<String>> header : response.headers().entrySet()) {
+            if (HOP_BY_HOP.contains(header.getKey().toLowerCase(Locale.ROOT))) continue;
+            respHeaders.put(header.getKey(), List.copyOf(header.getValue()));
         }
-    }
-
-    private static byte[] readContentLength(InputStream input, long contentLength) throws IOException {
-        if (contentLength > MAX_RESPONSE_BYTES) {
-            throw new ResponseTooLargeException();
-        }
-        return input.readNBytes((int) contentLength);
-    }
-
-    /** Reads to end of stream, failing once more than the payload quota has arrived. */
-    private static byte[] readBounded(InputStream input) throws IOException {
-        byte[] body = input.readNBytes(MAX_RESPONSE_BYTES + 1);
-        if (body.length > MAX_RESPONSE_BYTES) {
-            throw new ResponseTooLargeException();
-        }
-        return body;
-    }
-
-    private static final class ResponseTooLargeException extends IOException {
-        ResponseTooLargeException() {
-            super("integration response exceeds " + MAX_RESPONSE_BYTES + " bytes");
-        }
-    }
-
-    private static String readAsciiLine(InputStream input) throws IOException {
-        ByteArrayOutputStream line = new ByteArrayOutputStream();
-        while (true) {
-            int b = input.read();
-            if (b == -1) {
-                return line.size() == 0 ? null : line.toString(StandardCharsets.ISO_8859_1);
-            }
-            if (b == '\n') {
-                return line.toString(StandardCharsets.ISO_8859_1);
-            }
-            if (b == '\r') {
-                int next = input.read();
-                if (next == '\n') {
-                    return line.toString(StandardCharsets.ISO_8859_1);
-                }
-                line.write(b);
-                if (next != -1) {
-                    line.write(next);
-                }
-                continue;
-            }
-            line.write(b);
-        }
-    }
-
-    private static void expectCrlf(InputStream input) throws IOException {
-        int cr = input.read();
-        int lf = input.read();
-        if (cr != '\r' || lf != '\n') {
-            throw new IOException("invalid chunked response");
-        }
+        return new ProxyResult(response.statusCode(), respHeaders, response.body());
     }
 
     private static String buildFinalUrl(ProxyRequestBuilder builder) {
@@ -615,7 +449,8 @@ public class HttpProxyInvoker {
     }
 
     private static ProxyResult tooLargeResult() {
-        LOG.warnv("HTTP_PROXY backend response exceeds the {0}-byte payload quota", MAX_RESPONSE_BYTES);
+        LOG.warnv("HTTP_PROXY backend response exceeds the {0}-byte payload quota",
+                PinnedHttpClient.MAX_RESPONSE_BYTES);
         return ProxyResult.withSingleValueHeaders(413,
                 Map.of("Content-Type", "application/json"),
                 "{\"message\":\"Request Entity Too Large\"}".getBytes(StandardCharsets.UTF_8));
