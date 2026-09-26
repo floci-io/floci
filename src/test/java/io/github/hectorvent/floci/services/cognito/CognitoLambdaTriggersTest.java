@@ -18,6 +18,7 @@ import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.ses.SesService;
 import io.github.hectorvent.floci.services.sns.SnsService;
+import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -29,7 +30,6 @@ import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.time.Instant;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
@@ -881,7 +881,7 @@ class CognitoLambdaTriggersTest {
         verify(lambdaService).invoke(anyString(), eq("arn:aws:lambda:::verify"), any(byte[].class), any());
     }
 
-    private CognitoService serviceWithClock(CognitoServiceTest.MutableClock clock) {
+    private CognitoService serviceWithClock(MutableClock clock) {
         return new CognitoService(
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(),
@@ -908,8 +908,7 @@ class CognitoLambdaTriggersTest {
     @Test
     @SuppressWarnings("unchecked")
     void customAuthSessionValidityStartsWhenTheSessionIsIssued() {
-        CognitoServiceTest.MutableClock clock =
-                new CognitoServiceTest.MutableClock(Instant.parse("2026-01-01T00:00:00Z"));
+        MutableClock clock = new MutableClock();
         CognitoService clockedService = serviceWithClock(clock);
         UserPoolClient client = customAuthClient(clockedService);
 
@@ -937,8 +936,7 @@ class CognitoLambdaTriggersTest {
 
     @Test
     void customAuthSessionExpiresThreeMinutesAfterItIsIssued() {
-        CognitoServiceTest.MutableClock clock =
-                new CognitoServiceTest.MutableClock(Instant.parse("2026-01-01T00:00:00Z"));
+        MutableClock clock = new MutableClock();
         CognitoService clockedService = serviceWithClock(clock);
         UserPoolClient client = customAuthClient(clockedService);
 

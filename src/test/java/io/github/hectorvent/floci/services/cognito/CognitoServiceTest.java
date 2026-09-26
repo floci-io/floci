@@ -24,6 +24,7 @@ import io.github.hectorvent.floci.services.cognito.verification.CognitoMessageDi
 import io.github.hectorvent.floci.services.cognito.verification.VerificationCode;
 import io.github.hectorvent.floci.services.cognito.verification.VerificationCodeException;
 import io.github.hectorvent.floci.services.cognito.verification.VerificationCodeService;
+import io.github.hectorvent.floci.testing.MutableClock;
 import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
@@ -34,9 +35,6 @@ import org.junit.jupiter.params.provider.CsvSource;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
-import java.time.Instant;
-import java.time.ZoneId;
-import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
@@ -2385,34 +2383,6 @@ class CognitoServiceTest {
     // Auth challenge session expiry
     // =========================================================================
 
-    /** Local, controllable {@link Clock} mirroring VerificationCodeServiceTest's MutableClock. */
-    static final class MutableClock extends Clock {
-        private Instant now;
-
-        MutableClock(Instant start) {
-            this.now = start;
-        }
-
-        void advance(Duration duration) {
-            now = now.plus(duration);
-        }
-
-        @Override
-        public ZoneId getZone() {
-            return ZoneOffset.UTC;
-        }
-
-        @Override
-        public Clock withZone(ZoneId zone) {
-            return this;
-        }
-
-        @Override
-        public Instant instant() {
-            return now;
-        }
-    }
-
     private CognitoService serviceWithClock(Clock clock) {
         return new CognitoService(
                 new InMemoryStorage<>(),
@@ -2437,7 +2407,7 @@ class CognitoServiceTest {
 
     @Test
     void respondToAuthChallengeAfterSrpSessionExpiryRejects() {
-        MutableClock clock = new MutableClock(Instant.parse("2026-01-01T00:00:00Z"));
+        MutableClock clock = new MutableClock();
         CognitoService clockedService = serviceWithClock(clock);
         String password = "Password123!";
         UserPool pool = clockedService.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
@@ -2465,7 +2435,7 @@ class CognitoServiceTest {
 
     @Test
     void respondToAuthChallengeBeforeSrpSessionExpiryStillWorks() {
-        MutableClock clock = new MutableClock(Instant.parse("2026-01-01T00:00:00Z"));
+        MutableClock clock = new MutableClock();
         CognitoService clockedService = serviceWithClock(clock);
         String password = "Password123!";
         UserPool pool = clockedService.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
@@ -2494,7 +2464,7 @@ class CognitoServiceTest {
 
     @Test
     void respondToAuthChallengeAfterUserAuthPasswordSessionExpiryRejects() {
-        MutableClock clock = new MutableClock(Instant.parse("2026-01-01T00:00:00Z"));
+        MutableClock clock = new MutableClock();
         CognitoService clockedService = serviceWithClock(clock);
         UserPool pool = clockedService.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
         clockedService.adminCreateUser(pool.getId(), "alice", Map.of("email", "alice@example.com"), "TempPass1!");
