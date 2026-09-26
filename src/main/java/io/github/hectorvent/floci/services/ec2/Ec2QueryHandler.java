@@ -32,8 +32,8 @@ public class Ec2QueryHandler {
 
     /** ReplaceRoute targets AWS accepts that a stored {@code Route} cannot represent here. */
     private static final List<String> UNSUPPORTED_ROUTE_TARGETS = List.of(
-            "CarrierGatewayId", "CoreNetworkArn", "EgressOnlyInternetGatewayId", "InstanceId",
-            "LocalGatewayId", "NetworkInterfaceId", "OdbNetworkArn",
+            "CarrierGatewayId", "CoreNetworkArn", "EgressOnlyInternetGatewayId",
+            "LocalGatewayId", "OdbNetworkArn",
             "TransitGatewayId", "VpcEndpointId");
 
     /** The gateway id a route table's built-in route carries (see Ec2Service#createRouteTable). */
@@ -3639,7 +3639,11 @@ public class Ec2QueryHandler {
         // egress route is not silently rewritten into a targetless one.
         String eigwId = p.getFirst("EgressOnlyInternetGatewayId");
         String pcxId = p.getFirst("VpcPeeringConnectionId");
-        service.createRoute(region, rtId, dest, destIpv6, destPrefixList, gwId, natGwId, eigwId, pcxId);
+        String instanceId = p.getFirst("InstanceId");
+        String instanceOwnerId = p.getFirst("InstanceOwnerId");
+        String networkInterfaceId = p.getFirst("NetworkInterfaceId");
+        service.createRoute(region, rtId, dest, destIpv6, destPrefixList, gwId, natGwId, eigwId, pcxId,
+                instanceId, instanceOwnerId, networkInterfaceId);
         return booleanResponse("CreateRoute");
     }
 
@@ -3660,16 +3664,20 @@ public class Ec2QueryHandler {
         String gwId = p.getFirst("GatewayId");
         String natGwId = p.getFirst("NatGatewayId");
         String pcxId = p.getFirst("VpcPeeringConnectionId");
+        String instanceId = p.getFirst("InstanceId");
+        String instanceOwnerId = p.getFirst("InstanceOwnerId");
+        String networkInterfaceId = p.getFirst("NetworkInterfaceId");
         // Resetting a route to the local target is expressible: `local` is the gateway id the
         // route table's built-in route already carries, so it needs no new field on Route.
         if (Boolean.parseBoolean(p.getFirst("LocalTarget"))) {
-            if (gwId != null || natGwId != null || pcxId != null) {
+            if (gwId != null || natGwId != null || pcxId != null || instanceId != null || networkInterfaceId != null) {
                 throw new AwsException("InvalidParameterCombination",
                         "ReplaceRoute takes exactly one target.", 400);
             }
             gwId = LOCAL_GATEWAY_ID;
         }
         service.replaceRoute(region, rtId, dest, destIpv6, destPrefixList, gwId, natGwId, pcxId,
+                instanceId, instanceOwnerId, networkInterfaceId,
                 Boolean.parseBoolean(p.getFirst("DryRun")));
         return booleanResponse("ReplaceRoute");
     }
@@ -4728,7 +4736,10 @@ public class Ec2QueryHandler {
                     .elem("destinationIpv6CidrBlock", r.getDestinationIpv6CidrBlock())
                     .elem("destinationPrefixListId", r.getDestinationPrefixListId())
                     .elem("gatewayId", r.getGatewayId())
+                    .elem("instanceId", r.getInstanceId())
+                    .elem("instanceOwnerId", r.getInstanceOwnerId())
                     .elem("natGatewayId", r.getNatGatewayId())
+                    .elem("networkInterfaceId", r.getNetworkInterfaceId())
                     .elem("egressOnlyInternetGatewayId", r.getEgressOnlyInternetGatewayId())
                     .elem("vpcPeeringConnectionId", r.getVpcPeeringConnectionId())
                     .elem("state", r.getState())
