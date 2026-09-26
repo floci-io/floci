@@ -30,7 +30,7 @@ class SesTemplatePagingTest {
     private static List<String> names;
 
     @BeforeAll
-    static void setup() throws InterruptedException {
+    static void setup() {
         sesV1 = TestFixtures.sesClient();
         sesV2 = TestFixtures.sesV2Client();
         String prefix = "sdk-page-" + TestFixtures.uniqueName() + "-";
@@ -40,7 +40,6 @@ class SesTemplatePagingTest {
                     .templateName(name)
                     .templateContent(EmailTemplateContent.builder().subject("s").text("t").build())
                     .build());
-            Thread.sleep(5);
         }
     }
 
@@ -63,8 +62,8 @@ class SesTemplatePagingTest {
     }
 
     @Test
-    @DisplayName("V2 paginator walks one-item pages newest first")
-    void v2PaginatorWalksNewestFirst() {
+    @DisplayName("V2 paginator walks one-item pages over every template once")
+    void v2PaginatorWalksEveryTemplateOnce() {
         List<String> listed = new ArrayList<>();
         for (ListEmailTemplatesResponse page : sesV2.listEmailTemplatesPaginator(
                 ListEmailTemplatesRequest.builder().pageSize(1).build())) {
@@ -72,13 +71,13 @@ class SesTemplatePagingTest {
             page.templatesMetadata().forEach(meta -> listed.add(meta.templateName()));
         }
 
-        assertThat(listed.stream().filter(names::contains))
-                .containsExactly(names.get(2), names.get(1), names.get(0));
+        assertThat(listed).doesNotHaveDuplicates();
+        assertThat(listed.stream().filter(names::contains)).containsExactlyInAnyOrderElementsOf(names);
     }
 
     @Test
-    @DisplayName("V1 MaxItems pages newest first and ends without a token")
-    void v1PagesNewestFirst() {
+    @DisplayName("V1 MaxItems pages over every template once and ends without a token")
+    void v1PagesOverEveryTemplateOnce() {
         List<String> listed = new ArrayList<>();
         String token = null;
         do {
@@ -89,8 +88,8 @@ class SesTemplatePagingTest {
             token = page.nextToken();
         } while (token != null);
 
-        assertThat(listed.stream().filter(names::contains))
-                .containsExactly(names.get(2), names.get(1), names.get(0));
+        assertThat(listed).doesNotHaveDuplicates();
+        assertThat(listed.stream().filter(names::contains)).containsExactlyInAnyOrderElementsOf(names);
     }
 
     @Test

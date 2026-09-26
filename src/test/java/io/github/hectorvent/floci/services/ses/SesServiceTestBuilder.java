@@ -168,7 +168,7 @@ final class SesServiceTestBuilder {
         return new SesService(
                 identityService,
                 sentEmailService,
-                new SesTemplateService(templateStore, objectMapper, new SecureRandom()),
+                new SesTemplateService(templateStore, objectMapper, new SecureRandom(), clock),
                 configSetService,
                 suppressionService,
                 new SesDedicatedIpService(dedicatedIpPoolStore),

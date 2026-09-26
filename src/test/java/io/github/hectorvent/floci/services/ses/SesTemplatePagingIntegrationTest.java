@@ -37,15 +37,15 @@ class SesTemplatePagingIntegrationTest {
 
     @Test
     @Order(1)
-    void createTemplatesOutOfNameOrder() throws InterruptedException {
+    void createTemplatesOutOfNameOrder() {
+        // The test-scope MutableClock advances on every read, so each template gets a later
+        // creation time and the order below is by time, not by the name tiebreak.
         for (String name : new String[] {"page-b", "page-c", "page-a"}) {
             given().contentType("application/json").header("Authorization", AUTH)
                     .body("""
                         {"TemplateName": "%s", "TemplateContent": {"Subject": "s", "Text": "t"}}
                         """.formatted(name))
             .when().post("/v2/email/templates").then().statusCode(200);
-            // Distinct creation times, so the order below is by time and not by the name tiebreak.
-            Thread.sleep(5);
         }
     }
 

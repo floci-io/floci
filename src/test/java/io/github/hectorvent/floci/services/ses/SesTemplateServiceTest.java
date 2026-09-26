@@ -14,6 +14,9 @@ import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.ParameterizedTest;
 
 import java.security.SecureRandom;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.stream.Stream;
 
@@ -39,7 +42,8 @@ class SesTemplateServiceTest {
 
     @BeforeEach
     void setUp() {
-        service = new SesTemplateService(new InMemoryStorage<>(), new ObjectMapper(), new SecureRandom());
+        service = new SesTemplateService(new InMemoryStorage<>(), new ObjectMapper(), new SecureRandom(),
+                Clock.systemUTC());
     }
 
     private static EmailTemplate template(String name) {
@@ -97,6 +101,20 @@ class SesTemplateServiceTest {
         service.deleteTemplate("welcome", REGION);
         assertThrows(AwsException.class, () -> service.getTemplate("welcome", REGION));
         assertThrows(AwsException.class, () -> service.deleteTemplate("welcome", REGION));
+    }
+
+    @Test
+    void create_andUpdate_stampTheInjectedClock() {
+        Instant created = Instant.parse("2026-09-27T00:00:00Z");
+        SesTemplateService fixed = new SesTemplateService(new InMemoryStorage<>(), new ObjectMapper(),
+                new SecureRandom(), Clock.fixed(created, ZoneOffset.UTC));
+
+        fixed.createTemplate(template("welcome"), REGION);
+        fixed.updateTemplate(template("welcome"), REGION);
+
+        EmailTemplate stored = fixed.getTemplate("welcome", REGION);
+        assertEquals(created, stored.getCreatedTimestamp());
+        assertEquals(created, stored.getLastUpdatedTimestamp());
     }
 
     @Test
