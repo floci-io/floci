@@ -100,6 +100,12 @@ public class EcsContainerManager {
     /** How long a container waits for a dependency that has to COMPLETE, SUCCEED or get HEALTHY. */
     private static final int DEPENDENCY_WAIT_SECONDS = 60;
     private static final long DEPENDENCY_POLL_MILLIS = 200;
+    /**
+     * The baseline credential variables that must not reach a container being given task-role
+     * credentials: the SDK would prefer them over the credential endpoint.
+     */
+    private static final List<String> BASELINE_CREDENTIAL_KEYS =
+            List.of("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN");
     /** How long a killed container gets to register as exited before its code is read. */
     private static final int KILL_SETTLE_SECONDS = 5;
     /** How long a stats sample gets before the task metadata endpoint answers without one. */
@@ -122,8 +128,11 @@ public class EcsContainerManager {
     private final S3Service s3Service;
     private final EcrRegistryManager ecrRegistryManager;
     private final HostVolumePolicy hostVolumePolicy;
-    private Ec2Service ec2Service;
-    private SecurityGroupFirewallManager firewallManager;
+    private final Ec2Service ec2Service;
+    private final SecurityGroupFirewallManager firewallManager;
+    private final EcsTaskRoleCredentials taskRoleCredentials;
+    private final EcsCredentialsProxy credentialsProxy;
+    private final EcsTaskLinkLocalAddresses linkLocalAddresses;
 
     @Inject
     public EcsContainerManager(ContainerBuilder containerBuilder,
@@ -139,11 +148,27 @@ public class EcsContainerManager {
                                EcrRegistryManager ecrRegistryManager,
                                HostVolumePolicy hostVolumePolicy,
                                Ec2Service ec2Service,
-                               SecurityGroupFirewallManager firewallManager) {
-        this(containerBuilder, lifecycleManager, logStreamer, containerDetector, config, regionResolver,
-                awsEnv, ssmService, secretsManagerService, s3Service, ecrRegistryManager, hostVolumePolicy);
+                               SecurityGroupFirewallManager firewallManager,
+                               EcsTaskRoleCredentials taskRoleCredentials,
+                               EcsCredentialsProxy credentialsProxy,
+                               EcsTaskLinkLocalAddresses linkLocalAddresses) {
+        this.containerBuilder = containerBuilder;
+        this.lifecycleManager = lifecycleManager;
+        this.logStreamer = logStreamer;
+        this.containerDetector = containerDetector;
+        this.config = config;
+        this.regionResolver = regionResolver;
+        this.awsEnv = awsEnv;
+        this.ssmService = ssmService;
+        this.secretsManagerService = secretsManagerService;
+        this.s3Service = s3Service;
+        this.hostVolumePolicy = hostVolumePolicy;
+        this.ecrRegistryManager = ecrRegistryManager;
         this.ec2Service = ec2Service;
         this.firewallManager = firewallManager;
+        this.taskRoleCredentials = taskRoleCredentials;
+        this.credentialsProxy = credentialsProxy;
+        this.linkLocalAddresses = linkLocalAddresses;
     }
 
     public EcsContainerManager(ContainerBuilder containerBuilder,
@@ -158,18 +183,13 @@ public class EcsContainerManager {
                                S3Service s3Service,
                                EcrRegistryManager ecrRegistryManager,
                                HostVolumePolicy hostVolumePolicy) {
-        this.containerBuilder = containerBuilder;
-        this.lifecycleManager = lifecycleManager;
-        this.logStreamer = logStreamer;
-        this.containerDetector = containerDetector;
-        this.config = config;
-        this.regionResolver = regionResolver;
-        this.awsEnv = awsEnv;
-        this.ssmService = ssmService;
-        this.secretsManagerService = secretsManagerService;
-        this.s3Service = s3Service;
-        this.hostVolumePolicy = hostVolumePolicy;
-        this.ecrRegistryManager = ecrRegistryManager;
+        // The dependencies a caller can leave out: EC2 and the firewall for tasks that never use
+        // an ENI or a security group, and the three credential collaborators for a Floci that
+        // does not vend task-role credentials. Every call site that needs them uses the
+        // constructor above; the code paths that touch them all check first.
+        this(containerBuilder, lifecycleManager, logStreamer, containerDetector, config, regionResolver,
+                awsEnv, ssmService, secretsManagerService, s3Service, ecrRegistryManager, hostVolumePolicy,
+                null, null, null, null, null);
     }
 
     /**
@@ -213,32 +233,45 @@ public class EcsContainerManager {
         }
 
         Map<String, ContainerOverride> overridesByName = overridesByName(containerOverrides);
+        // Both resolved before any environment is built: whether the task gets role credentials
+        // decides whether its containers may also carry Floci's baseline static credentials,
+        // which would otherwise win over the role in the SDK credential chain.
+        PreparedNetwork protectedNetwork = prepareNetwork(task, taskDef, region, taskId);
+        TaskRoleCredentialEndpoint taskRoleEndpoint = prepareTaskRoleCredentials(task, taskDef, protectedNetwork);
         Map<ContainerDefinition, List<String>> envVarsByContainer = new LinkedHashMap<>();
         // Resolved before any container is created, so a registry-startup failure can't leak one already started.
         Map<ContainerDefinition, String> imagesByContainer = new LinkedHashMap<>();
         // The task metadata id has to exist before the container does: its own environment carries
         // the URI, so it cannot be derived from the Docker id the daemon hands back afterwards.
         Map<String, String> metadataIdsByContainer = new LinkedHashMap<>();
-        for (ContainerDefinition def : launchOrder) {
-            String metadataId = UUID.randomUUID().toString().replace("-", "");
-            metadataIdsByContainer.put(def.getName(), metadataId);
-            envVarsByContainer.put(def, buildEnvVars(def, overridesByName.get(def.getName()), region,
-                    metadataId));
-            imagesByContainer.put(def, ecrRegistryManager.rewriteImageUri(def.getImage()));
-        }
-
-        PreparedNetwork protectedNetwork = prepareNetwork(task, taskDef, region, taskId);
-
         String firelensVolumeName = null;
         String firelensSocketAddress = null;
         String firelensConfig = null;
         String firelensExternalConfig = null;
-        if (firelensRouter != null) {
-            firelensConfig = firelensConfig(task, taskDef, firelensRouter, firelensLogOptions);
-            firelensExternalConfig = s3ExternalConfig(firelensRouter);
-            firelensVolumeName = ContainerStorageHelper.dockerName(config, "ecs-firelens-" + taskId);
-            lifecycleManager.ensureVolume(firelensVolumeName);
-            firelensSocketAddress = unixSocketAddress(firelensVolumeName);
+        try {
+            for (ContainerDefinition def : launchOrder) {
+                String metadataId = UUID.randomUUID().toString().replace("-", "");
+                metadataIdsByContainer.put(def.getName(), metadataId);
+                envVarsByContainer.put(def, buildEnvVars(def, overridesByName.get(def.getName()), region,
+                        metadataId, taskRoleEndpoint.vending()));
+                imagesByContainer.put(def, ecrRegistryManager.rewriteImageUri(def.getImage()));
+            }
+
+            if (firelensRouter != null) {
+                firelensConfig = firelensConfig(task, taskDef, firelensRouter, firelensLogOptions);
+                firelensExternalConfig = s3ExternalConfig(firelensRouter);
+                firelensVolumeName = ContainerStorageHelper.dockerName(config, "ecs-firelens-" + taskId);
+                lifecycleManager.ensureVolume(firelensVolumeName);
+                firelensSocketAddress = unixSocketAddress(firelensVolumeName);
+            }
+        } catch (RuntimeException e) {
+            // Anything here can throw before a single container exists: an unresolvable secret,
+            // a registry that will not start, a FireLens config that will not render. The
+            // credentials are already issued by now and the caller only marks the task STOPPED,
+            // so without this they would stay valid with nothing behind them until they expire.
+            revokeTaskRoleCredentials(task.getTaskArn());
+            releaseTaskLinkLocalAddresses(task.getTaskArn());
+            throw e;
         }
 
         String fluentHost = null;
@@ -261,6 +294,11 @@ public class EcsContainerManager {
                     env.add("FLUENT_HOST=" + fluentHost);
                     env.add("FLUENT_PORT=" + FirelensConfigGenerator.FORWARD_PORT);
                 }
+                // Every container in the task is pointed at the same relative URI, the way real
+                // ECS vends one credential path per task rather than per container.
+                if (taskRoleEndpoint.vending()) {
+                    env.add("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI=" + taskRoleEndpoint.relativeUri());
+                }
 
                 // Build container spec
                 ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(imagesByContainer.get(def))
@@ -278,6 +316,13 @@ public class EcsContainerManager {
                 if (protectedNetwork != null) {
                     specBuilder.withNetworkMode("container:" + protectedNetwork.namespace().helperId());
                     specBuilder.withLabels(Map.of("floci.security-group-workload", "true"));
+                }
+                // Its own address in the credential endpoint's range, so this container has a
+                // connected route to 169.254.170.2 at all. One per container, not per task: each
+                // has its own network namespace and so its own routing table.
+                if (taskRoleEndpoint.vending()) {
+                    specBuilder.withLinkLocalIp(
+                            linkLocalAddresses.allocate(taskRoleEndpoint.network(), task.getTaskArn()));
                 }
 
                 boolean awsFirelens = isAwsFirelens(def);
@@ -451,14 +496,23 @@ public class EcsContainerManager {
                 }
             }
         } catch (Exception e) {
+            boolean allRemoved = true;
             for (String dockerId : containerIds.values()) {
-                lifecycleManager.stopAndRemove(dockerId, null);
+                if (!stopAndConfirmRemoved(dockerId)) {
+                    allRemoved = false;
+                }
             }
             if (firelensVolumeName != null) {
                 lifecycleManager.removeVolume(firelensVolumeName);
             }
             if (protectedNetwork != null) {
                 releaseTaskNetwork(task, region);
+            }
+            revokeTaskRoleCredentials(task.getTaskArn());
+            // A container left behind by a failed removal is still on the network holding its
+            // address, exactly as on the stop path.
+            if (allRemoved) {
+                releaseTaskLinkLocalAddresses(task.getTaskArn());
             }
             throw e;
         }
@@ -1086,13 +1140,39 @@ public class EcsContainerManager {
         if (handle == null) {
             return;
         }
+        boolean allRemoved = true;
         for (String dockerId : handle.getContainerIds().values()) {
-            lifecycleManager.stopAndRemove(dockerId, null);
+            if (!stopAndConfirmRemoved(dockerId)) {
+                allRemoved = false;
+            }
         }
         cleanupProtectedNetwork(handle);
         new ArrayList<>(handle.getLogStreamsByContainerId().keySet())
                 .forEach(dockerId -> finalizeLogStream(handle, dockerId));
         removeFirelensVolume(handle);
+        revokeTaskRoleCredentials(handle.getTaskArn());
+        if (allRemoved) {
+            releaseTaskLinkLocalAddresses(handle.getTaskArn());
+        }
+    }
+
+    /**
+     * Stops and removes a container, reporting whether it is really gone.
+     *
+     * <p>{@code stopAndRemove} logs a failed removal and returns normally, which is the right
+     * default for callers that only want the container off the machine on a best-effort basis. It
+     * is not enough here: a container that survived removal still holds its link-local address,
+     * and releasing it would hand the same address to the next task. The strict variant throws on
+     * that case, which is the signal this needs.
+     */
+    private boolean stopAndConfirmRemoved(String dockerId) {
+        try {
+            lifecycleManager.stopAndRemoveStrict(dockerId, null);
+            return true;
+        } catch (RuntimeException e) {
+            LOG.warnv("Error removing ECS container {0}: {1}", dockerId, e.getMessage());
+            return false;
+        }
     }
 
     /**
@@ -1160,7 +1240,15 @@ public class EcsContainerManager {
         if (handle.allContainersRemoved()) {
             cleanupProtectedNetwork(handle);
             removeFirelensVolume(handle);
+            // Only now: a container that survived a failed removal still holds its address.
+            releaseTaskLinkLocalAddresses(handle.getTaskArn());
         }
+        // Revoked whether or not removal succeeded, unlike everything above. A task being
+        // stopped must not keep usable credentials just because Docker could not remove one of
+        // its containers: the retry that would eventually revoke them depends on the handle
+        // being retained, which only happens while a log stream is still open, so a container
+        // without one (a FireLens router, say) would strand them for the life of the process.
+        revokeTaskRoleCredentials(handle.getTaskArn());
         return exitCodes;
     }
 
@@ -1445,6 +1533,102 @@ public class EcsContainerManager {
      * it belongs to the task, not to its containers, and {@link #releaseTaskNetwork} frees it when
      * the task reaches STOPPED.
      */
+    /**
+     * Issues the task's role credentials and makes sure the endpoint that serves them is up,
+     * before any of its containers start.
+     *
+     * <p>Empty when the task asks for no role, when the feature is off, when the role cannot be
+     * resolved, or when the task is security-group protected: those containers join an isolated
+     * helper namespace rather than the shared network the proxy holds its address on, so a proxy
+     * there would not be reachable and this refuses rather than handing out an endpoint the task
+     * cannot use. A proxy that cannot be established at all throws, since credentials whose
+     * endpoint is unreachable would fail later and further from the cause.
+     */
+    private TaskRoleCredentialEndpoint prepareTaskRoleCredentials(EcsTask task, TaskDefinition taskDef,
+                                                                  PreparedNetwork protectedNetwork) {
+        String taskRoleArn = taskDef.getTaskRoleArn();
+        if (taskRoleArn == null || taskRoleArn.isBlank()) {
+            return TaskRoleCredentialEndpoint.none();
+        }
+        if (taskRoleCredentials == null || credentialsProxy == null
+                || !config.services().ecs().taskRoleCredentials().enabled()) {
+            LOG.debugv("Task {0} asks for role {1}, but ECS task-role credentials are disabled",
+                    task.getTaskArn(), taskRoleArn);
+            return TaskRoleCredentialEndpoint.none();
+        }
+        if (protectedNetwork != null) {
+            LOG.warnv("Task {0} asks for role {1}, but its containers run in a security-group protected "
+                    + "namespace, which the task-role credential endpoint does not reach yet",
+                    task.getTaskArn(), taskRoleArn);
+            return TaskRoleCredentialEndpoint.none();
+        }
+        Optional<String> network = containerBuilder.resolveDockerNetwork(config.services().ecs().dockerNetwork());
+        if (network.isEmpty()) {
+            LOG.warnv("Task {0} asks for role {1}, but no Docker network is configured for ECS tasks, so "
+                    + "the credential endpoint has nowhere to listen", task.getTaskArn(), taskRoleArn);
+            return TaskRoleCredentialEndpoint.none();
+        }
+        Optional<String> relativeUri = taskRoleCredentials.issue(
+                task.getTaskArn(), taskRoleArn, regionResolver.getAccountId(), Instant.now());
+        if (relativeUri.isEmpty()) {
+            LOG.warnv("Task {0} asks for role {1}, which could not be resolved; its containers start "
+                    + "without AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", task.getTaskArn(), taskRoleArn);
+            return TaskRoleCredentialEndpoint.none();
+        }
+        try {
+            credentialsProxy.ensureProxyOn(network.get());
+        } catch (RuntimeException e) {
+            // The session is already registered at this point but the task will never start, and
+            // the launch-failure cleanup below only covers what happens after this method
+            // returns. Without this the credentials would stay valid with no task behind them.
+            revokeTaskRoleCredentials(task.getTaskArn());
+            releaseTaskLinkLocalAddresses(task.getTaskArn());
+            throw e;
+        }
+        return new TaskRoleCredentialEndpoint(relativeUri.get(), network.get());
+    }
+
+    /**
+     * Invalidates a task's credentials. Safe whenever the task is going away, and deliberately
+     * not conditional on cleanup having succeeded: a stopping task keeping usable credentials is
+     * worse than one whose containers are slow to disappear.
+     */
+    private void revokeTaskRoleCredentials(String taskArn) {
+        if (taskRoleCredentials != null) {
+            taskRoleCredentials.revoke(taskArn);
+        }
+    }
+
+    /**
+     * Returns a task's addresses to the pool. Unlike the credentials above, this is only safe
+     * once its containers are actually gone: a container that outlived a failed removal still
+     * holds its address on the network, and handing the same one to the next task would make
+     * which container answers depend on ARP. An address left reserved is the cheaper mistake,
+     * the range is a /16 and a restart clears it.
+     */
+    private void releaseTaskLinkLocalAddresses(String taskArn) {
+        if (linkLocalAddresses != null) {
+            linkLocalAddresses.releaseAll(taskArn);
+        }
+    }
+
+    /**
+     * What a task's containers need to reach the credential endpoint: the relative URI to publish
+     * to them, and the network to give each of them an address on. Both are set or neither is,
+     * which {@link #vending()} answers. Absence is a null rather than an {@code Optional} field,
+     * which this codebase does not use.
+     */
+    private record TaskRoleCredentialEndpoint(String relativeUri, String network) {
+        static TaskRoleCredentialEndpoint none() {
+            return new TaskRoleCredentialEndpoint(null, null);
+        }
+
+        /** Whether this task gets credentials at all: both fields are set, or neither is. */
+        boolean vending() {
+            return relativeUri != null;
+        }
+    }
+
     private void cleanupProtectedNetwork(EcsTaskHandle handle) {
         if (firewallManager != null && handle.getNetworkInterfaceId() != null) {
             firewallManager.unregister(handle.getNetworkInterfaceId());
@@ -1480,7 +1664,7 @@ public class EcsContainerManager {
     }
 
     private List<String> buildEnvVars(ContainerDefinition def, ContainerOverride override, String region,
-                                      String metadataId) {
+                                      String metadataId, boolean vendingTaskRoleCredentials) {
         // AWS SDK baseline (endpoint + region + credentials) first so the task can reach the
         // emulator, then the task-def environment, then task-def secrets, then the override
         // environment. Later entries win on key conflict, so an explicit task-def value or
@@ -1491,6 +1675,15 @@ public class EcsContainerManager {
             if (eq > 0) {
                 envMap.put(kv.substring(0, eq), kv.substring(eq + 1));
             }
+        }
+        if (vendingTaskRoleCredentials) {
+            // The SDK credential chain reads the environment before the container-credentials
+            // endpoint (botocore resolves env_provider ahead of container_provider), so leaving
+            // the baseline keys in place would silently shadow the task role with Floci's own
+            // credentials and the role would never be used. Real ECS does not put these in a
+            // task container either. Removed before the task's own environment is applied, so a
+            // task that deliberately sets its own credentials still keeps them.
+            BASELINE_CREDENTIAL_KEYS.forEach(envMap::remove);
         }
         // The task metadata endpoint, which an application, the ECS SDK integrations and the
         // aws-for-fluent-bit init process all read from this variable.

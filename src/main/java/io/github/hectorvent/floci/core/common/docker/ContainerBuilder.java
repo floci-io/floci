@@ -67,6 +67,26 @@ public class ContainerBuilder {
         return new Builder(resolveImage(image), config, dockerHostResolver, embeddedDnsServer, currentContainerNetworkResolver);
     }
 
+    /**
+     * The Docker network a spec built with {@link Builder#withDockerNetwork} would land on: the
+     * service's own setting, else the global default, else the network Floci itself is attached
+     * to. Exposed because a caller occasionally needs that name before it has a spec to read it
+     * from, for instance to allocate an address on the network the container is about to join.
+     */
+    public Optional<String> resolveDockerNetwork(Optional<String> serviceNetwork) {
+        return resolveDockerNetwork(serviceNetwork, config, currentContainerNetworkResolver);
+    }
+
+    private static Optional<String> resolveDockerNetwork(Optional<String> serviceNetwork, EmulatorConfig config,
+                                                         CurrentContainerNetworkResolver currentContainerNetworkResolver) {
+        return serviceNetwork
+                .or(() -> config.services().dockerNetwork())
+                .filter(n -> !n.isBlank())
+                .or(() -> currentContainerNetworkResolver != null
+                        ? currentContainerNetworkResolver.resolveNetworkName()
+                        : Optional.empty());
+    }
+
     public String resolveImage(String image) {
         return resolveImage(image, configuredImageRegistryBase(config));
     }
@@ -336,13 +356,8 @@ public class ContainerBuilder {
          * This is the standard pattern for Floci container services.
          */
         public Builder withDockerNetwork(Optional<String> serviceNetwork) {
-            Optional<String> configuredNetwork = serviceNetwork
-                    .or(() -> config.services().dockerNetwork())
-                    .filter(n -> !n.isBlank())
-                    .or(() -> currentContainerNetworkResolver != null
-                            ? currentContainerNetworkResolver.resolveNetworkName()
-                            : Optional.empty());
-            configuredNetwork.ifPresent(n -> this.networkMode = n);
+            ContainerBuilder.resolveDockerNetwork(serviceNetwork, config, currentContainerNetworkResolver)
+                    .ifPresent(n -> this.networkMode = n);
             return this;
         }
 
