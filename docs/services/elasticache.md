@@ -16,9 +16,9 @@ Floci manages real Valkey/Redis Docker containers and proxies TCP connections to
 | `DescribeReplicationGroups` | List clusters and their connection info |
 | `ModifyReplicationGroup` | Modify `SnapshotRetentionLimit` and `SnapshotWindow`, and the associated user groups |
 | `DeleteReplicationGroup` | Stop and remove a cluster |
-| `CreateUser` | Create an ElastiCache IAM user |
+| `CreateUser` | Create a user with password, no-password-required or IAM authentication, set through `AuthenticationMode` or the top-level `Passwords` and `NoPasswordRequired` |
 | `DescribeUsers` | List ElastiCache users |
-| `ModifyUser` | Update user access strings |
+| `ModifyUser` | Change a user's passwords and authentication mode, replace its access string with `AccessString` or add to it with `AppendAccessString` |
 | `DeleteUser` | Remove an ElastiCache user |
 | `CreateCacheCluster` | Start a Memcached cluster, or a single-node Redis/Valkey one (`NumCacheNodes` must be 1) |
 | `DescribeCacheClusters` | List cache clusters: Memcached, single-node Redis/Valkey, and replication group members |

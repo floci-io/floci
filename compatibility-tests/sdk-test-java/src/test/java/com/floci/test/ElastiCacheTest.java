@@ -12,6 +12,7 @@ import software.amazon.awssdk.services.elasticache.ElastiCacheClient;
 import software.amazon.awssdk.services.elasticache.model.AuthenticationMode;
 import software.amazon.awssdk.services.elasticache.model.CreateReplicationGroupRequest;
 import software.amazon.awssdk.services.elasticache.model.CreateUserRequest;
+import software.amazon.awssdk.services.elasticache.model.CreateUserResponse;
 import software.amazon.awssdk.services.elasticache.model.DeleteReplicationGroupRequest;
 import software.amazon.awssdk.services.elasticache.model.DeleteUserRequest;
 import software.amazon.awssdk.services.elasticache.model.DescribeReplicationGroupsRequest;
@@ -19,6 +20,7 @@ import software.amazon.awssdk.services.elasticache.model.DescribeUsersRequest;
 import software.amazon.awssdk.services.elasticache.model.InputAuthenticationType;
 import software.amazon.awssdk.services.elasticache.model.ModifyReplicationGroupRequest;
 import software.amazon.awssdk.services.elasticache.model.ModifyUserRequest;
+import software.amazon.awssdk.services.elasticache.model.ModifyUserResponse;
 import software.amazon.awssdk.services.elasticache.model.ElastiCacheException;
 
 import java.io.IOException;
@@ -294,6 +296,38 @@ class ElastiCacheTest {
 
     @Test
     @Order(12)
+    void topLevelPasswordsAndAccessStringChangesRoundTrip() {
+        String passwordUserId = TestFixtures.uniqueName("ec-pw-user");
+        CreateUserResponse created = elasticache.createUser(CreateUserRequest.builder()
+                .userId(passwordUserId)
+                .userName(TestFixtures.uniqueName("ec-pw-name"))
+                .engine("redis")
+                .accessString("on ~app:* -@all +@read")
+                .passwords("top-level-password-1")
+                .build());
+        assertThat(created.authentication().typeAsString()).isEqualTo("password");
+        assertThat(created.authentication().passwordCount()).isEqualTo(1);
+
+        try {
+            ModifyUserResponse appended = elasticache.modifyUser(ModifyUserRequest.builder()
+                    .userId(passwordUserId)
+                    .appendAccessString("+@write")
+                    .build());
+            assertThat(appended.accessString()).isEqualTo("on ~app:* -@all +@read +@write");
+
+            ModifyUserResponse opened = elasticache.modifyUser(ModifyUserRequest.builder()
+                    .userId(passwordUserId)
+                    .noPasswordRequired(true)
+                    .build());
+            assertThat(opened.authentication().typeAsString()).isEqualTo("no-password-required");
+            assertThat(opened.authentication().passwordCount()).isZero();
+        } finally {
+            elasticache.deleteUser(DeleteUserRequest.builder().userId(passwordUserId).build());
+        }
+    }
+
+    @Test
+    @Order(13)
     void deleteReplicationGroupReleasesPortForReuse() {
         requireGroup();
 
