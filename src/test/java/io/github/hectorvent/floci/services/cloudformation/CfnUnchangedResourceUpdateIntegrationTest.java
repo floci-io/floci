@@ -8,6 +8,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -553,5 +554,69 @@ class CfnUnchangedResourceUpdateIntegrationTest {
                   "Type": "AWS::S3::Bucket",
                   "Properties": {"BucketName": "probe-bucket-SUFFIX"}
                 }""");
+    }
+
+    @Test
+    void outputsOnlyUpdate_skipsUnchangedResources() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "probe-outputs-only-" + suffix;
+        String queueName = "probe-q-" + suffix;
+        String initialTemplate = """
+                {
+                  "Resources": {
+                    "Queue": {
+                      "Type": "AWS::SQS::Queue",
+                      "Properties": {"QueueName": "%s"}
+                    }
+                  }
+                }
+                """.formatted(queueName);
+        String updatedTemplate = """
+                {
+                  "Resources": {
+                    "Queue": {
+                      "Type": "AWS::SQS::Queue",
+                      "Properties": {"QueueName": "%s"}
+                    }
+                  },
+                  "Outputs": {
+                    "QueueArn": {"Value": "static-output"}
+                  }
+                }
+                """.formatted(queueName);
+
+        given().contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
+                .formParam("Action", "CreateStack").formParam("StackName", stackName)
+                .formParam("TemplateBody", initialTemplate)
+                .when().post("/").then().statusCode(200);
+
+        given().contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
+                .formParam("Action", "DescribeStacks").formParam("StackName", stackName)
+                .when().post("/").then().statusCode(200)
+                .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+
+        given().contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
+                .formParam("Action", "UpdateStack").formParam("StackName", stackName)
+                .formParam("TemplateBody", updatedTemplate)
+                .when().post("/").then().statusCode(200);
+
+        given().contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
+                .formParam("Action", "DescribeStacks").formParam("StackName", stackName)
+                .when().post("/").then().statusCode(200)
+                .body(containsString("<StackStatus>UPDATE_COMPLETE</StackStatus>"))
+                .body(containsString("<OutputKey>QueueArn</OutputKey>"));
+
+        // Queue was unchanged, so it should have only CREATE_IN_PROGRESS / CREATE_COMPLETE events,
+        // never UPDATE_IN_PROGRESS or UPDATE_COMPLETE.
+        String events = given()
+                .contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
+                .formParam("Action", "DescribeStackEvents").formParam("StackName", stackName)
+                .when().post("/").then().statusCode(200)
+                .extract().body().asString();
+        assertTrue(events.contains("<ResourceStatus>CREATE_COMPLETE</ResourceStatus>"));
+        // The only UPDATE_COMPLETE should be for the AWS::CloudFormation::Stack itself, not the Queue
+        assertFalse(events.contains("<LogicalResourceId>Queue</LogicalResourceId><PhysicalResourceId>" + queueName + "</PhysicalResourceId><ResourceType>AWS::SQS::Queue</ResourceType><ResourceStatus>UPDATE_COMPLETE</ResourceStatus>"));
+
+        deleteStack(stackName);
     }
 }

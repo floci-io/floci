@@ -474,6 +474,7 @@ public class CloudFormationService implements ResourceProvider {
             return List.of();
         }
         Stack stack = getStackOrThrow(cs.getStackName(), region);
+        String accountId = ownerAccount(stack);
         try {
             JsonNode newTemplate = parseTemplate(cs.getTemplateBody());
             // Merge Fn::Transform/AWS::Include snippets before SAM expansion, matching AWS order:
@@ -586,7 +587,7 @@ public class CloudFormationService implements ResourceProvider {
                     changes.add(new ResourceChange("Add", logicalId, null, resourceType, null));
                 } else if (newActive
                         && (!oldDef.equals(newDef)
-                        || "AWS::CloudFormation::Stack".equals(resourceType)
+                        || ("AWS::CloudFormation::Stack".equals(resourceType) && isNestedStackChanged(stack, logicalId, newDef, region, accountId))
                         || referencesAnyParameter(newDef, changedParams)
                         || referencesAnyCondition(newDef, changedConditions))) {
                     boolean typeChanged = !oldDef.path("Type").asText().equals(resourceType);
@@ -1368,6 +1369,7 @@ public class CloudFormationService implements ResourceProvider {
         boolean updateCommitted = false;
         Set<String> attemptedResourceIds = new LinkedHashSet<>();
         try {
+            boolean templateOrParamsChanged = isTemplateOrParamsChanged(stack, templateBody, params);
             Set<String> changedResourceIds = isCreate
                     ? Set.of()
                     : changedResourceIds(stack, templateBody, params, region);
@@ -1417,7 +1419,7 @@ public class CloudFormationService implements ResourceProvider {
             Map<String, Map<String, String>> resourceAttrs = new LinkedHashMap<>();
 
             // First pass: collect existing physicalIds
-            for (var r : stack.resourcesSnapshot().values()) {
+            for (StackResource r : stack.resourcesSnapshot().values()) {
                 if (r.getPhysicalId() != null) {
                     physicalIds.put(r.getLogicalId(), r.getPhysicalId());
                     resourceAttrs.put(r.getLogicalId(), r.getAttributes());
@@ -1428,8 +1430,9 @@ public class CloudFormationService implements ResourceProvider {
             if (resources.isObject()) {
                 List<String> sortedLogicalIds = topologicalSort(resources, conditions);
 
+                boolean shouldSkipUnchanged = templateOrParamsChanged || !changedResourceIds.isEmpty();
                 for (String logicalId : sortedLogicalIds) {
-                    if (!isCreate && !changedResourceIds.isEmpty() && !changedResourceIds.contains(logicalId)) {
+                    if (!isCreate && shouldSkipUnchanged && !changedResourceIds.contains(logicalId)) {
                         continue;
                     }
                     JsonNode resDef = resources.get(logicalId);
@@ -1677,6 +1680,49 @@ public class CloudFormationService implements ResourceProvider {
             }
         }
         return changedResourceIds;
+    }
+
+    private boolean isTemplateOrParamsChanged(Stack stack, String templateBody, Map<String, String> params) {
+        String oldTemplate = stack.getOriginalTemplateBody() != null
+                ? stack.getOriginalTemplateBody()
+                : stack.getTemplateBody();
+        if (oldTemplate != null && !oldTemplate.equals(templateBody)) {
+            return true;
+        }
+        Map<String, String> oldParams = stack.parametersSnapshot();
+        Map<String, String> safeParams = params != null ? params : Map.of();
+        Map<String, String> safeOldParams = oldParams != null ? oldParams : Map.of();
+        return !safeParams.equals(safeOldParams);
+    }
+
+    private boolean isNestedStackChanged(Stack parentStack, String logicalId, JsonNode newDef,
+                                         String region, String accountId) {
+        if (parentStack == null) {
+            return false;
+        }
+        StackResource existingResource = parentStack.getResources().get(logicalId);
+        if (existingResource == null || existingResource.getPhysicalId() == null) {
+            return true;
+        }
+        Stack childStack = resolveStack(existingResource.getPhysicalId(), region, accountId);
+        if (childStack == null) {
+            return true;
+        }
+        String templateUrl = newDef.path("Properties").path("TemplateURL").asText(null);
+        if (templateUrl == null || templateUrl.isBlank()) {
+            return false;
+        }
+        try {
+            String newChildTemplate = fetchTemplateFromS3(templateUrl);
+            String currentChildTemplate = childStack.getOriginalTemplateBody() != null
+                    ? childStack.getOriginalTemplateBody()
+                    : childStack.getTemplateBody();
+            return newChildTemplate != null && !newChildTemplate.equals(currentChildTemplate);
+        } catch (Exception ignored) {
+            // Safe to ignore: if TemplateURL is inaccessible and parent definition didn't change,
+            // treat the nested stack as unchanged so the parent update is not blocked.
+            return false;
+        }
     }
 
     /**
