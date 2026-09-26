@@ -3269,6 +3269,85 @@ public class CognitoService implements ResourceProvider {
         return generateAuthResult(user, pool, client, override, originJti);
     }
 
+    /**
+     * Mints the tokens the OAuth token endpoint returns for a redeemed authorization code, firing
+     * PreTokenGeneration first, as AWS does for a hosted-UI sign-in, so a pool that customises its
+     * claims gets the same tokens here as it does from {@code InitiateAuth}.
+     *
+     * <p>{@code protocolClaims} carries claims the OIDC flow itself owns, currently the request's
+     * {@code nonce}. They are applied <em>after</em> the trigger's, so a trigger cannot displace them:
+     * AWS likewise refuses to let this trigger override {@code nonce} and the other reserved claims.
+     * Passing {@code null} for either side leaves the other's claims untouched. {@code requestedScopes}
+     * are the scopes the authorization request asked for, narrowed to the ones the client may actually
+     * use before the trigger is told about them.
+     */
+    Map<String, Object> generateAuthResultForHostedAuth(CognitoUser user, UserPool pool, UserPoolClient client,
+                                                        ClaimsOverride protocolClaims, List<String> requestedScopes) {
+        ClaimsOverride trigger = authFlowHandler.preTokenGenerationForHostedAuth(pool, client, user,
+                scopesAllowedForClient(client, requestedScopes));
+        return generateAuthResult(user, pool, client, mergeUnderProtocolClaims(trigger, protocolClaims));
+    }
+
+    /**
+     * The requested scopes the client is allowed to use, in the order requested and without duplicates.
+     *
+     * <p>An authorization request names its own scopes, and nothing checks them against the client's
+     * AllowedOAuthScopes when the code is issued, so the stored code can carry a scope the client may
+     * not use. A V2 trigger is free to grant claims or add scopes based on what it is told was
+     * requested, so it is told only what the client was entitled to ask for. An unallowed scope is
+     * dropped rather than refused, which is how AWS treats a scope that is not associated with the
+     * client.
+     */
+    private static List<String> scopesAllowedForClient(UserPoolClient client, List<String> requestedScopes) {
+        if (requestedScopes == null || requestedScopes.isEmpty()) {
+            return List.of();
+        }
+        List<String> allowed = client.getAllowedOAuthScopes();
+        if (allowed == null || allowed.isEmpty()) {
+            return List.of();
+        }
+        List<String> kept = new ArrayList<>();
+        for (String scope : requestedScopes) {
+            if (allowed.contains(scope) && !kept.contains(scope)) {
+                kept.add(scope);
+            }
+        }
+        return List.copyOf(kept);
+    }
+
+    /**
+     * Layers {@code protocolClaims} over {@code trigger}, keeping every other field the trigger set
+     * (suppressions, groups, roles, scopes).
+     */
+    private static ClaimsOverride mergeUnderProtocolClaims(ClaimsOverride trigger, ClaimsOverride protocolClaims) {
+        if (trigger == null) {
+            return protocolClaims;
+        }
+        if (protocolClaims == null) {
+            return trigger;
+        }
+        return new ClaimsOverride(
+                claimsWithProtocolLast(trigger.idClaimsToAddOrOverride(), protocolClaims.idClaimsToAddOrOverride()),
+                trigger.idClaimsToSuppress(),
+                claimsWithProtocolLast(trigger.accessClaimsToAddOrOverride(), protocolClaims.accessClaimsToAddOrOverride()),
+                trigger.accessClaimsToSuppress(),
+                trigger.scopesToAdd(), trigger.scopesToSuppress(),
+                trigger.groupsToOverride(), trigger.iamRolesToOverride(), trigger.preferredRole());
+    }
+
+    private static Map<String, Object> claimsWithProtocolLast(Map<String, Object> triggerClaims,
+                                                              Map<String, Object> protocolClaims) {
+        if (protocolClaims == null || protocolClaims.isEmpty()) {
+            return triggerClaims;
+        }
+        if (triggerClaims == null || triggerClaims.isEmpty()) {
+            return protocolClaims;
+        }
+        Map<String, Object> merged = new HashMap<>(triggerClaims);
+        merged.putAll(protocolClaims);
+        return merged;
+    }
+
     Map<String, Object> generateAuthResult(CognitoUser user, UserPool pool, UserPoolClient client, ClaimsOverride override, String originJti) {
         Map<String, Object> auth = new HashMap<>();
         auth.put("AccessToken", generateSignedJwt(user, pool, "access", client, override, originJti));

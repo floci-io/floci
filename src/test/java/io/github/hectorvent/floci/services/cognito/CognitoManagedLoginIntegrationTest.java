@@ -1,12 +1,17 @@
 package io.github.hectorvent.floci.services.cognito;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.services.lambda.LambdaService;
+import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.net.URI;
 import java.net.URLDecoder;
@@ -31,6 +36,10 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.when;
 
 /**
  * Managed login for a pool's own users, driven over HTTP the way a browser drives it:
@@ -50,6 +59,12 @@ class CognitoManagedLoginIntegrationTest {
     private static final String INCORRECT_CREDENTIALS = "Incorrect username or password";
     private static final Pattern HIDDEN_FIELD = Pattern.compile("<input type=\"hidden\" name=\"([^\"]*)\" value=\"([^\"]*)\">");
     private static final Pattern FORM_ACTION = Pattern.compile("<form method=\"post\" action=\"([^\"]*)\">");
+    private static final String PRE_TOKEN_GENERATION_ARN = "arn:aws:lambda:::pre-token-generation";
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    /** Only the PreTokenGeneration trigger is configured on any pool here, so nothing else invokes it. */
+    @InjectMock
+    LambdaService lambdaService;
 
     @BeforeAll
     static void configureRestAssured() {
@@ -186,6 +201,60 @@ class CognitoManagedLoginIntegrationTest {
         JsonNode accessToken = jwtPayload(tokens.path("access_token"));
         assertEquals(pool.username(), accessToken.path("username").asText());
         assertFalse(accessToken.has("nonce"));
+    }
+
+    /**
+     * A pool whose PreTokenGeneration trigger adds a claim must get it from a managed-login sign-in
+     * too, not only from {@code InitiateAuth}: the token endpoint is what mints these tokens, so that
+     * is where the trigger has to fire. The authorization request's {@code nonce} outranks the
+     * trigger, as it does on AWS.
+     */
+    @Test
+    void redeemingTheCodeFiresPreTokenGenerationAndAppliesItsClaims() throws Exception {
+        Pool pool = newPoolWithPreTokenGenerationTrigger();
+        ArgumentCaptor<byte[]> event = ArgumentCaptor.forClass(byte[].class);
+        when(lambdaService.invoke(anyString(), eq(PRE_TOKEN_GENERATION_ARN), event.capture(), any()))
+                .thenReturn(triggerResponse(Map.of("claimsOverrideDetails", Map.of(
+                        "claimsToAddOrOverride", Map.of("tenant", "acme", "nonce", "trigger-nonce")))));
+
+        Response tokens = redeem(null, pool.clientId(),
+                code(signIn(null, pool, authorizeRequest(pool.clientId()))), VERIFIER);
+
+        tokens.then().statusCode(200);
+        JsonNode triggerEvent = MAPPER.readTree(event.getValue());
+        assertEquals("TokenGeneration_HostedAuth", triggerEvent.path("triggerSource").asText(),
+                "AWS uses TokenGeneration_HostedAuth for a sign-in through the hosted UI");
+        assertEquals(List.of("openid", "email"),
+                MAPPER.convertValue(triggerEvent.path("request").path("scopes"), List.class),
+                "the authorization request's scopes reach the trigger");
+        JsonNode idToken = jwtPayload(tokens.path("id_token"));
+        assertEquals("acme", idToken.path("tenant").asText(), "the trigger's claim should reach the ID token");
+        assertEquals("client-nonce", idToken.path("nonce").asText(),
+                "the request's nonce must outrank a trigger that tries to replace it");
+        assertEquals("acme", jwtPayload(tokens.path("access_token")).path("tenant").asText(),
+                "the trigger's claim should reach the access token");
+    }
+
+    /**
+     * The authorize endpoint stores the scopes the request named without checking them against the
+     * client's AllowedOAuthScopes, so a request can carry one the client may not use. A V2 trigger can
+     * grant claims or scopes from what it is told was requested, so an unallowed scope must not reach it.
+     */
+    @Test
+    void aScopeTheClientIsNotAllowedDoesNotReachTheTrigger() throws Exception {
+        Pool pool = newPoolWithPreTokenGenerationTrigger();
+        Map<String, String> query = authorizeRequest(pool.clientId());
+        query.put("scope", "openid email admin/superuser");
+        ArgumentCaptor<byte[]> event = ArgumentCaptor.forClass(byte[].class);
+        when(lambdaService.invoke(anyString(), eq(PRE_TOKEN_GENERATION_ARN), event.capture(), any()))
+                .thenReturn(triggerResponse(Map.of()));
+
+        Response tokens = redeem(null, pool.clientId(), code(signIn(null, pool, query)), VERIFIER);
+
+        tokens.then().statusCode(200);
+        assertEquals(List.of("openid", "email"),
+                MAPPER.convertValue(MAPPER.readTree(event.getValue()).path("request").path("scopes"), List.class),
+                "admin/superuser is not in the client's AllowedOAuthScopes, so the trigger never sees it");
     }
 
     @Test
@@ -449,6 +518,18 @@ class CognitoManagedLoginIntegrationTest {
     private static Pool newPool() throws Exception {
         String poolId = cognitoJson("CreateUserPool", "{\"PoolName\":\"ManagedLoginPool\"}").path("UserPool").path("Id").asText();
         return withUser(poolId, codeClient(poolId), "user-" + System.nanoTime());
+    }
+
+    private static Pool newPoolWithPreTokenGenerationTrigger() throws Exception {
+        String poolId = cognitoJson("CreateUserPool", """
+                {"PoolName":"ManagedLoginTriggerPool","LambdaConfig":{"PreTokenGeneration":"%s"}}
+                """.formatted(PRE_TOKEN_GENERATION_ARN)).path("UserPool").path("Id").asText();
+        return withUser(poolId, codeClient(poolId), "user-" + System.nanoTime());
+    }
+
+    /** A successful trigger invocation returning {@code response} as the Lambda's payload. */
+    private static InvokeResult triggerResponse(Map<String, Object> response) throws Exception {
+        return new InvokeResult(200, null, MAPPER.writeValueAsBytes(Map.of("response", response)), null, "req-id");
     }
 
     private static String codeClient(String poolId) throws Exception {
