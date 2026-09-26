@@ -691,8 +691,27 @@ public class CognitoService implements ResourceProvider {
                                                List<String> supportedIdentityProviders, Map<String, String> tokenValidityUnits,
                                                List<String> writeAttributes, Map<String, Object> refreshTokenRotation,
                                                Boolean enableTokenRevocation) {
+        return createUserPoolClient(userPoolId, clientName, generateSecret, allowedOAuthFlowsUserPoolClient,
+                allowedOAuthFlows, allowedOAuthScopes, analyticsConfiguration, callbackURLs,
+                defaultRedirectURI, explicitAuthFlows, accessTokenValidity, idTokenValidity,
+                logoutURLs, preventUserExistenceErrors, readAttributes, refreshTokenValidity,
+                supportedIdentityProviders, tokenValidityUnits, writeAttributes, refreshTokenRotation,
+                enableTokenRevocation, null);
+    }
+
+    public UserPoolClient createUserPoolClient(String userPoolId, String clientName,
+                                               boolean generateSecret, boolean allowedOAuthFlowsUserPoolClient,
+                                               List<String> allowedOAuthFlows, List<String> allowedOAuthScopes,
+                                               Map<String, Object> analyticsConfiguration, List<String> callbackURLs,
+                                               String defaultRedirectURI, List<String> explicitAuthFlows, Integer accessTokenValidity,
+                                               Integer idTokenValidity, List<String> logoutURLs, String preventUserExistenceErrors,
+                                               List<String> readAttributes, Integer refreshTokenValidity,
+                                               List<String> supportedIdentityProviders, Map<String, String> tokenValidityUnits,
+                                               List<String> writeAttributes, Map<String, Object> refreshTokenRotation,
+                                               Boolean enableTokenRevocation, Integer authSessionValidity) {
 
         UserPool userPool = describeUserPool(userPoolId);
+        validateAuthSessionValidity(authSessionValidity);
         String clientId = clientIdFor(userPool, clientName);
         List<String> normalizedAllowedOAuthFlows = normalizeStringList(allowedOAuthFlows);
         List<String> normalizedAllowedOAuthScopes = normalizeStringList(allowedOAuthScopes);
@@ -733,6 +752,9 @@ public class CognitoService implements ResourceProvider {
         client.setExplicitAuthFlows(normalizedExplicitAuthFlows);
         client.setAccessTokenValidity(accessTokenValidity);
         client.setIdTokenValidity(idTokenValidity);
+        if (authSessionValidity != null) {
+            client.setAuthSessionValidity(authSessionValidity);
+        }
         client.setLogoutURLs(normalizedLogoutUrls);
         client.setPreventUserExistenceErrors(preventUserExistenceErrors);
         client.setReadAttributes(normalizedReadAttributes);
@@ -869,7 +891,27 @@ public class CognitoService implements ResourceProvider {
                                                List<String> writeAttributes,
                                                Map<String, Object> refreshTokenRotation,
                                                Boolean enableTokenRevocation) {
+        return updateUserPoolClient(userPoolId, clientId, clientName, allowedOAuthFlowsUserPoolClient,
+                allowedOAuthFlows, allowedOAuthScopes, analyticsConfiguration, callbackURLs,
+                defaultRedirectURI, explicitAuthFlows, accessTokenValidity, idTokenValidity,
+                logoutURLs, preventUserExistenceErrors, readAttributes, refreshTokenValidity,
+                supportedIdentityProviders, tokenValidityUnits, writeAttributes, refreshTokenRotation,
+                enableTokenRevocation, null);
+    }
+
+    public UserPoolClient updateUserPoolClient(String userPoolId, String clientId, String clientName,
+                                               Boolean allowedOAuthFlowsUserPoolClient,
+                                               List<String> allowedOAuthFlows, List<String> allowedOAuthScopes,
+                                               Map<String, Object> analyticsConfiguration, List<String> callbackURLs,
+                                               String defaultRedirectURI, List<String> explicitAuthFlows,
+                                               Integer accessTokenValidity, Integer idTokenValidity,
+                                               List<String> logoutURLs, String preventUserExistenceErrors,
+                                               List<String> readAttributes, Integer refreshTokenValidity,
+                                               List<String> supportedIdentityProviders, Map<String, String> tokenValidityUnits,
+                                               List<String> writeAttributes, Map<String, Object> refreshTokenRotation,
+                                               Boolean enableTokenRevocation, Integer authSessionValidity) {
         UserPoolClient client = describeUserPoolClient(userPoolId, clientId);
+        validateAuthSessionValidity(authSessionValidity);
         boolean effectiveAllowedOAuthFlowsUserPoolClient = allowedOAuthFlowsUserPoolClient != null
                 ? allowedOAuthFlowsUserPoolClient
                 : client.isAllowedOAuthFlowsUserPoolClient();
@@ -969,11 +1011,21 @@ public class CognitoService implements ResourceProvider {
         if (enableTokenRevocation != null) {
             client.setEnableTokenRevocation(enableTokenRevocation);
         }
+        if (authSessionValidity != null) {
+            client.setAuthSessionValidity(authSessionValidity);
+        }
 
         client.setLastModifiedDate(System.currentTimeMillis() / 1000L);
         clientStore.put(clientId, client);
         LOG.infov("Updated User Pool Client: {0} for pool {1}", clientId, userPoolId);
         return client;
+    }
+
+    private static void validateAuthSessionValidity(Integer authSessionValidity) {
+        if (authSessionValidity != null && (authSessionValidity < 3 || authSessionValidity > 15)) {
+            throw new AwsException("InvalidParameterException",
+                    "AuthSessionValidity must be between 3 and 15 minutes", 400);
+        }
     }
 
     public List<UserPoolClientSecret> listUserPoolClientSecrets(String userPoolId, String clientId) {

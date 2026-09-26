@@ -19,6 +19,10 @@ Standalone `TagResource` rejects reserved `floci:*` keys. `ListTagsForResource` 
 
 An action given a user pool ID that does not resolve returns `ResourceNotFoundException` with the live service's wording, `User pool <poolId> does not exist.`, so tooling that matches Cognito error text behaves the same way locally.
 
+`CreateUserPoolClient` and `UpdateUserPoolClient` store `AuthSessionValidity` in minutes,
+and `DescribeUserPoolClient` returns it. Values must be integers from 3 through 15.
+New clients default to 3 minutes; an update that omits the field retains its stored value.
+
 ## Supported Actions
 
 ### User Pools

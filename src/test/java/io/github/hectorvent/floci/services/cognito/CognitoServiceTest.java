@@ -55,6 +55,17 @@ class CognitoServiceTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
+    @Test
+    void authSessionValiditySurvivesSerializationAndDefaultsForLegacyClients() throws Exception {
+        UserPoolClient client = new UserPoolClient();
+        client.setAuthSessionValidity(10);
+        UserPoolClient reloaded = MAPPER.readValue(MAPPER.writeValueAsBytes(client), UserPoolClient.class);
+        assertEquals(10, reloaded.getAuthSessionValidity());
+
+        UserPoolClient legacy = MAPPER.readValue("{\"clientId\":\"legacy\"}", UserPoolClient.class);
+        assertEquals(3, legacy.getAuthSessionValidity());
+    }
+
     private CognitoService service;
     private InMemoryStorage<String, UserPool> poolStore;
     private InMemoryStorage<String, CognitoUser> userStore;

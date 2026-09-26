@@ -31,6 +31,54 @@ class TestCognitoUserPool:
 class TestCognitoUserPoolClient:
     """Test Cognito user pool client operations."""
 
+    @pytest.mark.parametrize("minutes", [3, 10, 15])
+    def test_auth_session_validity_sdk_round_trip(self, cognito_client, unique_name, minutes):
+        """The SDK must send and parse the configured session duration."""
+        pool_id = cognito_client.create_user_pool(
+            PoolName=f"session-validity-{unique_name}"
+        )["UserPool"]["Id"]
+        try:
+            created = cognito_client.create_user_pool_client(
+                UserPoolId=pool_id, ClientName="session-client", AuthSessionValidity=minutes
+            )["UserPoolClient"]
+            client_id = created["ClientId"]
+            assert created["AuthSessionValidity"] == minutes
+            assert cognito_client.describe_user_pool_client(
+                UserPoolId=pool_id, ClientId=client_id
+            )["UserPoolClient"]["AuthSessionValidity"] == minutes
+
+            updated_minutes = 15 if minutes != 15 else 3
+            updated = cognito_client.update_user_pool_client(
+                UserPoolId=pool_id, ClientId=client_id, AuthSessionValidity=updated_minutes
+            )["UserPoolClient"]
+            assert updated["AuthSessionValidity"] == updated_minutes
+            assert cognito_client.describe_user_pool_client(
+                UserPoolId=pool_id, ClientId=client_id
+            )["UserPoolClient"]["AuthSessionValidity"] == updated_minutes
+
+            omitted = cognito_client.update_user_pool_client(
+                UserPoolId=pool_id, ClientId=client_id, ClientName="renamed"
+            )["UserPoolClient"]
+            assert omitted["AuthSessionValidity"] == updated_minutes
+        finally:
+            cognito_client.delete_user_pool(UserPoolId=pool_id)
+
+    def test_auth_session_validity_sdk_default(self, cognito_client, unique_name):
+        """Omitting the duration creates a client with the 3-minute default."""
+        pool_id = cognito_client.create_user_pool(
+            PoolName=f"session-default-{unique_name}"
+        )["UserPool"]["Id"]
+        try:
+            created = cognito_client.create_user_pool_client(
+                UserPoolId=pool_id, ClientName="default-client"
+            )["UserPoolClient"]
+            assert created["AuthSessionValidity"] == 3
+            assert cognito_client.describe_user_pool_client(
+                UserPoolId=pool_id, ClientId=created["ClientId"]
+            )["UserPoolClient"]["AuthSessionValidity"] == 3
+        finally:
+            cognito_client.delete_user_pool(UserPoolId=pool_id)
+
     def test_create_user_pool_client(self, cognito_client, unique_name):
         """Test CreateUserPoolClient creates a client."""
         pool_name = f"pytest-pool-{unique_name}"
