@@ -11,15 +11,23 @@ import org.junit.jupiter.api.TestMethodOrder;
 import software.amazon.awssdk.services.elasticache.ElastiCacheClient;
 import software.amazon.awssdk.services.elasticache.model.AuthenticationMode;
 import software.amazon.awssdk.services.elasticache.model.CreateReplicationGroupRequest;
+import software.amazon.awssdk.services.elasticache.model.CreateUserGroupRequest;
+import software.amazon.awssdk.services.elasticache.model.CreateUserGroupResponse;
 import software.amazon.awssdk.services.elasticache.model.CreateUserRequest;
 import software.amazon.awssdk.services.elasticache.model.DeleteReplicationGroupRequest;
+import software.amazon.awssdk.services.elasticache.model.DeleteUserGroupRequest;
 import software.amazon.awssdk.services.elasticache.model.DeleteUserRequest;
 import software.amazon.awssdk.services.elasticache.model.DescribeReplicationGroupsRequest;
+import software.amazon.awssdk.services.elasticache.model.DescribeUserGroupsRequest;
+import software.amazon.awssdk.services.elasticache.model.DescribeUserGroupsResponse;
 import software.amazon.awssdk.services.elasticache.model.DescribeUsersRequest;
-import software.amazon.awssdk.services.elasticache.model.InputAuthenticationType;
-import software.amazon.awssdk.services.elasticache.model.ModifyReplicationGroupRequest;
-import software.amazon.awssdk.services.elasticache.model.ModifyUserRequest;
 import software.amazon.awssdk.services.elasticache.model.ElastiCacheException;
+import software.amazon.awssdk.services.elasticache.model.InputAuthenticationType;
+import software.amazon.awssdk.services.elasticache.model.InvalidUserGroupStateException;
+import software.amazon.awssdk.services.elasticache.model.ModifyReplicationGroupRequest;
+import software.amazon.awssdk.services.elasticache.model.ModifyReplicationGroupResponse;
+import software.amazon.awssdk.services.elasticache.model.ModifyUserRequest;
+import software.amazon.awssdk.services.elasticache.model.UserGroupNotFoundException;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -205,9 +213,9 @@ class ElastiCacheTest {
         assertThat(rejectReply).isEqualTo("-ERR invalid username-password pair or user is disabled.\r\n");
 
         // Associate user with group via ModifyReplicationGroup.
-        // Known deviation: Floci treats userGroupIdsToAdd as raw user IDs because
-        // UserGroup resources are not yet implemented. In real AWS, this parameter
-        // accepts UserGroupIds (which are separate resources containing users).
+        // Known deviation: an id that names no user group but names a user associates that
+        // user directly, which Floci accepted before it modelled user groups. Real AWS only
+        // accepts user group ids here; userGroupMembersAuthenticateThroughTheProxy covers that.
         var response = elasticache.modifyReplicationGroup(ModifyReplicationGroupRequest.builder()
                 .replicationGroupId(groupId)
                 .userGroupIdsToAdd(userId)
@@ -294,6 +302,74 @@ class ElastiCacheTest {
 
     @Test
     @Order(12)
+    void userGroupMembersAuthenticateThroughTheProxy() throws Exception {
+        requireGroup();
+        String defaultUserId = TestFixtures.uniqueName("ec-ug-default");
+        String memberUserId = TestFixtures.uniqueName("ec-ug-member");
+        String memberUserName = TestFixtures.uniqueName("ec-ug-member-name");
+        String userGroupId = TestFixtures.uniqueName("ec-ug");
+        elasticache.createUser(CreateUserRequest.builder()
+                .userId(defaultUserId).userName("default").engine("redis")
+                .accessString("on ~* +@all")
+                .authenticationMode(AuthenticationMode.builder()
+                        .type(InputAuthenticationType.PASSWORD).passwords("default-password-0123").build())
+                .build());
+        elasticache.createUser(CreateUserRequest.builder()
+                .userId(memberUserId).userName(memberUserName).engine("redis")
+                .accessString("on ~* +@all")
+                .authenticationMode(AuthenticationMode.builder()
+                        .type(InputAuthenticationType.PASSWORD).passwords("member-password-0123").build())
+                .build());
+        try {
+            CreateUserGroupResponse created = elasticache.createUserGroup(CreateUserGroupRequest.builder()
+                    .userGroupId(userGroupId)
+                    .engine("redis")
+                    .userIds(defaultUserId, memberUserId)
+                    .build());
+            assertThat(created.status()).isEqualTo("active");
+            assertThat(created.userIds()).containsExactlyInAnyOrder(defaultUserId, memberUserId);
+
+            ModifyReplicationGroupResponse associated = elasticache.modifyReplicationGroup(
+                    ModifyReplicationGroupRequest.builder()
+                            .replicationGroupId(groupId)
+                            .userGroupIdsToAdd(userGroupId)
+                            .build());
+            assertThat(associated.replicationGroup().userGroupIds()).contains(userGroupId);
+
+            try (Socket socket = openSocket(firstProxyPort)) {
+                write(socket, respArray("AUTH", memberUserName, "member-password-0123"));
+                assertThat(readLine(socket)).isEqualTo("+OK\r\n");
+            }
+
+            DescribeUserGroupsResponse described = elasticache.describeUserGroups(DescribeUserGroupsRequest.builder()
+                    .userGroupId(userGroupId)
+                    .build());
+            assertThat(described.userGroups().get(0).replicationGroups()).containsExactly(groupId);
+
+            assertThatThrownBy(() -> elasticache.deleteUserGroup(DeleteUserGroupRequest.builder()
+                    .userGroupId(userGroupId)
+                    .build()))
+                    .isInstanceOf(InvalidUserGroupStateException.class);
+
+            elasticache.modifyReplicationGroup(ModifyReplicationGroupRequest.builder()
+                    .replicationGroupId(groupId)
+                    .userGroupIdsToRemove(userGroupId)
+                    .build());
+            assertThat(sendCommand(firstProxyPort, respArray("AUTH", memberUserName, "member-password-0123")))
+                    .isEqualTo("-ERR invalid username-password pair or user is disabled.\r\n");
+        } finally {
+            try {
+                elasticache.deleteUserGroup(DeleteUserGroupRequest.builder().userGroupId(userGroupId).build());
+            } catch (UserGroupNotFoundException ignored) {
+                // the group was never created
+            }
+            elasticache.deleteUser(DeleteUserRequest.builder().userId(memberUserId).build());
+            elasticache.deleteUser(DeleteUserRequest.builder().userId(defaultUserId).build());
+        }
+    }
+
+    @Test
+    @Order(13)
     void deleteReplicationGroupReleasesPortForReuse() {
         requireGroup();
 

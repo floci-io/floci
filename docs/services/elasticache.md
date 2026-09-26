@@ -12,14 +12,18 @@ Floci manages real Valkey/Redis Docker containers and proxies TCP connections to
 | Action | Description |
 | --- | --- |
 | `ValidateIamAuthToken` | Validate an IAM auth token (data-plane auth) |
-| `CreateReplicationGroup` | Start a new Redis/Valkey cluster; `AtRestEncryptionEnabled`, `KmsKeyId` (resolved to the key ARN), `SnapshotRetentionLimit`, `SnapshotWindow` and `Tags` are kept and returned, with the group `ARN` |
+| `CreateReplicationGroup` | Start a new Redis/Valkey cluster; `AtRestEncryptionEnabled`, `KmsKeyId` (resolved to the key ARN), `SnapshotRetentionLimit`, `SnapshotWindow`, `Tags` and `UserGroupIds` are kept and returned, with the group `ARN`. `UserGroupIds` needs `TransitEncryptionEnabled` or an `AuthToken` |
 | `DescribeReplicationGroups` | List clusters and their connection info |
-| `ModifyReplicationGroup` | Modify `SnapshotRetentionLimit` and `SnapshotWindow`, and the associated user groups |
+| `ModifyReplicationGroup` | Modify `SnapshotRetentionLimit` and `SnapshotWindow`, and the associated user groups (`UserGroupIdsToAdd`, `UserGroupIdsToRemove`) |
 | `DeleteReplicationGroup` | Stop and remove a cluster |
 | `CreateUser` | Create an ElastiCache IAM user |
 | `DescribeUsers` | List ElastiCache users |
 | `ModifyUser` | Update user access strings |
 | `DeleteUser` | Remove an ElastiCache user |
+| `CreateUserGroup` | Create a user group; a `redis` group must contain a user named `default`, a `valkey` group need not |
+| `DescribeUserGroups` | List user groups with their users and the replication groups using them |
+| `ModifyUserGroup` | Add or remove users, or change the engine; membership changes apply to authentication at once |
+| `DeleteUserGroup` | Remove a user group that no replication group uses |
 | `CreateCacheCluster` | Start a Memcached cluster, or a single-node Redis/Valkey one (`NumCacheNodes` must be 1) |
 | `DescribeCacheClusters` | List cache clusters: Memcached, single-node Redis/Valkey, and replication group members |
 | `DeleteCacheCluster` | Stop and remove a cache cluster |
