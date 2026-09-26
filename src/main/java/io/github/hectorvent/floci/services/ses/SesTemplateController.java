@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.Tag;
@@ -18,6 +19,7 @@ import jakarta.ws.rs.PUT;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
@@ -85,17 +87,22 @@ public class SesTemplateController {
 
     @GET
     @Path("/templates")
-    public Response listEmailTemplates(@Context HttpHeaders headers) {
+    public Response listEmailTemplates(@Context HttpHeaders headers,
+                                       @QueryParam("PageSize") String pageSize,
+                                       @QueryParam("NextToken") String nextToken) {
         String region = regionResolver.resolveRegion(headers);
-        List<EmailTemplate> templates = templateService.listTemplates(region);
+        PaginatedResult<EmailTemplate> page = SesListPaging.V2_LIST_EMAIL_TEMPLATES.page(
+                templateService.listTemplates(region), SesListPaging::templateCursor,
+                SesListPaging.parseQueryPageSize(pageSize), nextToken);
         ObjectNode result = objectMapper.createObjectNode();
         ArrayNode items = result.putArray("TemplatesMetadata");
-        for (EmailTemplate t : templates) {
+        for (EmailTemplate t : page.items()) {
             ObjectNode item = objectMapper.createObjectNode();
             item.put("TemplateName", t.getTemplateName());
             putTimestamp(item, "CreatedTimestamp", t.getCreatedTimestamp());
             items.add(item);
         }
+        result.put("NextToken", page.nextToken());
         return Response.ok(result).build();
     }
 

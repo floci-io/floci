@@ -5,7 +5,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
-import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.ses.model.ExportJob;
 import jakarta.inject.Inject;
@@ -20,8 +19,6 @@ import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
-
-import java.time.Instant;
 
 import static io.github.hectorvent.floci.services.ses.SesV2Json.intMemberOrAbsent;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.putTimestamp;
@@ -41,14 +38,6 @@ import static io.github.hectorvent.floci.services.ses.SesV2Json.stringMemberOrAb
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
 public class SesExportJobController {
-
-    private static final int DEFAULT_PAGE_SIZE = 100;
-    /**
-     * A page no emulator will ever fill, so a larger {@code PageSize} can be clamped instead of
-     * refused. The paginator adds this to the page offset as an int, so {@code Integer.MAX_VALUE}
-     * would overflow that sum and report a further page that does not exist.
-     */
-    private static final int MAX_PAGE_SIZE = 1_000_000;
 
     private final SesExportJobService exportJobService;
     private final SesAccountService accountService;
@@ -116,18 +105,12 @@ public class SesExportJobController {
         JsonNode request = readOptionBody(objectMapper, body);
         String sourceType = stringMemberOrAbsent(request, "ExportSourceType");
         String jobStatus = stringMemberOrAbsent(request, "JobStatus");
-        String nextToken = stringMemberOrAbsent(request, "NextToken");
-        // PageSize carries no bound in the model, so a large one is clamped rather than refused;
-        // only a value below 1 is an error, and the default applies when it is absent.
         Integer pageSize = intMemberOrAbsent(request, "PageSize");
-        if (pageSize != null && pageSize > MAX_PAGE_SIZE) {
-            pageSize = MAX_PAGE_SIZE;
-        }
-
-        PaginatedResult<ExportJob> page = Pagination.paginate(
+        String nextToken = stringMemberOrAbsent(request, "NextToken");
+        PaginatedResult<ExportJob> page = SesListPaging.V2_LIST_EXPORT_JOBS.page(
                 exportJobService.listExportJobs(region, sourceType, jobStatus),
-                SesExportJobController::cursor, pageSize, nextToken, DEFAULT_PAGE_SIZE,
-                MAX_PAGE_SIZE, "BadRequestException");
+                job -> SesListPaging.newestFirst(job.getCreatedTimestamp(), job.getJobId()),
+                pageSize, nextToken);
 
         ObjectNode result = objectMapper.createObjectNode();
         ArrayNode jobs = result.putArray("ExportJobs");
@@ -139,9 +122,7 @@ public class SesExportJobController {
             putTimestamp(node, "CreatedTimestamp", job.getCreatedTimestamp());
             putTimestamp(node, "CompletedTimestamp", job.getCompletedTimestamp());
         }
-        if (page.nextToken() != null) {
-            result.put("NextToken", page.nextToken());
-        }
+        result.put("NextToken", page.nextToken());
         return Response.ok(result).build();
     }
 
@@ -151,16 +132,5 @@ public class SesExportJobController {
         String region = regionResolver.resolveRegion(headers);
         exportJobService.cancelExportJob(region, jobId);
         return Response.ok(objectMapper.createObjectNode()).build();
-    }
-
-    /**
-     * The shared paginator orders by the cursor ascending, and AWS returns the newest job first, so
-     * the cursor counts time backwards. The job id breaks ties between jobs created in the same
-     * millisecond.
-     */
-    private static String cursor(ExportJob job) {
-        Instant created = job.getCreatedTimestamp();
-        long descending = Long.MAX_VALUE - (created == null ? 0L : created.toEpochMilli());
-        return String.format("%019d#%s", descending, job.getJobId());
     }
 }

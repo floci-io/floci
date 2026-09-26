@@ -19,6 +19,7 @@ import static org.hamcrest.Matchers.hasKey;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -395,7 +396,17 @@ class SesExportJobV2IntegrationTest {
     void malformedPagingAndResultLimitsAreRefused() {
         given().contentType("application/json").header("Authorization", AUTH)
                 .body("{\"PageSize\": \"ten\"}")
-        .when().post("/v2/email/list-export-jobs").then().statusCode(400);
+        .when().post("/v2/email/list-export-jobs").then().statusCode(400)
+                .body("__type", equalTo("SerializationException"));
+        // The body is deserialized before any member is validated, so a mistyped member wins.
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"JobStatus\": \"BOGUS\", \"PageSize\": \"ten\"}")
+        .when().post("/v2/email/list-export-jobs").then().statusCode(400)
+                .body("__type", equalTo("SerializationException"));
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"ExportSourceType\": \"BOGUS\", \"NextToken\": 5}")
+        .when().post("/v2/email/list-export-jobs").then().statusCode(400)
+                .body("__type", equalTo("SerializationException"));
 
         create("""
             {"ExportDataSource": {"MessageInsightsDataSource":
@@ -454,18 +465,21 @@ class SesExportJobV2IntegrationTest {
 
     @Test
     @Order(16)
-    void listExportJobs_acceptsAPageSizeAboveTheDefault() {
-        // PageSize carries no bound in the model, so a large page is a normal request.
-        given().contentType("application/json").header("Authorization", AUTH)
-                .body("{\"PageSize\": 250}")
-        .when().post("/v2/email/list-export-jobs").then().statusCode(200);
+    void listExportJobs_boundsPagingTheWaySesDoes() {
+        for (String size : new String[] {"0", "101", "250"}) {
+            given().contentType("application/json").header("Authorization", AUTH)
+                    .body("{\"PageSize\": %s}".formatted(size))
+            .when().post("/v2/email/list-export-jobs").then().statusCode(400)
+                    .body("__type", equalTo("BadRequestException"))
+                    .body("message", equalTo("PageSize must be between 1 and 100"));
+        }
+        for (String token : new String[] {"garbage", ""}) {
+            given().contentType("application/json").header("Authorization", AUTH)
+                    .body("{\"NextToken\": \"%s\"}".formatted(token))
+            .when().post("/v2/email/list-export-jobs").then().statusCode(400)
+                    .body("message", equalTo("Failed to deserialize token. "));
+        }
 
-        given().contentType("application/json").header("Authorization", AUTH)
-                .body("{\"PageSize\": 0}")
-        .when().post("/v2/email/list-export-jobs").then().statusCode(400);
-
-        // A page size at the int ceiling is clamped, not refused, and must not report a further
-        // page: the paginator adds the page size to the offset as an int.
         String token = given().contentType("application/json").header("Authorization", AUTH)
                 .body("{\"PageSize\": 1}")
         .when().post("/v2/email/list-export-jobs").then().statusCode(200)
@@ -473,9 +487,10 @@ class SesExportJobV2IntegrationTest {
         assertNotNull(token, "the fixture needs more than one job for this to mean anything");
 
         given().contentType("application/json").header("Authorization", AUTH)
-                .body("{\"PageSize\": 2147483647, \"NextToken\": \"%s\"}".formatted(token))
+                .body("{\"PageSize\": 100, \"NextToken\": \"%s\"}".formatted(token))
         .when().post("/v2/email/list-export-jobs").then().statusCode(200)
-                .body("$", not(hasKey("NextToken")));
+                .body("$", hasKey("NextToken"))
+                .body("NextToken", nullValue());
     }
 
     @Test
