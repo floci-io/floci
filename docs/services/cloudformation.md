@@ -417,6 +417,12 @@ A kept resource is reported as `DELETE_SKIPPED` in `DescribeStackEvents` and doe
 deletion — the stack still reaches `DELETE_COMPLETE` while the resource keeps existing. This also
 lets a stack owning a non-empty S3 bucket be deleted, since the bucket is never touched.
 
+Every other resource the stack manages is deleted, whatever status the last operation left it in:
+a stack in `UPDATE_ROLLBACK_FAILED` also deletes the resources its failed rollback left in
+`UPDATE_FAILED`. A `CREATE_FAILED` resource is deleted only when the stack created its backing
+entity, since a failed create can name an entity that existed before and belongs to someone else.
+A resource that cannot be deleted leaves the stack in `DELETE_FAILED`, named in the status reason.
+
 Deviations from AWS to be aware of:
 
 - `Snapshot` deletes the resource without taking a snapshot; floci has no snapshot support for the
