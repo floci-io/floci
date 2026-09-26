@@ -158,6 +158,42 @@ class ElbV2HealthCheckerTest {
     }
 
     @Test
+    void numericHealthCheckPortIsProbedInsteadOfTrafficPort() throws Exception {
+        HttpServer traffic = startServer(404);
+        HttpServer health = startServer(200);
+        try {
+            ElbV2HealthChecker checker = healthChecker();
+            TargetGroup targetGroup = targetGroup(traffic.actualPort(), "200", 1, 1);
+            targetGroup.setHealthCheckPort(String.valueOf(health.actualPort()));
+            TargetDescription target = target("127.0.0.1", traffic.actualPort());
+
+            checker.addTargets(targetGroup.getTargetGroupArn(), List.of(target), targetGroup);
+
+            await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> assertEquals(
+                    "healthy",
+                    checker.getHealth(targetGroup.getTargetGroupArn(), target.getId(), traffic.actualPort()).state()));
+        } finally {
+            close(traffic);
+            close(health);
+        }
+    }
+
+    @Test
+    void trafficPortKeywordOrInvalidPortProbesTargetPort() {
+        TargetGroup targetGroup = new TargetGroup();
+        targetGroup.setHealthCheckPort("traffic-port");
+        assertEquals(50051, ElbV2HealthChecker.healthCheckPort(targetGroup, 50051));
+        targetGroup.setHealthCheckPort(null);
+        assertEquals(50051, ElbV2HealthChecker.healthCheckPort(targetGroup, 50051));
+        targetGroup.setHealthCheckPort("8080");
+        assertEquals(8080, ElbV2HealthChecker.healthCheckPort(targetGroup, 50051));
+        targetGroup.setHealthCheckPort("70000");
+        assertEquals(50051, ElbV2HealthChecker.healthCheckPort(targetGroup, 50051));
+        targetGroup.setHealthCheckPort("not-a-port");
+        assertEquals(50051, ElbV2HealthChecker.healthCheckPort(targetGroup, 50051));
+    }
+
+    @Test
     void registrationStateCarriesAwsReasonUntilFirstProbeCompletes() {
         ElbV2HealthChecker checker = healthChecker();
 

@@ -357,6 +357,7 @@ public class ElbV2Service implements ResourceProvider {
                                           String matcher, String ipAddressType,
                                           Map<String, String> initialTags) {
         validateName(name, "target group");
+        validateHealthCheckPort(healthCheckPort);
         Map<String, TargetGroup> regionTgs = targetGroups.computeIfAbsent(region, k -> new ConcurrentHashMap<>());
         boolean duplicate = regionTgs.values().stream()
                 .anyMatch(tg -> tg.getTargetGroupName().equals(name));
@@ -450,6 +451,7 @@ public class ElbV2Service implements ResourceProvider {
                                    Integer healthCheckTimeout, Integer healthyThreshold,
                                    Integer unhealthyThreshold, String matcher) {
         TargetGroup tg = requireTargetGroup(region, arn);
+        validateHealthCheckPort(healthCheckPort);
         if (healthCheckProtocol != null) tg.setHealthCheckProtocol(healthCheckProtocol);
         if (healthCheckPort != null)     tg.setHealthCheckPort(healthCheckPort);
         if (healthCheckEnabled != null)  tg.setHealthCheckEnabled(healthCheckEnabled);
@@ -1054,6 +1056,17 @@ public class ElbV2Service implements ResourceProvider {
                     try { return Integer.parseInt(r.getPriority()); } catch (NumberFormatException e) { return Integer.MAX_VALUE; }
                 }))
                 .collect(Collectors.toList());
+    }
+
+    /** {@code HealthCheckPort} is either {@code traffic-port} or a port number from 1 to 65535. */
+    private static void validateHealthCheckPort(String healthCheckPort) {
+        if (healthCheckPort == null || "traffic-port".equals(healthCheckPort)) {
+            return;
+        }
+        if (ElbV2HealthChecker.parsePort(healthCheckPort) == null) {
+            throw new AwsException("ValidationError",
+                    "Health check port '" + healthCheckPort + "' must be 'traffic-port' or a port number from 1 to 65535.", 400);
+        }
     }
 
     private static void validateName(String name, String resource) {
