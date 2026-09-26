@@ -91,6 +91,9 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("RegionalDomainName", AwsEndpoints.s3RegionalHost(bucketName, ctx.region()));
         if (AwsPartitions.forRegionOrCommercial(ctx.region()).supportsS3DualStack(ctx.region())) {
             r.getAttributes().put("DualStackDomainName", AwsEndpoints.s3DualStackHost(bucketName, ctx.region()));
+        } else {
+            // An update arrives with the prior attributes already on the resource.
+            r.getAttributes().remove("DualStackDomainName");
         }
         r.getAttributes().put("WebsiteURL", AwsEndpoints.s3WebsiteUrl(bucketName, ctx.region()));
         r.getAttributes().put("BucketName", bucketName);

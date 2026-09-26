@@ -3,7 +3,9 @@ package io.github.hectorvent.floci.services.cloudtrail;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.github.hectorvent.floci.testutil.S3RequestSigner;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -15,6 +17,8 @@ import java.util.UUID;
 import java.util.zip.GZIPInputStream;
 
 import static io.restassured.RestAssured.given;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -36,21 +40,57 @@ class CloudTrailSelfDeliveryTest {
 
     @Test
     void trailWithBlanketSelectorCapturesItsOwnLogDeliveryAsDataEvent() throws Exception {
+        List<JsonNode> selfDeliveries = selfDeliveryPutRecords("us-east-1", "arn:aws:s3:::");
+
+        assertFalse(selfDeliveries.isEmpty(),
+                "Expected a PutObject record for the trail's own CloudTrail log delivery "
+                        + "(self-referential / circular-logging reproduction) but found none");
+    }
+
+    /**
+     * The log writer emits its own deliveries from the flush thread, outside any request, so the
+     * record's hosts and ARNs must come from the event's region: a China trail's delivery names a
+     * China host and ARN, not the deployment default's.
+     */
+    @Test
+    void selfDeliveryRecordNamesTheEventRegionsHostAndPartition() throws Exception {
+        List<JsonNode> selfDeliveries = selfDeliveryPutRecords("cn-north-1", "arn:aws-cn:s3:::");
+
+        assertFalse(selfDeliveries.isEmpty(), "no self-delivery record in cn-north-1");
+        for (JsonNode record : selfDeliveries) {
+            assertEquals("cn-north-1", record.path("awsRegion").asText());
+            String bucket = record.path("requestParameters").path("bucketName").asText();
+            assertEquals(bucket + ".s3.amazonaws.com.cn", record.path("requestParameters").path("Host").asText());
+            assertEquals(bucket + ".s3.amazonaws.com.cn",
+                    record.path("tlsDetails").path("clientProvidedHostHeader").asText());
+            for (JsonNode resource : record.path("resources")) {
+                assertTrue(resource.path("ARN").asText().startsWith("arn:aws-cn:s3:::" + bucket),
+                        "resource ARN: " + resource);
+            }
+        }
+    }
+
+    /**
+     * Creates a trail in {@code region} whose blanket S3 data-event selector matches its own
+     * destination bucket (the pathological "before" config, uc-build-loop: s3DataEvents true, no
+     * exclusions), flushes twice, and returns the PutObject records that describe the trail's own
+     * log-file writes. Delivery #1 writes a log file into the bucket; under the fix that write is
+     * itself a matching PutObject, so delivery #2 carries a record of it.
+     */
+    private List<JsonNode> selfDeliveryPutRecords(String region, String selectorArnPrefix) throws Exception {
         String suffix = UUID.randomUUID().toString().substring(0, 8);
         String bucket = "loop-logs-" + suffix;
         String trailName = "loop-trail-" + suffix;
+        S3RequestSigner s3 = S3RequestSigner.signedAs("test", "test").inRegion(region);
 
-        createBucket(bucket);
+        createBucket(bucket, s3);
 
-        invokeCloudTrail("CreateTrail", String.format("""
+        invokeCloudTrail(region, "CreateTrail", String.format("""
                 {"Name":"%s","S3BucketName":"%s"}
                 """, trailName, bucket))
             .then().statusCode(200);
 
-        // Blanket selector: every S3 object in every bucket, including the
-        // trail's own delivery bucket. This is the pathological "before"
-        // config (uc-build-loop): s3DataEvents true, no exclusions.
-        invokeCloudTrail("PutEventSelectors", String.format("""
+        invokeCloudTrail(region, "PutEventSelectors", String.format("""
                 {
                   "TrailName": "%s",
                   "EventSelectors": [
@@ -58,90 +98,72 @@ class CloudTrailSelfDeliveryTest {
                       "ReadWriteType": "All",
                       "IncludeManagementEvents": false,
                       "DataResources": [
-                        {"Type": "AWS::S3::Object", "Values": ["arn:aws:s3:::"]}
+                        {"Type": "AWS::S3::Object", "Values": ["%s"]}
                       ]
                     }
                   ]
                 }
-                """, trailName))
+                """, trailName, selectorArnPrefix))
             .then().statusCode(200);
 
-        invokeCloudTrail("StartLogging",
+        invokeCloudTrail(region, "StartLogging",
                 String.format("{\"Name\":\"%s\"}", trailName))
             .then().statusCode(200);
 
-        // Seed one real data event so the first flush has something to
-        // deliver.
-        putObject(bucket, "seed.txt", "seed");
+        // Seed one real data event so the first flush has something to deliver.
+        putObject(bucket, "seed.txt", "seed", s3);
 
-        // Delivery #1: writes a log file into `bucket`. Under the fix, that
-        // write is itself a PutObject matching the blanket selector, so it
-        // must be queued for delivery #2.
+        writer.flushNow();
         writer.flushNow();
 
-        // Delivery #2: should contain a record describing delivery #1's own
-        // log-file write, the self-referential loop.
-        writer.flushNow();
-
-        List<String> keys = new ArrayList<>();
-        for (String key : listKeys(bucket)) {
-            if (key.contains("/CloudTrail/") && key.endsWith(".json.gz")) {
-                keys.add(key);
-            }
-        }
-        assertTrue(keys.size() >= 2,
-                "Expected at least 2 delivered log files (seed delivery + self-referential delivery), got: "
-                        + keys);
-
-        boolean sawSelfReferentialPut = false;
         ObjectMapper mapper = new ObjectMapper();
-        for (String key : keys) {
-            byte[] gz = given().when().get("/" + bucket + "/" + key)
+        List<JsonNode> selfDeliveries = new ArrayList<>();
+        for (String key : listKeys(bucket, s3)) {
+            if (!key.contains("/CloudTrail/") || !key.endsWith(".json.gz")) {
+                continue;
+            }
+            byte[] gz = given().filter(s3).when().get("/" + bucket + "/" + key)
                     .then().statusCode(200).extract().asByteArray();
             byte[] json;
             try (GZIPInputStream gzin = new GZIPInputStream(new ByteArrayInputStream(gz))) {
                 json = gzin.readAllBytes();
             }
-            JsonNode records = mapper.readTree(json).get("Records");
-            for (JsonNode rec : records) {
-                String eventName = rec.path("eventName").asText();
-                String recBucket = rec.path("requestParameters").path("bucketName").asText(null);
-                String recKey = rec.path("requestParameters").path("key").asText("");
-                if ("PutObject".equals(eventName) && bucket.equals(recBucket)
+            for (JsonNode record : mapper.readTree(json).get("Records")) {
+                String recBucket = record.path("requestParameters").path("bucketName").asText(null);
+                String recKey = record.path("requestParameters").path("key").asText("");
+                if ("PutObject".equals(record.path("eventName").asText()) && bucket.equals(recBucket)
                         && recKey.contains("/CloudTrail/")) {
-                    sawSelfReferentialPut = true;
+                    selfDeliveries.add(record);
                 }
             }
         }
-
-        assertTrue(sawSelfReferentialPut,
-                "Expected a PutObject record for the trail's own CloudTrail log delivery "
-                        + "(self-referential / circular-logging reproduction) but found none in "
-                        + keys.size() + " delivered files");
+        return selfDeliveries;
     }
 
     // --- Helpers ---
 
-    private static io.restassured.response.Response invokeCloudTrail(String action, String body) {
+    private static Response invokeCloudTrail(String region, String action, String body) {
         return given()
             .header("X-Amz-Target", CT_TARGET + action)
+            .header("Authorization", "AWS4-HMAC-SHA256 Credential=test/20260101/" + region
+                    + "/cloudtrail/aws4_request, SignedHeaders=host, Signature=abc")
             .contentType(JSON11)
             .body(body)
         .when().post("/");
     }
 
-    private static void createBucket(String name) {
-        given().when().put("/" + name).then().statusCode(200);
+    private static void createBucket(String name, S3RequestSigner signer) {
+        given().filter(signer).when().put("/" + name).then().statusCode(200);
     }
 
-    private static void putObject(String bucket, String key, String body) {
-        given().body(body)
+    private static void putObject(String bucket, String key, String body, S3RequestSigner signer) {
+        given().filter(signer).body(body)
             .when().put("/" + bucket + "/" + key)
             .then().statusCode(200);
     }
 
-    private static List<String> listKeys(String bucket) {
-        String xml = given().when().get("/" + bucket + "?list-type=2")
+    private static List<String> listKeys(String bucket, S3RequestSigner signer) {
+        String xml = given().filter(signer).when().get("/" + bucket + "?list-type=2")
                 .then().statusCode(200).extract().asString();
         List<String> keys = new ArrayList<>();
         int from = 0;
