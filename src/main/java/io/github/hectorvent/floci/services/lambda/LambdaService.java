@@ -132,6 +132,7 @@ public class LambdaService implements ResourceProvider {
      * emulator workload.
      */
     private final ConcurrentHashMap<String, Object> concurrencyOpLocks = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Object> legacyReclaimLocks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Object> policyMutationLocks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Object> versionCounterLocks = new ConcurrentHashMap<>();
 
@@ -1024,12 +1025,14 @@ public class LambdaService implements ResourceProvider {
      * or $LATEST filter, matching the fact that the legacy path itself carries neither.
      */
     private void reclaimLegacyCodeDirectoryIfUnused(String functionName) {
-        String legacyPath = codeStore.getLegacyCodePath(functionName).toAbsolutePath().normalize().toString();
-        boolean stillLive = functionStore.listAll().stream()
-                .anyMatch(other -> functionName.equals(other.getFunctionName())
-                        && legacyPath.equals(other.getCodeLocalPath()));
-        if (!stillLive) {
-            codeStore.deleteLegacy(functionName);
+        synchronized (lockForLegacyReclaim(functionName)) {
+            String legacyPath = codeStore.getLegacyCodePath(functionName).toAbsolutePath().normalize().toString();
+            boolean stillLive = functionStore.listAll().stream()
+                    .anyMatch(other -> functionName.equals(other.getFunctionName())
+                            && legacyPath.equals(other.getCodeLocalPath()));
+            if (!stillLive) {
+                codeStore.deleteLegacy(functionName);
+            }
         }
     }
 
@@ -2690,6 +2693,10 @@ public class LambdaService implements ResourceProvider {
     /** Package-private (not private) so tests can hold this lock to prove a critical section waits for it. */
     Object lockForConcurrencyOp(String functionArn) {
         return concurrencyOpLocks.computeIfAbsent(functionArn, k -> new Object());
+    }
+
+    Object lockForLegacyReclaim(String functionName) {
+        return legacyReclaimLocks.computeIfAbsent(functionName, k -> new Object());
     }
 
     public LambdaFunction getFunctionByUrlId(String urlId) {

@@ -15,6 +15,8 @@ import java.nio.file.Path;
 import java.util.Base64;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -253,6 +255,44 @@ class LambdaAccountScopedCodeTest {
                 "a legacy directory another account's $LATEST still points at must survive this delete");
     }
 
+    @Test
+    void legacyReclaimSerializesSameNamedFunctionsAcrossAccounts(@TempDir Path baseDir) throws Exception {
+        CodeStore codeStore = new CodeStore(baseDir);
+        LambdaFunctionStore sharedStore = new LambdaFunctionStore(
+                AccountAwareStorageBackend.inMemory(ACCOUNT_A));
+
+        LambdaService service = new LambdaService(
+                sharedStore,
+                new WarmPool(),
+                codeStore,
+                new ZipExtractor(),
+                new RegionResolver(REGION, ACCOUNT_A));
+
+        // The legacy reclaim lock is keyed only by function name, not account ID.
+        // Therefore operations for same-named functions from different accounts must
+        // serialize through the same lock.
+        Object accountALock = service.lockForLegacyReclaim("shared-fn");
+        Object accountBLock = service.lockForLegacyReclaim("shared-fn");
+
+        assertSame(accountALock, accountBLock,
+                "same-named functions across accounts must share the legacy reclaim lock");
+
+        CompletableFuture<Void> waitingOperation;
+
+        synchronized (accountALock) {
+            waitingOperation = CompletableFuture.runAsync(() -> {
+                synchronized (accountBLock) {
+                    // Entering this block proves the shared lock was released.
+                }
+            });
+
+            assertThrows(TimeoutException.class,
+                    () -> waitingOperation.get(100, TimeUnit.MILLISECONDS),
+                    "a same-named function in another account must wait for the shared legacy reclaim lock");
+        }
+
+        waitingOperation.get(5, TimeUnit.SECONDS);
+    }
     private LambdaFunction functionOwnedBy(String accountId) {
         LambdaFunction fn = new LambdaFunction();
         fn.setAccountId(accountId);
