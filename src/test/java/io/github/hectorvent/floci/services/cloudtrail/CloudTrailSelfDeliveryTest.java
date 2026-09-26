@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudtrail;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.github.hectorvent.floci.testutil.S3RequestSigner;
 import io.quarkus.test.junit.QuarkusTest;
@@ -9,6 +10,7 @@ import io.restassured.response.Response;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.io.ByteArrayInputStream;
 import java.util.ArrayList;
@@ -37,6 +39,9 @@ class CloudTrailSelfDeliveryTest {
 
     @Inject
     CloudTrailLogWriter writer;
+
+    @RegisterExtension
+    final PartitionCleanup cleanup = new PartitionCleanup();
 
     @Test
     void trailWithBlanketSelectorCapturesItsOwnLogDeliveryAsDataEvent() throws Exception {
@@ -84,11 +89,17 @@ class CloudTrailSelfDeliveryTest {
         S3RequestSigner s3 = S3RequestSigner.signedAs("test", "test").inRegion(region);
 
         createBucket(bucket, s3);
+        // Runs last: the emulator is shared, and a leftover bucket shows up in every later
+        // cross-region listing (ResourceExplorer scans all resources).
+        cleanup.register(() -> deleteBucketAndObjects(bucket, s3));
 
         invokeCloudTrail(region, "CreateTrail", String.format("""
                 {"Name":"%s","S3BucketName":"%s"}
                 """, trailName, bucket))
             .then().statusCode(200);
+        // Runs first, so the writer stops delivering into the bucket before it is emptied.
+        cleanup.register(() -> invokeCloudTrail(region, "DeleteTrail",
+                String.format("{\"Name\":\"%s\"}", trailName)).then().statusCode(200));
 
         invokeCloudTrail(region, "PutEventSelectors", String.format("""
                 {
@@ -160,6 +171,13 @@ class CloudTrailSelfDeliveryTest {
         given().filter(signer).body(body)
             .when().put("/" + bucket + "/" + key)
             .then().statusCode(200);
+    }
+
+    private static void deleteBucketAndObjects(String bucket, S3RequestSigner signer) {
+        for (String key : listKeys(bucket, signer)) {
+            given().filter(signer).when().delete("/" + bucket + "/" + key).then().statusCode(204);
+        }
+        given().filter(signer).when().delete("/" + bucket).then().statusCode(204);
     }
 
     private static List<String> listKeys(String bucket, S3RequestSigner signer) {
