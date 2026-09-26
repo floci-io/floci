@@ -1,0 +1,7019 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Fast, free, open-source local AWS emulator">
+      
+      
+      
+        <link rel="canonical" href="https://floci.io/floci/services/ecs/">
+      
+      
+        <link rel="prev" href="../acm/">
+      
+      
+        <link rel="next" href="../ecr/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/floci.svg">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>ECS - Floci</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  
+  <script defer src="https://cloud.umami.is/script.js" data-website-id="b2ab8ccd-4619-4b94-bfa6-e8870961d6eb"></script>
+
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#ecs-elastic-container-service" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="Floci" class="md-header__button md-logo" aria-label="Floci" data-md-component="logo">
+      
+  <img src="../../assets/floci-header.svg" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Floci
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              ECS
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/floci-io/floci" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    floci-io/floci
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../getting-started/quick-start/" class="md-tabs__link">
+          
+  
+  
+  Getting Started
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../configuration/environment-variables/" class="md-tabs__link">
+          
+  
+  
+  Configuration
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+  Services
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../ui/" class="md-tabs__link">
+          
+  
+  
+  Web Console
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../testcontainers/" class="md-tabs__link">
+          
+  
+  
+  Testcontainers
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../contributing/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Contributing
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="Floci" class="md-nav__button md-logo" aria-label="Floci" data-md-component="logo">
+      
+  <img src="../../assets/floci-header.svg" alt="logo">
+
+    </a>
+    Floci
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/floci-io/floci" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    floci-io/floci
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/quick-start/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quick Start
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/aws-setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AWS CLI & SDK Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/terraform/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Terraform
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/migrate-from-localstack/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migrate from LocalStack
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Configuration
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/environment-variables/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Environment Variables
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/docker-images/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Docker Images
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/docker-compose/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Docker Compose
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/docker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Docker Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/ports/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ports Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/multi-account/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-Account Isolation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/partitions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AWS Partitions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/storage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Storage Modes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/tls/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    TLS / HTTPS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/initialization-hooks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Initialization Hooks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_11" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_11" id="__nav_3_11_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Advanced
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_11_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_11">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Advanced
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/advanced/application-yml/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    application.yml Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Services
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Services
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ssm/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SSM Parameter Store
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sqs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SQS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sns/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SNS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ses/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SES
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../s3/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    S3
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../s3tables/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    S3 Tables
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../s3vectors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    S3 Vectors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../efs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    EFS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../dynamodb/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DynamoDB
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../lambda/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Lambda
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../lambda-microvms/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Lambda MicroVMs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api-gateway/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Gateway
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cognito/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cognito
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cognitoidentity/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cognito Identity
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../globalaccelerator/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Global Accelerator
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kms/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    KMS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cloudhsmv2/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CloudHSM v2
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kinesis/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Kinesis
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kinesisanalytics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Managed Service for Apache Flink
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../secrets-manager/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Secrets Manager
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cloudformation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CloudFormation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cloudcontrol/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cloud Control API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../step-functions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Step Functions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../swf/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SWF
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../iam/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    IAM
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    STS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../organizations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Organizations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../account/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AWS Account Management
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../access-analyzer/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    IAM Access Analyzer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ssoadmin/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    IAM Identity Center (SSO Admin)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ssooidc/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    IAM Identity Center (OIDC)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ssoportal/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    IAM Identity Center (Access Portal)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../identitystore/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Identity Store
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../budgets/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AWS Budgets
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../macie2/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Amazon Macie
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../inspector2/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Amazon Inspector
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../securityhub/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security Hub
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../detective/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Amazon Detective
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../verifiedpermissions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Amazon Verified Permissions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../controlcatalog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Control Catalog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../marketplace/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AWS Marketplace
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../controltower/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Control Tower
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../service-catalog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AWS Service Catalog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../elasticache/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ElastiCache
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../memorydb/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MemoryDB
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../rds/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    RDS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../rds-data/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    RDS Data API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../timestream-influxdb/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Timestream for InfluxDB
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../msk/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MSK (Kafka)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../amazonmq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Amazon MQ
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../glue/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Glue
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../lakeformation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Lake Formation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../neptune/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Neptune
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../docdb/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DocumentDB
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../dms/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DMS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../athena/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Athena
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../redshift/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Redshift
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../redshift-data/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Redshift Data API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../redshift-serverless/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Redshift Serverless
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../firehose/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Data Firehose
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../eventbridge/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    EventBridge
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../pipes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    EventBridge Pipes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../scheduler/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    EventBridge Scheduler
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cloudwatch/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CloudWatch
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cloudwatch-metric-filters-verification/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CloudWatch Metric Filter Verification
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../oam/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CloudWatch OAM
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../rum/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CloudWatch RUM
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../managed-prometheus/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Managed Prometheus (AMP)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guardduty/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    GuardDuty
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../connect/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Connect
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../appintegrations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AppIntegrations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../dlm/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Amazon Data Lifecycle Manager
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../acm/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ACM
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ECS
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ECS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#supported-operations" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Supported Operations
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Supported Operations">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#clusters" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Clusters
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#task-definitions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Task Definitions
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#tasks" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Tasks
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#fargate" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fargate
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Fargate">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#capacity-providers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Capacity providers
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#task-metadata-endpoint" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Task metadata endpoint
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#ecs-exec" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ECS Exec
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#services" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Services
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Services">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#service-deployments" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Service deployments
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#ecs-eventbridge-events" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ECS EventBridge events
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#service-discovery" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Service discovery
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#unknown-services" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Unknown services
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#task-sets" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Task Sets
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#container-instances" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Container Instances
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#capacity-providers_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Capacity Providers
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#service-deployments-revisions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Service Deployments &amp; Revisions
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#tags" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Tags
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#account-settings-attributes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Account Settings &amp; Attributes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#agent-state-change-stubs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Agent / State Change Stubs
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Configuration">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#host-volume-safety" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Host volume safety
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#efs-volume-ownership" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        EFS volume ownership
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mock-mode" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Mock mode
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#docker-socket-requirement" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Docker socket requirement
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#host-access-to-awsvpc-task-ports" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Host access to awsvpc task ports
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#examples" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Examples
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#java-sdk-example" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Java SDK Example
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ecr/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ECR
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../resource-groups-tagging/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Resource Groups Tagging API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../resource-explorer/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Resource Explorer 2
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../eks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    EKS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../mwaa/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MWAA
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../opensearch/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OpenSearch
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ec2/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    EC2
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../lightsail/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Lightsail
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../appconfig/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AppConfig
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../bedrock/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Bedrock
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../bedrock-runtime/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Bedrock Runtime
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../bedrock-agentcore/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Bedrock AgentCore
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../elb/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ELB v2
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../elb-classic/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ELB Classic (v1)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../autoscaling/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Auto Scaling
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../applicationautoscaling/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Application Auto Scaling
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../elastic-beanstalk/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Elastic Beanstalk
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../codebuild/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CodeBuild
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../batch/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AWS Batch
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sagemaker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SageMaker
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../codedeploy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CodeDeploy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../codegurureviewer/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CodeGuru Reviewer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../codeartifact/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CodeArtifact
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../codepipeline/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CodePipeline
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../servicequotas/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Service Quotas
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ram/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AWS RAM
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../backup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AWS Backup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fis/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AWS FIS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cloudtrail/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CloudTrail
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cloudfront/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CloudFront
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../route53/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Route53
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../route53resolver/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Route 53 Resolver
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cloudmap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AWS Cloud Map
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../iot/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AWS IoT Core
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../appsync/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AppSync
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../transfer/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Transfer Family
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../datasync/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DataSync
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AWS Config
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../emr/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    EMR
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../emr-serverless/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    EMR Serverless
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../wafv2/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    WAF v2
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../network-firewall/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AWS Network Firewall
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../textract/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Textract
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../transcribe/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Transcribe
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../comprehend/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Comprehend
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../rekognition/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Rekognition
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../translate/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Translate
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../pricing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pricing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ce/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cost Explorer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cur/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cost and Usage Reports
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../bcm-pricing-calculator/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    BCM Pricing Calculator
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../bcm-data-exports/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    BCM Data Exports
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Web Console
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Web Console
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../ui/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../ui/console-contract/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Console Contract v1
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testcontainers
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Testcontainers
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testcontainers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testcontainers/java/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Java
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testcontainers/nodejs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Node.js / TypeScript
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testcontainers/python/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Python
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testcontainers/dotnet/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    .NET
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testcontainers/go/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Go
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#supported-operations" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Supported Operations
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Supported Operations">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#clusters" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Clusters
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#task-definitions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Task Definitions
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#tasks" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Tasks
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#fargate" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fargate
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Fargate">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#capacity-providers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Capacity providers
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#task-metadata-endpoint" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Task metadata endpoint
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#ecs-exec" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ECS Exec
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#services" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Services
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Services">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#service-deployments" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Service deployments
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#ecs-eventbridge-events" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ECS EventBridge events
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#service-discovery" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Service discovery
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#unknown-services" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Unknown services
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#task-sets" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Task Sets
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#container-instances" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Container Instances
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#capacity-providers_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Capacity Providers
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#service-deployments-revisions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Service Deployments &amp; Revisions
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#tags" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Tags
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#account-settings-attributes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Account Settings &amp; Attributes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#agent-state-change-stubs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Agent / State Change Stubs
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Configuration">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#host-volume-safety" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Host volume safety
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#efs-volume-ownership" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        EFS volume ownership
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mock-mode" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Mock mode
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#docker-socket-requirement" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Docker socket requirement
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#host-access-to-awsvpc-task-ports" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Host access to awsvpc task ports
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#examples" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Examples
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#java-sdk-example" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Java SDK Example
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="ecs-elastic-container-service">ECS (Elastic Container Service)</h1>
+<p><strong>Protocol:</strong> JSON 1.1
+<strong>Endpoint:</strong> <code>POST /</code> + <code>X-Amz-Target: AmazonEC2ContainerServiceV20141113.&lt;Action&gt;</code></p>
+<p>ECS emulates clusters, task definitions, tasks, and services. In the default configuration tasks run as real Docker containers. Set <code>mock: true</code> (enabled automatically in tests) to run tasks as in-process stubs without Docker.</p>
+<p>A value an enum-typed member does not have is rejected with <code>InvalidParameterException</code> rather
+than treated as absent. That matters more than it sounds: a <code>launchType</code> of <code>EC22</code> silently
+ignored would fall through to Floci's default and place the task on Fargate, which is neither
+what the caller asked for nor what AWS answers.</p>
+<h2 id="supported-operations">Supported Operations</h2>
+<h3 id="clusters">Clusters</h3>
+<table>
+<thead>
+<tr>
+<th>Operation</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>CreateCluster</code></td>
+<td>Create a cluster (idempotent)</td>
+</tr>
+<tr>
+<td><code>DescribeClusters</code></td>
+<td>Describe one or more clusters</td>
+</tr>
+<tr>
+<td><code>ListClusters</code></td>
+<td>List cluster ARNs</td>
+</tr>
+<tr>
+<td><code>UpdateCluster</code></td>
+<td>Update cluster settings</td>
+</tr>
+<tr>
+<td><code>UpdateClusterSettings</code></td>
+<td>Update <code>containerInsights</code> and other settings</td>
+</tr>
+<tr>
+<td><code>PutClusterCapacityProviders</code></td>
+<td>Associate capacity providers with a cluster</td>
+</tr>
+<tr>
+<td><code>DeleteCluster</code></td>
+<td>Delete an empty cluster</td>
+</tr>
+</tbody>
+</table>
+<p>A cluster round-trips what it was created with: <code>settings</code>, <code>tags</code>, <code>configuration</code>,
+<code>serviceConnectDefaults</code>, <code>capacityProviders</code> and <code>defaultCapacityProviderStrategy</code> are all
+accepted on <code>CreateCluster</code> and returned as sent. <code>UpdateCluster</code> replaces only the members the
+request named, leaving the ones it omits alone; <code>UpdateClusterSettings</code> replaces <code>settings</code>
+outright.</p>
+<p><code>DescribeClusters</code> returns <code>settings</code>, <code>tags</code>, <code>statistics</code>, <code>attachments</code> and <code>configuration</code>
+only when <code>include</code> asks for them, one of <code>SETTINGS</code>, <code>TAGS</code>, <code>STATISTICS</code>, <code>ATTACHMENTS</code> and
+<code>CONFIGURATIONS</code>; any other value is rejected. A member that was asked for is returned even when
+it is empty, so a client can tell an empty answer from a withheld one. <code>STATISTICS</code> reports the
+eight documented counts split by launch type (<code>runningEC2TasksCount</code>, <code>runningFargateTasksCount</code>,
+<code>pendingEC2TasksCount</code>, <code>pendingFargateTasksCount</code>, <code>activeEC2ServiceCount</code>,
+<code>activeFargateServiceCount</code>, <code>drainingEC2ServiceCount</code>, <code>drainingFargateServiceCount</code>) as
+name/value strings. The API reference spells one of those names <code>RunningFargateTasksCount</code>; Floci
+follows the wire, which is lower camel case like the other seven. <code>ATTACHMENTS</code> is always an empty
+list, because Floci creates no managed scaling policies to attach.</p>
+<p><code>DescribeClusters</code> reports a cluster it cannot resolve as a <code>MISSING</code> entry in <code>failures</code> rather
+than dropping it, as <code>DescribeServices</code> and <code>DescribeTasks</code> do. <code>ListClusters</code> pages with
+<code>maxResults</code> (1 to 100) and <code>nextToken</code>, returning up to 100 ARNs when the request names neither.</p>
+<p><code>DeleteCluster</code> only deletes an empty cluster, and says which way it is not empty:
+<code>ClusterContainsServicesException</code> while a service is still <code>ACTIVE</code>,
+<code>ClusterContainsContainerInstancesException</code> while a container instance is still registered, and
+<code>ClusterContainsTasksException</code> while a task is still running. Delete the services, deregister the
+instances and stop the tasks first, as on AWS.</p>
+<h3 id="task-definitions">Task Definitions</h3>
+<table>
+<thead>
+<tr>
+<th>Operation</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>RegisterTaskDefinition</code></td>
+<td>Register a new revision of a task definition</td>
+</tr>
+<tr>
+<td><code>DescribeTaskDefinition</code></td>
+<td>Describe a task definition by family:revision or ARN</td>
+</tr>
+<tr>
+<td><code>ListTaskDefinitions</code></td>
+<td>List task definition ARNs</td>
+</tr>
+<tr>
+<td><code>ListTaskDefinitionFamilies</code></td>
+<td>List task definition family names</td>
+</tr>
+<tr>
+<td><code>DeregisterTaskDefinition</code></td>
+<td>Mark a revision INACTIVE</td>
+</tr>
+<tr>
+<td><code>DeleteTaskDefinitions</code></td>
+<td>Delete one or more task definitions</td>
+</tr>
+</tbody>
+</table>
+<p>A task definition round-trips whole. Members Floci acts on are modelled
+(<code>ephemeralStorage</code>, <code>pidMode</code>, <code>ipcMode</code>, <code>runtimePlatform</code>, and at container level <code>dependsOn</code>,
+<code>startTimeout</code>, <code>stopTimeout</code>, <code>user</code>, <code>workingDirectory</code>, <code>readonlyRootFilesystem</code>,
+<code>environmentFiles</code>, <code>dockerLabels</code>, <code>repositoryCredentials</code> and the rest); everything else it does
+not act on, such as <code>proxyConfiguration</code>, <code>linuxParameters</code>, <code>ulimits</code>, <code>resourceRequirements</code>,
+<code>systemControls</code> and placement constraints, is kept verbatim and returned as registered. A client
+that reads back what it wrote (Terraform, or a deploy tool verifying its own
+<code>RegisterTaskDefinition</code>) sees no drift. <code>runtimePlatform</code> does not change where a local task
+runs: Floci launches every task on the host's own architecture.</p>
+<p>The round trip reaches inside the members Floci does parse. A port mapping keeps its <code>name</code>,
+<code>appProtocol</code> and <code>containerPortRange</code>, which is what a service's <code>serviceConnectConfiguration</code>
+and <code>vpcLatticeConfigurations</code> reference by name, and a volume keeps the configurations Floci
+backs with nothing: <code>dockerVolumeConfiguration</code>, <code>fsxWindowsFileServerVolumeConfiguration</code>,
+<code>s3filesVolumeConfiguration</code> and <code>configuredAtLaunch</code>.</p>
+<p><code>compatibilities</code> is derived from the definition rather than echoed from
+<code>requiresCompatibilities</code>: ECS reports the launch types a definition actually works on, so an
+<code>awsvpc</code> definition with a valid Fargate size pair and no Fargate-unsupported parameters comes
+back as <code>["EC2", "FARGATE"]</code> even when it never asked for FARGATE. <code>EXTERNAL</code> is added for any
+network mode other than <code>awsvpc</code>, which ECS Anywhere instances do not support. The derivation runs
+Fargate's own registration rules, so it can never disagree with what <code>requiresCompatibilities:
+["FARGATE"]</code> would have accepted.</p>
+<p><code>requiresAttributes</code> names the container instance capabilities the definition needs for EC2
+placement. ECS derives these from the container agent's capability model, which AWS does not
+publish in full, so Floci derives the subset whose names appear verbatim in the AWS documentation:
+the base <code>com.amazonaws.ecs.capability.docker-remote-api.1.18</code>, <code>ecs.capability.task-eni</code> for
+<code>awsvpc</code>, <code>com.amazonaws.ecs.capability.task-iam-role</code> (or
+<code>...task-iam-role-network-host</code> under <code>host</code> networking) for a <code>taskRoleArn</code>,
+<code>com.amazonaws.ecs.capability.logging-driver.&lt;driver&gt;</code> per container log driver,
+<code>com.amazonaws.ecs.capability.ecr-auth</code> for an ECR image, and
+<code>com.amazonaws.ecs.capability.privileged-container</code>. Capabilities outside that set are not
+reported.</p>
+<p>A revision goes ACTIVE, then INACTIVE on <code>DeregisterTaskDefinition</code> (which stamps
+<code>deregisteredAt</code>), then <code>DELETE_IN_PROGRESS</code> on <code>DeleteTaskDefinitions</code> (which stamps
+<code>deleteRequestedAt</code>). Deleting a revision that has not been deregistered is refused, as is a
+reference that names only the family: <code>DeleteTaskDefinitions</code> takes a revision, at most 10 per
+call. A deleted revision is not dropped, because AWS keeps describing it and the tasks already on
+it keep running; it just cannot start anything new, so <code>RunTask</code>, <code>CreateService</code> and
+<code>UpdateService</code> refuse it.</p>
+<p><code>ListTaskDefinitions</code> lists only <code>ACTIVE</code> revisions unless another <code>status</code> is asked for, orders
+them lexicographically by family and then numerically by revision (<code>sort: DESC</code> reverses it, so
+revision 11 sorts after revision 2 rather than before it), and pages with <code>maxResults</code> and
+<code>nextToken</code>.</p>
+<p><code>ListTaskDefinitionFamilies</code> filters on <code>familyPrefix</code> and on <code>status</code>, where <code>ACTIVE</code> keeps the
+families with at least one ACTIVE revision, <code>INACTIVE</code> the families with none, and <code>ALL</code> (the
+default) keeps both. It pages with <code>maxResults</code> and <code>nextToken</code> the same way.</p>
+<p>At launch, a container's <code>dependsOn</code> decides the start order, and a <code>COMPLETE</code>, <code>SUCCESS</code> or
+<code>HEALTHY</code> condition holds the dependent container until the dependency gets there. The wait is
+bounded by the dependent container's <code>startTimeout</code>, defaulting to 60 seconds rather than AWS's
+longer agent default, because <code>RunTask</code> here answers synchronously. A container's <code>cpu</code> becomes its
+CPU shares, its <code>memory</code> its hard limit, and a container without a <code>memory</code> of its own is capped at
+the task's; the task's <code>cpu</code> becomes a CPU quota. <code>stopTimeout</code> is the grace period the container gets
+on teardown; a container that does not ask for one gets 5 seconds rather than AWS's 30, because
+<code>StopTask</code> here answers synchronously and most containers ignore SIGTERM as PID 1. A container
+still running when its grace period is up is killed, so its exit code is always reported.</p>
+<p><code>firelensConfiguration</code> is stored and returned the same way. <code>RegisterTaskDefinition</code> rejects a
+missing or unsupported <code>type</code> (<code>fluentd</code> and <code>fluentbit</code> only), and a task using <code>awsfirelens</code>
+must name exactly one router: a task definition with two FireLens routers, or a router publishing
+port <code>24224</code>, is rejected at launch. A <code>fluentbit</code> or <code>fluentd</code> FireLens
+container is acted on at launch: Floci generates the router config (unix socket input, TCP forward
+on bridge/awsvpc, ECS metadata, optional include of a <code>config-file-type=file</code> or <code>s3</code> extra
+config, and one output per <code>awsfirelens</code> container), starts that router first, and points application
+containers with <code>logDriver: awsfirelens</code> at the generated unix socket. Other log drivers,
+including <code>awslogs</code>, still stream to CloudWatch via Floci rather than the configured driver.
+An <code>[OUTPUT]</code> for an AWS destination whose plugin reads a URL from <code>endpoint</code> (<code>s3</code>,
+<code>cloudwatch</code>, <code>firehose</code>) also gets <code>Endpoint</code> set to Floci's container-reachable base URL. The
+Fluent Bit AWS plugins take a custom endpoint only from their own configuration and ignore the
+<code>AWS_ENDPOINT_URL</code> injected into the container, so without it the router would ship logs to the
+real service. An <code>endpoint</code> set in the task definition's log options is never overwritten, so
+aiming one output at real AWS still works, and outputs declared in an <code>@INCLUDE</code>d or
+<code>config-file-type=s3</code> config are not visible to Floci and keep whatever endpoint they were
+written with.
+The upstream C plugins (<code>cloudwatch_logs</code>, <code>kinesis_firehose</code>, <code>kinesis_streams</code>) are left
+alone instead. They hand <code>endpoint</code> to <code>getaddrinfo</code> as a bare host name rather than parsing it as
+a URL, and they always dial TLS, so Floci's <code>http://host:port</code> base URL fails there as
+<code>Misformatted domain name</code> and a bare host fails certificate verification; no output-level switch
+disables either. On the <code>aws-for-fluent-bit</code> 3.x line these plugins also honour a separate <code>port</code>
+(undocumented for <code>kinesis_firehose</code> and <code>cloudwatch_logs</code>, but it works), so an output can be
+aimed at Floci's port, but it still cannot complete the TLS handshake. Those outputs go wherever
+the task definition points them.
+An injected <code>http://</code> endpoint also gets <code>tls Off</code>. Fluent Bit 1.9 (the <code>aws-for-fluent-bit</code> 2.x
+and <code>:latest</code> line) still calls <code>flb_tls_session_create</code> on HTTP S3 and SIGSEGVs on a NULL
+TLS context; the scheme alone is not enough. A <code>tls</code> the task definition already set is left
+alone.
+The TCP forward listens on <code>0.0.0.0</code> rather than AWS's awsvpc <code>127.0.0.1</code> because Floci only
+shares a network namespace when security-group enforcement is enabled for an awsvpc task. In every
+other case, the injected <code>FLUENT_HOST</code> (the router's container IP) must be reachable. Fluent Bit
+config is written to <code>/fluent-bit/etc/fluent-bit.conf</code>. Fluentd config is
+written to <code>/fluentd/etc/fluent.conf</code> and uses <code>@type</code> (not <code>Name</code>) for output plugins; Floci
+does not inject an <code>endpoint</code> into Fluentd outputs.
+<code>config-file-type=s3</code> follows where ECS itself draws the line. <code>RegisterTaskDefinition</code> rejects
+it for a Fargate-compatible task definition, with <code>Fargate launch type does not support
+FirelensConfiguration config file from 's3'</code>, and rejects a <code>config-file-value</code> that is not an S3
+object ARN with <code>Invalid arn syntax</code>. A Fargate task can still take its config from S3 the way AWS
+documents, by giving the aws-for-fluent-bit init process its <code>aws_fluent_bit_init_s3_*</code>
+environment variables. ECS never inspects those and Floci passes them through, so that
+registration is accepted here too; the init process reads the task metadata endpoint before
+downloading, and Floci serves one (see <a href="#task-metadata-endpoint">Task metadata endpoint</a>).
+Floci does not validate a task definition's <code>compatibilities</code> /
+<code>requiresCompatibilities</code> against <code>RunTask</code> <code>launchType</code>; a Fargate-compatible
+definition can still be run with <code>launchType=EC2</code> (and the reverse).
+On an EC2-compatible task definition Floci reads the object from its own S3, writes it to the
+fixed <code>external.conf</code> path next to the generated config (<code>/fluent-bit/etc/external.conf</code> or
+<code>/fluentd/etc/external.conf</code>), and includes it from there, matching the paths the ECS agent uses.
+The object is read before any container is created, so a missing bucket or key stops the task with
+the agent's reason, <code>Unable to download firelens s3 config file: unable to download s3 config
+&lt;key&gt; from bucket &lt;bucket&gt;: &lt;detail&gt;</code>, instead of leaking a started router. Shared network
+namespaces (AppConfig agent on <code>127.0.0.1:2772</code>) are not implemented.</p>
+<p>Container <code>volumesFrom</code> entries are also stored and returned. In Docker mode, source containers
+are launched before their consumers and their declared volumes are inherited with the requested
+read-only or read-write access mode. Startup ordering also respects FireLens router dependencies;
+cycles involving both volume inheritance and log routing are rejected before containers start.</p>
+<h3 id="tasks">Tasks</h3>
+<table>
+<thead>
+<tr>
+<th>Operation</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>RunTask</code></td>
+<td>Launch one or more task instances</td>
+</tr>
+<tr>
+<td><code>StartTask</code></td>
+<td>Start a task on specific container instances</td>
+</tr>
+<tr>
+<td><code>StopTask</code></td>
+<td>Stop a running task</td>
+</tr>
+<tr>
+<td><code>DescribeTasks</code></td>
+<td>Describe one or more tasks</td>
+</tr>
+<tr>
+<td><code>ListTasks</code></td>
+<td>List task ARNs (filterable by cluster, family, service, status)</td>
+</tr>
+<tr>
+<td><code>UpdateTaskProtection</code></td>
+<td>Set scale-in protection for tasks</td>
+</tr>
+<tr>
+<td><code>GetTaskProtection</code></td>
+<td>Get current task protection state</td>
+</tr>
+<tr>
+<td><code>ExecuteCommand</code></td>
+<td>Open an ECS Exec session into a container (see <a href="#ecs-exec">ECS Exec</a>)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="fargate">Fargate</h3>
+<p>A task definition that declares <code>FARGATE</code> in <code>requiresCompatibilities</code> is held to Fargate's rules
+at registration:</p>
+<ul>
+<li><code>awsvpc</code> network mode.</li>
+<li>A task-level <code>cpu</code> and <code>memory</code> forming one of the documented pairs, from 256 CPU units through
+  32768 (the 32 vCPU tier offers only 60 GB, 120 GB and 244 GB), in CPU units or the <code>1 vCPU</code> and
+  <code>1 GB</code> string forms. Windows rules out the sub-vCPU sizes.</li>
+<li>An <code>ephemeralStorage.sizeInGiB</code> between 21 and 200.</li>
+<li>None of the parameters that are not valid in a Fargate task: <code>disableNetworking</code>,
+  <code>dnsSearchDomains</code>, <code>dnsServers</code>, <code>dockerSecurityOptions</code>, <code>extraHosts</code>, a <code>GPU</code>
+  <code>resourceRequirements</code> entry, <code>ipcMode</code>, <code>links</code>, <code>placementConstraints</code>, <code>privileged</code>,
+  <code>linuxParameters.maxSwap</code>, <code>linuxParameters.swappiness</code>, a <code>pidMode</code> other than <code>task</code>, or a
+  host volume with a <code>sourcePath</code>. All of them are accepted on an EC2-compatible definition.</li>
+<li>A <code>dependsOn</code> graph that names only containers of the same task definition and has no cycle.</li>
+</ul>
+<p>A launched Fargate task reports what AWS reports: <code>platformVersion</code> (with <code>LATEST</code> resolved to a
+concrete version, as AWS resolves it) and <code>platformFamily</code> (<code>Linux</code>, or the Windows Server family
+from the task definition's <code>runtimePlatform.operatingSystemFamily</code>), <code>connectivity</code> and
+<code>connectivityAt</code>, <code>healthStatus</code>, <code>stopCode</code>, <code>version</code>, <code>availabilityZone</code>, <code>attributes</code> with
+<code>ecs.cpu-architecture</code>, <code>pullStartedAt</code> / <code>pullStoppedAt</code> / <code>stoppingAt</code> / <code>executionStoppedAt</code>,
+<code>ephemeralStorage</code> and <code>fargateEphemeralStorage</code>, and <code>enableExecuteCommand</code>. <code>overrides</code> is
+always present with one <code>containerOverrides</code> entry per container, carrying whatever the request
+overrode, which is how AWS answers a task nobody overrode. <code>group</code> defaults to <code>family:&lt;family&gt;</code>
+for a <code>RunTask</code> and is <code>service:&lt;name&gt;</code> for a service's tasks. A container that asked for no CPU
+units reports <code>"cpu": "0"</code>, as on AWS.</p>
+<p>A task's <code>attachments</code> entry is an <code>ElasticNetworkInterface</code> carrying <code>subnetId</code>,
+<code>networkInterfaceId</code>, <code>macAddress</code>, <code>privateDnsName</code> and <code>privateIPv4Address</code>. <code>DescribeTasks</code> and
+<code>DescribeServices</code> report tags only when the request asks for them with <code>include: ["TAGS"]</code>, as
+<code>DescribeTaskDefinition</code> already did. A task <code>DescribeTasks</code> cannot resolve comes back as a
+<code>MISSING</code> entry in <code>failures</code>, which is what the <code>TasksRunning</code> and <code>TasksStopped</code> waiters treat
+as terminal.</p>
+<p>A created service reports the documented defaults: <code>propagateTags</code> is <code>NONE</code> and
+<code>healthCheckGracePeriodSeconds</code> is <code>0</code> when the request sets neither. A <code>role</code> is accepted only on
+a load-balanced service whose task definition does not use <code>awsvpc</code>, which is the only case AWS
+permits it in.</p>
+<p>A described service always carries <code>events</code> and <code>taskSets</code>, empty list and all, so a client can
+tell an empty answer from a member Floci never wrote. <code>taskSets</code> holds the service's task sets, the
+same ones <code>DescribeTaskSets</code> returns, which is where a blue/green deploy tool reads them from.
+<code>events</code> is derived from the service's current state rather than replayed from a rollout, the same
+way <code>deployments</code> is: a service that has converged reports the one event tools poll for,
+<code>(service &lt;name&gt;) has reached a steady state.</code>, with an id stable across calls; one still
+converging reports none. Each <code>deployments</code> entry carries the placement it runs under, its
+<code>launchType</code> or <code>capacityProviderStrategy</code>, <code>platformVersion</code>, <code>platformFamily</code> and
+<code>networkConfiguration</code>, not only its id and counts.</p>
+<p><code>RunTask</code> places at most 10 tasks per call and rejects <code>propagateTags: SERVICE</code>, which is a
+service-only option; <code>TASK_DEFINITION</code> copies the task definition's tags onto each task.
+<code>StartTask</code> requires the <code>containerInstances</code> it places onto, at most 10 of them.</p>
+<p><code>ListTasks</code> filters by <code>cluster</code>, <code>family</code>, <code>desiredStatus</code>, <code>launchType</code>, <code>containerInstance</code>,
+<code>serviceName</code> and <code>startedBy</code>, and pages with <code>maxResults</code> and <code>nextToken</code> (100 per page by
+default). The default filter is a desired status of <code>RUNNING</code>, so a listing that has not asked for
+stopped tasks does not get them, <code>PENDING</code> matches nothing (ECS never sets that desired status),
+and <code>startedBy</code> has to be the only filter in the request.</p>
+<p>On <code>UpdateService</code>, the changes that start new tasks roll the deployment: the task definition, the
+network configuration, the load balancers, the service registries, the Service Connect
+configuration, <code>platformVersion</code> and <code>forceNewDeployment</code>. The ones AWS documents as not
+triggering a deployment (<code>desiredCount</code>, <code>deploymentConfiguration</code>, <code>enableExecuteCommand</code>,
+<code>enableECSManagedTags</code>, <code>propagateTags</code>, <code>healthCheckGracePeriodSeconds</code>,
+<code>availabilityZoneRebalancing</code>, the capacity provider strategy and the placement members) are
+applied without rolling anything. An update replaces only the members it names: one that sends
+<code>placementStrategy</code> alone leaves a <code>placementConstraints</code> stored earlier in place, and an empty
+array clears a member the way AWS clears it.</p>
+<p>When a service replaces or stops a task in Docker mode, the task remains <code>STOPPING</code> until its
+containers are removed. A failed Docker removal is retried on later reconciliation ticks, so the
+task is not reported as <code>STOPPED</code> while its container may still be serving.</p>
+<p>Every <code>awsvpc</code> task gets a real ENI in the subnet it asked for, in Docker and in mock mode alike,
+and reports it as an <code>attachments</code> entry with its <code>networkInterfaceId</code>, <code>privateIPv4Address</code> and
+<code>subnetId</code>; the task's containers report the same interface in <code>networkInterfaces</code>. A subnet that
+does not exist fails the request rather than being ignored. While the task runs, <code>ec2
+DescribeNetworkInterfaces</code> reports that ENI as <code>in-use</code> and refuses to delete it, so it never
+answers a search for a free interface; it carries no EC2 attachment, every member of one naming an
+instance that a task does not have. The ECS attachment is reported as <code>DELETED</code> once the task
+stops, and the ENI is released. Security-group enforcement
+(<code>FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED</code>) adds packet filtering on top of the ENI; it is
+not needed for the ENI itself.</p>
+<h4 id="capacity-providers">Capacity providers</h4>
+<p><code>capacityProviderStrategy</code> is honoured on <code>RunTask</code> and <code>CreateService</code>, including the built-in
+<code>FARGATE</code> and <code>FARGATE_SPOT</code> providers. Tasks are spread the way ECS spreads them: the single entry
+that declares a <code>base</code> is filled first, then the rest are split by weight, with the remainder of
+the integer split going to the heaviest entries. A strategy and a <code>launchType</code> in the same request
+are rejected, as is an unknown provider or a second <code>base</code>, and a cluster's
+<code>defaultCapacityProviderStrategy</code> applies when a request carries neither. The documented bounds
+are enforced: at most 20 providers in a strategy, a <code>weight</code> of 0 to 1,000 and a <code>base</code> of 0 to
+100,000. A provider of <code>weight</code> 0 places nothing beyond its base, so a strategy naming several
+providers that all weigh 0 is rejected; a lone provider of <code>weight</code> 0 still places the tasks,
+since the request named no alternative.</p>
+<p>A task placed through a provider reports <code>capacityProviderName</code> <strong>and</strong> the <code>launchType</code> that
+provider resolves to. A service reports one or the other: <code>DescribeServices</code> omits <code>launchType</code>
+for a service created with a strategy, and omits <code>capacityProviderStrategy</code> for one created with a
+launch type, which is what AWS documents for the <code>Service</code> shape.</p>
+<p>With no launch type, no strategy and no cluster default, a task keeps Floci's <code>FARGATE</code> default: a
+local cluster has no container instances, so an EC2 default would have nowhere to place it.</p>
+<h4 id="task-metadata-endpoint">Task metadata endpoint</h4>
+<p>Floci serves the <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-metadata-endpoint-v4-fargate.html">task metadata endpoint version
+4</a>
+and injects <code>ECS_CONTAINER_METADATA_URI_V4</code> into every container it launches. AWS serves it on the
+link-local address <code>169.254.170.2</code>, which a local container cannot be given, so Floci serves the
+same paths on its own port; applications and the AWS SDKs read the environment variable rather than
+the address, so they work unchanged.</p>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Returns</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>/v4/{id}</code></td>
+<td>The container's metadata</td>
+</tr>
+<tr>
+<td><code>/v4/{id}/task</code></td>
+<td>The task's metadata, including every container</td>
+</tr>
+<tr>
+<td><code>/v4/{id}/taskWithTags</code></td>
+<td>The task's metadata with its tags and its container instance's (EC2 only)</td>
+</tr>
+<tr>
+<td><code>/v4/{id}/stats</code></td>
+<td>The container's Docker stats</td>
+</tr>
+<tr>
+<td><code>/v4/{id}/task/stats</code></td>
+<td>The Docker stats of every container in the task, keyed by Docker id</td>
+</tr>
+</tbody>
+</table>
+<p>The <code>{id}</code> is minted per container at launch, as the ECS agent mints it. The task document carries
+<code>Cluster</code>, <code>TaskARN</code>, <code>Family</code>, <code>Revision</code>, the statuses, <code>Limits</code> (CPU in vCPUs), the pull
+timestamps, <code>AvailabilityZone</code>, <code>LaunchType</code>, <code>ServiceName</code> for a service's task, <code>VPCID</code> for an
+EC2 task, and, for Fargate, <code>ClockDrift</code> and <code>EphemeralStorageMetrics</code>. Floci has no clock drift to
+report and does not meter the disk, so those two report a synchronized clock and zero usage.</p>
+<p>An <code>awsvpc</code> container's <code>Networks</code> object describes the task ENI and the subnet it sits in:
+<code>NetworkMode</code>, <code>IPv4Addresses</code>, <code>AttachmentIndex</code>, <code>MACAddress</code>, <code>PrivateDNSName</code>,
+<code>IPv4SubnetCIDRBlock</code>, <code>SubnetGatewayIpv4Address</code>, <code>DomainNameServers</code> and <code>DomainNameSearchList</code>.
+A local ENI has no DHCP option set behind it, so the gateway is derived as the first address of the
+subnet's CIDR, the resolver as the third address of the VPC's, and the search domain from the
+region, the way a real VPC assigns them.</p>
+<p>The stats paths read the Docker daemon when the request arrives, so they return the same
+<a href="https://docs.docker.com/engine/api/v1.30/#operation/ContainerStats">ContainerStats</a> document AWS
+returns, plus the <code>network_rate_stats</code> the ECS agent adds. Docker reports cumulative counters only,
+so the rates are taken across two consecutive samples: as on Fargate, that means a container has to
+have run for about a second before its stats are there. A container Floci has no running Docker
+container for reports an empty document instead, and one sampled only once reports its stats
+without <code>network_rate_stats</code>: the path exists for every container in the task, whether or not the
+daemon can measure it.</p>
+<p><code>/v4/{id}/task/stats</code> samples the task's containers in one pass, with every stream open at once,
+rather than one after another. A sidecar polls that path for network metrics, so the response costs
+about the single collection tick one container costs however many containers the task has.</p>
+<p><code>taskWithTags</code> is the container agent's path, so it answers for an EC2 task and 404s for a Fargate
+one, as on AWS. A container's <code>CreatedAt</code>, <code>StartedAt</code> and <code>FinishedAt</code> are Docker's own for that
+container, read when it starts and again when it stops; a task that never reached a daemon, which
+means <code>mock: true</code> or one restored from storage, reports the task's timestamps instead.</p>
+<h4 id="ecs-exec">ECS Exec</h4>
+<p><code>ExecuteCommand</code> opens a real shell in a task's container. The session must be <code>interactive</code>, which
+is the only mode ECS supports. The task must belong to the cluster the request names, must be
+<code>RUNNING</code>, must have been run with
+<code>enableExecuteCommand</code>, and must have a container behind it, which means Docker mode:
+a mock-mode task reports the <code>ExecuteCommandAgent</code> as running but has no runtime to exec into, and
+<code>ExecuteCommand</code> answers <code>TargetNotConnectedException</code>.</p>
+<p>The response carries a <code>session</code> with a <code>streamUrl</code> pointing at Floci's own data channel and a
+single-use <code>tokenValue</code>, so the AWS CLI works as documented:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>aws<span class="w"> </span>ecs<span class="w"> </span>execute-command<span class="w"> </span>--cluster<span class="w"> </span>my-cluster<span class="w"> </span>--task<span class="w"> </span>&lt;task-arn&gt;<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="w">  </span>--container<span class="w"> </span>app<span class="w"> </span>--interactive<span class="w"> </span>--command<span class="w"> </span><span class="s2">"/bin/sh"</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="w">  </span>--endpoint-url<span class="w"> </span><span class="nv">$AWS_ENDPOINT_URL</span>
+</code></pre></div>
+<p>Floci plays the SSM agent's half of the Session Manager protocol on that channel (the binary
+<code>AgentMessage</code> framing, the handshake, sequenced acknowledgements and terminal resizes) and bridges
+it to a <code>docker exec</code> in the container. Deliberate limits:</p>
+<ul>
+<li>The command runs through <code>/bin/sh -c</code>, so an image without a shell cannot be exec'd into.</li>
+<li>Sessions are in memory, single use, and expire after five minutes if nobody connects.</li>
+<li><code>ExecuteCommand</code> logging (the <code>executeCommandConfiguration</code> on a cluster, which sends session
+  transcripts to S3 or CloudWatch) is not implemented.</li>
+</ul>
+<h3 id="services">Services</h3>
+<table>
+<thead>
+<tr>
+<th>Operation</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>CreateService</code></td>
+<td>Create a long-running service</td>
+</tr>
+<tr>
+<td><code>UpdateService</code></td>
+<td>Update desired count, task definition, or deployment config</td>
+</tr>
+<tr>
+<td><code>DeleteService</code></td>
+<td>Delete a service (supports <code>force</code>)</td>
+</tr>
+<tr>
+<td><code>DescribeServices</code></td>
+<td>Describe one or more services (includes <code>deployments</code>, see below)</td>
+</tr>
+<tr>
+<td><code>ListServices</code></td>
+<td>List service ARNs in a cluster</td>
+</tr>
+<tr>
+<td><code>ListServicesByNamespace</code></td>
+<td>List services filtered by Cloud Map namespace</td>
+</tr>
+</tbody>
+</table>
+<p><code>ListServices</code> filters on <code>launchType</code> and <code>schedulingStrategy</code> as well as <code>cluster</code>, and pages
+with <code>maxResults</code> and <code>nextToken</code>. Unlike every other ECS listing, which pages a hundred at a
+time, a request that names no <code>maxResults</code> gets ten ARNs and a <code>nextToken</code>.</p>
+<h4 id="service-deployments">Service deployments</h4>
+<p>An <code>ACTIVE</code> service reports exactly one <code>PRIMARY</code> entry in <code>services[].deployments</code>,
+synthesized from the service's current state rather than tracked as a rollout. This is
+what AWS's <code>ServicesStable</code> waiter accepts on, so <code>aws ecs wait services-stable</code>, the
+SDK waiters, and Terraform's <code>aws_ecs_service</code> all converge normally. A deleted
+(<code>INACTIVE</code>) service reports an empty list.</p>
+<p><code>rolloutState</code> is <code>COMPLETED</code> once <code>runningCount</code> reaches <code>desiredCount</code>, and
+<code>IN_PROGRESS</code> before that. The deployment <code>id</code> is derived from the service ARN and its
+task definition, so it is stable across calls and across restarts, and rolls over when
+the task definition changes. <code>createdAt</code> tracks the deployment rather than the service:
+it is the service's creation time until a task-definition change starts a new
+deployment, and moves with it thereafter.</p>
+<p>Known differences from AWS:</p>
+<ul>
+<li>There is never a second <code>ACTIVE</code> deployment draining alongside the <code>PRIMARY</code> one.
+  The running tasks <em>are</em> rolled onto a changed task definition (replacements on the new
+  revision start first, then the stale tasks are drained, one reconciler tick apart), but
+  the deployments list reports only the single <code>PRIMARY</code> throughout.</li>
+<li><code>deployments</code> is reported for every service. AWS omits it for services that use the
+  <code>CODE_DEPLOY</code> or <code>EXTERNAL</code> deployment controller; Floci records and echoes
+  <code>deploymentController</code> (along with <code>schedulingStrategy</code> and
+  <code>availabilityZoneRebalancing</code>; AWS defaults <code>ECS</code> / <code>REPLICA</code> / <code>ENABLED</code> on create) but
+  still synthesises the <code>deployments</code> list regardless of the controller type.</li>
+<li><code>DAEMON</code> scheduling runs exactly one task per <code>ACTIVE</code> container instance and derives
+  <code>desiredCount</code> from that count; it is rejected for the Fargate launch type and for the
+  <code>CODE_DEPLOY</code> / <code>EXTERNAL</code> controllers, as on AWS. Placement constraints are not evaluated.</li>
+<li><code>pendingCount</code> is always <code>0</code>, matching the top-level service field.</li>
+<li><code>forceNewDeployment</code> (with an unchanged task definition) mints a new deployment <code>id</code>
+  and rolls the running tasks: a replacement on the new deployment starts first, then
+  the task from the previous deployment is drained one reconciler tick later. The
+  <code>deployments</code> list still reports a single <code>PRIMARY</code> throughout.</li>
+<li><code>updatedAt</code> equals <code>createdAt</code>. AWS advances it as a rollout progresses; Floci has no
+  intermediate rollout state to report.</li>
+<li><code>deploymentConfiguration</code> (including the circuit breaker), <code>healthCheckGracePeriodSeconds</code>,
+  <code>serviceRegistries</code> and the placement constraints and strategies are stored and reported as
+  given, so a client that reads them back sees no drift, but the reconciler does not act on them:
+  it converges to <code>desiredCount</code> without a maximum or minimum percent, registers nothing in Cloud
+  Map, and places tasks without evaluating constraints.</li>
+<li><code>StopServiceDeployment</code> is not implemented.</li>
+</ul>
+<h4 id="ecs-eventbridge-events">ECS EventBridge events</h4>
+<p>Floci publishes AWS-shaped lifecycle events to the <strong>default</strong> EventBridge bus
+(<code>source: aws.ecs</code>). Rules matching <code>aws.ecs</code> fire from ECS activity, in both docker
+and mock mode.</p>
+<table>
+<thead>
+<tr>
+<th><code>detail-type</code></th>
+<th>When</th>
+<th>Key <code>detail</code> fields</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ECS Task State Change</code></td>
+<td>a task starts or stops</td>
+<td><code>lastStatus</code>, <code>desiredStatus</code>, <code>taskDefinitionArn</code>, <code>group</code>, <code>startedBy</code>, <code>stoppedReason</code>, <code>containers[].exitCode</code></td>
+</tr>
+<tr>
+<td><code>ECS Deployment State Change</code></td>
+<td>a service deployment starts, is in progress, or reaches steady state</td>
+<td><code>eventType</code> (always <code>INFO</code>), <code>eventName</code>, <code>deploymentId</code></td>
+</tr>
+</tbody>
+</table>
+<p><code>eventName</code> is one of <code>SERVICE_DEPLOYMENT_STARTED</code>, <code>SERVICE_DEPLOYMENT_IN_PROGRESS</code>,
+<code>SERVICE_DEPLOYMENT_COMPLETED</code>.</p>
+<p>Known differences from AWS:</p>
+<ul>
+<li>The task phase ladder is <strong>synthesized</strong>. Floci's task model only occupies
+  <code>PENDING</code>, <code>RUNNING</code> and <code>STOPPED</code>, but a start emits
+  <code>PROVISIONING -&gt; PENDING -&gt; ACTIVATING -&gt; RUNNING</code> and a stop emits
+  <code>DEACTIVATING -&gt; STOPPING -&gt; DEPROVISIONING -&gt; STOPPED</code>, one <code>ECS Task State Change</code>
+  per phase, so rules that filter on <code>detail.lastStatus</code> behave as on AWS.</li>
+<li><code>SERVICE_DEPLOYMENT_FAILED</code> and the deployment circuit breaker are not emitted.</li>
+<li><code>SubmitTaskStateChange</code> / <code>SubmitContainerStateChange</code> remain ACK-only; Floci drives
+  the task lifecycle itself rather than via agent submissions.</li>
+</ul>
+<h4 id="service-discovery">Service discovery</h4>
+<p>A service that declares <code>serviceRegistries</code> has each of its running tasks registered as a
+Cloud Map instance of the named service, and deregistered when the task stops. The instance
+carries <code>AWS_INSTANCE_IPV4</code> (the task's ENI address on an awsvpc task, otherwise the
+container's address on the Docker network) and <code>AWS_INSTANCE_PORT</code> (the entry's <code>port</code>, or
+the host port its <code>containerPort</code> was published on), alongside the metadata attributes AWS
+records: <code>AVAILABILITY_ZONE</code>, <code>REGION</code>, <code>ECS_SERVICE_NAME</code>, <code>ECS_CLUSTER_NAME</code> and
+<code>ECS_TASK_DEFINITION_FAMILY</code>. The task id is the instance id, as on AWS, so a replacement
+task supersedes its predecessor.</p>
+<p>Combined with <a href="../cloudmap/#dns-resolution">Cloud Map answering DNS</a> for its namespaces, that
+is what makes <code>&lt;cloud-map-service&gt;.&lt;namespace&gt;</code> resolve to a running task from another
+container. Registration is best effort: a registry entry Floci cannot place is logged and
+skipped rather than failing the task. <code>UpdateService</code> moves running task registrations to
+replacement registries; stopping a task removes the registrations it actually created.</p>
+<p>Known differences from AWS:</p>
+<ul>
+<li>AWS supports only <code>SRV</code> records for a <code>bridge</code> or <code>host</code> network mode task, since the
+  reachable port is the published host port rather than the container port. Floci serves
+  only A records, so such a task registers its address and its published host port and
+  resolves by address; the port is readable through <code>DiscoverInstances</code> rather than DNS.</li>
+<li><code>EC2_INSTANCE_ID</code> is not recorded. Every Floci task runs as a container rather than on a
+  registered EC2 host, which is the Fargate case on AWS, where the attribute is also absent.</li>
+<li>An instance's health status never moves. AWS registers a task <code>UNHEALTHY</code> and promotes it to
+  <code>HEALTHY</code> once the container health check passes, for a service discovery service that
+  declares <code>HealthCheckCustomConfig</code>. Floci feeds no container health into Cloud Map, so a task
+  registers <code>HEALTHY</code>, which is Cloud Map's own default for a <code>RegisterInstance</code> that names no
+  <code>AWS_INIT_HEALTH_STATUS</code>, and stays there until it is deregistered.</li>
+</ul>
+<h4 id="unknown-services">Unknown services</h4>
+<p>A service reference that does not resolve is returned in <code>failures</code> with
+<code>reason: MISSING</code> and the ARN the service would have had, rather than being dropped from
+the response. <code>DescribeServices</code> therefore returns partial results instead of erroring, as
+AWS does, and <code>aws ecs wait services-stable</code> on a nonexistent service fails immediately
+instead of polling for its full timeout. A reference supplied as an ARN is echoed back
+unchanged.</p>
+<h3 id="task-sets">Task Sets</h3>
+<table>
+<thead>
+<tr>
+<th>Operation</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>CreateTaskSet</code></td>
+<td>Create a task set inside a service</td>
+</tr>
+<tr>
+<td><code>UpdateTaskSet</code></td>
+<td>Update a task set's scale</td>
+</tr>
+<tr>
+<td><code>DeleteTaskSet</code></td>
+<td>Delete a task set</td>
+</tr>
+<tr>
+<td><code>DescribeTaskSets</code></td>
+<td>Describe task sets for a service</td>
+</tr>
+<tr>
+<td><code>UpdateServicePrimaryTaskSet</code></td>
+<td>Promote a task set to primary</td>
+</tr>
+</tbody>
+</table>
+<p>A task set can only be created in a service whose deployment controller is <code>EXTERNAL</code> or
+<code>CODE_DEPLOY</code>; a rolling service runs its own deployments, and AWS refuses the call rather than
+creating a task set nothing will place. <code>launchType</code> and <code>capacityProviderStrategy</code> are mutually
+exclusive, and a request naming neither takes the cluster's <code>defaultCapacityProviderStrategy</code>,
+falling back to <code>EC2</code>. <code>scale</code> accepts only the <code>PERCENT</code> unit.</p>
+<p>The task set round-trips <code>networkConfiguration</code> (defaulting to the service's), <code>loadBalancers</code>,
+<code>serviceRegistries</code>, <code>platformVersion</code> and <code>tags</code>, and reports <code>platformFamily</code>, <code>startedBy</code>
+(<code>CODE_DEPLOY</code> for a task set Floci's CodeDeploy created, unset for an external one) and
+<code>stabilityStatusAt</code>. <code>computedDesiredCount</code> is the service's <code>desiredCount</code> times the task set's
+scale percentage, always rounded up: 3 desired at 50 percent is 2 tasks, not 1. <code>UpdateTaskSet</code>
+recomputes it.</p>
+<p>Floci places no tasks for a task set, so <code>runningCount</code> and <code>pendingCount</code> stay at 0 and
+<code>stabilityStatus</code> is always <code>STEADY_STATE</code>. On AWS the status reaches <code>STEADY_STATE</code> once the
+running count matches the computed one; reporting <code>STABILIZING</code> here would hang anything that
+waits for the set to stabilise, since no count ever moves.</p>
+<p><code>DeleteTaskSet</code> refuses a task set that has not been scaled down to zero unless <code>force</code> is set.
+<code>DescribeTaskSets</code> returns tags only for <code>include: ["TAGS"]</code> and reports a reference naming no
+task set of that service as a <code>MISSING</code> failure. A task set reference that resolves to nothing is
+a <code>TaskSetNotFoundException</code>, and task sets are scoped to one cluster and service: another
+service's task set is not visible through this one.</p>
+<h3 id="container-instances">Container Instances</h3>
+<table>
+<thead>
+<tr>
+<th>Operation</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>RegisterContainerInstance</code></td>
+<td>Register a container instance with a cluster</td>
+</tr>
+<tr>
+<td><code>DeregisterContainerInstance</code></td>
+<td>Deregister a container instance</td>
+</tr>
+<tr>
+<td><code>DescribeContainerInstances</code></td>
+<td>Describe container instances</td>
+</tr>
+<tr>
+<td><code>ListContainerInstances</code></td>
+<td>List container instance ARNs</td>
+</tr>
+<tr>
+<td><code>UpdateContainerAgent</code></td>
+<td>Trigger agent update (stub)</td>
+</tr>
+<tr>
+<td><code>UpdateContainerInstancesState</code></td>
+<td>Drain or activate container instances</td>
+</tr>
+</tbody>
+</table>
+<p><code>RegisterContainerInstance</code> keeps what the agent sent: <code>totalResources</code> comes back as both
+<code>registeredResources</code> and <code>remainingResources</code>, and <code>versionInfo</code>, <code>attributes</code>, <code>tags</code> and a
+re-registered <code>containerInstanceArn</code> all round-trip. The agent version is reported inside
+<code>versionInfo</code>, which is where the <code>ContainerInstance</code> shape puts it, not as a top-level
+<code>agentVersion</code>. An instance also reports <code>registeredAt</code> and a <code>version</code> counter that each state
+change increments.</p>
+<p><code>DeregisterContainerInstance</code> leaves the instance in the cluster as <code>INACTIVE</code> rather than
+dropping it, so a later <code>DescribeContainerInstances</code> still answers for it, as on AWS. A cluster's
+<code>registeredContainerInstancesCount</code> counts only the <code>ACTIVE</code> and <code>DRAINING</code> instances.</p>
+<p><code>ListContainerInstances</code> defaults to every instance other than the <code>INACTIVE</code> ones, validates
+<code>status</code> against the five documented values, and pages with <code>maxResults</code> (1 to 100) and
+<code>nextToken</code>. The cluster query language <code>filter</code> is accepted and ignored.</p>
+<p><code>UpdateContainerInstancesState</code> sets only <code>ACTIVE</code> or <code>DRAINING</code>, takes at most 10 instances per
+call, and refuses to drain an instance that is not <code>ACTIVE</code> first. It and
+<code>DescribeContainerInstances</code> report an instance the cluster does not have as a <code>MISSING</code> failure
+rather than dropping it.</p>
+<p><code>DescribeContainerInstances</code> withholds two members until the request asks for them, and rejects an
+<code>include</code> value that is neither: <code>TAGS</code> for the instance's tags, and <code>CONTAINER_INSTANCE_HEALTH</code>
+for its <code>healthStatus</code>. Floci runs no agent health checks of its own, so the one check it reports
+is <code>AGENT_CONNECTIVITY</code>, taken from the registration state the instance already tracks, and
+<code>overallStatus</code> follows it.</p>
+<h3 id="capacity-providers_1">Capacity Providers</h3>
+<table>
+<thead>
+<tr>
+<th>Operation</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>CreateCapacityProvider</code></td>
+<td>Create a custom capacity provider</td>
+</tr>
+<tr>
+<td><code>UpdateCapacityProvider</code></td>
+<td>Update a capacity provider</td>
+</tr>
+<tr>
+<td><code>DeleteCapacityProvider</code></td>
+<td>Delete a capacity provider</td>
+</tr>
+<tr>
+<td><code>DescribeCapacityProviders</code></td>
+<td>Describe capacity providers (includes FARGATE built-ins)</td>
+</tr>
+</tbody>
+</table>
+<p>A capacity provider name is validated the way AWS documents it: up to 255 letters, numbers,
+underscores and hyphens, and never prefixed with <code>aws</code>, <code>ecs</code> or <code>fargate</code>. A created provider
+reports its <code>capacityProviderArn</code>, a <code>type</code> of <code>EC2_AUTOSCALING</code>, and the
+<code>autoScalingGroupProvider</code> it was created with, so a client that wrote one reads back what it
+registered instead of seeing drift.</p>
+<p><code>DescribeCapacityProviders</code> returns tags only for <code>include: ["TAGS"]</code>, and reports a name that
+resolves to nothing as a <code>MISSING</code> entry in <code>failures</code> rather than dropping it. The built-in
+<code>FARGATE</code> and <code>FARGATE_SPOT</code> providers are described with their own ARNs and a <code>type</code> matching
+their name.</p>
+<p><code>DeleteCapacityProvider</code> refuses the reserved <code>FARGATE</code> and <code>FARGATE_SPOT</code> providers, one that is
+still attached to a cluster (detach it with <code>PutClusterCapacityProviders</code>, or delete the cluster,
+first), and one still named in an active service's capacity provider strategy, which AWS requires
+to be removed with <code>UpdateService</code> before the provider goes. A deleted provider is reported with
+<code>updateStatus: DELETE_IN_PROGRESS</code> and an unchanged <code>status</code>, because <code>DELETE_IN_PROGRESS</code> is not
+one of the four values <code>CapacityProviderStatus</code> takes.</p>
+<h3 id="service-deployments-revisions">Service Deployments &amp; Revisions</h3>
+<table>
+<thead>
+<tr>
+<th>Operation</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>DescribeServiceDeployments</code></td>
+<td>Describe service deployments</td>
+</tr>
+<tr>
+<td><code>ListServiceDeployments</code></td>
+<td>List service deployment ARNs</td>
+</tr>
+<tr>
+<td><code>DescribeServiceRevisions</code></td>
+<td>Describe service revisions</td>
+</tr>
+</tbody>
+</table>
+<p>A deployment is recorded on <code>CreateService</code> and on every <code>UpdateService</code> that rolls one, together
+with the service revision it targets. The two are linked the way AWS links them: a deployment
+reports <code>targetServiceRevision</code> (its ARN and the task counts) and <code>sourceServiceRevisions</code>, and
+the service itself reports <code>currentServiceDeployment</code> and <code>currentServiceRevisions</code>, so a caller
+gets from <code>DescribeServices</code> to the deployment without listing first. A service deployment carries
+no <code>taskDefinition</code> member, because AWS's <code>ServiceDeployment</code> shape has none: the revision names
+it.</p>
+<p>A service revision is the snapshot of the service's configuration at that moment, copied rather
+than referenced, so it keeps reporting what the service looked like then: <code>taskDefinition</code>, the
+<code>launchType</code> or <code>capacityProviderStrategy</code>, <code>platformVersion</code>, <code>platformFamily</code>,
+<code>networkConfiguration</code>, <code>loadBalancers</code>, <code>serviceRegistries</code>, <code>serviceConnectConfiguration</code> and
+one <code>containerImages</code> entry per container definition. <code>guardDutyEnabled</code> is always <code>false</code>: Floci
+runs no runtime monitoring. Floci applies a change in place rather than rolling it, so a
+deployment is <code>SUCCESSFUL</code> with the same <code>startedAt</code> and <code>finishedAt</code> from the moment it is
+recorded. Both describes report an ARN that resolves to nothing as a <code>MISSING</code> failure.</p>
+<h3 id="tags">Tags</h3>
+<table>
+<thead>
+<tr>
+<th>Operation</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>TagResource</code></td>
+<td>Add tags to a cluster, service, task, or task definition</td>
+</tr>
+<tr>
+<td><code>UntagResource</code></td>
+<td>Remove tags from a resource</td>
+</tr>
+<tr>
+<td><code>ListTagsForResource</code></td>
+<td>List tags on a resource</td>
+</tr>
+</tbody>
+</table>
+<p>Every operation that takes <code>tags</code> holds it to the limits ECS documents: at most 50 tags, a key of
+1 to 128 characters and a value of up to 256. The count is taken from the request rather than the
+parsed map, so 51 entries that collapse to fewer distinct keys are still rejected.</p>
+<h3 id="account-settings-attributes">Account Settings &amp; Attributes</h3>
+<table>
+<thead>
+<tr>
+<th>Operation</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>PutAccountSetting</code></td>
+<td>Set an account-level setting for the calling user</td>
+</tr>
+<tr>
+<td><code>PutAccountSettingDefault</code></td>
+<td>Set the default account-level setting</td>
+</tr>
+<tr>
+<td><code>DeleteAccountSetting</code></td>
+<td>Delete an account setting</td>
+</tr>
+<tr>
+<td><code>ListAccountSettings</code></td>
+<td>List account settings</td>
+</tr>
+<tr>
+<td><code>PutAttributes</code></td>
+<td>Set custom key-value attributes on resources</td>
+</tr>
+<tr>
+<td><code>DeleteAttributes</code></td>
+<td>Remove attributes from resources</td>
+</tr>
+<tr>
+<td><code>ListAttributes</code></td>
+<td>List resources with a given attribute</td>
+</tr>
+</tbody>
+</table>
+<p>An account setting name must be one of the eleven ECS accepts, and its value is checked against
+what that name allows: <code>0</code>, <code>7</code> or <code>14</code> for <code>fargateTaskRetirementWaitPeriod</code>, <code>blocking</code> or
+<code>non-blocking</code> for <code>defaultLogDriverMode</code>, <code>enhanced</code> on top of the usual flags for
+<code>containerInsights</code>, and <code>enabled</code>/<code>disabled</code>/<code>on</code>/<code>off</code> for the rest. A <code>Setting</code> reports its
+<code>principalArn</code> and its <code>type</code>, which is <code>user</code> except for <code>guardDutyActivate</code>, the setting
+GuardDuty owns on the account's behalf.</p>
+<p>A request that names no <code>principalArn</code> acts for the account root, since Floci does not
+authenticate a separate user, and <code>PutAccountSettingDefault</code> writes that same root row: AWS
+describes the effective value as "the account settings for the root user or the default setting".
+<code>ListAccountSettings</code> returns only the settings the principal explicitly set, which is why an
+untouched account lists nothing; with <code>effectiveSettings: true</code> it returns all eleven at the value
+that principal actually reads, falling back from its own setting to the root default to the
+setting's built-in default. It pages with <code>maxResults</code> (1 to 10) and <code>nextToken</code>, ten at a time.</p>
+<p>A setting is persisted under <code>&lt;principalArn&gt;::&lt;name&gt;</code> rather than the name alone, so settings
+written by an earlier Floci version are ignored after upgrading: delete
+<code>ecs-account-settings.json</code> from the persistence directory, or write the settings again.</p>
+<p>Attributes belong to a cluster, not to a target id alone, so the same container instance id in two
+clusters is two targets. An attribute must name a container instance the cluster has, or the call
+is a <code>TargetNotFoundException</code>, and a target holds at most 10 custom attributes
+(<code>AttributeLimitExceededException</code> past that, and for a single call carrying more than 10).
+<code>ListAttributes</code> requires <code>targetType</code>, whose only valid value is <code>container-instance</code>, and pages
+with <code>maxResults</code> (1 to 100) and <code>nextToken</code>.</p>
+<h3 id="agent-state-change-stubs">Agent / State Change Stubs</h3>
+<table>
+<thead>
+<tr>
+<th>Operation</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>SubmitTaskStateChange</code></td>
+<td>Agent callback stub</td>
+</tr>
+<tr>
+<td><code>SubmitContainerStateChange</code></td>
+<td>Agent callback stub</td>
+</tr>
+<tr>
+<td><code>SubmitAttachmentStateChanges</code></td>
+<td>Agent callback stub</td>
+</tr>
+<tr>
+<td><code>DiscoverPollEndpoint</code></td>
+<td>Returns the agent polling endpoint</td>
+</tr>
+</tbody>
+</table>
+<h2 id="configuration">Configuration</h2>
+<p>Every <code>awsvpc</code> task receives an ENI in its subnet. With <code>FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED=true</code>, a Docker-backed task's containers additionally share one protected network namespace built around that ENI, and packets are filtered against its security groups. A task without explicit security groups uses its subnet VPC's default group. Containers in the same task can communicate over localhost. Bridge and host task networking do not attach task-level <code>awsvpc</code> security groups. Mock mode reports control-plane state, including the ENI, and does not enforce packet filtering.</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_SERVICES_ECS_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable or disable the ECS service</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_ECS_MOCK</code></td>
+<td><code>false</code></td>
+<td>Skip Docker; tasks go straight to <code>RUNNING</code> (useful for CI)</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_ECS_DOCKER_NETWORK</code></td>
+<td><em>(unset)</em></td>
+<td>Docker network for task containers</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_ECS_DEFAULT_MEMORY_MB</code></td>
+<td><code>512</code></td>
+<td>Default memory (MB) when the task definition omits it</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_ECS_DEFAULT_CPU_UNITS</code></td>
+<td><code>256</code></td>
+<td>Default CPU units when the task definition omits it</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_ECS_HOST_VOLUME_ROOTS</code></td>
+<td><em>(unset)</em></td>
+<td>Approved parent directories for host volume bind mounts (<code>volumes[].host.sourcePath</code>)</td>
+</tr>
+<tr>
+<td><code>FLOCI_SERVICES_ECS_ALLOW_UNSAFE_HOST_VOLUMES</code></td>
+<td><code>false</code></td>
+<td>Allow any host path, bypassing the <code>HOST_VOLUME_ROOTS</code> allowlist; traversal, the bare root, and the Docker socket are still always rejected</td>
+</tr>
+</tbody>
+</table>
+<h3 id="host-volume-safety">Host volume safety</h3>
+<p>A task definition's <code>volumes[].host.sourcePath</code> is a caller-controlled filesystem path that Floci bind-mounts straight into the launched container, so both <code>RegisterTaskDefinition</code> and the actual bind mount at <code>RunTask</code> time validate it (the second check narrows the window between validation and mount, and also covers task definitions registered before this policy existed).</p>
+<p>Always rejected, regardless of configuration:</p>
+<ul>
+<li>Relative paths, and any path containing a <code>..</code> segment.</li>
+<li>The bare filesystem root (<code>/</code>).</li>
+<li>The Docker daemon socket and any directory that contains it (e.g. <code>/var/run</code>, <code>/run</code>, <code>/var</code>), including via a symlink that resolves onto one of these paths. The protected socket is the one Floci's own Docker client connects to, resolved the same way the client resolves it: <code>floci.docker.docker-host</code>, then <code>DOCKER_HOST</code>, then the active Docker context (Colima, OrbStack, Rancher Desktop, Podman), then <code>/var/run/docker.sock</code>. The conventional locations <code>/var/run/docker.sock</code> and <code>/run/docker.sock</code> are always protected as well.</li>
+</ul>
+<p><strong>By default, with no configuration, every host <code>sourcePath</code> is rejected.</strong> You must explicitly opt in with one of:</p>
+<ul>
+<li><code>FLOCI_SERVICES_ECS_HOST_VOLUME_ROOTS</code>: a comma-separated allowlist of approved parent directories. A <code>sourcePath</code> must resolve (symlinks included) under one of them:</li>
+</ul>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="nt">services</span><span class="p">:</span>
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="w">  </span><span class="nt">floci</span><span class="p">:</span>
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="w">    </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">floci/floci:latest</span>
+<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="w">    </span><span class="nt">environment</span><span class="p">:</span>
+<a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="w">      </span><span class="nt">FLOCI_SERVICES_ECS_HOST_VOLUME_ROOTS</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">/srv/floci/volumes,/data</span>
+</code></pre></div>
+<ul>
+<li><code>FLOCI_SERVICES_ECS_ALLOW_UNSAFE_HOST_VOLUMES=true</code>: allow any host path (for local development where any host path should be mountable). The traversal, bare-root, and Docker socket blocks above are never bypassed by this flag.</li>
+</ul>
+<p>A rejected <code>sourcePath</code> fails <code>RegisterTaskDefinition</code> with <code>InvalidParameterException</code>; a rejection caught again at <code>RunTask</code> time (e.g. a task definition registered before this policy existed) stops the task with that message as its <code>stoppedReason</code>. Named Docker volumes, EFS volumes, and host volumes with no <code>sourcePath</code> (ephemeral, container-local storage) are unaffected by these checks.</p>
+<h3 id="efs-volume-ownership">EFS volume ownership</h3>
+<p>A task's <code>efsVolumeConfiguration</code> volumes are backed by shared local Docker volumes (Floci cannot mount a real EFS file system). A Docker named volume is created <code>root:root 0755</code>, so a task whose image runs as a non-root <code>USER</code> cannot write it. To emulate an <a href="https://docs.aws.amazon.com/efs/latest/ug/efs-access-points.html">EFS access point</a>'s <code>RootDirectory.CreationInfo</code> and <code>PosixUser</code>, configure <code>floci.storage.efs.*</code> (all opt-in; the default is a plain named volume, so existing behaviour is unchanged):</p>
+<table>
+<thead>
+<tr>
+<th>Key (<code>floci.storage.efs.</code>)</th>
+<th>Env</th>
+<th>AWS equivalent</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>owner-uid</code></td>
+<td><code>FLOCI_STORAGE_EFS_OWNER_UID</code></td>
+<td><code>CreationInfo.OwnerUid</code></td>
+<td>Owner uid of the volume root (set together with <code>owner-gid</code>)</td>
+</tr>
+<tr>
+<td><code>owner-gid</code></td>
+<td><code>FLOCI_STORAGE_EFS_OWNER_GID</code></td>
+<td><code>CreationInfo.OwnerGid</code></td>
+<td>Owner gid of the volume root (set together with <code>owner-uid</code>)</td>
+</tr>
+<tr>
+<td><code>root-permissions</code></td>
+<td><code>FLOCI_STORAGE_EFS_ROOT_PERMISSIONS</code></td>
+<td><code>CreationInfo.Permissions</code></td>
+<td>3-4 octal digits, e.g. <code>0777</code>, or <code>2775</code> for the setgid bit</td>
+</tr>
+<tr>
+<td><code>mount-user</code></td>
+<td><code>FLOCI_STORAGE_EFS_MOUNT_USER</code></td>
+<td><code>PosixUser {Uid,Gid}</code></td>
+<td>Run mounting containers as <code>uid[:gid]</code></td>
+</tr>
+<tr>
+<td><code>mount-group-add</code></td>
+<td><code>FLOCI_STORAGE_EFS_MOUNT_GROUP_ADD</code></td>
+<td><code>PosixUser</code> supplementary</td>
+<td>Supplementary gid added to mounting containers</td>
+</tr>
+<tr>
+<td><code>init-image</code></td>
+<td><code>FLOCI_STORAGE_EFS_INIT_IMAGE</code></td>
+<td>—</td>
+<td>Image for the one-off <code>chown</code>/<code>chmod</code> of the volume root (default <code>busybox:stable</code>)</td>
+</tr>
+</tbody>
+</table>
+<p><code>owner-uid</code> and <code>owner-gid</code> must be set together (a partial <code>CreationInfo</code> is not valid on AWS). The volume root is initialised once per volume; express the setgid bit through a 4-digit <code>root-permissions</code> (e.g. <code>2775</code>) so subdirectories inherit the owner gid.</p>
+<h3 id="mock-mode">Mock mode</h3>
+<p>Set <code>FLOCI_SERVICES_ECS_MOCK=true</code> to run without Docker. In this mode tasks skip container launch and immediately transition to <code>RUNNING</code>, then to <code>STOPPED</code> when stopped. The task still reports a container per container definition and, for <code>awsvpc</code>, a real ENI, so a client reading <code>containers[]</code> or waiting on the task's address behaves as it does against AWS; nothing is running behind those containers, so ECS Exec answers <code>TargetNotConnectedException</code> and no logs are streamed. This is the recommended mode for unit/integration tests and CI pipelines where Docker-in-Docker is unavailable.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="c1"># docker-compose.yml — CI / test environment</span>
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="nt">services</span><span class="p">:</span>
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="w">  </span><span class="nt">floci</span><span class="p">:</span>
+<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="w">    </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">floci/floci:latest</span>
+<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="w">    </span><span class="nt">environment</span><span class="p">:</span>
+<a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a><span class="w">      </span><span class="nt">FLOCI_SERVICES_ECS_MOCK</span><span class="p">:</span><span class="w"> </span><span class="s">"true"</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="c1"># docker-compose.yml — local development (real containers)</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="nt">services</span><span class="p">:</span>
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="w">  </span><span class="nt">floci</span><span class="p">:</span>
+<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="w">    </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">floci/floci:latest</span>
+<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a><span class="w">    </span><span class="nt">volumes</span><span class="p">:</span>
+<a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">/var/run/docker.sock:/var/run/docker.sock</span>
+<a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a><span class="w">    </span><span class="nt">environment</span><span class="p">:</span>
+<a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a><span class="w">      </span><span class="nt">FLOCI_SERVICES_ECS_MOCK</span><span class="p">:</span><span class="w"> </span><span class="s">"false"</span>
+<a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a><span class="w">      </span><span class="nt">FLOCI_SERVICES_ECS_DOCKER_NETWORK</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">my_network</span>
+</code></pre></div>
+<h3 id="docker-socket-requirement">Docker socket requirement</h3>
+<p>When <code>mock: false</code> (the default), ECS launches real Docker containers and requires the Docker socket. Mount it and set the network so containers can reach each other. For private registry authentication and other Docker settings see <a href="../../configuration/docker/">Docker Configuration</a>.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="nt">services</span><span class="p">:</span>
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="w">  </span><span class="nt">floci</span><span class="p">:</span>
+<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="w">    </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">floci/floci:latest</span>
+<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="w">    </span><span class="nt">volumes</span><span class="p">:</span>
+<a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">/var/run/docker.sock:/var/run/docker.sock</span>
+<a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a><span class="w">    </span><span class="nt">environment</span><span class="p">:</span>
+<a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a><span class="w">      </span><span class="nt">FLOCI_SERVICES_ECS_DOCKER_NETWORK</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">aws-local_default</span>
+</code></pre></div>
+<h3 id="host-access-to-awsvpc-task-ports">Host access to awsvpc task ports</h3>
+<p>By default, Floci preserves the isolation expected from <code>awsvpc</code>: native runs use a dynamic Docker host port, while Floci-in-Docker exposes the container port only on the configured Docker network. A process running directly on the Docker host therefore has no stable port for an <code>awsvpc</code> task.</p>
+<p>Set <code>FLOCI_SERVICES_ECS_PUBLISH_AWSVPC_PORTS_TO_HOST=true</code> to opt into stable host publishing. Floci binds each <code>containerPort</code> to the same host port, or uses an explicit non-zero <code>hostPort</code> when one is present. A host-side Terraform provider can then connect to <code>localhost:&lt;port&gt;</code>.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="nt">services</span><span class="p">:</span>
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="w">  </span><span class="nt">floci</span><span class="p">:</span>
+<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="w">    </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">floci/floci:latest</span>
+<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="w">    </span><span class="nt">volumes</span><span class="p">:</span>
+<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">/var/run/docker.sock:/var/run/docker.sock</span>
+<a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a><span class="w">    </span><span class="nt">environment</span><span class="p">:</span>
+<a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a><span class="w">      </span><span class="nt">FLOCI_SERVICES_ECS_PUBLISH_AWSVPC_PORTS_TO_HOST</span><span class="p">:</span><span class="w"> </span><span class="s">"true"</span>
+</code></pre></div>
+<p>This setting is an emulator-specific networking convenience and defaults to <code>false</code>. Docker cannot bind the same host port twice, so use it only when at most one running task publishes each port.</p>
+<h2 id="examples">Examples</h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="nb">export</span><span class="w"> </span><span class="nv">AWS_ENDPOINT_URL</span><span class="o">=</span>http://localhost:4566
+<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="nb">export</span><span class="w"> </span><span class="nv">AWS_DEFAULT_REGION</span><span class="o">=</span>us-east-1
+<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="nb">export</span><span class="w"> </span><span class="nv">AWS_ACCESS_KEY_ID</span><span class="o">=</span><span class="nb">test</span>
+<a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a><span class="nb">export</span><span class="w"> </span><span class="nv">AWS_SECRET_ACCESS_KEY</span><span class="o">=</span><span class="nb">test</span>
+<a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a>
+<a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a><span class="c1"># Create a cluster</span>
+<a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a>aws<span class="w"> </span>ecs<span class="w"> </span>create-cluster<span class="w"> </span>--cluster-name<span class="w"> </span>my-cluster<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a><span class="w">  </span>--endpoint-url<span class="w"> </span><span class="nv">$AWS_ENDPOINT_URL</span>
+<a id="__codelineno-6-9" name="__codelineno-6-9" href="#__codelineno-6-9"></a>
+<a id="__codelineno-6-10" name="__codelineno-6-10" href="#__codelineno-6-10"></a><span class="c1"># Register a task definition</span>
+<a id="__codelineno-6-11" name="__codelineno-6-11" href="#__codelineno-6-11"></a>aws<span class="w"> </span>ecs<span class="w"> </span>register-task-definition<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-6-12" name="__codelineno-6-12" href="#__codelineno-6-12"></a><span class="w">  </span>--family<span class="w"> </span>my-task<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-6-13" name="__codelineno-6-13" href="#__codelineno-6-13"></a><span class="w">  </span>--container-definitions<span class="w"> </span><span class="s1">'[</span>
+<a id="__codelineno-6-14" name="__codelineno-6-14" href="#__codelineno-6-14"></a><span class="s1">    {</span>
+<a id="__codelineno-6-15" name="__codelineno-6-15" href="#__codelineno-6-15"></a><span class="s1">      "name": "app",</span>
+<a id="__codelineno-6-16" name="__codelineno-6-16" href="#__codelineno-6-16"></a><span class="s1">      "image": "nginx:latest",</span>
+<a id="__codelineno-6-17" name="__codelineno-6-17" href="#__codelineno-6-17"></a><span class="s1">      "cpu": 256,</span>
+<a id="__codelineno-6-18" name="__codelineno-6-18" href="#__codelineno-6-18"></a><span class="s1">      "memory": 512,</span>
+<a id="__codelineno-6-19" name="__codelineno-6-19" href="#__codelineno-6-19"></a><span class="s1">      "essential": true,</span>
+<a id="__codelineno-6-20" name="__codelineno-6-20" href="#__codelineno-6-20"></a><span class="s1">      "portMappings": [{"containerPort": 80, "protocol": "tcp"}]</span>
+<a id="__codelineno-6-21" name="__codelineno-6-21" href="#__codelineno-6-21"></a><span class="s1">    }</span>
+<a id="__codelineno-6-22" name="__codelineno-6-22" href="#__codelineno-6-22"></a><span class="s1">  ]'</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-6-23" name="__codelineno-6-23" href="#__codelineno-6-23"></a><span class="w">  </span>--requires-compatibilities<span class="w"> </span>FARGATE<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-6-24" name="__codelineno-6-24" href="#__codelineno-6-24"></a><span class="w">  </span>--cpu<span class="w"> </span><span class="m">256</span><span class="w"> </span>--memory<span class="w"> </span><span class="m">512</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-6-25" name="__codelineno-6-25" href="#__codelineno-6-25"></a><span class="w">  </span>--network-mode<span class="w"> </span>awsvpc<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-6-26" name="__codelineno-6-26" href="#__codelineno-6-26"></a><span class="w">  </span>--endpoint-url<span class="w"> </span><span class="nv">$AWS_ENDPOINT_URL</span>
+<a id="__codelineno-6-27" name="__codelineno-6-27" href="#__codelineno-6-27"></a>
+<a id="__codelineno-6-28" name="__codelineno-6-28" href="#__codelineno-6-28"></a><span class="c1"># Run a task</span>
+<a id="__codelineno-6-29" name="__codelineno-6-29" href="#__codelineno-6-29"></a>aws<span class="w"> </span>ecs<span class="w"> </span>run-task<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-6-30" name="__codelineno-6-30" href="#__codelineno-6-30"></a><span class="w">  </span>--cluster<span class="w"> </span>my-cluster<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-6-31" name="__codelineno-6-31" href="#__codelineno-6-31"></a><span class="w">  </span>--task-definition<span class="w"> </span>my-task<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-6-32" name="__codelineno-6-32" href="#__codelineno-6-32"></a><span class="w">  </span>--launch-type<span class="w"> </span>FARGATE<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-6-33" name="__codelineno-6-33" href="#__codelineno-6-33"></a><span class="w">  </span>--endpoint-url<span class="w"> </span><span class="nv">$AWS_ENDPOINT_URL</span>
+<a id="__codelineno-6-34" name="__codelineno-6-34" href="#__codelineno-6-34"></a>
+<a id="__codelineno-6-35" name="__codelineno-6-35" href="#__codelineno-6-35"></a><span class="c1"># Create a service</span>
+<a id="__codelineno-6-36" name="__codelineno-6-36" href="#__codelineno-6-36"></a>aws<span class="w"> </span>ecs<span class="w"> </span>create-service<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-6-37" name="__codelineno-6-37" href="#__codelineno-6-37"></a><span class="w">  </span>--cluster<span class="w"> </span>my-cluster<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-6-38" name="__codelineno-6-38" href="#__codelineno-6-38"></a><span class="w">  </span>--service-name<span class="w"> </span>my-service<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-6-39" name="__codelineno-6-39" href="#__codelineno-6-39"></a><span class="w">  </span>--task-definition<span class="w"> </span>my-task<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-6-40" name="__codelineno-6-40" href="#__codelineno-6-40"></a><span class="w">  </span>--desired-count<span class="w"> </span><span class="m">1</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-6-41" name="__codelineno-6-41" href="#__codelineno-6-41"></a><span class="w">  </span>--launch-type<span class="w"> </span>FARGATE<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-6-42" name="__codelineno-6-42" href="#__codelineno-6-42"></a><span class="w">  </span>--endpoint-url<span class="w"> </span><span class="nv">$AWS_ENDPOINT_URL</span>
+<a id="__codelineno-6-43" name="__codelineno-6-43" href="#__codelineno-6-43"></a>
+<a id="__codelineno-6-44" name="__codelineno-6-44" href="#__codelineno-6-44"></a><span class="c1"># List running tasks</span>
+<a id="__codelineno-6-45" name="__codelineno-6-45" href="#__codelineno-6-45"></a>aws<span class="w"> </span>ecs<span class="w"> </span>list-tasks<span class="w"> </span>--cluster<span class="w"> </span>my-cluster<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-6-46" name="__codelineno-6-46" href="#__codelineno-6-46"></a><span class="w">  </span>--endpoint-url<span class="w"> </span><span class="nv">$AWS_ENDPOINT_URL</span>
+<a id="__codelineno-6-47" name="__codelineno-6-47" href="#__codelineno-6-47"></a>
+<a id="__codelineno-6-48" name="__codelineno-6-48" href="#__codelineno-6-48"></a><span class="c1"># Stop a task</span>
+<a id="__codelineno-6-49" name="__codelineno-6-49" href="#__codelineno-6-49"></a>aws<span class="w"> </span>ecs<span class="w"> </span>stop-task<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-6-50" name="__codelineno-6-50" href="#__codelineno-6-50"></a><span class="w">  </span>--cluster<span class="w"> </span>my-cluster<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-6-51" name="__codelineno-6-51" href="#__codelineno-6-51"></a><span class="w">  </span>--task<span class="w"> </span>&lt;task-arn&gt;<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-6-52" name="__codelineno-6-52" href="#__codelineno-6-52"></a><span class="w">  </span>--endpoint-url<span class="w"> </span><span class="nv">$AWS_ENDPOINT_URL</span>
+<a id="__codelineno-6-53" name="__codelineno-6-53" href="#__codelineno-6-53"></a>
+<a id="__codelineno-6-54" name="__codelineno-6-54" href="#__codelineno-6-54"></a><span class="c1"># Delete a service</span>
+<a id="__codelineno-6-55" name="__codelineno-6-55" href="#__codelineno-6-55"></a>aws<span class="w"> </span>ecs<span class="w"> </span>delete-service<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-6-56" name="__codelineno-6-56" href="#__codelineno-6-56"></a><span class="w">  </span>--cluster<span class="w"> </span>my-cluster<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-6-57" name="__codelineno-6-57" href="#__codelineno-6-57"></a><span class="w">  </span>--service<span class="w"> </span>my-service<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-6-58" name="__codelineno-6-58" href="#__codelineno-6-58"></a><span class="w">  </span>--force<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-6-59" name="__codelineno-6-59" href="#__codelineno-6-59"></a><span class="w">  </span>--endpoint-url<span class="w"> </span><span class="nv">$AWS_ENDPOINT_URL</span>
+</code></pre></div>
+<h2 id="java-sdk-example">Java SDK Example</h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="n">EcsClient</span><span class="w"> </span><span class="n">ecs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">EcsClient</span><span class="p">.</span><span class="na">builder</span><span class="p">()</span>
+<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="w">    </span><span class="p">.</span><span class="na">endpointOverride</span><span class="p">(</span><span class="n">URI</span><span class="p">.</span><span class="na">create</span><span class="p">(</span><span class="s">"http://localhost:4566"</span><span class="p">))</span>
+<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a><span class="w">    </span><span class="p">.</span><span class="na">region</span><span class="p">(</span><span class="n">Region</span><span class="p">.</span><span class="na">US_EAST_1</span><span class="p">)</span>
+<a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a><span class="w">    </span><span class="p">.</span><span class="na">credentialsProvider</span><span class="p">(</span><span class="n">StaticCredentialsProvider</span><span class="p">.</span><span class="na">create</span><span class="p">(</span>
+<a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a><span class="w">        </span><span class="n">AwsBasicCredentials</span><span class="p">.</span><span class="na">create</span><span class="p">(</span><span class="s">"test"</span><span class="p">,</span><span class="w"> </span><span class="s">"test"</span><span class="p">)))</span>
+<a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a><span class="w">    </span><span class="p">.</span><span class="na">build</span><span class="p">();</span>
+<a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a>
+<a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a><span class="c1">// Create cluster</span>
+<a id="__codelineno-7-9" name="__codelineno-7-9" href="#__codelineno-7-9"></a><span class="n">ecs</span><span class="p">.</span><span class="na">createCluster</span><span class="p">(</span><span class="n">r</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">r</span><span class="p">.</span><span class="na">clusterName</span><span class="p">(</span><span class="s">"my-cluster"</span><span class="p">));</span>
+<a id="__codelineno-7-10" name="__codelineno-7-10" href="#__codelineno-7-10"></a>
+<a id="__codelineno-7-11" name="__codelineno-7-11" href="#__codelineno-7-11"></a><span class="c1">// Register task definition</span>
+<a id="__codelineno-7-12" name="__codelineno-7-12" href="#__codelineno-7-12"></a><span class="n">ecs</span><span class="p">.</span><span class="na">registerTaskDefinition</span><span class="p">(</span><span class="n">r</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">r</span>
+<a id="__codelineno-7-13" name="__codelineno-7-13" href="#__codelineno-7-13"></a><span class="w">    </span><span class="p">.</span><span class="na">family</span><span class="p">(</span><span class="s">"my-task"</span><span class="p">)</span>
+<a id="__codelineno-7-14" name="__codelineno-7-14" href="#__codelineno-7-14"></a><span class="w">    </span><span class="p">.</span><span class="na">containerDefinitions</span><span class="p">(</span><span class="n">c</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">c</span>
+<a id="__codelineno-7-15" name="__codelineno-7-15" href="#__codelineno-7-15"></a><span class="w">        </span><span class="p">.</span><span class="na">name</span><span class="p">(</span><span class="s">"app"</span><span class="p">)</span>
+<a id="__codelineno-7-16" name="__codelineno-7-16" href="#__codelineno-7-16"></a><span class="w">        </span><span class="p">.</span><span class="na">image</span><span class="p">(</span><span class="s">"nginx:latest"</span><span class="p">)</span>
+<a id="__codelineno-7-17" name="__codelineno-7-17" href="#__codelineno-7-17"></a><span class="w">        </span><span class="p">.</span><span class="na">cpu</span><span class="p">(</span><span class="mi">256</span><span class="p">)</span>
+<a id="__codelineno-7-18" name="__codelineno-7-18" href="#__codelineno-7-18"></a><span class="w">        </span><span class="p">.</span><span class="na">memory</span><span class="p">(</span><span class="mi">512</span><span class="p">)</span>
+<a id="__codelineno-7-19" name="__codelineno-7-19" href="#__codelineno-7-19"></a><span class="w">        </span><span class="p">.</span><span class="na">essential</span><span class="p">(</span><span class="kc">true</span><span class="p">))</span>
+<a id="__codelineno-7-20" name="__codelineno-7-20" href="#__codelineno-7-20"></a><span class="w">    </span><span class="p">.</span><span class="na">requiresCompatibilities</span><span class="p">(</span><span class="n">Compatibility</span><span class="p">.</span><span class="na">FARGATE</span><span class="p">)</span>
+<a id="__codelineno-7-21" name="__codelineno-7-21" href="#__codelineno-7-21"></a><span class="w">    </span><span class="p">.</span><span class="na">cpu</span><span class="p">(</span><span class="s">"256"</span><span class="p">)</span>
+<a id="__codelineno-7-22" name="__codelineno-7-22" href="#__codelineno-7-22"></a><span class="w">    </span><span class="p">.</span><span class="na">memory</span><span class="p">(</span><span class="s">"512"</span><span class="p">)</span>
+<a id="__codelineno-7-23" name="__codelineno-7-23" href="#__codelineno-7-23"></a><span class="w">    </span><span class="p">.</span><span class="na">networkMode</span><span class="p">(</span><span class="n">NetworkMode</span><span class="p">.</span><span class="na">AWSVPC</span><span class="p">));</span>
+<a id="__codelineno-7-24" name="__codelineno-7-24" href="#__codelineno-7-24"></a>
+<a id="__codelineno-7-25" name="__codelineno-7-25" href="#__codelineno-7-25"></a><span class="c1">// Run a task</span>
+<a id="__codelineno-7-26" name="__codelineno-7-26" href="#__codelineno-7-26"></a><span class="n">RunTaskResponse</span><span class="w"> </span><span class="n">response</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ecs</span><span class="p">.</span><span class="na">runTask</span><span class="p">(</span><span class="n">r</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">r</span>
+<a id="__codelineno-7-27" name="__codelineno-7-27" href="#__codelineno-7-27"></a><span class="w">    </span><span class="p">.</span><span class="na">cluster</span><span class="p">(</span><span class="s">"my-cluster"</span><span class="p">)</span>
+<a id="__codelineno-7-28" name="__codelineno-7-28" href="#__codelineno-7-28"></a><span class="w">    </span><span class="p">.</span><span class="na">taskDefinition</span><span class="p">(</span><span class="s">"my-task"</span><span class="p">)</span>
+<a id="__codelineno-7-29" name="__codelineno-7-29" href="#__codelineno-7-29"></a><span class="w">    </span><span class="p">.</span><span class="na">launchType</span><span class="p">(</span><span class="n">LaunchType</span><span class="p">.</span><span class="na">FARGATE</span><span class="p">)</span>
+<a id="__codelineno-7-30" name="__codelineno-7-30" href="#__codelineno-7-30"></a><span class="w">    </span><span class="p">.</span><span class="na">count</span><span class="p">(</span><span class="mi">1</span><span class="p">));</span>
+<a id="__codelineno-7-31" name="__codelineno-7-31" href="#__codelineno-7-31"></a>
+<a id="__codelineno-7-32" name="__codelineno-7-32" href="#__codelineno-7-32"></a><span class="n">String</span><span class="w"> </span><span class="n">taskArn</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">response</span><span class="p">.</span><span class="na">tasks</span><span class="p">().</span><span class="na">get</span><span class="p">(</span><span class="mi">0</span><span class="p">).</span><span class="na">taskArn</span><span class="p">();</span>
+</code></pre></div>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.top", "navigation.instant", "search.highlight", "search.suggest", "content.code.copy", "content.code.annotate", "content.tabs.link"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>
