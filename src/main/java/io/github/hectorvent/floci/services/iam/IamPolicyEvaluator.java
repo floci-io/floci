@@ -345,6 +345,118 @@ public class IamPolicyEvaluator {
         return keys;
     }
 
+    /**
+     * Whether {@code policyDocument} lets its holder reach any action in {@code serviceNamespace},
+     * backing {@code ListPoliciesGrantingServiceAccess}.
+     *
+     * <p>Only {@code Allow} statements grant, and only the permissions-policy logic is applied:
+     * AWS documents that this operation ignores resource-based policies, ACLs, Organizations
+     * policies, permissions boundaries and trust policies. Resources and conditions are not
+     * consulted either, because the question is which policies could grant the service at all,
+     * not whether a specific call would be authorized.
+     *
+     * <p>A document that fails to parse grants nothing, matching {@link #parseAll} elsewhere here.
+     */
+    public boolean grantsServiceAccess(String policyDocument, String serviceNamespace) {
+        if (policyDocument == null || serviceNamespace == null || serviceNamespace.isBlank()) {
+            return false;
+        }
+        for (PolicyStatement stmt : parseAll(List.of(policyDocument))) {
+            if (!"Allow".equalsIgnoreCase(stmt.getEffect())) {
+                continue;
+            }
+            if (stmt.getActions() != null) {
+                for (String pattern : stmt.getActions()) {
+                    if (actionPatternReaches(pattern, serviceNamespace)) {
+                        return true;
+                    }
+                }
+            } else if (stmt.getNotActions() != null && !excludesEntirely(stmt.getNotActions(), serviceNamespace)) {
+                // Allow + NotAction grants everything the list does not carve out, so the
+                // namespace is still reachable unless the list removes all of it.
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * The service namespaces {@code policyDocuments} name explicitly in an {@code Allow}, backing
+     * the service list in {@code GetServiceLastAccessedDetails}.
+     *
+     * <p>AWS lists a service the entity could reach even when it was never used, so the list is
+     * derived from the same permissions-policy logic as {@link #grantsServiceAccess}. Only
+     * namespaces written out literally can be enumerated: {@code Action: "*"}, a globbed prefix
+     * like {@code s3*}, and {@code NotAction} all denote a set no policy document enumerates, so
+     * they are reported through {@code grantsAllServices} for the caller to expand against
+     * whatever universe of services it knows.
+     */
+    public GrantedServices servicesGrantedBy(List<String> policyDocuments) {
+        List<String> namespaces = new ArrayList<>();
+        boolean all = false;
+        for (PolicyStatement stmt : parseAll(policyDocuments)) {
+            if (!"Allow".equalsIgnoreCase(stmt.getEffect())) {
+                continue;
+            }
+            if (stmt.getNotActions() != null) {
+                all = true;
+                continue;
+            }
+            if (stmt.getActions() == null) {
+                continue;
+            }
+            for (String pattern : stmt.getActions()) {
+                int colon = pattern == null ? -1 : pattern.indexOf(':');
+                if (colon < 0) {
+                    // "*" grants every service; anything else without a colon is malformed.
+                    all = all || "*".equals(pattern);
+                    continue;
+                }
+                String namespace = pattern.substring(0, colon);
+                if (namespace.indexOf('*') >= 0 || namespace.indexOf('?') >= 0) {
+                    all = true;
+                } else if (!namespaces.contains(namespace)) {
+                    namespaces.add(namespace);
+                }
+            }
+        }
+        return new GrantedServices(namespaces, all);
+    }
+
+    /**
+     * Service namespaces an identity's policies grant: those named literally, plus whether some
+     * statement grants every service without naming any.
+     */
+    public record GrantedServices(List<String> namespaces, boolean grantsAllServices) {}
+
+    /** An action pattern reaches a namespace when its service part matches, whatever the verb is. */
+    private static boolean actionPatternReaches(String pattern, String serviceNamespace) {
+        if ("*".equals(pattern)) {
+            return true;
+        }
+        int colon = pattern == null ? -1 : pattern.indexOf(':');
+        if (colon < 0) {
+            // Not "service:Action" and not "*"; IAM would reject it, so it grants nothing here.
+            return false;
+        }
+        return globMatches(pattern.substring(0, colon), serviceNamespace);
+    }
+
+    /** True only if the NotAction list removes every action in the namespace, not merely some. */
+    private static boolean excludesEntirely(List<String> notActions, String serviceNamespace) {
+        for (String pattern : notActions) {
+            if ("*".equals(pattern)) {
+                return true;
+            }
+            int colon = pattern == null ? -1 : pattern.indexOf(':');
+            if (colon >= 0 && "*".equals(pattern.substring(colon + 1))
+                    && globMatches(pattern.substring(0, colon), serviceNamespace)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /** Appends the key name inside every {@code ${key}} policy variable found in {@code values}. */
     private void collectPolicyVariableKeys(List<String> values, List<String> keys) {
         if (values == null) {
