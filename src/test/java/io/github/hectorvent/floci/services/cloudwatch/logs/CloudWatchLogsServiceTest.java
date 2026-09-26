@@ -1079,6 +1079,53 @@ class CloudWatchLogsServiceTest {
     }
 
     @Test
+    void getLogEventsNarrowWindowPaginatesOnlyMatchingEventsAcrossManyOutOfWindowEvents() {
+        // The window must be applied before pagination, not after: 6 in-window matches
+        // surrounded by 200 out-of-window events must page exactly like a 6-event stream.
+        // A refactor that paginates the full scan before filtering would return the wrong
+        // messages here and drift the tokens off the match count.
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "stream-1", REGION);
+        long base = System.currentTimeMillis();
+        putEvents("/app/logs", "stream-1", base, 200);
+
+        long startTime = base + 97;
+        long endTime = base + 102;
+
+        CloudWatchLogsService.LogEventsResult page1 = service.getLogEvents(
+                "/app/logs", "stream-1", startTime, endTime, 2, true, null, REGION);
+        assertEquals(List.of("msg-97", "msg-98"),
+                page1.events().stream().map(LogEvent::getMessage).toList());
+        assertEquals("f/2", page1.nextForwardToken());
+
+        CloudWatchLogsService.LogEventsResult page2 = service.getLogEvents(
+                "/app/logs", "stream-1", startTime, endTime, 2, true, page1.nextForwardToken(), REGION);
+        assertEquals(List.of("msg-99", "msg-100"),
+                page2.events().stream().map(LogEvent::getMessage).toList());
+        assertEquals("f/4", page2.nextForwardToken());
+
+        CloudWatchLogsService.LogEventsResult page3 = service.getLogEvents(
+                "/app/logs", "stream-1", startTime, endTime, 2, true, page2.nextForwardToken(), REGION);
+        assertEquals(List.of("msg-101", "msg-102"),
+                page3.events().stream().map(LogEvent::getMessage).toList());
+        assertEquals("f/6", page3.nextForwardToken());
+
+        CloudWatchLogsService.LogEventsResult atEnd = service.getLogEvents(
+                "/app/logs", "stream-1", startTime, endTime, 2, true, page3.nextForwardToken(), REGION);
+        assertEquals(0, atEnd.events().size());
+        assertEquals("f/6", atEnd.nextForwardToken(), "token must echo back to signal end of the window");
+
+        // startFromHead=false with no token must start from the tail of the *filtered*
+        // window, not the tail of the full 200-event stream.
+        CloudWatchLogsService.LogEventsResult tail = service.getLogEvents(
+                "/app/logs", "stream-1", startTime, endTime, 2, false, null, REGION);
+        assertEquals(List.of("msg-101", "msg-102"),
+                tail.events().stream().map(LogEvent::getMessage).toList());
+        assertEquals("b/4", tail.nextBackwardToken());
+        assertEquals("f/6", tail.nextForwardToken());
+    }
+
+    @Test
     void filterLogEventsPagesForwardToTheNewestMatches() {
         service.createLogGroup("/app/logs", null, null, REGION);
         service.createLogStream("/app/logs", "stream-1", REGION);
@@ -1201,6 +1248,38 @@ class CloudWatchLogsServiceTest {
         assertEquals(1, page2.events().size());
         assertEquals("ERROR: three", page2.events().get(0).event().getMessage());
         assertNull(page2.nextToken());
+    }
+
+    @Test
+    void filterLogEventsNarrowWindowPaginatesOnlyMatchingEventsAcrossManyOutOfWindowEvents() {
+        // Same guard as GetLogEvents: the window must be applied before pagination, so 6
+        // in-window matches surrounded by 200 out-of-window events page like a 6-event scan,
+        // not like the full one.
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "stream-1", REGION);
+        long base = System.currentTimeMillis();
+        putEvents("/app/logs", "stream-1", base, 200);
+
+        long startTime = base + 97;
+        long endTime = base + 102;
+
+        CloudWatchLogsService.FilteredLogEventsResult page1 = service.filterLogEvents(
+                "/app/logs", null, startTime, endTime, null, 2, null, REGION);
+        assertEquals(List.of("msg-97", "msg-98"),
+                page1.events().stream().map(f -> f.event().getMessage()).toList());
+        assertEquals("f/2", page1.nextToken());
+
+        CloudWatchLogsService.FilteredLogEventsResult page2 = service.filterLogEvents(
+                "/app/logs", null, startTime, endTime, null, 2, page1.nextToken(), REGION);
+        assertEquals(List.of("msg-99", "msg-100"),
+                page2.events().stream().map(f -> f.event().getMessage()).toList());
+        assertEquals("f/4", page2.nextToken());
+
+        CloudWatchLogsService.FilteredLogEventsResult page3 = service.filterLogEvents(
+                "/app/logs", null, startTime, endTime, null, 2, page2.nextToken(), REGION);
+        assertEquals(List.of("msg-101", "msg-102"),
+                page3.events().stream().map(f -> f.event().getMessage()).toList());
+        assertNull(page3.nextToken(), "a page that exactly exhausts the matches is the last one");
     }
 
     @Test

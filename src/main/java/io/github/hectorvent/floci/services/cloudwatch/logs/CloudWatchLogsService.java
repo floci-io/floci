@@ -788,11 +788,13 @@ public class CloudWatchLogsService implements ResourceProvider {
 
         String eventPrefix = eventKeyPrefix(region, groupName, streamName);
         List<LogEvent> all = eventStore.scan(k -> k.startsWith(eventPrefix));
-        all.sort(EVENT_ORDER);
 
+        // Filter before sorting so a narrow time window only pays the comparison cost for
+        // the events it keeps, instead of sorting the whole stream and discarding most of it.
         List<LogEvent> filtered = all.stream()
                 .filter(e -> (startTime == null || e.getTimestamp() >= startTime)
                         && (endTime == null || e.getTimestamp() <= endTime))
+                .sorted(EVENT_ORDER)
                 .toList();
 
         int total = filtered.size();
@@ -872,13 +874,14 @@ public class CloudWatchLogsService implements ResourceProvider {
             eventStore.get(key).ifPresent(e -> all.add(new FilteredEvent(streamName, e)));
         }
 
-        all.sort(Comparator.comparing(FilteredEvent::event, EVENT_ORDER));
-
+        // Filter before sorting so a narrow time window or pattern only pays the comparison
+        // cost for the events it keeps, instead of sorting every stored event up front.
         List<FilteredEvent> matches = all.stream()
                 .filter(f -> (startTime == null || f.event().getTimestamp() >= startTime)
                         && (endTime == null || f.event().getTimestamp() <= endTime))
                 .filter(f -> filterPattern == null || filterPattern.isBlank()
                         || f.event().getMessage().contains(filterPattern))
+                .sorted(Comparator.comparing(FilteredEvent::event, EVENT_ORDER))
                 .toList();
 
         // The cursor indexes matches rather than stored events, which is why the window is applied
