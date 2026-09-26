@@ -57,7 +57,8 @@ class LambdaDataSourceInvokerTest {
         answers("{\"id\": \"1\"}");
 
         Object result = invoker.invoke(dataSource(),
-                Map.of("operation", "Invoke", "payload", Map.of("field", "getMessages")), "eu-west-1");
+                Map.of("version", "2018-05-29", "operation", "Invoke",
+                        "payload", Map.of("field", "getMessages")), "eu-west-1");
 
         // The operation is AppSync's envelope, not something the function should see.
         assertEquals("{\"field\":\"getMessages\"}", capturePayload());

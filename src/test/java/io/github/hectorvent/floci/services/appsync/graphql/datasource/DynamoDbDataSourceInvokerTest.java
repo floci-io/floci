@@ -68,7 +68,8 @@ class DynamoDbDataSourceInvokerTest {
             """);
 
         Object result = invoker.invoke(dataSource(),
-                request("{\"operation\": \"GetItem\", \"key\": {\"regNo\": {\"S\": \"556677\"}}}"),
+                request("{\"version\": \"2018-05-29\", \"operation\": \"GetItem\", "
+                        + "\"key\": {\"regNo\": {\"S\": \"556677\"}}}"),
                 "eu-west-1");
 
         // A GraphQL field cannot be built from {"S": …}; AppSync resolvers see plain values.
