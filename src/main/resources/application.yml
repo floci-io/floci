@@ -287,6 +287,13 @@ floci:
     log-max-size: "10m"
     log-max-file: "3"
     docker-host: unix:///var/run/docker.sock
+    # FLOCI_DOCKER_MAX_CONNECTIONS: connection pool size for every Docker call Floci makes. Each
+    # live Lambda container holds 2 connections for its whole lifetime (log follow + exit watcher),
+    # so the warm-container ceiling is about max-connections / 2; past it, create/start/stop/remove
+    # wait for a free connection and the emulator stalls. 1024 covers the 500 containers the
+    # runtime API port range allows. Keep in step with the @WithDefault on
+    # EmulatorConfig.DockerConfig.maxConnections: a value set here WINS over the annotation.
+    max-connections: 1024
     resource-namespace: ""          # FLOCI_DOCKER_RESOURCE_NAMESPACE; scopes child container/volume names
     docker-config-path: ""
     # extra-labels:                 # Extra Docker labels applied to every Floci-created container and volume

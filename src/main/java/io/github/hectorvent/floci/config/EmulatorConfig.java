@@ -3311,6 +3311,22 @@ public interface EmulatorConfig {
         String dockerHost();
 
         /**
+         * Size of the connection pool behind the shared Docker client. Every Docker call leases a
+         * connection from it, and some hold one for as long as a container runs: a Lambda
+         * container holds two (its followed log stream and its exit watcher) plus one per
+         * extension, and other container-backed services hold one for their log stream. Once
+         * those fill the pool, create, start, stop and remove wait for a free connection,
+         * including the calls that would release one, so the emulator stalls.
+         *
+         * <p>1024 rather than the former hard-coded 100, which capped live Lambda containers at
+         * about 50: a tenth of the 500 that the runtime API port range
+         * ({@link LambdaServiceConfig#runtimeApiBasePort}) exists to allow. Connections are
+         * opened on demand, so a small stack never approaches the limit.
+         */
+        @WithDefault("1024")
+        int maxConnections();
+
+        /**
          * Optional namespace inserted into Floci-managed child container and volume names.
          * Useful when multiple Floci processes share one Docker daemon.
          */
