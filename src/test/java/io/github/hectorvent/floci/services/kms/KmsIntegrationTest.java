@@ -177,6 +177,35 @@ class KmsIntegrationTest {
             .body("KeyMetadata.EncryptionAlgorithms", equalTo(List.of("SYMMETRIC_DEFAULT")));
     }
 
+    /**
+     * github.com/floci-io/floci/issues/4387: AWS defaults Description to "" (never null) per
+     * the CreateKey API reference, so a client modeling the field as a non-optional string
+     * must not see JSON null for a key created without one.
+     */
+    @Test
+    void createKeyWithoutDescription_defaultsToEmptyStringNotNull() {
+        String keyId = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{}")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("KeyMetadata.Description", equalTo(""))
+                .extract().jsonPath().getString("KeyMetadata.KeyId");
+
+        given()
+                .header("X-Amz-Target", "TrentService.DescribeKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"%s\"}".formatted(keyId))
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("KeyMetadata.Description", equalTo(""));
+    }
+
     @Test
     void generateMacAndVerifyMacRoundTripThroughJsonHandler() {
         String keyId = given()

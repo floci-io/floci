@@ -152,7 +152,7 @@ public class KmsService implements ResourceProvider {
         KmsKey key = new KmsKey();
         key.setKeyId(keyId);
         key.setArn(arn);
-        key.setDescription(description);
+        key.setDescription(description == null ? "" : description);
         key.setKeyUsage(effectiveUsage);
         key.setKeySpec(effectiveSpec);
         key.setPolicy(policy != null ? policy : buildDefaultKeyPolicy());
@@ -750,7 +750,7 @@ public class KmsService implements ResourceProvider {
     public void updateKeyDescription(String keyId, String description, String region) {
         KmsKey key = resolveKey(keyId, region);
         requireNotPendingDeletion(key);
-        key.setDescription(description);
+        key.setDescription(description == null ? "" : description);
         keyStore.put(region + "::" + key.getKeyId(), key);
         LOG.infov("Updated description for KMS key: {0} in {1}", key.getKeyId(), region);
     }

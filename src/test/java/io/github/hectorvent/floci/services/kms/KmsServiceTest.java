@@ -308,6 +308,26 @@ class KmsServiceTest {
         assertEquals("new description", updated.getDescription());
     }
 
+    /**
+     * github.com/floci-io/floci/issues/4387: AWS defaults Description to "" (never null).
+     */
+    @Test
+    void createKeyWithoutDescription_storesEmptyStringNotNull() {
+        KmsKey key = kmsService.createKey(null, REGION);
+
+        assertEquals("", key.getDescription());
+        assertEquals("", kmsService.describeKey(key.getKeyId(), REGION).getDescription());
+    }
+
+    @Test
+    void updateKeyDescriptionWithNull_storesEmptyStringNotNull() {
+        KmsKey key = kmsService.createKey("old description", REGION);
+
+        kmsService.updateKeyDescription(key.getKeyId(), null, REGION);
+
+        assertEquals("", kmsService.describeKey(key.getKeyId(), REGION).getDescription());
+    }
+
     @Test
     void listKeys() {
         kmsService.createKey("key1", REGION);

@@ -761,7 +761,10 @@ public class KmsJsonHandler {
         keyMetadata.put("Arn", k.getArn());
         keyMetadata.put("CreationDate", k.getCreationDate());
         keyMetadata.put("Enabled", k.isEnabled());
-        keyMetadata.put("Description", k.getDescription());
+        // AWS defaults Description to "" (never null), and a key persisted before this fix may
+        // still carry a stored null, so this is the one place that must be defensive regardless
+        // of what the write paths store.
+        keyMetadata.put("Description", k.getDescription() == null ? "" : k.getDescription());
         keyMetadata.put("KeyUsage", k.getKeyUsage().name());
         keyMetadata.put("KeyState", k.getKeyState());
         keyMetadata.put("Origin", k.getOrigin());
