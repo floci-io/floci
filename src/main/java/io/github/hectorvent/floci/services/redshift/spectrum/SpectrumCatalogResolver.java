@@ -20,7 +20,7 @@ public class SpectrumCatalogResolver {
         if (glue.isPresent()) {
             return Optional.of(new Resolution.Glue(glue.get()));
         }
-        return catalog.findLegacySchema(accountId, schemaName).map(Resolution.PhaseOne::new);
+        return catalog.findLegacySchema(accountId, databaseName, schemaName).map(Resolution.PhaseOne::new);
     }
 
     public Optional<SpectrumExternalTable> legacyTable(String accountId, String databaseName,
@@ -28,8 +28,8 @@ public class SpectrumCatalogResolver {
         return catalog.table(accountId, databaseName, schemaName, tableName);
     }
 
-    public List<String> legacySchemaNames(String accountId) {
-        return catalog.legacySchemaNames(accountId);
+    public List<String> legacySchemaNames(String accountId, String databaseName) {
+        return catalog.legacySchemaNames(accountId, databaseName);
     }
 
     public sealed interface Resolution permits Resolution.Glue, Resolution.PhaseOne {

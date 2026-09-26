@@ -54,7 +54,12 @@ public class SpectrumInterceptor {
      * so a Glue or IAM failure must reach the client as an error rather than as a closed socket.
      */
     private static SpectrumSqlException asSqlError(AwsException exception) {
-        return new SpectrumSqlException("XX000", exception.getMessage());
+        String sqlState = switch (exception.getErrorCode()) {
+            case "AccessDenied", "AccessDeniedException", "UnauthorizedException" -> "42501";
+            case "EntityNotFoundException", "ResourceNotFoundException" -> "42P01";
+            default -> "XX000";
+        };
+        return new SpectrumSqlException(sqlState, exception.getMessage());
     }
 
     private Plan planStatement(String sql, SpectrumSession session) {

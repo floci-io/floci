@@ -2,6 +2,8 @@ package io.github.hectorvent.floci.services.redshift.spectrum;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -46,6 +48,28 @@ class ExternalStatementParserTest {
         assertThat(table.serde(), equalTo("org.apache.hadoop.hive.serde2.OpenCSVSerde"));
         assertThat(table.serdeProperties().get("separatorChar"), equalTo("|"));
         assertThat(table.serdeProperties().get("quoteChar"), equalTo("\""));
+    }
+
+    @Test
+    void parsesSerdePropertyValuesThatContainClosingParentheses() {
+        ExternalStatement.CreateTable table = (ExternalStatement.CreateTable) parser.parse(
+                "CREATE EXTERNAL TABLE analytics.events (id INT) "
+                        + "ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.OpenCSVSerde' "
+                        + "WITH SERDEPROPERTIES ('separatorChar'=')', 'quoteChar'='(') "
+                        + "STORED AS TEXTFILE LOCATION 's3://bucket/events/'").orElseThrow();
+
+        assertThat(table.serdeProperties().get("separatorChar"), equalTo(")"));
+        assertThat(table.serdeProperties().get("quoteChar"), equalTo("("));
+    }
+
+    @Test
+    void parsesColumnNamesContainingCommasWhenQuoted() {
+        ExternalStatement.CreateTable table = (ExternalStatement.CreateTable) parser.parse(
+                "CREATE EXTERNAL TABLE analytics.events (\"event,id\" VARCHAR, amount DECIMAL(10,2)) "
+                        + "STORED AS PARQUET LOCATION 's3://bucket/events/'").orElseThrow();
+
+        assertThat(table.columns().stream().map(ExternalStatement.ColumnDefinition::name).toList(),
+                equalTo(List.of("event,id", "amount")));
     }
 
     @Test

@@ -207,4 +207,28 @@ class PartitionProjectionTest {
                 "SELECT * FROM audit_events WHERE \"limit\" = 10 AND tenant = 'abc'",
                 List.of(injectedTenantTable())));
     }
+
+    @Test
+    void injectedFiltersMustApplyToEveryJoinedTableAlias() {
+        Table second = table("payments", projecting("projection.tenant.type", "injected"),
+                List.of(column("tenant")));
+
+        assertThrows(AwsException.class, () -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM audit_events a JOIN payments p ON a.id = p.id WHERE a.tenant = 'abc'",
+                List.of(injectedTenantTable(), second)));
+        assertDoesNotThrow(() -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM audit_events a JOIN payments p ON a.id = p.id "
+                        + "WHERE a.tenant = 'abc' AND p.tenant = 'xyz'",
+                List.of(injectedTenantTable(), second)));
+    }
+
+    @Test
+    void injectedFilterMustUseStaticEquality() {
+        assertThrows(AwsException.class, () -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM audit_events WHERE tenant > 'abc'", List.of(injectedTenantTable())));
+        assertThrows(AwsException.class, () -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM audit_events WHERE tenant >= 'abc'", List.of(injectedTenantTable())));
+        assertThrows(AwsException.class, () -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM audit_events WHERE tenant = other_tenant", List.of(injectedTenantTable())));
+    }
 }

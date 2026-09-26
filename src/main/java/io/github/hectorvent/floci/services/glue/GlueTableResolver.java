@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * Resolves a Glue {@link Table} into the pieces of a DuckDB read plan: which {@code read_*}
@@ -61,6 +62,33 @@ public final class GlueTableResolver {
     }
 
     /**
+     * Read plan constrained to the exact objects that the caller listed and authorized. This is
+     * used by Redshift Spectrum, where a location-derived glob could match keys outside the
+     * literal S3 prefix that was checked against the bound role.
+     */
+    public static ReadPlan readPlan(Table table, List<String> objectUris) {
+        if (isIcebergTable(table)) {
+            return readPlan(table);
+        }
+        if (objectUris == null || objectUris.isEmpty()) {
+            throw new IllegalArgumentException("An exact-object read plan requires at least one object");
+        }
+        List<Column> columns = declaredColumns(table);
+        String fileList = "[" + objectUris.stream().map(GlueTableResolver::sqlLiteral)
+                .collect(Collectors.joining(", ")) + "]";
+        String readFunction = inferReadFunction(table);
+        String fromClause;
+        if ("read_csv_auto".equals(readFunction) && hasCsvOptions(table)) {
+            fromClause = csvReadExpressionForInput(table, fileList);
+        } else if ("read_parquet".equals(readFunction)) {
+            fromClause = "read_parquet(" + fileList + ", union_by_name = true)";
+        } else {
+            fromClause = readFunction + "(" + fileList + ")";
+        }
+        return new ReadPlan(fromClause, false, columns);
+    }
+
+    /**
      * A table that declares CSV options (header lines to skip, a delimiter) is read with exactly
      * those options and its declared columns rather than sniffed: a headerless file otherwise gets
      * its first row taken as the header and the declared column names bind to nothing.
@@ -72,9 +100,13 @@ public final class GlueTableResolver {
     }
 
     static String csvReadExpression(Table table, String readPath) {
+        return csvReadExpressionForInput(table, "'" + escape(readPath) + "/**'");
+    }
+
+    private static String csvReadExpressionForInput(Table table, String inputExpression) {
         Map<String, String> options = csvParameters(table);
         int skip = skipCount(options.get(PARAM_SKIP_HEADER));
-        StringBuilder sql = new StringBuilder("read_csv('").append(escape(readPath)).append("/**'");
+        StringBuilder sql = new StringBuilder("read_csv(").append(inputExpression);
         sql.append(", header = ").append(skip == 1);
         if (skip > 1) {
             sql.append(", skip = ").append(skip);
@@ -138,6 +170,11 @@ public final class GlueTableResolver {
 
     private static String escape(String value) {
         return value.replace("'", "''");
+    }
+
+    private static String sqlLiteral(String value) {
+        String globLiteral = value.replace("[", "[[]").replace("*", "[*]").replace("?", "[?]");
+        return "'" + globLiteral.replace("'", "''") + "'";
     }
 
     /**

@@ -10,6 +10,8 @@ import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.QuarkusTestProfile;
+import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.awaitility.Awaitility;
 import org.junit.jupiter.api.AfterEach;
@@ -37,6 +39,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
+@TestProfile(RedshiftSpectrumIntegrationTest.SpectrumSidecarProfile.class)
 class RedshiftSpectrumIntegrationTest {
     private static final String ROLE_NAME = "SpectrumItRole";
     private static final String ROLE_ARN = "arn:aws:iam::000000000000:role/" + ROLE_NAME;
@@ -58,6 +61,13 @@ class RedshiftSpectrumIntegrationTest {
     private String clusterId;
     private String bucket;
     private String glueDatabase;
+
+    public static final class SpectrumSidecarProfile implements QuarkusTestProfile {
+        @Override
+        public Map<String, String> getConfigOverrides() {
+            return Map.of("quarkus.http.test-port", "4566");
+        }
+    }
 
     @BeforeAll
     static void requireDocker() {
@@ -225,6 +235,38 @@ class RedshiftSpectrumIntegrationTest {
                     assertTrue(rows.next());
                     assertEquals("Bob", rows.getString(1));
                 }
+            }
+        }
+    }
+
+    @Test
+    @Timeout(120)
+    void reloadsExternalTableInPlaceAndKeepsDependentViewsCurrent() throws SQLException {
+        seedCsvTable("events", "id,name\n1,Alice\n");
+        Cluster cluster = newCluster("view-reload");
+        try (Connection connection = connect(cluster); Statement statement = connection.createStatement()) {
+            statement.execute(createSchemaSql("analytics"));
+            try (ResultSet initial = statement.executeQuery("SELECT count(*) FROM analytics.events")) {
+                assertTrue(initial.next());
+                assertEquals(1, initial.getInt(1));
+            }
+            statement.execute("CREATE VIEW dependent AS SELECT id, name FROM analytics.events");
+
+            s3Service.putObject(bucket, "events/part-2.csv", "id,name\n2,Bob\n"
+                    .getBytes(StandardCharsets.UTF_8), "text/csv", null);
+
+            try (ResultSet reloaded = statement.executeQuery("SELECT count(*) FROM analytics.events")) {
+                assertTrue(reloaded.next());
+                assertEquals(2, reloaded.getInt(1));
+            }
+            try (ResultSet dependent = statement.executeQuery("SELECT id, name FROM dependent ORDER BY id")) {
+                assertTrue(dependent.next());
+                assertEquals(1, dependent.getInt("id"));
+                assertEquals("Alice", dependent.getString("name"));
+                assertTrue(dependent.next());
+                assertEquals(2, dependent.getInt("id"));
+                assertEquals("Bob", dependent.getString("name"));
+                assertFalse(dependent.next());
             }
         }
     }

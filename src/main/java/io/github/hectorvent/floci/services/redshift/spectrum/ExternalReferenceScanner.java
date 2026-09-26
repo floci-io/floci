@@ -107,6 +107,14 @@ public final class ExternalReferenceScanner {
         }
         List<Token> tokens = tokenize(sql);
         for (int i = 0; i < tokens.size(); i++) {
+            Optional<Reference> moved = movedIntoExternalSchema(tokens, i, schemaNames);
+            if (moved.isPresent()) {
+                return moved;
+            }
+            Optional<Reference> truncated = truncatedTarget(tokens, i, schemaNames);
+            if (truncated.isPresent()) {
+                return truncated;
+            }
             int target = writeTargetIndex(tokens, i);
             if (target >= 0 && target < tokens.size() && tokens.get(target).isChain()) {
                 Reference reference = reference(tokens.get(target).chain(), schemaNames);
@@ -117,6 +125,33 @@ public final class ExternalReferenceScanner {
             Optional<Reference> dropped = droppedTarget(tokens, i, schemaNames);
             if (dropped.isPresent()) {
                 return dropped;
+            }
+        }
+        return Optional.empty();
+    }
+
+    private static Optional<Reference> movedIntoExternalSchema(List<Token> tokens, int i, Set<String> schemaNames) {
+        if (!keywordAt(tokens, i, "alter") || !keywordAt(tokens, i + 1, "table")) {
+            return Optional.empty();
+        }
+        int source = skipOnly(tokens, i + 2);
+        if (keywordAt(tokens, source, "if") && keywordAt(tokens, source + 1, "exists")) {
+            source += 2;
+        }
+        int operation = source + 1;
+        if (keywordAt(tokens, operation, "rename") && keywordAt(tokens, operation + 1, "to")) {
+            int target = operation + 2;
+            if (target < tokens.size() && tokens.get(target).isChain()) {
+                return Optional.ofNullable(reference(tokens.get(target).chain(), schemaNames));
+            }
+        }
+        if (keywordAt(tokens, operation, "set") && keywordAt(tokens, operation + 1, "schema")) {
+            int target = operation + 2;
+            if (target < tokens.size() && tokens.get(target).isChain()) {
+                Word schema = tokens.get(target).chain().getFirst();
+                if (schemaNames.contains(schema.value())) {
+                    return Optional.of(new Reference(schema.value(), ""));
+                }
             }
         }
         return Optional.empty();
@@ -179,7 +214,7 @@ public final class ExternalReferenceScanner {
             return skipOnly(tokens, i + 2);
         }
         if (keywordAt(tokens, i, "merge") && keywordAt(tokens, i + 1, "into")) {
-            return i + 2;
+            return skipOnly(tokens, i + 2);
         }
         if (keywordAt(tokens, i, "update")) {
             return skipOnly(tokens, i + 1);
@@ -187,10 +222,26 @@ public final class ExternalReferenceScanner {
         if (keywordAt(tokens, i, "delete") && keywordAt(tokens, i + 1, "from")) {
             return skipOnly(tokens, i + 2);
         }
-        if (keywordAt(tokens, i, "truncate")) {
-            return skipOnly(tokens, keywordAt(tokens, i + 1, "table") ? i + 2 : i + 1);
-        }
         return -1;
+    }
+
+    private static Optional<Reference> truncatedTarget(List<Token> tokens, int i, Set<String> schemaNames) {
+        if (!keywordAt(tokens, i, "truncate")) {
+            return Optional.empty();
+        }
+        int target = skipOnly(tokens, keywordAt(tokens, i + 1, "table") ? i + 2 : i + 1);
+        while (target < tokens.size() && tokens.get(target).isChain()) {
+            Reference reference = reference(tokens.get(target).chain(), schemaNames);
+            if (reference != null) {
+                return Optional.of(reference);
+            }
+            int comma = target + 1;
+            if (comma >= tokens.size() || tokens.get(comma).isChain() || tokens.get(comma).symbol() != ',') {
+                return Optional.empty();
+            }
+            target = skipOnly(tokens, comma + 1);
+        }
+        return Optional.empty();
     }
 
     private static int skipOnly(List<Token> tokens, int index) {

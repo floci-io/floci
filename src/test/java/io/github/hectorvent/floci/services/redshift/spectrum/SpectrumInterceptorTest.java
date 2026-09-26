@@ -91,6 +91,30 @@ class SpectrumInterceptorTest {
     }
 
     @Test
+    void accessDeniedFailuresUseTheInsufficientPrivilegeSqlState() {
+        when(service.touchesCatalogViews("SELECT * FROM svv_external_tables")).thenReturn(true);
+        doThrow(new AwsException("AccessDeniedException", "Access denied", 403))
+                .when(service).refreshMetadata(SESSION, BACKEND);
+
+        SpectrumSqlException error = assertThrows(SpectrumSqlException.class,
+                () -> interceptor.intercept("SELECT * FROM svv_external_tables", SESSION, BACKEND));
+
+        assertThat(error.sqlState(), equalTo("42501"));
+    }
+
+    @Test
+    void missingGlueResourcesUseTheUndefinedTableSqlState() {
+        when(service.touchesCatalogViews("SELECT * FROM svv_external_tables")).thenReturn(true);
+        doThrow(new AwsException("EntityNotFoundException", "Table missing", 400))
+                .when(service).refreshMetadata(SESSION, BACKEND);
+
+        SpectrumSqlException error = assertThrows(SpectrumSqlException.class,
+                () -> interceptor.intercept("SELECT * FROM svv_external_tables", SESSION, BACKEND));
+
+        assertThat(error.sqlState(), equalTo("42P01"));
+    }
+
+    @Test
     void glueFailuresWhilePlanningAlsoBecomeSqlErrors() {
         when(service.referencesIn("SELECT * FROM a.t", SESSION))
                 .thenThrow(new AwsException("InternalServiceException", "Glue is down", 500));

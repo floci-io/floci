@@ -99,7 +99,7 @@ class ExternalSchemaServiceTest {
         SpectrumSqlException error = assertThrows(SpectrumSqlException.class, () -> service.execute(
                 new CreateSchema("analytics", "lake", ROLE_ARN, false), session, backend()));
 
-        assertThat(error.sqlState(), equalTo("XX000"));
+        assertThat(error.sqlState(), equalTo("3D000"));
         assertThat(error.getMessage(), containsString("Glue database \"lake\" not found"));
         verify(registry, never()).bind(any(ExternalSchemaBinding.class));
     }
@@ -375,7 +375,7 @@ class ExternalSchemaServiceTest {
     @Test
     void createTableOnALegacySchemaExplainsWhyItIsRefused() {
         when(registry.find(ACCOUNT, CLUSTER, "dev", "old_schema")).thenReturn(Optional.empty());
-        when(legacyCatalog.legacySchemaNames(ACCOUNT)).thenReturn(List.of("old_schema"));
+        when(legacyCatalog.legacySchemaNames(ACCOUNT, "dev")).thenReturn(List.of("old_schema"));
         CreateTable create = new CreateTable("old_schema", "events", List.of(new ColumnDefinition("id", "int")),
                 List.of(), TableFormat.PARQUET, "s3://bucket/events/", null, null, Map.of());
 

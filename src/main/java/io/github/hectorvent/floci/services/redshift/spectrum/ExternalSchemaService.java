@@ -109,7 +109,7 @@ public class ExternalSchemaService {
     private Set<String> schemaNames(SpectrumSession session) {
         Set<String> names = registry.list(session.accountId(), session.clusterKey(), session.databaseName()).stream()
                 .map(ExternalSchemaBinding::schemaName).collect(Collectors.toSet());
-        names.addAll(catalogResolver.legacySchemaNames(session.accountId()));
+        names.addAll(catalogResolver.legacySchemaNames(session.accountId(), session.databaseName()));
         return names;
     }
     public Optional<String> execute(ExternalStatement statement, SpectrumSession session, BackendSql backend) {
@@ -145,12 +145,12 @@ public class ExternalSchemaService {
                     throw exception;
                 }
                 if (!statement.createDatabaseIfNotExists()) {
-                    throw new SpectrumSqlException("XX000", "Glue database \"" + statement.glueDatabase() + "\" not found");
+                    throw new SpectrumSqlException("3D000", "Glue database \"" + statement.glueDatabase() + "\" not found");
                 }
                 return true;
             }
         });
-        // PostgreSQL trước: nếu tên schema trùng schema native thì lỗi ở đây và Glue không bị tạo mồ côi
+        // Create the PostgreSQL schema first so a name collision cannot leave an orphan Glue database.
         backend.execute("CREATE SCHEMA " + quote(statement.schemaName()));
         if (createGlueDatabase) {
             try {
@@ -296,7 +296,7 @@ public class ExternalSchemaService {
             }
             inCatalog = false;
         }
-        // PostgreSQL trước: nếu view phụ thuộc chặn DROP (không CASCADE) thì Glue vẫn còn nguyên và có thể thử lại
+        // Drop from PostgreSQL first so a dependent view can block RESTRICT without deleting Glue metadata.
         backend.execute("DROP TABLE IF EXISTS " + quote(statement.schemaName()) + "." + quote(statement.tableName())
                 + (statement.cascade() ? " CASCADE" : ""));
         materializer.forget(session.clusterKey(), session.databaseName(), statement.schemaName(), statement.tableName());
@@ -307,7 +307,7 @@ public class ExternalSchemaService {
                 if (!"EntityNotFoundException".equals(exception.getErrorCode())) {
                     throw exception;
                 }
-                // bảng đã bị xóa khỏi Glue giữa lúc kiểm tra và lúc xóa, kết quả mong muốn vẫn đạt được
+                // The table disappeared from Glue after the existence check, so the requested state already holds.
             }
         }
         metadata.refresh(backend, session.accountId(), binding.get());
@@ -320,7 +320,7 @@ public class ExternalSchemaService {
     }
 
     private SpectrumSqlException unknownSchema(String schemaName, SpectrumSession session) {
-        if (catalogResolver.legacySchemaNames(session.accountId()).contains(schemaName)) {
+        if (catalogResolver.legacySchemaNames(session.accountId(), session.databaseName()).contains(schemaName)) {
             return new SpectrumSqlException("0A000", "schema \"" + schemaName
                     + "\" was created by legacy Spectrum support; recreate it with CREATE EXTERNAL SCHEMA to add tables");
         }

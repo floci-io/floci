@@ -40,7 +40,7 @@ class SpectrumLegacyCatalogRoutingTest {
     }
 
     @Test
-    void findsLegacySchemaByAccountAndNameWhenItsKeyUsesGlueDatabase() {
+    void findsLegacySchemaByAccountAndRedshiftDatabaseWhenItsKeyUsesGlueDatabase() {
         SpectrumExternalSchema oldSchema = new SpectrumExternalSchema(
                 ACCOUNT, "glue_lake", "analytics", "s3://warehouse/events/", null);
         SpectrumExternalTable oldTable = new SpectrumExternalTable(ACCOUNT, "dev", "analytics", "events",
@@ -52,8 +52,20 @@ class SpectrumLegacyCatalogRoutingTest {
         SpectrumCatalogResolver.Resolution result = resolver.resolve(ACCOUNT, CLUSTER, "dev", "analytics").orElseThrow();
 
         assertEquals(SpectrumCatalogResolver.Resolution.Kind.PHASE_ONE, result.kind());
-        assertEquals(Optional.of(oldSchema), catalog.findLegacySchema(ACCOUNT, "analytics"));
+        assertEquals(Optional.of(oldSchema), catalog.findLegacySchema(ACCOUNT, "dev", "analytics"));
         assertTrue(catalog.table(ACCOUNT, "dev", "analytics", "events").isPresent());
+    }
+
+    @Test
+    void legacySchemaIsNotResolvedFromAnotherRedshiftDatabase() {
+        catalog.createSchema(new SpectrumExternalSchema(ACCOUNT, "glue_lake", "analytics",
+                "s3://warehouse/events/", null));
+        catalog.createTable(new SpectrumExternalTable(ACCOUNT, "dev", "analytics", "events",
+                List.of(new SpectrumColumn("id", SpectrumColumn.Type.INTEGER)), "s3://warehouse/events/",
+                ',', '"', '\\', "\\N", 1));
+
+        assertTrue(resolver.resolve(ACCOUNT, CLUSTER, "other", "analytics").isEmpty());
+        assertEquals(List.of(), catalog.legacySchemaNames(ACCOUNT, "other"));
     }
 
     @Test
@@ -72,11 +84,15 @@ class SpectrumLegacyCatalogRoutingTest {
     }
 
     @Test
-    void legacySchemaNamesRemainAccountScoped() {
+    void legacySchemaNamesRemainAccountAndDatabaseScoped() {
         catalog.createSchema(new SpectrumExternalSchema(ACCOUNT, "glue_lake", "legacy", "s3://warehouse/legacy/", null));
+        catalog.createTable(new SpectrumExternalTable(ACCOUNT, "dev", "legacy", "events",
+                List.of(new SpectrumColumn("id", SpectrumColumn.Type.INTEGER)), "s3://warehouse/legacy/",
+                ',', '"', '\\', "\\N", 1));
 
-        assertEquals(List.of("legacy"), catalog.legacySchemaNames(ACCOUNT));
-        assertTrue(catalog.legacySchemaNames("111111111111").isEmpty());
+        assertEquals(List.of("legacy"), catalog.legacySchemaNames(ACCOUNT, "dev"));
+        assertTrue(catalog.legacySchemaNames(ACCOUNT, "other").isEmpty());
+        assertTrue(catalog.legacySchemaNames("111111111111", "dev").isEmpty());
     }
 
     @Test

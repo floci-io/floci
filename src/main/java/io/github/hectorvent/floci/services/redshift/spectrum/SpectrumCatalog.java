@@ -43,7 +43,10 @@ public class SpectrumCatalog implements Resettable {
         return schemas.getForAccount(accountId, schemaKey(accountId, databaseName, schemaName));
     }
 
-    public Optional<SpectrumExternalSchema> findLegacySchema(String accountId, String schemaName) {
+    public Optional<SpectrumExternalSchema> findLegacySchema(String accountId, String databaseName, String schemaName) {
+        if (!legacySchemaNames(accountId, databaseName).contains(schemaName)) {
+            return Optional.empty();
+        }
         String prefix = accountId + ":";
         return schemas.scanForAccount(accountId, key -> key.startsWith(prefix)).stream()
                 .filter(schema -> accountId.equals(schema.accountId()) && schema.schemaName().equals(schemaName))
@@ -51,11 +54,16 @@ public class SpectrumCatalog implements Resettable {
                 .findFirst();
     }
 
-    public List<String> legacySchemaNames(String accountId) {
+    public List<String> legacySchemaNames(String accountId, String databaseName) {
         String prefix = accountId + ":";
-        return schemas.scanForAccount(accountId, key -> key.startsWith(prefix)).stream()
+        String tablePrefix = accountId + ":" + databaseName + ":";
+        List<String> knownSchemas = schemas.scanForAccount(accountId, key -> key.startsWith(prefix)).stream()
                 .filter(schema -> accountId.equals(schema.accountId()))
                 .map(SpectrumExternalSchema::schemaName)
+                .toList();
+        return tables.scanForAccount(accountId, key -> key.startsWith(tablePrefix)).stream()
+                .filter(table -> accountId.equals(table.accountId()) && knownSchemas.contains(table.schemaName()))
+                .map(SpectrumExternalTable::schemaName)
                 .distinct()
                 .sorted()
                 .toList();

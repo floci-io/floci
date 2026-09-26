@@ -296,7 +296,7 @@ public final class SpectrumS3Reader {
         int value;
         while ((value = reader.read()) != -1) {
             char current = (char) value;
-            if (current == escape && !quoted) {
+            if (current == escape) {
                 record.append(current);
                 int next = reader.read();
                 if (next == -1) {

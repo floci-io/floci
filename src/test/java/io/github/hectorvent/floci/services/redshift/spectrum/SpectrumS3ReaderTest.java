@@ -54,6 +54,24 @@ class SpectrumS3ReaderTest {
     }
 
     @Test
+    void keepsEscapedQuotesInsideQuotedFieldsWithoutJoiningTheNextRecord() {
+        S3Service s3 = mock(S3Service.class);
+        S3Object data = object("events/data.csv", "\"a\\\"b\",c\nnext,row\n");
+        when(s3.listObjectsWithPrefixes("warehouse", "events/", "", 1000, null, null))
+                .thenReturn(new S3Service.ListObjectsResult(List.of(data), List.of(), false, null));
+        when(s3.getObject("warehouse", "events/data.csv")).thenReturn(data);
+        SpectrumExternalTable table = new SpectrumExternalTable("000000000000", "dev", "analytics", "events",
+                List.of(new SpectrumColumn("first", SpectrumColumn.Type.VARCHAR),
+                        new SpectrumColumn("second", SpectrumColumn.Type.VARCHAR)),
+                "s3://warehouse/events/", ',', '"', '\\', "\\N", 0);
+
+        List<SpectrumRow> rows = new SpectrumS3Reader(s3, null).read(schema(), table).toList();
+
+        assertEquals(List.of(new SpectrumRow(List.of("a\"b", "c")),
+                new SpectrumRow(List.of("next", "row"))), rows);
+    }
+
+    @Test
     void readsPrefixObjectsInSortedKeyOrder() {
         S3Service s3 = mock(S3Service.class);
         S3Object z = object("events/z.csv", "z\n");

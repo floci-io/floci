@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumGlueCsvAdap
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumInterceptor;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumMaterializer;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumQuery;
+import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumSqlException;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.jboss.logging.Logger;
@@ -22,6 +23,8 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
@@ -43,6 +46,7 @@ class RedshiftInterceptingBridgeTest {
     private Socket bridgeBackendEnd; // the bridge's "backend" socket
     private Socket testBackendEnd;  // test reads what the bridge forwarded, writes backend replies
     private Thread bridgeThread;
+    private RedshiftInterceptingBridge bridge;
 
     private S3Service s3Stub;
 
@@ -60,7 +64,7 @@ class RedshiftInterceptingBridgeTest {
         testBackendEnd = backendListener.accept();
 
         s3Stub = Mockito.mock(S3Service.class);
-        RedshiftInterceptingBridge bridge = new RedshiftInterceptingBridge(
+        bridge = new RedshiftInterceptingBridge(
                 bridgeClientEnd, bridgeBackendEnd, s3Stub, Mockito.mock(IamService.class),
                 spectrumInterceptor == null ? null : "000000000000", List.of(), spectrumInterceptor,
                 spectrumInterceptor == null ? null : "000000000000:cluster", "dev");
@@ -161,6 +165,43 @@ class RedshiftInterceptingBridgeTest {
 
     @Test
     @Timeout(10)
+    void discardsExtendedMessagesAfterASpectrumExecuteErrorUntilSync() throws Exception {
+        SpectrumInterceptor interceptor = Mockito.mock(SpectrumInterceptor.class);
+        SpectrumInterceptor.Plan plan = phaseOnePlan();
+        Mockito.when(interceptor.plan(Mockito.eq("SELECT id FROM analytics.events"), Mockito.any())).thenReturn(plan);
+        Mockito.when(interceptor.plan(Mockito.eq("SELECT 1"), Mockito.any()))
+                .thenReturn(new SpectrumInterceptor.Plan.Forward());
+        Mockito.when(interceptor.execute(Mockito.eq(plan), Mockito.any(), Mockito.any()))
+                .thenThrow(new SpectrumSqlException("22000", "query failed"));
+        startBridge(interceptor);
+
+        PostgresWireDecoder clientDecoder = new PostgresWireDecoder(testClientEnd.getInputStream());
+        testClientEnd.getOutputStream().write(PostgresWireDecoder.encodeParse(new PostgresWireDecoder.ParseMessage(
+                "s", "SELECT id FROM analytics.events", List.of()), "SELECT id FROM analytics.events"));
+        testClientEnd.getOutputStream().flush();
+        assertEquals('1', clientDecoder.nextMessage().type());
+        testClientEnd.getOutputStream().write(frame('B', concat(cString("p"), cString("s"), new byte[6])));
+        testClientEnd.getOutputStream().flush();
+        assertEquals('2', clientDecoder.nextMessage().type());
+        testClientEnd.getOutputStream().write(frame('E', concat(cString("p"), new byte[]{0, 0, 0, 0})));
+        testClientEnd.getOutputStream().flush();
+        assertEquals('E', clientDecoder.nextMessage().type());
+
+        testClientEnd.getOutputStream().write(PostgresWireDecoder.encodeParse(new PostgresWireDecoder.ParseMessage(
+                "next", "SELECT 1", List.of()), "SELECT 1"));
+        testClientEnd.getOutputStream().write(frame('H', new byte[0]));
+        testClientEnd.getOutputStream().write(frame('S', new byte[0]));
+        testClientEnd.getOutputStream().flush();
+
+        PostgresWireDecoder.FrontendMessage forwardedSync = nextForwarded();
+        assertEquals('S', forwardedSync.type());
+        testBackendEnd.getOutputStream().write(frame('Z', new byte[]{'I'}));
+        testBackendEnd.getOutputStream().flush();
+        assertEquals('Z', clientDecoder.nextMessage().type());
+    }
+
+    @Test
+    @Timeout(10)
     void closingSuspendedSpectrumPortalCleansItsTemporaryTable() throws Exception {
         SpectrumInterceptor interceptor = Mockito.mock(SpectrumInterceptor.class);
         SpectrumInterceptor.Plan plan = phaseOnePlan();
@@ -214,6 +255,43 @@ class RedshiftInterceptingBridgeTest {
         testClientEnd.getOutputStream().flush();
         assertEquals('3', clientDecoder.nextMessage().type());
         backend.join();
+        assertEquals(null, backendFailure.get());
+        Mockito.verify(interceptor).cleanup(Mockito.any(), Mockito.eq(materialization));
+    }
+
+    @Test
+    @Timeout(10)
+    void deferredSpectrumCleanupRetainsMaterializationAndRemovesItsSpool() throws Exception {
+        SpectrumInterceptor interceptor = Mockito.mock(SpectrumInterceptor.class);
+        SpectrumMaterializer.Materialization materialization = new SpectrumMaterializer.Materialization("tmp", List.of());
+        Mockito.doAnswer(invocation -> {
+            BackendSql backendSql = invocation.getArgument(0);
+            backendSql.execute("DROP TABLE IF EXISTS \"tmp\"");
+            return null;
+        }).when(interceptor).cleanup(Mockito.any(), Mockito.eq(materialization));
+        startBridge(interceptor);
+
+        Path spoolFile = Files.createTempFile("floci-spectrum-", ".rows");
+        ExtendedSpectrumExchange.PortalCursor cursor = new ExtendedSpectrumExchange.PortalCursor(materialization, spoolFile);
+        bridge.deferSpectrumCleanup(cursor);
+        assertFalse(Files.exists(spoolFile));
+
+        AtomicReference<Throwable> backendFailure = new AtomicReference<>();
+        Thread backend = Thread.ofVirtual().start(() -> {
+            try {
+                PostgresWireDecoder decoder = new PostgresWireDecoder(testBackendEnd.getInputStream());
+                assertEquals("DROP TABLE IF EXISTS \"tmp\"", decoder.nextMessage().getSql());
+                testBackendEnd.getOutputStream().write(frame('C', cString("DROP TABLE")));
+                testBackendEnd.getOutputStream().write(frame('Z', new byte[]{'I'}));
+                testBackendEnd.getOutputStream().flush();
+            } catch (Throwable failure) {
+                backendFailure.set(failure);
+            }
+        });
+
+        assertTrue(bridge.runWithBackendOwned(() -> true));
+        backend.join(5_000);
+        assertFalse(backend.isAlive(), "fake backend did not finish deferred Spectrum cleanup");
         assertEquals(null, backendFailure.get());
         Mockito.verify(interceptor).cleanup(Mockito.any(), Mockito.eq(materialization));
     }

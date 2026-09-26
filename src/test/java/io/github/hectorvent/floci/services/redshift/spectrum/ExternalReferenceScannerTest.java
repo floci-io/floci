@@ -81,6 +81,11 @@ class ExternalReferenceScannerTest {
         assertThat(ExternalReferenceScanner.writeTarget("TRUNCATE TABLE analytics.events", SCHEMAS),
                 equalTo(Optional.of(new Reference("analytics", "events"))));
         assertThat(ExternalReferenceScanner.writeTarget(
+                "TRUNCATE TABLE public.local_table, analytics.events", SCHEMAS),
+                equalTo(Optional.of(new Reference("analytics", "events"))));
+        assertThat(ExternalReferenceScanner.writeTarget("MERGE INTO ONLY analytics.events USING public.t ON true", SCHEMAS),
+                equalTo(Optional.of(new Reference("analytics", "events"))));
+        assertThat(ExternalReferenceScanner.writeTarget(
                 "MERGE INTO analytics.events USING public.t ON true WHEN MATCHED THEN DELETE", SCHEMAS),
                 equalTo(Optional.of(new Reference("analytics", "events"))));
     }
@@ -110,6 +115,14 @@ class ExternalReferenceScannerTest {
         assertThat(ExternalReferenceScanner.writeTarget("ALTER TABLE public.t ADD COLUMN c int", SCHEMAS), equalTo(Optional.empty()));
         assertThat(ExternalReferenceScanner.writeTarget("CREATE TABLE public.t AS SELECT * FROM analytics.events", SCHEMAS), equalTo(Optional.empty()));
         assertThat(ExternalReferenceScanner.writeTarget("COPY public.t FROM 's3://b/k'", SCHEMAS), equalTo(Optional.empty()));
+    }
+
+    @Test
+    void detectsNativeTablesRenamedOrMovedIntoAnExternalSchema() {
+        assertThat(ExternalReferenceScanner.writeTarget("ALTER TABLE public.t RENAME TO analytics.events", SCHEMAS),
+                equalTo(Optional.of(new Reference("analytics", "events"))));
+        assertThat(ExternalReferenceScanner.writeTarget("ALTER TABLE public.t SET SCHEMA analytics", SCHEMAS),
+                equalTo(Optional.of(new Reference("analytics", ""))));
     }
 
     @Test

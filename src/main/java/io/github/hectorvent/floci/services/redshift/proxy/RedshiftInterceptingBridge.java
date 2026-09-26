@@ -71,6 +71,7 @@ public class RedshiftInterceptingBridge {
     private final Map<String, SpectrumInterceptor.Plan> spectrumStatements = new HashMap<>();
     private final Map<String, SpectrumInterceptor.Plan> spectrumPortals = new HashMap<>();
     private final Map<String, ExtendedSpectrumExchange.PortalCursor> spectrumCursors = new HashMap<>();
+    private final List<ExtendedSpectrumExchange.PortalCursor> deferredSpectrumCleanup = new ArrayList<>();
     private final BackendResponseCoordinator coordinator = new BackendResponseCoordinator(session);
 
     private final ReentrantLock backendLock = new ReentrantLock(true);
@@ -140,12 +141,35 @@ public class RedshiftInterceptingBridge {
             InputStream clientIn = client.getInputStream();
             OutputStream backendOut = backend.getOutputStream();
             PostgresWireDecoder decoder = new PostgresWireDecoder(clientIn);
+            OutputStream healthyPassthrough = new OutputStream() {
+                @Override
+                public void write(int value) throws IOException {
+                    if (!discardingExtendedMessages()) {
+                        backendOut.write(value);
+                    }
+                }
+
+                @Override
+                public void write(byte[] bytes, int offset, int length) throws IOException {
+                    if (!discardingExtendedMessages()) {
+                        backendOut.write(bytes, offset, length);
+                    }
+                }
+
+                @Override
+                public void flush() throws IOException {
+                    if (!discardingExtendedMessages()) {
+                        backendOut.flush();
+                    }
+                }
+            };
 
             while (true) {
                 PostgresWireDecoder.FrontendMessage msg;
                 try {
-                    msg = decoder.nextMessage(backendOut, type -> type == 'Q' || type == 'P'
-                            || type == 'B' || type == 'D' || type == 'E' || type == 'C' || type == 'S');
+                    msg = decoder.nextMessage(healthyPassthrough, type -> type != 'X'
+                            && (discardingExtendedMessages() || type == 'Q' || type == 'P' || type == 'B'
+                            || type == 'D' || type == 'E' || type == 'C' || type == 'S'));
                 } catch (SocketTimeoutException e) {
                     if (decoder.isBetweenMessages()) {
                         continue;
@@ -157,6 +181,9 @@ public class RedshiftInterceptingBridge {
                     break;
                 }
 
+                if (discardingExtendedMessages() && msg.type() != 'S' && msg.type() != 'X') {
+                    continue;
+                }
                 if (msg.body() == null) {
                     if (msg.type() == 'P') {
                         session.clear();
@@ -174,9 +201,6 @@ public class RedshiftInterceptingBridge {
                     } else if (msg.type() == 'X') {
                         break;
                     }
-                    continue;
-                }
-                if (extendedSpectrumError && msg.type() != 'S' && msg.type() != 'X') {
                     continue;
                 }
                 switch (msg.type()) {
@@ -200,9 +224,17 @@ public class RedshiftInterceptingBridge {
             LOG.warnv(e, "Unexpected error in RedshiftInterceptingBridge");
         } finally {
             coordinator.close();
+            spectrumCursors.values().forEach(ExtendedSpectrumExchange::dispose);
+            spectrumCursors.clear();
+            deferredSpectrumCleanup.forEach(ExtendedSpectrumExchange::dispose);
+            deferredSpectrumCleanup.clear();
             closeQuietly(client, "client");
             closeQuietly(backend, "backend");
         }
+    }
+
+    private boolean discardingExtendedMessages() {
+        return extendedSpectrumError || coordinator.isDiscardingUntilSync();
     }
 
     private void handleSimpleQuery(PostgresWireDecoder.FrontendMessage message, OutputStream backendOut)
@@ -453,6 +485,9 @@ public class RedshiftInterceptingBridge {
             // (they are synthesized locally, see handleParse/handleBind), so the backend has never
             // heard of this name either: forwarding Close would draw a spurious "does not exist" error.
             awaitPriorBackendResponses();
+            if (!deferredSpectrumCleanup.isEmpty()) {
+                runWithBackendOwned(() -> true);
+            }
             write(client.getOutputStream(), backendFrame('3', EMPTY_BODY));
             return;
         }
@@ -509,10 +544,7 @@ public class RedshiftInterceptingBridge {
             }
         }
         for (ExtendedSpectrumExchange.PortalCursor cursor : abandoned) {
-            runWithBackendOwned(() -> {
-                ExtendedSpectrumExchange.abandon(spectrumInterceptor, backend, cursor);
-                return true;
-            });
+            abandonCursor(cursor);
         }
     }
 
@@ -521,12 +553,38 @@ public class RedshiftInterceptingBridge {
         ExtendedSpectrumExchange.PortalCursor cursor = spectrumCursors.remove(portalName);
         if (cursor != null) {
             spectrumOwned = true;
-            runWithBackendOwned(() -> {
+            abandonCursor(cursor);
+        }
+        return spectrumOwned;
+    }
+
+    private void abandonCursor(ExtendedSpectrumExchange.PortalCursor cursor) throws IOException {
+        try {
+            boolean cleaned = runWithBackendOwned(() -> {
                 ExtendedSpectrumExchange.abandon(spectrumInterceptor, backend, cursor);
                 return true;
             });
+            if (!cleaned) {
+                deferSpectrumCleanup(cursor);
+            }
+        } catch (IOException failure) {
+            deferSpectrumCleanup(cursor);
+            throw failure;
         }
-        return spectrumOwned;
+    }
+
+    void deferSpectrumCleanup(ExtendedSpectrumExchange.PortalCursor cursor) {
+        deferredSpectrumCleanup.add(cursor);
+        ExtendedSpectrumExchange.dispose(cursor);
+    }
+
+    private void cleanupDeferredSpectrumCursors() {
+        if (deferredSpectrumCleanup.isEmpty()) {
+            return;
+        }
+        List<ExtendedSpectrumExchange.PortalCursor> pending = List.copyOf(deferredSpectrumCleanup);
+        deferredSpectrumCleanup.clear();
+        pending.forEach(cursor -> ExtendedSpectrumExchange.abandon(spectrumInterceptor, backend, cursor));
     }
 
     private CopyStatementParser.S3Statement parseS3Statement(String sql) {
@@ -733,6 +791,7 @@ public class RedshiftInterceptingBridge {
                 if (!backendBusy || pumpFinished) {
                     backend.setSoTimeout(EXCHANGE_READ_TIMEOUT_MS);
                     try {
+                        cleanupDeferredSpectrumCursors();
                         return exchange.run();
                     } finally {
                         try {

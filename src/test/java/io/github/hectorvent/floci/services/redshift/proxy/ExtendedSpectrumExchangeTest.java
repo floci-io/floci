@@ -12,10 +12,13 @@ import org.junit.jupiter.api.Timeout;
 import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Stream;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -85,6 +88,7 @@ class ExtendedSpectrumExchangeTest {
         assertEquals('D', clientDecoder.nextMessage().type());
         assertEquals('D', clientDecoder.nextMessage().type());
         assertEquals('s', clientDecoder.nextMessage().type());
+        assertEquals(1, spectrumSpoolFiles().size());
 
         execute(interceptor, session, plan, coordinator, cursors, 2);
         assertEquals('D', clientDecoder.nextMessage().type());
@@ -95,8 +99,17 @@ class ExtendedSpectrumExchangeTest {
 
         assertEquals(null, backendFailure.get());
         assertEquals(0, cursors.size());
+        assertEquals(0, spectrumSpoolFiles().size());
         verify(interceptor, times(1)).execute(eq(plan), eq(session), any());
         verify(interceptor).cleanup(any(BackendSql.class), eq(materialization));
+    }
+
+    private static List<Path> spectrumSpoolFiles() throws IOException {
+        try (Stream<Path> files = Files.list(Path.of(System.getProperty("java.io.tmpdir")))) {
+            return files.filter(path -> path.getFileName().toString().startsWith("floci-spectrum-"))
+                    .filter(path -> path.getFileName().toString().endsWith(".rows"))
+                    .toList();
+        }
     }
 
     @Test

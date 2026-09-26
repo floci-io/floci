@@ -81,11 +81,18 @@ class ExternalTableMaterializerTest {
         EmulatorConfig config = mock(EmulatorConfig.class, Answers.RETURNS_DEEP_STUBS);
         when(config.services().redshift().spectrumMaxRows()).thenReturn(1000L);
         when(config.defaultRegion()).thenReturn("us-east-1");
+        when(duck.query(anyString(), any(), anyString())).thenReturn(List.of());
         backend = new RecordingBackend();
         materializer = new ExternalTableMaterializer(duck, glue, s3, iam, config);
         S3Object scratch = new S3Object(ExternalTableMaterializer.SCRATCH_BUCKET, "scratch.csv",
                 "id,name\n1,Alice\n2,Bob\n".getBytes(StandardCharsets.UTF_8), "text/csv");
         when(s3.getObject(eq(ExternalTableMaterializer.SCRATCH_BUCKET), anyString())).thenReturn(scratch);
+        S3Object icebergMetadata = new S3Object("bucket", "events/metadata/v1.json",
+                "{\"current-snapshot-id\":\"1\",\"snapshots\":[{\"snapshot-id\":\"1\","
+                        .concat("\"manifest-list\":\"s3://bucket/events/metadata/snap*.avro\"}]}")
+                        .getBytes(StandardCharsets.UTF_8), "application/json");
+        when(s3.getObject(eq("bucket"), argThat(key -> key.startsWith("events/metadata/"))))
+                .thenReturn(icebergMetadata);
         when(s3.listObjectsWithPrefixes(eq("bucket"), eq("events/"), eq(""), eq(1000), any(), any()))
                 .thenReturn(new S3Service.ListObjectsResult(
                         List.of(new S3Object("bucket", "events/p1.csv", new byte[]{1}, "text/csv", "etag1")),
@@ -110,6 +117,79 @@ class ExternalTableMaterializerTest {
         assertThat(materializer.ensureCurrent(backend, session(false), BINDING, "events"),
                 equalTo(ExternalTableMaterializer.Outcome.CURRENT));
         assertThat(backend.statements.size(), equalTo(size));
+    }
+
+    @Test
+    void readsOnlyTheExactS3ObjectsThatWereListedAndAuthorized() {
+        when(glue.getTable("lake", "events")).thenReturn(csvTable());
+        when(s3.listObjectsWithPrefixes(eq("bucket"), eq("events/"), eq(""), eq(1000), any(), any()))
+                .thenReturn(new S3Service.ListObjectsResult(List.of(
+                        new S3Object("bucket", "events/part*'one'.csv", new byte[]{1}, "text/csv", "etag1")),
+                        List.of(), false, null));
+
+        materializer.ensureCurrent(backend, session(false), BINDING, "events");
+
+        verify(duck).execute(argThat(sql -> sql.contains("read_csv_auto(['s3://bucket/events/part[*]''one''.csv'])")
+                && !sql.contains("/**")), isNull(), anyString(), eq(ACCOUNT));
+    }
+
+    @Test
+    void deniesIcebergDataFilesReferencedByManifestBeforeScanningThem() {
+        Table table = icebergTable("s3://bucket/events/metadata/v[1].json");
+        when(glue.getTable("lake", "events")).thenReturn(table);
+        when(s3.isAuthEnforced()).thenReturn(true);
+        when(duck.query(anyString(), any(), eq(ACCOUNT))).thenAnswer(invocation -> {
+            String sql = invocation.getArgument(0);
+            if (!sql.contains("status IN ('ADDED', 'EXISTING')") || sql.contains("content = 'DATA'")) {
+                return List.of();
+            }
+            return List.of(
+                    Map.of("file_path", "s3://bucket/events/data.parquet", "manifest_content", "DATA",
+                            "content", "EXISTING", "status", "ADDED"),
+                    Map.of("file_path", "s3://bucket/private/deletes.parquet", "manifest_content", "DELETES",
+                            "content", "POSITION_DELETES", "status", "ADDED"));
+        });
+        when(iam.resolvePrincipalContext(BINDING.iamRoleArn())).thenReturn(CallerContext.of(List.of("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":["s3:ListBucket","s3:GetObject"],"Resource":"*"},
+                  {"Effect":"Deny","Action":"s3:GetObject","Resource":"arn:aws:s3:::bucket/private/deletes.parquet"}
+                ]}""")));
+
+        SpectrumSqlException exception = assertThrows(SpectrumSqlException.class,
+                () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
+
+        assertThat(exception.sqlState(), equalTo("42501"));
+        verify(duck).query(argThat(sql -> sql.contains("iceberg_metadata('s3://bucket/events/metadata/v[[]1].json')")),
+                any(), eq(ACCOUNT));
+        verify(duck, never()).execute(anyString(), any(), anyString(), anyString());
+    }
+
+    @Test
+    void deniesIcebergManifestBeforeTheMetadataScanReadsIt() {
+        Table table = icebergTable("s3://bucket/events/metadata/v1.json");
+        when(glue.getTable("lake", "events")).thenReturn(table);
+        when(s3.isAuthEnforced()).thenReturn(true);
+        when(duck.query(anyString(), any(), eq(ACCOUNT))).thenAnswer(invocation -> {
+            String sql = invocation.getArgument(0);
+            if (sql.contains("read_avro")) {
+                return List.of(Map.of("manifest_path", "s3://bucket/private/manifest.avro"));
+            }
+            return List.of();
+        });
+        when(iam.resolvePrincipalContext(BINDING.iamRoleArn())).thenReturn(CallerContext.of(List.of("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":["s3:ListBucket","s3:GetObject"],"Resource":"*"},
+                  {"Effect":"Deny","Action":"s3:GetObject","Resource":"arn:aws:s3:::bucket/private/manifest.avro"}
+                ]}""")));
+
+        SpectrumSqlException exception = assertThrows(SpectrumSqlException.class,
+                () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
+
+        assertThat(exception.sqlState(), equalTo("42501"));
+        verify(duck).query(argThat(sql -> sql.contains("read_avro('s3://bucket/events/metadata/snap[*].avro')")),
+                any(), eq(ACCOUNT));
+        verify(duck, never()).query(argThat(sql -> sql.contains("iceberg_metadata")), any(), eq(ACCOUNT));
+        verify(duck, never()).execute(anyString(), any(), anyString(), anyString());
     }
 
     @Test
@@ -221,7 +301,7 @@ class ExternalTableMaterializerTest {
 
         materializer.ensureCurrent(backend, session(false), BINDING, "events");
 
-        verify(duck).execute(argThat(sql -> sql.contains("s3://bucket/archived/day=2026-09-25/**")
+        verify(duck).execute(argThat(sql -> sql.contains("s3://bucket/archived/day=2026-09-25/part.csv")
                 && sql.contains("CAST('2026-09-25' AS VARCHAR)") && sql.contains("AS \"day\"")),
                 any(), anyString(), eq(ACCOUNT));
     }
@@ -493,7 +573,7 @@ class ExternalTableMaterializerTest {
 
         materializer.ensureCurrent(backend, session(false), BINDING, "events");
 
-        verify(duck).execute(argThat(sql -> sql.contains("read_csv('s3://bucket/events/**'")
+        verify(duck).execute(argThat(sql -> sql.contains("read_csv(['s3://bucket/events/p1.csv']")
                 && sql.contains("header = false") && sql.contains("delim = '|'")
                 && sql.contains("columns = {'id': 'VARCHAR', 'name': 'VARCHAR'}")),
                 isNull(), anyString(), eq(ACCOUNT));

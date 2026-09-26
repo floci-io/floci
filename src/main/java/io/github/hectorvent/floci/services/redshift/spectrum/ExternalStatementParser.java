@@ -16,7 +16,7 @@ public class ExternalStatementParser {
     private static final Pattern CREATE_SCHEMA = Pattern.compile("(?is)^\\s*CREATE\\s+EXTERNAL\\s+SCHEMA\\s+(.+?)\\s+FROM\\s+DATA\\s+CATALOG\\s+DATABASE\\s+'((?:''|[^'])*)'(?:\\s+REGION\\s+'(?:''|[^'])*')?\\s+IAM_ROLE\\s+(.+?)(\\s+CREATE\\s+EXTERNAL\\s+DATABASE\\s+IF\\s+NOT\\s+EXISTS)?\\s*;?\\s*$");
     private static final Pattern CREATE_EXTERNAL_TABLE = Pattern.compile("(?is)^\\s*CREATE\\s+EXTERNAL\\s+TABLE\\b.*");
     private static final Pattern CREATE_EXTERNAL = Pattern.compile("(?is)^\\s*CREATE\\s+EXTERNAL\\b.*");
-    private static final Pattern SERDE_PROPERTIES = Pattern.compile("(?is)WITH\\s+SERDEPROPERTIES\\s*\\((.*?)\\)");
+    private static final Pattern SERDE_PROPERTIES = Pattern.compile("(?is)WITH\\s+SERDEPROPERTIES\\s*\\(");
     private static final Pattern CREATE_TABLE_HEAD = Pattern.compile("(?is)^\\s*CREATE\\s+EXTERNAL\\s+TABLE\\s+(.+?)\\.(.+?)\\s*\\(");
     private static final Pattern DROP_TABLE = Pattern.compile("(?is)^\\s*DROP\\s+TABLE\\s+(IF\\s+EXISTS\\s+)?([^.;\\s]+)\\.([^.;\\s]+)(?:\\s+(CASCADE|RESTRICT))?\\s*;?\\s*$");
     private static final Pattern DROP_SCHEMA = Pattern.compile("(?is)^\\s*DROP\\s+SCHEMA\\s+(IF\\s+EXISTS\\s+)?([^\\s;]+)(?:\\s+(CASCADE|RESTRICT))?\\s*;?\\s*$");
@@ -78,7 +78,7 @@ public class ExternalStatementParser {
         List<ExternalStatement.ColumnDefinition> partitions = List.of();
         Matcher partition = PARTITIONED_BY.matcher(tail);
         if (partition.find()) {
-            // Cột partition có thể chứa ngoặc như decimal(10,2), nên phải ghép cặp ngoặc thay vì dừng ở ")" đầu tiên
+            // Partition columns may have types such as decimal(10,2), so match nested parentheses.
             int partitionOpen = partition.end() - 1;
             int partitionClose = matchingParen(tail, partitionOpen);
             if (partitionClose < 0) {
@@ -146,9 +146,20 @@ public class ExternalStatementParser {
         List<String> result = new ArrayList<>();
         int depth = 0;
         int start = 0;
+        char quote = 0;
         for (int i = 0; i < text.length(); i++) {
             char c = text.charAt(i);
-            if (c == '(' || c == '<') {
+            if (quote != 0) {
+                if (c == quote) {
+                    if (i + 1 < text.length() && text.charAt(i + 1) == quote) {
+                        i++;
+                    } else {
+                        quote = 0;
+                    }
+                }
+            } else if (c == '\'' || c == '"') {
+                quote = c;
+            } else if (c == '(' || c == '<') {
                 depth++;
             } else if (c == ')' || c == '>') {
                 depth--;
@@ -175,7 +186,13 @@ public class ExternalStatementParser {
         Map<String, String> result = new LinkedHashMap<>();
         Matcher matcher = SERDE_PROPERTIES.matcher(text);
         if (matcher.find()) {
-            Matcher pair = Pattern.compile("'((?:''|[^'])*)'\\s*=\\s*'((?:''|[^'])*)'").matcher(matcher.group(1));
+            int open = matcher.end() - 1;
+            int close = matchingParen(text, open);
+            if (close < 0) {
+                throw new SpectrumSqlException("0A000", "malformed SERDEPROPERTIES clause");
+            }
+            Matcher pair = Pattern.compile("'((?:''|[^'])*)'\\s*=\\s*'((?:''|[^'])*)'")
+                    .matcher(text.substring(open + 1, close));
             while (pair.find()) {
                 result.put(pair.group(1).replace("''", "'"), pair.group(2).replace("''", "'"));
             }

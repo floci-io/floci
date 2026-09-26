@@ -9,15 +9,16 @@ import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumSqlExceptio
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayDeque;
-import java.util.Deque;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.Map;
 
-/** Executes the Phase 1 query for an Extended Query portal and pages its buffered result rows. */
+/** Executes the Phase 1 query for an Extended Query portal and pages its spooled result rows. */
 final class ExtendedSpectrumExchange {
 
     private static final Logger LOG = Logger.getLogger(ExtendedSpectrumExchange.class);
@@ -53,12 +54,12 @@ final class ExtendedSpectrumExchange {
             failed = false;
             if (cursor.exhausted()) {
                 cursors.remove(portalName);
-                cleanup(interceptor, backend, cursor.materialization());
+                cleanup(interceptor, backend, cursor);
             }
         } catch (RuntimeException exception) {
             PortalCursor abandoned = cursors.remove(portalName);
             if (abandoned != null) {
-                cleanup(interceptor, backend, abandoned.materialization());
+                cleanup(interceptor, backend, abandoned);
             } else if (unownedMaterialization != null) {
                 cleanup(interceptor, backend, unownedMaterialization);
             }
@@ -66,7 +67,7 @@ final class ExtendedSpectrumExchange {
         } catch (IOException exception) {
             PortalCursor abandoned = cursors.remove(portalName);
             if (abandoned != null) {
-                cleanup(interceptor, backend, abandoned.materialization());
+                cleanup(interceptor, backend, abandoned);
             } else if (unownedMaterialization != null) {
                 cleanup(interceptor, backend, unownedMaterialization);
             }
@@ -77,7 +78,16 @@ final class ExtendedSpectrumExchange {
     }
 
     static void abandon(SpectrumInterceptor interceptor, Socket backend, PortalCursor cursor) {
+        cleanup(interceptor, backend, cursor);
+    }
+
+    static void dispose(PortalCursor cursor) {
+        cursor.closeSpool();
+    }
+
+    private static void cleanup(SpectrumInterceptor interceptor, Socket backend, PortalCursor cursor) {
         cleanup(interceptor, backend, cursor.materialization());
+        cursor.closeSpool();
     }
 
     private static void cleanup(SpectrumInterceptor interceptor, Socket backend,
@@ -89,13 +99,28 @@ final class ExtendedSpectrumExchange {
         }
     }
 
-    private static Deque<PostgresWireDecoder.FrontendMessage> bufferRows(Socket backend, String sql) throws IOException {
+    private static Path bufferRows(Socket backend, String sql) throws IOException {
+        Path spoolFile = Files.createTempFile("floci-spectrum-", ".rows");
+        boolean complete = false;
+        try {
+            try (OutputStream spool = Files.newOutputStream(spoolFile)) {
+                bufferRows(backend, sql, spool);
+            }
+            complete = true;
+            return spoolFile;
+        } finally {
+            if (!complete) {
+                Files.deleteIfExists(spoolFile);
+            }
+        }
+    }
+
+    private static void bufferRows(Socket backend, String sql, OutputStream spool) throws IOException {
         OutputStream backendOut = backend.getOutputStream();
         backendOut.write(PostgresWireDecoder.encodeQuery(sql));
         backendOut.flush();
 
         PostgresWireDecoder decoder = new PostgresWireDecoder(backend.getInputStream());
-        Deque<PostgresWireDecoder.FrontendMessage> rows = new ArrayDeque<>();
         PostgresWireDecoder.FrontendMessage backendError = null;
         while (true) {
             PostgresWireDecoder.FrontendMessage message = decoder.nextMessage();
@@ -108,12 +133,12 @@ final class ExtendedSpectrumExchange {
                     throw new SpectrumSqlException("unknown error".equals(sqlState) ? "22000" : sqlState,
                             "PostgreSQL rejected the rewritten Spectrum query: " + describeError(backendError));
                 }
-                return rows;
+                return;
             }
             if (message.type() == 'E') {
                 backendError = message;
-            } else if (message.type() != 'T' && message.type() != 'C' && backendError == null) {
-                rows.add(message);
+            } else if (message.type() == 'D' && backendError == null) {
+                spool.write(message.toPacketBytes());
             }
         }
     }
@@ -147,12 +172,19 @@ final class ExtendedSpectrumExchange {
 
     private static void deliverRows(Socket client, PortalCursor cursor, int maxRows) throws IOException {
         int delivered = 0;
-        while ((maxRows <= 0 || delivered < maxRows) && !cursor.rows().isEmpty()) {
-            forward(client, cursor.rows().removeFirst());
+        while (maxRows <= 0 || delivered < maxRows) {
+            PostgresWireDecoder.FrontendMessage row = cursor.nextRow();
+            if (row == null) {
+                cursor.delivered(delivered);
+                forward(client, commandComplete("SELECT " + cursor.totalDelivered()));
+                return;
+            }
+            forward(client, row);
             delivered++;
         }
         cursor.delivered(delivered);
-        forward(client, cursor.rows().isEmpty() ? commandComplete("SELECT " + cursor.totalDelivered()) : portalSuspended());
+        forward(client, cursor.hasNextRow() ? portalSuspended()
+                : commandComplete("SELECT " + cursor.totalDelivered()));
     }
 
     private static PostgresWireDecoder.FrontendMessage commandComplete(String tag) {
@@ -186,21 +218,44 @@ final class ExtendedSpectrumExchange {
 
     static final class PortalCursor {
         private final SpectrumMaterializer.Materialization materialization;
-        private final Deque<PostgresWireDecoder.FrontendMessage> rows;
+        private final Path spoolFile;
+        private final InputStream spoolInput;
+        private final PostgresWireDecoder decoder;
+        private PostgresWireDecoder.FrontendMessage pending;
+        private boolean inputExhausted;
         private long totalDelivered;
 
-        PortalCursor(SpectrumMaterializer.Materialization materialization,
-                     Deque<PostgresWireDecoder.FrontendMessage> rows) {
+        PortalCursor(SpectrumMaterializer.Materialization materialization, Path spoolFile) throws IOException {
             this.materialization = materialization;
-            this.rows = rows;
+            this.spoolFile = spoolFile;
+            this.spoolInput = Files.newInputStream(spoolFile);
+            this.decoder = new PostgresWireDecoder(spoolInput);
         }
 
         SpectrumMaterializer.Materialization materialization() {
             return materialization;
         }
 
-        Deque<PostgresWireDecoder.FrontendMessage> rows() {
-            return rows;
+        PostgresWireDecoder.FrontendMessage nextRow() throws IOException {
+            if (pending != null) {
+                PostgresWireDecoder.FrontendMessage result = pending;
+                pending = null;
+                return result;
+            }
+            if (inputExhausted) {
+                return null;
+            }
+            PostgresWireDecoder.FrontendMessage result = decoder.nextMessage();
+            inputExhausted = result == null;
+            return result;
+        }
+
+        boolean hasNextRow() throws IOException {
+            if (pending == null && !inputExhausted) {
+                pending = decoder.nextMessage();
+                inputExhausted = pending == null;
+            }
+            return pending != null;
         }
 
         void delivered(int count) {
@@ -212,7 +267,20 @@ final class ExtendedSpectrumExchange {
         }
 
         boolean exhausted() {
-            return rows.isEmpty();
+            return inputExhausted && pending == null;
+        }
+
+        void closeSpool() {
+            try {
+                spoolInput.close();
+            } catch (IOException exception) {
+                LOG.warnv(exception, "Unable to close Spectrum result spool {0}", spoolFile);
+            }
+            try {
+                Files.deleteIfExists(spoolFile);
+            } catch (IOException exception) {
+                LOG.warnv(exception, "Unable to delete Spectrum result spool {0}", spoolFile);
+            }
         }
     }
 }

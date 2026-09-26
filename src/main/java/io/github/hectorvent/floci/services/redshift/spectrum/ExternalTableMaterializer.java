@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.redshift.spectrum;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RequestScopes;
@@ -19,6 +21,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import org.jboss.logging.Logger;
 
 import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -26,6 +29,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -37,11 +41,15 @@ import java.util.stream.Collectors;
 @ApplicationScoped
 public class ExternalTableMaterializer {
     private static final Logger LOG = Logger.getLogger(ExternalTableMaterializer.class);
+    private static final ObjectMapper JSON = new ObjectMapper();
     public static final String SCRATCH_BUCKET = S3Service.INTERNAL_BUCKET_PREFIX + "redshift-spectrum-scratch";
     private static final String SQLSTATE_LOAD_FAILED = "58030";
     private static final String SQLSTATE_INSUFFICIENT_PRIVILEGE = "42501";
     private static final long LOCK_TIMEOUT_SECONDS = 30;
     private static final String ICEBERG_SETUP = "INSTALL iceberg; LOAD iceberg;\n";
+    private static final String ICEBERG_MANIFESTS = "SELECT DISTINCT manifest_path FROM read_avro(%s)";
+    private static final String ICEBERG_DATA_FILES = "SELECT DISTINCT file_path FROM iceberg_metadata(%s) "
+            + "WHERE status IN ('ADDED', 'EXISTING')";
     private static final String COPY_OPTIONS = "WITH (FORMAT csv, HEADER true, NULL '\\N')";
     public enum Outcome { NOT_EXTERNAL, CURRENT, LOADED }
 
@@ -82,11 +90,13 @@ public class ExternalTableMaterializer {
         try {
             Location location = Location.parse(table);
             authorizeIcebergMetadata(session.accountId(), binding, roleSession, table, location);
+            authorizeIcebergManifests(session.accountId(), binding, roleSession, table, location);
             requireProjectionTemplateWithin(table, location);
             List<Partition> partitions = partitions(session.accountId(), binding, table);
             List<ReadSource> sources = readSources(session.accountId(), binding, roleSession, table, location, partitions);
             List<S3Object> objects = sources.stream().flatMap(source -> source.objects().stream()).toList();
             authorizeObjects(session.accountId(), binding, roleSession, sources);
+            authorizeIcebergDataFiles(session.accountId(), binding, roleSession, table, location);
             String cacheKey = cacheKey(session, binding, tableName);
             String fingerprint = fingerprint(table, partitions, objects);
             if (!session.inTransaction() && fingerprint.equals(fingerprints.get(cacheKey))) {
@@ -100,7 +110,7 @@ public class ExternalTableMaterializer {
                 }
                 String definitions = load(backend, session, binding, table, sources, schemaSignatures.get(cacheKey));
                 if (session.inTransaction()) {
-                    // DDL của transaction có thể bị rollback, nên không tin fingerprint và signature của lần load này
+                    // Transactional DDL may roll back, so do not cache this load's fingerprint or schema signature.
                     fingerprints.remove(cacheKey);
                     schemaSignatures.remove(cacheKey);
                 } else {
@@ -150,7 +160,7 @@ public class ExternalTableMaterializer {
     private void forgetMatching(Predicate<String> matches) {
         fingerprints.keySet().removeIf(matches);
         schemaSignatures.keySet().removeIf(matches);
-        // locks giữ nguyên: xóa một lock đang được giữ sẽ cho luồng khác tạo lock mới và load song song cùng bảng
+        // Keep locks: removing a held lock lets another thread create a second lock for the same table.
     }
 
     /** Tables of one external schema this materializer has loaded into PostgreSQL and still tracks. */
@@ -261,6 +271,125 @@ public class ExternalTableMaterializer {
         } catch (S3CopySimulator.S3TransferException exception) {
             throw new SpectrumSqlException(exception.sqlState(), exception.getMessage());
         }
+    }
+
+    /**
+     * Iceberg manifests can name data files outside the table location. DuckDB performs the scan
+     * with account credentials, so authorize each live data-file path as the bound role first.
+     */
+    private void authorizeIcebergDataFiles(String accountId, ExternalSchemaBinding binding,
+                                           RedshiftRoleAccess.RoleSession roleSession, Table table, Location location) {
+        if (!GlueTableResolver.isIcebergTable(table)) {
+            return;
+        }
+        String metadata = GlueTableResolver.icebergMetadataLocation(table);
+        if (metadata == null || metadata.isBlank()) {
+            throw new SpectrumSqlException("0A000", "Iceberg table \"" + table.getName()
+                    + "\" has no supported metadata_location");
+        }
+        String sql = ICEBERG_DATA_FILES.formatted(sqlPathLiteral(metadata));
+        List<Map<String, Object>> rows = duckClient.query(sql, ICEBERG_SETUP, accountId);
+        for (Map<String, Object> row : rows) {
+            Object value = row.get("file_path");
+            if (!(value instanceof String filePath) || filePath.isBlank()) {
+                throw new SpectrumSqlException("XX000", "Iceberg manifest contains an invalid data-file path");
+            }
+            S3Location file = icebergFileLocation(filePath, location);
+            try {
+                RequestScopes.runAs(accountId, () -> RedshiftRoleAccess.authorizeRoleRead(
+                        s3Service, iamService, roleSession, binding.iamRoleArn(), file.bucket(), file.key()));
+            } catch (S3CopySimulator.S3TransferException exception) {
+                throw new SpectrumSqlException(exception.sqlState(), exception.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Iceberg's metadata scan reads manifest lists and manifests before it can return data-file paths.
+     * Resolve and authorize both levels first, so the sidecar cannot read them using the emulator's
+     * account credentials when the bound Redshift role is denied access.
+     */
+    private void authorizeIcebergManifests(String accountId, ExternalSchemaBinding binding,
+                                           RedshiftRoleAccess.RoleSession roleSession, Table table, Location location) {
+        if (!GlueTableResolver.isIcebergTable(table)) {
+            return;
+        }
+        String metadata = GlueTableResolver.icebergMetadataLocation(table);
+        if (metadata == null || metadata.isBlank()) {
+            return;
+        }
+        S3Location metadataObjectLocation = icebergFileLocation(metadata, location);
+        S3Object metadataObject = RequestScopes.callAs(accountId,
+                () -> s3Service.getObject(metadataObjectLocation.bucket(), metadataObjectLocation.key()));
+        if (metadataObject == null || metadataObject.getData() == null) {
+            throw new SpectrumSqlException("XX000", "Unable to read Iceberg table metadata");
+        }
+        JsonNode metadataJson;
+        try {
+            metadataJson = JSON.readTree(metadataObject.getData());
+        } catch (IOException exception) {
+            throw new SpectrumSqlException("XX000", "Iceberg table metadata is not valid JSON");
+        }
+        String currentSnapshotId = metadataJson.path("current-snapshot-id").asText();
+        if (currentSnapshotId.isBlank() || "-1".equals(currentSnapshotId)) {
+            return;
+        }
+        String manifestListPath = null;
+        for (JsonNode snapshot : metadataJson.path("snapshots")) {
+            if (currentSnapshotId.equals(snapshot.path("snapshot-id").asText())) {
+                manifestListPath = snapshot.path("manifest-list").asText();
+                break;
+            }
+        }
+        if (manifestListPath == null || manifestListPath.isBlank()) {
+            throw new SpectrumSqlException("XX000", "Iceberg current snapshot has no manifest-list path");
+        }
+        S3Location manifestList = icebergFileLocation(manifestListPath, location);
+        authorizeIcebergObject(accountId, binding, roleSession, manifestList);
+        String manifestListUri = "s3://" + manifestList.bucket() + "/" + manifestList.key();
+        List<Map<String, Object>> manifests = duckClient.query(
+                ICEBERG_MANIFESTS.formatted(sqlPathLiteral(manifestListUri)), ICEBERG_SETUP, accountId);
+        for (Map<String, Object> manifest : manifests) {
+            Object manifestValue = manifest.get("manifest_path");
+            if (!(manifestValue instanceof String manifestPath) || manifestPath.isBlank()) {
+                throw new SpectrumSqlException("XX000", "Iceberg manifest list contains an invalid manifest path");
+            }
+            authorizeIcebergObject(accountId, binding, roleSession, icebergFileLocation(manifestPath, location));
+        }
+    }
+
+    private void authorizeIcebergObject(String accountId, ExternalSchemaBinding binding,
+                                        RedshiftRoleAccess.RoleSession roleSession, S3Location object) {
+        try {
+            RequestScopes.runAs(accountId, () -> RedshiftRoleAccess.authorizeRoleRead(
+                    s3Service, iamService, roleSession, binding.iamRoleArn(), object.bucket(), object.key()));
+        } catch (S3CopySimulator.S3TransferException exception) {
+            throw new SpectrumSqlException(exception.sqlState(), exception.getMessage());
+        }
+    }
+
+    private static S3Location icebergFileLocation(String filePath, Location tableLocation) {
+        if (filePath.startsWith("s3://")) {
+            String rest = filePath.substring(5);
+            int slash = rest.indexOf('/');
+            if (slash <= 0 || slash == rest.length() - 1) {
+                throw new SpectrumSqlException("XX000", "Iceberg manifest contains an invalid S3 data-file path");
+            }
+            return new S3Location(rest.substring(0, slash), rest.substring(slash + 1));
+        }
+        if (filePath.contains("://") || filePath.isBlank()) {
+            throw new SpectrumSqlException("0A000", "Iceberg data-file path uses an unsupported location");
+        }
+        String key = filePath.startsWith("/") ? filePath.substring(1) : filePath;
+        if (!tableLocation.prefix().isEmpty() && !key.startsWith(tableLocation.prefix())) {
+            key = tableLocation.prefix() + key;
+        }
+        return new S3Location(tableLocation.bucket(), key);
+    }
+
+    private static String sqlPathLiteral(String path) {
+        String globLiteral = path.replace("[", "[[]").replace("*", "[*]").replace("?", "[?]");
+        return "'" + globLiteral.replace("'", "''") + "'";
     }
 
     private String cacheKey(SpectrumSession session, ExternalSchemaBinding binding, String tableName) {
@@ -435,7 +564,9 @@ public class ExternalTableMaterializer {
     }
 
     private String readSelect(ReadSource source) {
-        GlueTableResolver.ReadPlan plan = GlueTableResolver.readPlan(source.table());
+        List<String> objectUris = source.objects().stream()
+                .map(object -> "s3://" + source.location().bucket() + "/" + object.getKey()).toList();
+        GlueTableResolver.ReadPlan plan = GlueTableResolver.readPlan(source.table(), objectUris);
         String projection;
         if (source.partition() == null) {
             projection = projection(plan.columns());
@@ -486,5 +617,8 @@ public class ExternalTableMaterializer {
     }
 
     private record ReadSource(Table table, Partition partition, Location location, List<S3Object> objects) {
+    }
+
+    private record S3Location(String bucket, String key) {
     }
 }
