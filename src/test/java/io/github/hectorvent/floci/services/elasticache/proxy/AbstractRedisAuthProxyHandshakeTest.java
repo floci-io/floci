@@ -10,6 +10,7 @@ import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -165,6 +166,68 @@ class AbstractRedisAuthProxyHandshakeTest {
     }
 
     @Test
+    void invalidHelloRetryIsClosedAfterHandshakeTimeout() throws Exception {
+        try (ServerSocket backendServer = new ServerSocket(0)) {
+            TestProxy proxy = startProxy(backendServer, true, USERNAME, PASSWORD, 200);
+            try (Socket client = openClient(proxy.proxyPort())) {
+                write(client, respArray("HELLO", "3", "AUTH", USERNAME, "wrong"));
+                assertEquals("-WRONGPASS invalid username-password pair or user is disabled.\r\n",
+                        readLine(client));
+
+                assertEquals(-1, client.getInputStream().read());
+            } finally {
+                proxy.stop();
+            }
+        }
+    }
+
+    @Test
+    void stopClosesClientWaitingForHelloRetry() throws Exception {
+        try (ServerSocket backendServer = new ServerSocket(0)) {
+            TestProxy proxy = startProxy(backendServer, true, USERNAME, PASSWORD, 5_000);
+            try (Socket client = openClient(proxy.proxyPort())) {
+                write(client, respArray("HELLO", "3", "AUTH", USERNAME, "wrong"));
+                assertEquals("-WRONGPASS invalid username-password pair or user is disabled.\r\n",
+                        readLine(client));
+
+                proxy.stop();
+                assertEquals(-1, client.getInputStream().read());
+            } finally {
+                proxy.stop();
+            }
+        }
+    }
+
+    @Test
+    void successfulHelloRetryClearsHandshakeTimeout() throws Exception {
+        try (ServerSocket backendServer = new ServerSocket(0)) {
+            TestProxy proxy = startProxy(backendServer, true, USERNAME, PASSWORD, 200);
+            try (Socket client = openClient(proxy.proxyPort())) {
+                write(client, respArray("HELLO", "3", "AUTH", USERNAME, "wrong"));
+                assertEquals("-WRONGPASS invalid username-password pair or user is disabled.\r\n",
+                        readLine(client));
+
+                write(client, respArray("HELLO", "3", "AUTH", USERNAME, PASSWORD));
+                try (Socket backend = acceptBackend(backendServer)) {
+                    byte[] hello = respArray("HELLO", "3");
+                    assertArrayEquals(hello, backend.getInputStream().readNBytes(hello.length));
+                    write(backend, "+HELLO\r\n".getBytes(StandardCharsets.US_ASCII));
+                    assertEquals("+HELLO\r\n", readLine(client));
+
+                    TimeUnit.MILLISECONDS.sleep(300);
+                    byte[] ping = respArray("PING");
+                    write(client, ping);
+                    assertArrayEquals(ping, backend.getInputStream().readNBytes(ping.length));
+                    write(backend, "+PONG\r\n".getBytes(StandardCharsets.US_ASCII));
+                    assertEquals("+PONG\r\n", readLine(client));
+                }
+            } finally {
+                proxy.stop();
+            }
+        }
+    }
+
+    @Test
     void helloOnOpenCacheIsForwardedVerbatim() throws Exception {
         try (ServerSocket backendServer = new ServerSocket(0)) {
             TestProxy proxy = startProxy(backendServer, false, USERNAME, PASSWORD);
@@ -187,12 +250,19 @@ class AbstractRedisAuthProxyHandshakeTest {
 
     private static TestProxy startProxy(ServerSocket backendServer, boolean authRequired,
                                         String username, String password) throws IOException {
+        return startProxy(backendServer, authRequired, username, password,
+                SOCKET_TIMEOUT_MILLIS);
+    }
+
+    private static TestProxy startProxy(ServerSocket backendServer, boolean authRequired,
+                                        String username, String password,
+                                        int handshakeTimeoutMillis) throws IOException {
         int proxyPort;
         try (ServerSocket freePort = new ServerSocket(0)) {
             proxyPort = freePort.getLocalPort();
         }
         TestProxy proxy = new TestProxy("127.0.0.1", backendServer.getLocalPort(), proxyPort,
-                authRequired, username, password);
+                authRequired, username, password, handshakeTimeoutMillis);
         proxy.start(proxyPort);
         return proxy;
     }
@@ -251,8 +321,10 @@ class AbstractRedisAuthProxyHandshakeTest {
         private final AtomicInteger authenticationAttempts = new AtomicInteger();
 
         private TestProxy(String backendHost, int backendPort, int proxyPort,
-                          boolean authRequired, String expectedUsername, String expectedPassword) {
-            super(LOG, "test", "test", "handshake", backendHost, backendPort);
+                          boolean authRequired, String expectedUsername, String expectedPassword,
+                          int handshakeTimeoutMillis) {
+            super(LOG, "test", "test", "handshake", backendHost, backendPort,
+                    handshakeTimeoutMillis);
             this.proxyPort = proxyPort;
             this.authRequired = authRequired;
             this.expectedUsername = expectedUsername;

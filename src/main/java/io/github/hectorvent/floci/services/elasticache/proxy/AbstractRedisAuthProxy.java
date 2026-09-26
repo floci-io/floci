@@ -10,6 +10,8 @@ import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 
 /**
@@ -23,6 +25,7 @@ import java.util.concurrent.CountDownLatch;
  * <p>Uses Java virtual threads to accept connections and run the AUTH handshake.
  */
 public abstract class AbstractRedisAuthProxy {
+    private static final int HANDSHAKE_TIMEOUT_MILLIS = 10_000;
     private static final long RELAY_JOIN_TIMEOUT_MILLIS = 1_000;
 
     private static final byte[] OK_RESPONSE = "+OK\r\n".getBytes(StandardCharsets.UTF_8);
@@ -57,18 +60,28 @@ public abstract class AbstractRedisAuthProxy {
     private final String resourceId;
     private final String backendHost;
     private final int backendPort;
+    private final int handshakeTimeoutMillis;
+    private final Set<Socket> handshakingClients = ConcurrentHashMap.newKeySet();
 
     private volatile boolean running;
     private ServerSocket serverSocket;
 
     protected AbstractRedisAuthProxy(Logger log, String serviceName, String threadPrefix,
                                       String resourceId, String backendHost, int backendPort) {
+        this(log, serviceName, threadPrefix, resourceId, backendHost, backendPort,
+                HANDSHAKE_TIMEOUT_MILLIS);
+    }
+
+    protected AbstractRedisAuthProxy(Logger log, String serviceName, String threadPrefix,
+                                      String resourceId, String backendHost, int backendPort,
+                                      int handshakeTimeoutMillis) {
         this.log = log;
         this.serviceName = serviceName;
         this.threadPrefix = threadPrefix;
         this.resourceId = resourceId;
         this.backendHost = backendHost;
         this.backendPort = backendPort;
+        this.handshakeTimeoutMillis = handshakeTimeoutMillis;
     }
 
     /** Whether the {@code AUTH} command is required before bridging to the backend. */
@@ -97,12 +110,22 @@ public abstract class AbstractRedisAuthProxy {
         } catch (IOException e) {
             log.warnv("Error closing proxy server socket for {0}: {1}", resourceId, e.getMessage());
         }
+        for (Socket client : handshakingClients) {
+            closeQuietly(client);
+        }
+        handshakingClients.clear();
     }
 
     private void acceptLoop() {
         while (running) {
             try {
                 Socket client = serverSocket.accept();
+                handshakingClients.add(client);
+                if (!running) {
+                    handshakingClients.remove(client);
+                    closeQuietly(client);
+                    continue;
+                }
                 Thread.ofVirtual().name(threadPrefix + "-proxy-conn-" + resourceId)
                         .start(() -> handleConnection(client));
             } catch (IOException e) {
@@ -116,6 +139,7 @@ public abstract class AbstractRedisAuthProxy {
     private void handleConnection(Socket client) {
         try {
             client.setTcpNoDelay(true);
+            client.setSoTimeout(handshakeTimeoutMillis);
             RespReader reader = new RespReader(client.getInputStream());
             while (true) {
                 String[] cmd = reader.readCommand();
@@ -151,6 +175,8 @@ public abstract class AbstractRedisAuthProxy {
         } catch (Exception e) {
             log.debugv("Connection error for {0}: {1}", resourceId, e.getMessage());
             closeQuietly(client);
+        } finally {
+            handshakingClients.remove(client);
         }
     }
 
@@ -269,11 +295,18 @@ public abstract class AbstractRedisAuthProxy {
 
     private void bridgeCommand(Socket client, String[] command) throws IOException {
         Socket backend = new Socket(backendHost, backendPort);
-        backend.setTcpNoDelay(true);
-        if (command != null) {
-            resendCommand(command, backend.getOutputStream());
+        try {
+            backend.setTcpNoDelay(true);
+            if (command != null) {
+                resendCommand(command, backend.getOutputStream());
+            }
+            client.setSoTimeout(0);
+            handshakingClients.remove(client);
+            bridge(client, backend);
+        } catch (IOException e) {
+            closeQuietly(backend);
+            throw e;
         }
-        bridge(client, backend);
     }
 
     private static void writeResponse(Socket client, byte[] response) throws IOException {

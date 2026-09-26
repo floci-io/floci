@@ -327,10 +327,9 @@ class MemoryDbIntegrationTest {
         }
 
         char type = header.charAt(0);
-        int count;
-        switch (type) {
+        return switch (type) {
             case '$', '!', '=' -> {
-                count = parseRespLength(header);
+                int count = parseRespLength(header);
                 if (count >= 0) {
                     byte[] payload = socket.getInputStream().readNBytes(count + 2);
                     if (payload.length != count + 2
@@ -338,24 +337,24 @@ class MemoryDbIntegrationTest {
                         throw new IOException("Incomplete RESP bulk payload");
                     }
                 }
+                yield header;
             }
             case '*', '~', '>' -> {
-                count = parseRespLength(header);
+                int count = parseRespLength(header);
                 for (int index = 0; index < count; index++) {
                     readRespValue(socket);
                 }
+                yield header;
             }
             case '%', '|' -> {
-                count = parseRespLength(header);
+                int count = parseRespLength(header);
                 for (int index = 0; index < count * 2; index++) {
                     readRespValue(socket);
                 }
+                yield header;
             }
-            default -> {
-                // This value is fully contained in the header line.
-            }
-        }
-        return header;
+            default -> header;
+        };
     }
 
     private static int parseRespLength(String header) throws IOException {
