@@ -49,6 +49,9 @@ public class GlueCrawlerRunService {
     private static final int MAX_RUNTIME_HISTORY = 100;
 
     private final StorageBackend<String, CrawlerRunRecord> recordStore;
+    // Workflow run id to the crawls that ran in it. Kept apart from each crawler's recent history, which
+    // only holds its latest crawls, so an older workflow run keeps its crawls; cleared with the workflow.
+    private final StorageBackend<String, List<FinishedCrawl>> workflowCrawlStore;
     private final GlueService glueService;
     private final int runDurationSeconds;
     private final Clock clock;
@@ -56,31 +59,34 @@ public class GlueCrawlerRunService {
     @Inject
     public GlueCrawlerRunService(StorageFactory storageFactory, GlueService glueService, EmulatorConfig config) {
         this(storageFactory.create("glue", "crawler_runs.json", new TypeReference<>() {}),
+                storageFactory.create("glue", "workflow_run_crawls.json", new TypeReference<>() {}),
                 glueService, config.services().glue().crawlerRunDurationSeconds(), Clock.systemUTC());
     }
 
-    GlueCrawlerRunService(StorageBackend<String, CrawlerRunRecord> recordStore, GlueService glueService,
+    GlueCrawlerRunService(StorageBackend<String, CrawlerRunRecord> recordStore,
+                          StorageBackend<String, List<FinishedCrawl>> workflowCrawlStore, GlueService glueService,
                           int runDurationSeconds, Clock clock) {
         if (runDurationSeconds < 0) {
             throw new IllegalArgumentException(
                     "floci.services.glue.crawler-run-duration-seconds must not be negative: " + runDurationSeconds);
         }
         this.recordStore = recordStore;
+        this.workflowCrawlStore = workflowCrawlStore;
         this.glueService = glueService;
         this.runDurationSeconds = runDurationSeconds;
         this.clock = clock;
     }
 
     public synchronized String startCrawler(String name) {
-        return startCrawler(name, null);
+        return startCrawler(name, null, null);
     }
 
     /**
      * Starts a crawl and returns its crawl id ({@code crawl:} and a UUID, so ids never repeat, even for
-     * a crawler deleted and created again). A trigger passes the origin of its chain; a null origin
-     * makes the crawl its own origin.
+     * a crawler deleted and created again). A trigger passes the origin of its chain (a null origin
+     * makes the crawl its own origin) and, when it belongs to a workflow, the workflow run.
      */
-    public synchronized String startCrawler(String name, String originRunId) {
+    public synchronized String startCrawler(String name, String originRunId, String workflowRunId) {
         glueService.getCrawler(name);
         CrawlerRunRecord record = settledRecord(name);
         if (record.getCurrentStart() != null) {
@@ -91,6 +97,7 @@ public class GlueCrawlerRunService {
         record.setCurrentMessagePrefix(UUID.randomUUID().toString());
         record.setCurrentCrawlId(crawlId);
         record.setCurrentOriginRunId(originRunId != null ? originRunId : crawlId);
+        record.setCurrentWorkflowRunId(workflowRunId);
         recordStore.put(name, record);
         LOG.infov("Started Glue crawler {0}", name);
         settle(record);
@@ -175,7 +182,7 @@ public class GlueCrawlerRunService {
         for (FinishedCrawl crawl : record.getRecentCrawls()) {
             if (crawl.getSequence() > after) {
                 completions.add(new GlueRunCompletion(Long.toString(crawl.getSequence()), crawl.getFinishedAt(),
-                        crawl.getStatus(), crawl.getOriginRunId()));
+                        crawl.getStatus(), crawl.getOriginRunId(), crawl.getWorkflowRunId()));
             }
         }
         return completions;
@@ -199,6 +206,48 @@ public class GlueCrawlerRunService {
             }
         }
         return false;
+    }
+
+    /** A crawl of a workflow run as the workflow graph reports it: the {@code Crawl} structure. */
+    public record WorkflowCrawl(String crawlerName, String state, Instant startedOn, Instant completedOn) {}
+
+    /** The crawls, settled, that belong to a workflow run: finished ones and a crawl still running. */
+    public synchronized List<WorkflowCrawl> crawlsInWorkflowRun(String workflowRunId) {
+        List<WorkflowCrawl> running = new ArrayList<>();
+        for (CrawlerRunRecord stored : recordStore.scan(key -> true)) {
+            CrawlerRunRecord record = settledRecord(stored.getCrawlerName());
+            if (record.getCurrentStart() != null && workflowRunId.equals(record.getCurrentWorkflowRunId())) {
+                running.add(new WorkflowCrawl(record.getCrawlerName(), STATE_RUNNING, record.getCurrentStart(), null));
+            }
+        }
+        List<WorkflowCrawl> crawls = new ArrayList<>();
+        for (FinishedCrawl crawl : workflowCrawlStore.get(workflowRunId).orElse(List.of())) {
+            crawls.add(new WorkflowCrawl(crawl.getCrawlerName(), crawl.getStatus(), crawl.getStartedAt(),
+                    crawl.getFinishedAt()));
+        }
+        crawls.addAll(running);
+        crawls.sort(Comparator.comparing(WorkflowCrawl::startedOn));
+        return crawls;
+    }
+
+    /**
+     * Forgets the crawls of a workflow run that no longer exists, and detaches a crawl still running in
+     * it, so that crawl does not record history under the removed run when it finishes.
+     */
+    public synchronized void forgetWorkflowRun(String workflowRunId) {
+        workflowCrawlStore.delete(workflowRunId);
+        for (CrawlerRunRecord record : recordStore.scan(key -> true)) {
+            if (workflowRunId.equals(record.getCurrentWorkflowRunId())) {
+                record.setCurrentWorkflowRunId(null);
+                recordStore.put(record.getCrawlerName(), record);
+            }
+        }
+    }
+
+    /** Whether the crawler is crawling now, after settling a crawl that has run its time. */
+    public synchronized boolean isRunning(String name) {
+        glueService.getCrawler(name);
+        return settledRecord(name).getCurrentStart() != null;
     }
 
     public synchronized void updateCrawler(Crawler update) {
@@ -294,6 +343,14 @@ public class GlueCrawlerRunService {
         finished.setStatus(status);
         finished.setCrawlId(record.getCurrentCrawlId());
         finished.setOriginRunId(record.getCurrentOriginRunId());
+        finished.setWorkflowRunId(record.getCurrentWorkflowRunId());
+        finished.setCrawlerName(record.getCrawlerName());
+        if (finished.getWorkflowRunId() != null) {
+            List<FinishedCrawl> ofRun = new ArrayList<>(
+                    workflowCrawlStore.get(finished.getWorkflowRunId()).orElse(List.of()));
+            ofRun.add(finished);
+            workflowCrawlStore.put(finished.getWorkflowRunId(), ofRun);
+        }
         List<FinishedCrawl> recent = new ArrayList<>(record.getRecentCrawls());
         recent.add(finished);
         if (recent.size() > MAX_RUNTIME_HISTORY) {
@@ -308,6 +365,7 @@ public class GlueCrawlerRunService {
         record.setCurrentMessagePrefix(null);
         record.setCurrentCrawlId(null);
         record.setCurrentOriginRunId(null);
+        record.setCurrentWorkflowRunId(null);
         recordStore.put(record.getCrawlerName(), record);
     }
 }

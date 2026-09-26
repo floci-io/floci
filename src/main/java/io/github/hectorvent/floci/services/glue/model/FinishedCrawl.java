@@ -8,14 +8,19 @@ import java.time.Instant;
 @RegisterForReflection
 public class FinishedCrawl {
     private long sequence;
+    private String crawlerName;
     private Instant startedAt;
     private Instant finishedAt;
     private String status;
     private String crawlId;
     private String originRunId;
     private int triggeredRuns;
+    private String workflowRunId;
 
     public FinishedCrawl() {}
+
+    public String getCrawlerName() { return crawlerName; }
+    public void setCrawlerName(String crawlerName) { this.crawlerName = crawlerName; }
 
     public long getSequence() { return sequence; }
     public void setSequence(long sequence) { this.sequence = sequence; }
@@ -37,4 +42,7 @@ public class FinishedCrawl {
 
     public int getTriggeredRuns() { return triggeredRuns; }
     public void setTriggeredRuns(int triggeredRuns) { this.triggeredRuns = triggeredRuns; }
+
+    public String getWorkflowRunId() { return workflowRunId; }
+    public void setWorkflowRunId(String workflowRunId) { this.workflowRunId = workflowRunId; }
 }

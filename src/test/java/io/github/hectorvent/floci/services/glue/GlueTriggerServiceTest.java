@@ -61,8 +61,8 @@ class GlueTriggerServiceTest {
                 regionResolver, new ResourceGroupsTaggingService(storageFactory),
                 new KmsService(storageFactory, regionResolver));
         jobRuns = new GlueJobRunService(new InMemoryStorage<>(), new InMemoryStorage<>(), glueService, 0, Clock.systemUTC());
-        crawls = new GlueCrawlerRunService(new InMemoryStorage<>(), glueService, 0, Clock.systemUTC());
-        triggers = new GlueTriggerService(new InMemoryStorage<>(), glueService, jobRuns, crawls);
+        crawls = new GlueCrawlerRunService(new InMemoryStorage<>(), new InMemoryStorage<>(), glueService, 0, Clock.systemUTC());
+        triggers = new GlueTriggerService(new InMemoryStorage<>(), new InMemoryStorage<>(), glueService, jobRuns, crawls);
         for (String job : List.of("extract", "load", "report")) {
             createJob(job);
         }
@@ -496,7 +496,7 @@ class GlueTriggerServiceTest {
     void aSuccessIsNotLostWhenALaterRunOfTheSameJobIsStoppedFirst() {
         MutableClock clock = new MutableClock();
         GlueJobRunService slowRuns = new GlueJobRunService(new InMemoryStorage<>(), new InMemoryStorage<>(), glueService, 60, clock);
-        GlueTriggerService slowTriggers = new GlueTriggerService(new InMemoryStorage<>(), glueService, slowRuns, crawls);
+        GlueTriggerService slowTriggers = new GlueTriggerService(new InMemoryStorage<>(), new InMemoryStorage<>(), glueService, slowRuns, crawls);
         slowTriggers.createTrigger(conditional("after", null, List.of(jobIs("extract", "SUCCEEDED")), "load"),
                 true, null, REGION);
         slowRuns.startJobRun("extract", null, new JobRun());
@@ -515,7 +515,7 @@ class GlueTriggerServiceTest {
         Clock frozen = Clock.fixed(Instant.parse("2026-09-25T12:00:00Z"), ZoneOffset.UTC);
         GlueJobRunService frozenRuns =
                 new GlueJobRunService(new InMemoryStorage<>(), new InMemoryStorage<>(), glueService, 0, frozen);
-        GlueTriggerService frozenTriggers = new GlueTriggerService(new InMemoryStorage<>(), glueService, frozenRuns, crawls);
+        GlueTriggerService frozenTriggers = new GlueTriggerService(new InMemoryStorage<>(), new InMemoryStorage<>(), glueService, frozenRuns, crawls);
         frozenTriggers.createTrigger(conditional("each", "ANY", List.of(jobIs("extract", "SUCCEEDED")), "load"),
                 true, null, REGION);
 
@@ -530,9 +530,9 @@ class GlueTriggerServiceTest {
     @Test
     void crawlsFinishingInTheSameClockTickEachCount() {
         Clock frozen = Clock.fixed(Instant.parse("2026-09-25T12:00:00Z"), ZoneOffset.UTC);
-        GlueCrawlerRunService frozenCrawls = new GlueCrawlerRunService(new InMemoryStorage<>(), glueService, 0, frozen);
+        GlueCrawlerRunService frozenCrawls = new GlueCrawlerRunService(new InMemoryStorage<>(), new InMemoryStorage<>(), glueService, 0, frozen);
         GlueTriggerService frozenTriggers =
-                new GlueTriggerService(new InMemoryStorage<>(), glueService, jobRuns, frozenCrawls);
+                new GlueTriggerService(new InMemoryStorage<>(), new InMemoryStorage<>(), glueService, jobRuns, frozenCrawls);
         frozenTriggers.createTrigger(conditional("each", "ANY", List.of(crawlIs("raw", "SUCCEEDED")), "load"),
                 true, null, REGION);
 

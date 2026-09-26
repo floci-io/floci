@@ -35,6 +35,8 @@ public class GlueJsonHandler {
             "StartJobRun", "GetJobRun", "GetJobRuns", "BatchStopJobRun",
             "StartCrawler", "StopCrawler", "GetCrawler", "GetCrawlers", "BatchGetCrawlers", "GetCrawlerMetrics",
             "UpdateCrawler",
+            "StartWorkflowRun", "StopWorkflowRun", "ResumeWorkflowRun", "GetWorkflowRun", "GetWorkflowRuns",
+            "GetWorkflow", "BatchGetWorkflows",
             "StartTrigger");
 
     private final GlueService glueService;
@@ -515,8 +517,89 @@ public class GlueJsonHandler {
                 triggerService.stopTrigger(name);
                 yield Response.ok(Map.of("Name", name)).build();
             }
+            case "CreateWorkflow" -> {
+                Workflow workflow = new Workflow();
+                workflow.setName(request.path("Name").asText(null));
+                workflow.setDescription(request.path("Description").asText(null));
+                workflow.setDefaultRunProperties(readStringMap(request, "DefaultRunProperties"));
+                if (request.hasNonNull("MaxConcurrentRuns")) {
+                    workflow.setMaxConcurrentRuns(request.get("MaxConcurrentRuns").asInt());
+                }
+                glueService.createWorkflow(workflow, readStringMap(request, "Tags"), region);
+                yield Response.ok(Map.of("Name", workflow.getName())).build();
+            }
+            case "GetWorkflow" -> Response.ok(Map.of("Workflow", triggerService.workflowView(
+                    glueService.getWorkflow(request.path("Name").asText(null)),
+                    request.path("IncludeGraph").asBoolean(false)))).build();
+            case "ListWorkflows" -> {
+                GlueService.Page<String> page = glueService.listWorkflows(readMaxResults(request), readNextToken(request));
+                yield Response.ok(pageResponse("Workflows", page.items(), page.nextToken())).build();
+            }
+            case "BatchGetWorkflows" -> {
+                List<String> names = request.hasNonNull("Names")
+                        ? mapper.convertValue(request.get("Names"), STRING_LIST)
+                        : null;
+                GlueService.BatchGetWorkflowsResult result = glueService.batchGetWorkflows(names);
+                List<Workflow> workflows = new ArrayList<>();
+                for (Workflow workflow : result.workflows()) {
+                    workflows.add(triggerService.workflowView(workflow, request.path("IncludeGraph").asBoolean(false)));
+                }
+                Map<String, Object> response = new LinkedHashMap<>();
+                response.put("Workflows", workflows);
+                response.put("MissingWorkflows", result.missingWorkflows());
+                yield Response.ok(response).build();
+            }
+            case "UpdateWorkflow" -> {
+                String name = request.path("Name").asText(null);
+                glueService.updateWorkflow(name, request.path("Description").asText(null),
+                        readStringMap(request, "DefaultRunProperties"),
+                        request.hasNonNull("MaxConcurrentRuns") ? request.get("MaxConcurrentRuns").asInt() : null);
+                yield Response.ok(Map.of("Name", name)).build();
+            }
+            case "DeleteWorkflow" -> {
+                String name = request.path("Name").asText(null);
+                triggerService.deleteWorkflow(name, region);
+                yield Response.ok(Map.of("Name", name)).build();
+            }
+            case "StartWorkflowRun" -> Response.ok(Map.of("RunId", triggerService.startWorkflowRun(
+                    request.path("Name").asText(null), readStringMap(request, "RunProperties")))).build();
+            case "StopWorkflowRun" -> {
+                triggerService.stopWorkflowRun(request.path("Name").asText(null), request.path("RunId").asText(null));
+                yield Response.ok(Map.of()).build();
+            }
+            case "ResumeWorkflowRun" -> {
+                List<String> nodeIds = request.hasNonNull("NodeIds")
+                        ? mapper.convertValue(request.get("NodeIds"), STRING_LIST)
+                        : null;
+                GlueTriggerService.ResumedRun resumed = triggerService.resumeWorkflowRun(
+                        request.path("Name").asText(null), request.path("RunId").asText(null), nodeIds);
+                Map<String, Object> response = new LinkedHashMap<>();
+                response.put("RunId", resumed.runId());
+                response.put("NodeIds", resumed.nodeIds());
+                yield Response.ok(response).build();
+            }
+            case "GetWorkflowRun" -> Response.ok(Map.of("Run", triggerService.getWorkflowRun(
+                    request.path("Name").asText(null), request.path("RunId").asText(null),
+                    request.path("IncludeGraph").asBoolean(false)))).build();
+            case "GetWorkflowRuns" -> {
+                GlueService.Page<WorkflowRun> page = triggerService.getWorkflowRuns(request.path("Name").asText(null),
+                        request.path("IncludeGraph").asBoolean(false), readMaxResults(request), readNextToken(request));
+                yield Response.ok(pageResponse("Runs", page.items(), page.nextToken())).build();
+            }
+            case "GetWorkflowRunProperties" -> Response.ok(Map.of("RunProperties",
+                    triggerService.getWorkflowRunProperties(request.path("Name").asText(null),
+                            request.path("RunId").asText(null)))).build();
+            case "PutWorkflowRunProperties" -> {
+                triggerService.putWorkflowRunProperties(request.path("Name").asText(null),
+                        request.path("RunId").asText(null), readStringMap(request, "RunProperties"));
+                yield Response.ok(Map.of()).build();
+            }
             default -> throw new AwsException("InvalidAction", "Action " + action + " is not supported", 400);
         };
+    }
+
+    private Map<String, String> readStringMap(JsonNode request, String field) {
+        return request.hasNonNull(field) ? mapper.convertValue(request.get(field), STRING_MAP) : null;
     }
 
     /** The definition members CreateTrigger and TriggerUpdate share. */

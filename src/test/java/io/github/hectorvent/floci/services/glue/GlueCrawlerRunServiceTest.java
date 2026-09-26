@@ -66,7 +66,7 @@ class GlueCrawlerRunServiceTest {
     }
 
     private GlueCrawlerRunService service(int runDurationSeconds) {
-        return new GlueCrawlerRunService(recordStore, glueService, runDurationSeconds, clock);
+        return new GlueCrawlerRunService(recordStore, new InMemoryStorage<>(), glueService, runDurationSeconds, clock);
     }
 
     private void createCrawler(String name, String scheduleExpression) {

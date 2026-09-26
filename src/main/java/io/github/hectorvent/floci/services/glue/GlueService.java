@@ -36,6 +36,7 @@ import io.github.hectorvent.floci.services.glue.model.Trigger;
 import io.github.hectorvent.floci.services.glue.model.TriggerAction;
 import io.github.hectorvent.floci.services.glue.model.TriggerCondition;
 import io.github.hectorvent.floci.services.glue.model.UserDefinedFunction;
+import io.github.hectorvent.floci.services.glue.model.Workflow;
 import io.github.hectorvent.floci.services.glue.schemaregistry.GlueSchemaRegistryService;
 import io.github.hectorvent.floci.services.glue.schemaregistry.SchemaToColumnsConverter;
 import io.github.hectorvent.floci.services.glue.schemaregistry.model.SchemaId;
@@ -163,6 +164,8 @@ public class GlueService {
     private static final Set<String> CONDITION_JOB_STATES = Set.of("SUCCEEDED", "STOPPED", "FAILED", "TIMEOUT");
     private static final Set<String> CONDITION_CRAWL_STATES = Set.of("SUCCEEDED", "CANCELLED", "FAILED");
     private static final int MAX_TRIGGERS_PAGE_SIZE = 200;
+    private static final int MAX_WORKFLOWS_PAGE_SIZE = 25;
+    private static final int MAX_BATCH_GET_WORKFLOWS = 25;
     // BatchGetCrawlers takes a CrawlerNameList, which the API model caps at 100 names.
     private static final int MAX_BATCH_GET_CRAWLERS = 100;
 
@@ -182,6 +185,7 @@ public class GlueService {
     private final StorageBackend<String, DataCatalogEncryptionSettings> encryptionSettingsStore;
     private final StorageBackend<String, SecurityConfiguration> securityConfigurationStore;
     private final StorageBackend<String, Trigger> triggerStore;
+    private final StorageBackend<String, Workflow> workflowStore;
     private final GlueSchemaRegistryService schemaRegistryService;
     private final RegionResolver regionResolver;
     private final ResourceGroupsTaggingService resourceGroupsTaggingService;
@@ -213,6 +217,7 @@ public class GlueService {
         this.securityConfigurationStore = storageFactory.create(
             "glue", "security_configurations.json", new TypeReference<>() {});
         this.triggerStore = storageFactory.create("glue", "triggers.json", new TypeReference<>() {});
+        this.workflowStore = storageFactory.create("glue", "workflows.json", new TypeReference<>() {});
         this.schemaRegistryService = schemaRegistryService;
         this.regionResolver = regionResolver;
         this.resourceGroupsTaggingService = resourceGroupsTaggingService;
@@ -235,6 +240,7 @@ public class GlueService {
                 StorageBackend<String, DataCatalogEncryptionSettings> encryptionSettingsStore,
                 StorageBackend<String, SecurityConfiguration> securityConfigurationStore,
                 StorageBackend<String, Trigger> triggerStore,
+                StorageBackend<String, Workflow> workflowStore,
                 GlueSchemaRegistryService schemaRegistryService,
                 RegionResolver regionResolver,
                 ResourceGroupsTaggingService resourceGroupsTaggingService,
@@ -255,6 +261,7 @@ public class GlueService {
         this.encryptionSettingsStore = encryptionSettingsStore;
         this.securityConfigurationStore = securityConfigurationStore;
         this.triggerStore = triggerStore;
+        this.workflowStore = workflowStore;
         this.schemaRegistryService = schemaRegistryService;
         this.regionResolver = regionResolver;
         this.resourceGroupsTaggingService = resourceGroupsTaggingService;
@@ -1519,6 +1526,10 @@ public class GlueService {
         return regionResolver.buildArn("glue", region, "trigger/" + triggerName);
     }
 
+    private String workflowArn(String region, String workflowName) {
+        return regionResolver.buildArn("glue", region, "workflow/" + workflowName);
+    }
+
     private static Pattern compileFunctionPattern(String pattern) {
         if (pattern == null) {
             return Pattern.compile(".*");
@@ -2166,6 +2177,108 @@ public class GlueService {
         crawlerStore.put(name, crawler);
     }
 
+    // ---- Workflows --------------------------------------------------------------------------
+
+    public void createWorkflow(Workflow workflow, Map<String, String> tags, String region) {
+        validateRequired(workflow.getName(), "Name");
+        validateWorkflowConcurrency(workflow.getMaxConcurrentRuns());
+        String name = workflow.getName();
+        if (workflowStore.get(name).isPresent()) {
+            throw new AwsException("AlreadyExistsException", "Workflow " + name + " already exists.", 400);
+        }
+        Instant now = Instant.now();
+        workflow.setCreatedOn(now);
+        workflow.setLastModifiedOn(now);
+        workflowStore.put(name, workflow);
+        if (tags != null && !tags.isEmpty()) {
+            resourceGroupsTaggingService.tagResources(List.of(workflowArn(region, name)), tags, region);
+        }
+        LOG.infov("Created Glue workflow {0}", name);
+    }
+
+    public Workflow getWorkflow(String name) {
+        validateRequired(name, "Name");
+        return workflowStore.get(name)
+                .orElseThrow(() -> new AwsException("EntityNotFoundException", "Workflow " + name + " not found.", 400));
+    }
+
+    public Page<String> listWorkflows(Integer maxResults, String nextToken) {
+        if (maxResults != null && (maxResults < 1 || maxResults > MAX_WORKFLOWS_PAGE_SIZE)) {
+            throw new AwsException("InvalidInputException",
+                    "MaxResults must be between 1 and " + MAX_WORKFLOWS_PAGE_SIZE, 400);
+        }
+        List<String> names = new ArrayList<>();
+        for (Workflow workflow : workflowStore.scan(k -> true)) {
+            names.add(workflow.getName());
+        }
+        names.sort(Comparator.naturalOrder());
+        return paginate(names, maxResults, nextToken);
+    }
+
+    public BatchGetWorkflowsResult batchGetWorkflows(List<String> names) {
+        if (names == null || names.isEmpty() || names.size() > MAX_BATCH_GET_WORKFLOWS) {
+            throw new AwsException("InvalidInputException",
+                    "Names must contain between 1 and " + MAX_BATCH_GET_WORKFLOWS + " names.", 400);
+        }
+        List<Workflow> workflows = new ArrayList<>();
+        List<String> missing = new ArrayList<>();
+        for (String name : names) {
+            Optional<Workflow> workflow = name == null ? Optional.empty() : workflowStore.get(name);
+            if (workflow.isPresent()) {
+                workflows.add(workflow.get());
+            } else {
+                missing.add(name);
+            }
+        }
+        return new BatchGetWorkflowsResult(workflows, missing);
+    }
+
+    public record BatchGetWorkflowsResult(List<Workflow> workflows, List<String> missingWorkflows) {}
+
+    /** Applies the members an UpdateWorkflow request sets; the rest of the workflow is kept. */
+    public void updateWorkflow(String name, String description, Map<String, String> defaultRunProperties,
+                               Integer maxConcurrentRuns) {
+        Workflow workflow = getWorkflow(name);
+        validateWorkflowConcurrency(maxConcurrentRuns);
+        if (description != null) {
+            workflow.setDescription(description);
+        }
+        if (defaultRunProperties != null) {
+            workflow.setDefaultRunProperties(defaultRunProperties);
+        }
+        if (maxConcurrentRuns != null) {
+            workflow.setMaxConcurrentRuns(maxConcurrentRuns);
+        }
+        workflow.setLastModifiedOn(Instant.now());
+        workflowStore.put(name, workflow);
+    }
+
+    /**
+     * DeleteWorkflow declares no EntityNotFoundException: deleting a missing workflow succeeds. The
+     * workflow's triggers are left in place, as the API does not say they are removed.
+     */
+    public void deleteWorkflow(String name, String region) {
+        validateRequired(name, "Name");
+        workflowStore.delete(name);
+        resourceGroupsTaggingService.deleteResources(List.of(workflowArn(region, name)), region);
+    }
+
+    public List<Trigger> triggersOfWorkflow(String workflowName) {
+        List<Trigger> triggers = new ArrayList<>();
+        for (Trigger trigger : allTriggers()) {
+            if (workflowName.equals(trigger.getWorkflowName())) {
+                triggers.add(trigger);
+            }
+        }
+        return triggers;
+    }
+
+    private static void validateWorkflowConcurrency(Integer maxConcurrentRuns) {
+        if (maxConcurrentRuns != null && maxConcurrentRuns < 1) {
+            throw new AwsException("InvalidInputException", "MaxConcurrentRuns must be at least 1.", 400);
+        }
+    }
+
     // ---- Triggers ---------------------------------------------------------------------------
 
     public void createTrigger(Trigger trigger, Map<String, String> tags, String region) {
@@ -2175,10 +2288,8 @@ public class GlueService {
             throw new AwsException("InvalidInputException", "Invalid trigger type: " + trigger.getType(), 400);
         }
         if (trigger.getWorkflowName() != null) {
-            throw new AwsException("EntityNotFoundException",
-                    "Workflow " + trigger.getWorkflowName() + " not found.", 400);
-        }
-        if ("EVENT".equals(trigger.getType())) {
+            getWorkflow(trigger.getWorkflowName());
+        } else if ("EVENT".equals(trigger.getType())) {
             throw new AwsException("InvalidInputException", "An EVENT trigger must belong to a workflow.", 400);
         }
         validateTriggerDefinition(trigger);
@@ -2829,6 +2940,9 @@ public class GlueService {
                 return;
             } else if (resource.startsWith("trigger/")) {
                 getTrigger(resource.substring(8));
+                return;
+            } else if (resource.startsWith("workflow/")) {
+                getWorkflow(resource.substring(9));
                 return;
             } else if (resource.startsWith("connection/")) {
                 getConnection(resource.substring(11), false);

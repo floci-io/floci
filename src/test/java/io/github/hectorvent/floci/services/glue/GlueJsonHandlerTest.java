@@ -49,9 +49,9 @@ class GlueJsonHandlerTest {
         GlueJobRunService jobRunService =
                 new GlueJobRunService(new InMemoryStorage<>(), new InMemoryStorage<>(), glueService, 0, Clock.systemUTC());
         GlueCrawlerRunService crawlerRunService =
-                new GlueCrawlerRunService(new InMemoryStorage<>(), glueService, 0, Clock.systemUTC());
+                new GlueCrawlerRunService(new InMemoryStorage<>(), new InMemoryStorage<>(), glueService, 0, Clock.systemUTC());
         handler = new GlueJsonHandler(glueService, jobRunService, crawlerRunService,
-                new GlueTriggerService(new InMemoryStorage<>(), glueService,
+                new GlueTriggerService(new InMemoryStorage<>(), new InMemoryStorage<>(), glueService,
                         jobRunService, crawlerRunService),
                 schemaRegistryService, mapper);
     }
@@ -1020,5 +1020,85 @@ class GlueJsonHandlerTest {
                 "GetJobRuns", mapper.createObjectNode().put("JobName", "load"), REGION).getEntity()).get("JobRuns");
         assertEquals(1, runs.size());
         assertEquals("after-extract", runs.get(0).get("TriggerName").asText());
+    }
+
+    /**
+     * Workflow operations on the wire: CreateWorkflow answers with the name, StartWorkflowRun with the
+     * run id, GetWorkflowRun nests the run under "Run" with numeric timestamps and Statistics, and
+     * GetWorkflow with IncludeGraph carries Nodes and Edges.
+     */
+    @Test
+    void workflowOperationsAnswerWithTheDocumentedBodies() throws Exception {
+        createJobWithTags("extract", Map.of());
+        createJobWithTags("load", Map.of());
+        ObjectNode create = mapper.createObjectNode();
+        create.put("Name", "etl");
+        create.putObject("DefaultRunProperties").put("env", "dev");
+        create.putObject("Tags").put("team", "data");
+        assertEquals("etl", mapper.valueToTree(handler.handle("CreateWorkflow", create, REGION).getEntity())
+                .get("Name").asText());
+        ObjectNode start = mapper.createObjectNode();
+        start.put("Name", "start");
+        start.put("Type", "ON_DEMAND");
+        start.put("WorkflowName", "etl");
+        start.putArray("Actions").addObject().put("JobName", "extract");
+        handler.handle("CreateTrigger", start, REGION);
+        ObjectNode then = mapper.createObjectNode();
+        then.put("Name", "then-load");
+        then.put("Type", "CONDITIONAL");
+        then.put("WorkflowName", "etl");
+        then.put("StartOnCreation", true);
+        then.putArray("Actions").addObject().put("JobName", "load");
+        then.putObject("Predicate").putArray("Conditions").addObject()
+                .put("LogicalOperator", "EQUALS").put("JobName", "extract").put("State", "SUCCEEDED");
+        handler.handle("CreateTrigger", then, REGION);
+
+        ObjectNode startRun = mapper.createObjectNode().put("Name", "etl");
+        String runId = mapper.valueToTree(handler.handle("StartWorkflowRun", startRun, REGION).getEntity())
+                .get("RunId").asText();
+
+        ObjectNode getRun = mapper.createObjectNode().put("Name", "etl").put("RunId", runId);
+        JsonNode run = mapper.valueToTree(handler.handle("GetWorkflowRun", getRun, REGION).getEntity()).get("Run");
+        assertEquals("COMPLETED", run.get("Status").asText());
+        assertEquals("etl", run.get("Name").asText());
+        assertTrue(run.get("StartedOn").isNumber());
+        assertTrue(run.get("CompletedOn").isNumber());
+        assertEquals(2, run.get("Statistics").get("SucceededActions").asInt());
+        assertEquals("dev", run.get("WorkflowRunProperties").get("env").asText());
+        assertFalse(run.has("Graph"));
+
+        ObjectNode getWorkflow = mapper.createObjectNode().put("Name", "etl").put("IncludeGraph", true);
+        JsonNode workflow = mapper.valueToTree(handler.handle("GetWorkflow", getWorkflow, REGION).getEntity())
+                .get("Workflow");
+        assertEquals(runId, workflow.get("LastRun").get("WorkflowRunId").asText());
+        assertEquals(4, workflow.get("Graph").get("Nodes").size());
+        assertEquals(3, workflow.get("Graph").get("Edges").size());
+        assertTrue(workflow.get("CreatedOn").isNumber());
+
+        JsonNode runs = mapper.valueToTree(handler.handle(
+                "GetWorkflowRuns", mapper.createObjectNode().put("Name", "etl"), REGION).getEntity());
+        assertEquals(1, runs.get("Runs").size());
+        JsonNode names = mapper.valueToTree(handler.handle("ListWorkflows", mapper.createObjectNode(), REGION).getEntity());
+        assertEquals("etl", names.get("Workflows").get(0).asText());
+
+        ObjectNode put = mapper.createObjectNode().put("Name", "etl").put("RunId", runId);
+        put.putObject("RunProperties").put("rows", "42");
+        assertEquals(0, mapper.valueToTree(handler.handle("PutWorkflowRunProperties", put, REGION).getEntity()).size());
+        JsonNode properties = mapper.valueToTree(handler.handle("GetWorkflowRunProperties", getRun, REGION).getEntity());
+        assertEquals("42", properties.get("RunProperties").get("rows").asText());
+
+        ObjectNode tags = mapper.createObjectNode();
+        tags.put("ResourceArn", "arn:aws:glue:" + REGION + ":" + ACCOUNT_ID + ":workflow/etl");
+        assertEquals("data", mapper.valueToTree(handler.handle("GetTags", tags, REGION).getEntity())
+                .get("Tags").get("team").asText());
+
+        ObjectNode batch = mapper.createObjectNode();
+        batch.putArray("Names").add("etl").add("absent");
+        JsonNode got = mapper.valueToTree(handler.handle("BatchGetWorkflows", batch, REGION).getEntity());
+        assertEquals("etl", got.get("Workflows").get(0).get("Name").asText());
+        assertEquals("absent", got.get("MissingWorkflows").get(0).asText());
+
+        assertEquals("etl", mapper.valueToTree(handler.handle(
+                "DeleteWorkflow", mapper.createObjectNode().put("Name", "etl"), REGION).getEntity()).get("Name").asText());
     }
 }

@@ -87,15 +87,16 @@ public class GlueJobRunService {
      * unset field falls back to the job definition.
      */
     public synchronized JobRun startJobRun(String jobName, String previousRunId, JobRun overrides) {
-        return startJobRun(jobName, previousRunId, overrides, null);
+        return startJobRun(jobName, previousRunId, overrides, null, null);
     }
 
     /**
      * As {@link #startJobRun(String, String, JobRun)}, for a run a trigger starts on behalf of
-     * {@code originRunId}; a null origin makes the run its own origin.
+     * {@code originRunId} (a null origin makes the run its own origin), inside {@code workflowRunId}
+     * when the trigger belongs to a workflow.
      */
     public synchronized JobRun startJobRun(String jobName, String previousRunId, JobRun overrides,
-                                           String originRunId) {
+                                           String originRunId, String workflowRunId) {
         Job job = glueService.getJob(jobName);
         // The job's own Timeout is stored as given by CreateJob/UpdateJob, so check what the run inherits.
         Integer timeout = firstNonNull(overrides.getTimeout(), job.getTimeout());
@@ -143,6 +144,7 @@ public class GlueJobRunService {
         runStore.put(run.getId(), run);
         JobRunBookkeeping bookkeeping = new JobRunBookkeeping();
         bookkeeping.setOriginRunId(originRunId != null ? originRunId : run.getId());
+        bookkeeping.setWorkflowRunId(workflowRunId);
         bookkeepingStore.put(run.getId(), bookkeeping);
         LOG.infov("Started Glue job run {0} for job {1}", run.getId(), jobName);
         return settle(run);
@@ -213,8 +215,9 @@ public class GlueJobRunService {
             if (isTerminal(run)) {
                 String position = positionOf(run);
                 if (afterPosition == null || afterPosition.isEmpty() || position.compareTo(afterPosition) > 0) {
+                    JobRunBookkeeping bookkeeping = bookkeepingOf(run.getId());
                     completions.add(new GlueRunCompletion(position, run.getCompletedOn(), run.getJobRunState(),
-                            bookkeepingOf(run.getId()).getOriginRunId()));
+                            bookkeeping.getOriginRunId(), bookkeeping.getWorkflowRunId()));
                 }
             }
         }
@@ -225,6 +228,31 @@ public class GlueJobRunService {
     // Zero padded so that comparing positions as strings follows the completion order.
     private String positionOf(JobRun run) {
         return String.format("%020d", bookkeepingOf(run.getId()).getCompletionOrder());
+    }
+
+    /**
+     * Whether a run of the job could start now without {@code ConcurrentRunsExceededException}, as
+     * {@link #startJobRun} decides it for a run that does not override JobRunQueuingEnabled.
+     */
+    public synchronized boolean hasCapacity(String jobName) {
+        Job job = glueService.getJob(jobName);
+        if (Boolean.TRUE.equals(job.getJobRunQueuingEnabled())) {
+            return true;
+        }
+        long active = runsOf(jobName).stream().filter(run -> !isTerminal(settle(run))).count();
+        return active < maxConcurrentRuns(job);
+    }
+
+    /** The runs, settled, that belong to a workflow run, oldest first. */
+    public synchronized List<JobRun> runsInWorkflowRun(String workflowRunId) {
+        List<JobRun> runs = new ArrayList<>();
+        for (JobRun run : runStore.scan(key -> true)) {
+            if (workflowRunId.equals(bookkeepingOf(run.getId()).getWorkflowRunId())) {
+                runs.add(settle(run));
+            }
+        }
+        runs.sort(Comparator.comparing(JobRun::getStartedOn).thenComparing(JobRun::getId));
+        return runs;
     }
 
     /** Runs belong to their job: deleting the job removes them, as it does on AWS. */
