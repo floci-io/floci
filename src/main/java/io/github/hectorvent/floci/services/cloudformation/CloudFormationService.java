@@ -53,6 +53,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * CloudFormation stack lifecycle management — Create, Update, Delete stacks via ChangeSets.
@@ -541,6 +542,7 @@ public class CloudFormationService implements ResourceProvider {
                     newTemplate, newResolvedParams, null, region, regionResolver.getAccountId());
             Set<String> deployedIds = stack.resourcesSnapshot().keySet();
 
+            Set<String> replacedResourceIds = new HashSet<>();
             List<ResourceChange> changes = new ArrayList<>();
             newResources.fields().forEachRemaining(e -> {
                 String logicalId = e.getKey();
@@ -569,9 +571,14 @@ public class CloudFormationService implements ResourceProvider {
                 } else if (newActive
                         && (!oldDef.equals(newDef) || referencesAnyParameter(newDef, changedParams))) {
                     boolean typeChanged = !oldDef.path("Type").asText().equals(resourceType);
+                    boolean replacement = typeChanged
+                            || requiresReplacement(resourceType, oldDef.path("Properties"), newDef.path("Properties"), changedParams);
+                    if (replacement) {
+                        replacedResourceIds.add(logicalId);
+                    }
                     changes.add(new ResourceChange("Modify", logicalId,
                             resourcePhysicalId(stack, logicalId), resourceType,
-                            typeChanged ? "True" : "False"));
+                            replacement ? "True" : "False"));
                 }
             });
             oldResources.fields().forEachRemaining(e -> {
@@ -581,6 +588,44 @@ public class CloudFormationService implements ResourceProvider {
                             e.getValue().path("Type").asText(), null));
                 }
             });
+
+            if (!replacedResourceIds.isEmpty()) {
+                Set<String> alreadyChangedIds = changes.stream()
+                        .map(ResourceChange::logicalResourceId)
+                        .collect(Collectors.toCollection(LinkedHashSet::new));
+                Set<String> allResourceIds = new LinkedHashSet<>();
+                newResources.fieldNames().forEachRemaining(allResourceIds::add);
+
+                List<String> sortedLogicalIds = topologicalSort(newResources, newConditions);
+                for (String logicalId : sortedLogicalIds) {
+                    if (alreadyChangedIds.contains(logicalId)) {
+                        continue;
+                    }
+                    JsonNode newDef = newResources.get(logicalId);
+                    String newConditionName = newDef.path("Condition").asText(null);
+                    boolean newActive = newConditionName == null
+                            || newConditions.getOrDefault(newConditionName, false);
+                    if (!newActive || !deployedIds.contains(logicalId)) {
+                        continue;
+                    }
+                    Set<String> propertyDependencies = new LinkedHashSet<>();
+                    collectDependencies(newDef.path("Properties"), allResourceIds, propertyDependencies, newConditions);
+                    if (propertyDependencies.stream().anyMatch(replacedResourceIds::contains)) {
+                        String resourceType = newDef.path("Type").asText();
+                        JsonNode oldDef = oldResources.get(logicalId);
+                        boolean typeChanged = oldDef != null && !oldDef.path("Type").asText().equals(resourceType);
+                        boolean replacement = typeChanged
+                                || (oldDef != null && requiresReplacement(resourceType, oldDef.path("Properties"), newDef.path("Properties"), changedParams));
+                        if (replacement) {
+                            replacedResourceIds.add(logicalId);
+                        }
+                        alreadyChangedIds.add(logicalId);
+                        changes.add(new ResourceChange("Modify", logicalId,
+                                resourcePhysicalId(stack, logicalId), resourceType,
+                                replacement ? "True" : "False"));
+                    }
+                }
+            }
             return changes;
         } catch (AwsException e) {
             throw e;
@@ -603,6 +648,46 @@ public class CloudFormationService implements ResourceProvider {
             }
         }
         return false;
+    }
+
+    private boolean requiresReplacement(String resourceType, JsonNode oldProps, JsonNode newProps,
+                                        Set<String> changedParams) {
+        if (oldProps == null || newProps == null || oldProps.isMissingNode() || newProps.isMissingNode()) {
+            return false;
+        }
+        for (Iterator<String> it = newProps.fieldNames(); it.hasNext(); ) {
+            String field = it.next();
+            if (isCreateOnlyProperty(resourceType, field)) {
+                JsonNode oldVal = oldProps.get(field);
+                JsonNode newVal = newProps.get(field);
+                if (oldVal != null && !oldVal.equals(newVal)) {
+                    return true;
+                }
+                if (newVal != null && referencesAnyParameter(newVal, changedParams)) {
+                    return true;
+                }
+            }
+        }
+        for (Iterator<String> it = oldProps.fieldNames(); it.hasNext(); ) {
+            String field = it.next();
+            if (isCreateOnlyProperty(resourceType, field) && !newProps.has(field)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isCreateOnlyProperty(String resourceType, String propertyName) {
+        if ("Name".equals(propertyName)
+                || propertyName.endsWith("Identifier")
+                || "FifoQueue".equals(propertyName)
+                || "FifoTopic".equals(propertyName)) {
+            return true;
+        }
+        String typeSuffix = resourceType.contains("::")
+                ? resourceType.substring(resourceType.lastIndexOf("::") + 2)
+                : resourceType;
+        return propertyName.equals(typeSuffix + "Name");
     }
 
     public record ResourceChange(String action, String logicalResourceId, String physicalResourceId,
@@ -1300,18 +1385,6 @@ public class CloudFormationService implements ResourceProvider {
             if (resources.isObject()) {
                 List<String> sortedLogicalIds = topologicalSort(resources, conditions);
 
-                if (!isCreate) {
-                    Set<String> allResourceIds = new LinkedHashSet<>();
-                    resources.fieldNames().forEachRemaining(allResourceIds::add);
-                    for (String logicalId : sortedLogicalIds) {
-                        Set<String> propertyDependencies = new LinkedHashSet<>();
-                        collectDependencies(resources.path(logicalId).path("Properties"),
-                                allResourceIds, propertyDependencies, conditions);
-                        if (propertyDependencies.stream().anyMatch(changedResourceIds::contains)) {
-                            changedResourceIds.add(logicalId);
-                        }
-                    }
-                }
                 for (String logicalId : sortedLogicalIds) {
                     if (!isCreate && !changedResourceIds.contains(logicalId)) {
                         continue;

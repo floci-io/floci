@@ -105,6 +105,12 @@ public final class CfnRollback {
      */
     public static final String REPLACEMENT_CLEANUP_ATTR = "__FlociReplacementCleanup";
 
+    /**
+     * Holds the attributes and tags a queue carried before an in-place update changed them,
+     * so a failed stack update can restore them.
+     */
+    public static final String SQS_UPDATE_SNAPSHOT_ATTR = "__FlociSqsUpdateSnapshot";
+
     private CfnRollback() {
     }
 
