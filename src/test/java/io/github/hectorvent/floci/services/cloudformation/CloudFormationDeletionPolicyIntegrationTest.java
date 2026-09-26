@@ -463,6 +463,58 @@ class CloudFormationDeletionPolicyIntegrationTest {
     }
 
     @Test
+    void updateParentStackWithUnchangedNestedStackSucceedsEvenIfTemplateUrlUnavailable() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String functionName = "cfn-nested-keep-func-" + suffix;
+        String bucketName = "nested-stack-templates-" + suffix;
+        String templateUrl = bucketName + "/child-lambda-keep.json";
+        String initialParentTemplate = """
+            {
+              "Resources": {
+                "ChildStack": {
+                  "Type": "AWS::CloudFormation::Stack",
+                  "Properties": { "TemplateURL": "http://localhost/%s" }
+                }
+              }
+            }
+        """.formatted(templateUrl);
+        String updatedParentTemplate = """
+            {
+              "Resources": {
+                "ChildStack": {
+                  "Type": "AWS::CloudFormation::Stack",
+                  "Properties": { "TemplateURL": "http://localhost/%s" }
+                }
+              },
+              "Outputs": {
+                "ParentOut": { "Value": "static" }
+              }
+            }
+        """.formatted(templateUrl);
+        String stackName = "parent-nested-keep-" + suffix;
+
+        given().header("Authorization", CUSTOM_AUTH)
+                .when().put("/" + bucketName).then().statusCode(200);
+        given().header("Authorization", CUSTOM_AUTH)
+                .contentType("application/json").body(nestedLambdaTemplate(functionName, 3))
+                .when().put("/" + templateUrl).then().statusCode(200);
+        String parentStackId = createStack(stackName, initialParentTemplate, CUSTOM_AUTH);
+        try {
+            awaitStackStatus(parentStackId, "CREATE_COMPLETE", CUSTOM_AUTH);
+
+            // Delete the template object from S3 so TemplateURL is no longer reachable
+            given().header("Authorization", CUSTOM_AUTH)
+                    .when().delete("/" + templateUrl).then().statusCode(204);
+
+            // Parent update modifying only Outputs: unchanged nested stack is skipped, so missing TemplateURL doesn't fail update
+            updateStack(stackName, updatedParentTemplate, CUSTOM_AUTH);
+            awaitStackStatus(parentStackId, "UPDATE_COMPLETE", CUSTOM_AUTH);
+        } finally {
+            deleteStack(stackName);
+        }
+    }
+
+    @Test
     void nestedStackWithNonEmptyBucketFailsDeletionOnUpdate_leavesChildAsDeleteFailedAndTracksInParent() throws InterruptedException {
         String suffix = Long.toString(System.nanoTime(), 36);
         String bucketName = "cfn-nested-orphan-" + suffix;
