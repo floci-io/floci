@@ -2182,16 +2182,9 @@ public class IamQueryHandler {
             String key = members.get(i).getKey();
             String value = members.get(i).getValue();
             String at = "tags." + (i + 1) + ".member";
-            if (key.isEmpty()) {
-                throw tagValidationError(key, at + ".key", "Member must have length greater than or equal to 1");
-            }
-            if (key.codePointCount(0, key.length()) > MAX_TAG_KEY_LENGTH) {
-                throw tagValidationError(key, at + ".key",
-                        "Member must have length less than or equal to " + MAX_TAG_KEY_LENGTH);
-            }
-            if (!TAG_KEY_PATTERN.matcher(key).matches()) {
-                throw tagValidationError(key, at + ".key",
-                        "Member must satisfy regular expression pattern: " + TAG_KEY_PATTERN.pattern());
+            String keyViolation = tagKeyViolation(key);
+            if (keyViolation != null) {
+                throw tagValidationError(key, at + ".key", keyViolation);
             }
             if (value.codePointCount(0, value.length()) > MAX_TAG_VALUE_LENGTH) {
                 throw tagValidationError(value, at + ".value",
@@ -2227,6 +2220,20 @@ public class IamQueryHandler {
         }
     }
 
+    /** Returns the {@code tagKeyType} constraint the key breaks, or null when it is valid. */
+    private static String tagKeyViolation(String key) {
+        if (key.isEmpty()) {
+            return "Member must have length greater than or equal to 1";
+        }
+        if (key.codePointCount(0, key.length()) > MAX_TAG_KEY_LENGTH) {
+            return "Member must have length less than or equal to " + MAX_TAG_KEY_LENGTH;
+        }
+        if (!TAG_KEY_PATTERN.matcher(key).matches()) {
+            return "Member must satisfy regular expression pattern: " + TAG_KEY_PATTERN.pattern();
+        }
+        return null;
+    }
+
     private static AwsException tagValidationError(String value, String at, String constraint) {
         return new AwsException("ValidationError",
                 "1 validation error detected: Value '" + value + "' at '" + at + "' failed to satisfy constraint: "
@@ -2251,6 +2258,13 @@ public class IamQueryHandler {
             keys.add(key);
         }
         checkListLength(keys.size(), "tagKeys");
+        for (String key : keys) {
+            String violation = tagKeyViolation(key);
+            if (violation != null) {
+                throw tagValidationError(keys.toString(), "tagKeys",
+                        "Member must satisfy constraint: [" + violation + "]");
+            }
+        }
         return keys;
     }
 

@@ -25,6 +25,11 @@ class IamTagValidationIntegrationTest {
     private static final String POLICY_DOCUMENT = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
             + "\"Action\":\"s3:GetObject\",\"Resource\":\"*\"}]}";
     private static final String THUMBPRINT = "9e99a48a9960b14926bb7f3b02e22da2b0ab7280";
+    private static final String SAML_METADATA = "<md:EntityDescriptor xmlns:md=\"urn:oasis:names:tc:SAML:2.0:metadata\""
+            + " entityID=\"https://idp.example.test/untag-key\"><md:IDPSSODescriptor><md:KeyDescriptor use=\"signing\">"
+            + "<ds:KeyInfo xmlns:ds=\"http://www.w3.org/2000/09/xmldsig#\"><ds:X509Data>"
+            + "<ds:X509Certificate>dW50YWc=</ds:X509Certificate></ds:X509Data></ds:KeyInfo>"
+            + "</md:KeyDescriptor></md:IDPSSODescriptor></md:EntityDescriptor>";
 
     private static RequestSpecification iam(String action) {
         return given().header("Authorization", IAM_AUTH).formParam("Action", action);
@@ -554,5 +559,85 @@ class IamTagValidationIntegrationTest {
             .formParam("Tags.member.1.Key", "I").formParam("Tags.member.1.Value", "upper")
             .formParam("Tags.member.2.Key", "\u0131").formParam("Tags.member.2.Value", "dotless");
         assertDuplicateTagKeys(request, true);
+    }
+
+    private static void assertInvalidTagKeys(RequestSpecification request, String constraint) {
+        assertInvalidTag(request, "tagKeys", "Member must satisfy constraint: [" + constraint);
+    }
+
+    @Test
+    void untagKeysAreHeldToTheTagKeyConstraintsOnEveryUntagAction() {
+        String user = unique("untag-key-user");
+        createUser(user);
+        assertInvalidTagKeys(iam("UntagUser").formParam("UserName", user).formParam("TagKeys.member.1", ""),
+                "Member must have length greater than or equal to 1");
+
+        String role = unique("untag-key-role");
+        iam("CreateRole").formParam("RoleName", role).formParam("AssumeRolePolicyDocument", TRUST_POLICY)
+            .when().post("/").then().statusCode(200);
+        assertInvalidTagKeys(iam("UntagRole").formParam("RoleName", role).formParam("TagKeys.member.1", "k".repeat(129)),
+                "Member must have length less than or equal to 128");
+
+        String policyArn = iam("CreatePolicy").formParam("PolicyName", unique("untag-key-policy"))
+            .formParam("PolicyDocument", POLICY_DOCUMENT)
+            .when().post("/").then().statusCode(200)
+            .extract().xmlPath().getString("CreatePolicyResponse.CreatePolicyResult.Policy.Arn");
+        assertInvalidTagKeys(iam("UntagPolicy").formParam("PolicyArn", policyArn).formParam("TagKeys.member.1", "cost#center"),
+                "Member must satisfy regular expression pattern");
+
+        String profile = unique("untag-key-profile");
+        iam("CreateInstanceProfile").formParam("InstanceProfileName", profile)
+            .when().post("/").then().statusCode(200);
+        assertInvalidTagKeys(iam("UntagInstanceProfile").formParam("InstanceProfileName", profile)
+                .formParam("TagKeys.member.1", "ok").formParam("TagKeys.member.2", "a,b"),
+                "Member must satisfy regular expression pattern");
+
+        String oidcArn = iam("CreateOpenIDConnectProvider")
+            .formParam("Url", "https://oidc.tag-max.example.com/" + unique("untag-key"))
+            .formParam("ThumbprintList.member.1", THUMBPRINT)
+            .when().post("/").then().statusCode(200)
+            .extract().xmlPath().getString(
+                    "CreateOpenIDConnectProviderResponse.CreateOpenIDConnectProviderResult.OpenIDConnectProviderArn");
+        assertInvalidTagKeys(iam("UntagOpenIDConnectProvider").formParam("OpenIDConnectProviderArn", oidcArn)
+                .formParam("TagKeys.member.1", ""),
+                "Member must have length greater than or equal to 1");
+
+        String samlArn = iam("CreateSAMLProvider")
+            .formParam("Name", unique("untag-key-saml"))
+            .formParam("SAMLMetadataDocument", SAML_METADATA)
+            .when().post("/").then().statusCode(200)
+            .extract().xmlPath().getString("CreateSAMLProviderResponse.CreateSAMLProviderResult.SAMLProviderArn");
+        assertInvalidTagKeys(iam("UntagSAMLProvider").formParam("SAMLProviderArn", samlArn)
+                .formParam("TagKeys.member.1", "k".repeat(129)),
+                "Member must have length less than or equal to 128");
+    }
+
+    @Test
+    void invalidUntagKeyRemovesNothing() {
+        String name = unique("untag-key-atomic");
+        createUser(name);
+        singleTag(iam("TagUser").formParam("UserName", name), "team", "platform")
+            .when().post("/").then().statusCode(200);
+
+        assertInvalidTagKeys(iam("UntagUser").formParam("UserName", name)
+                .formParam("TagKeys.member.1", "team").formParam("TagKeys.member.2", "bad#key"),
+                "Member must satisfy regular expression pattern");
+
+        iam("ListUserTags").formParam("UserName", name).when().post("/").then()
+            .statusCode(200)
+            .body("ListUserTagsResponse.ListUserTagsResult.Tags.member.Key", equalTo("team"));
+    }
+
+    @Test
+    void untagKeyAtTheLengthLimitIsAccepted() {
+        String name = unique("untag-key-limit");
+        createUser(name);
+        String scriptA = new String(Character.toChars(0x1D49C));
+        iam("UntagUser").formParam("UserName", name)
+            .contentType("application/x-www-form-urlencoded; charset=UTF-8")
+            .formParam("TagKeys.member.1", "k".repeat(128))
+            .formParam("TagKeys.member.2", scriptA.repeat(128))
+            .formParam("TagKeys.member.3", "Cost Center_.:/=+-@")
+            .when().post("/").then().statusCode(200);
     }
 }
