@@ -70,6 +70,10 @@ class CloudMapIntegrationTest {
     @Test
     @Order(3)
     void createService() {
+        call("CreateService", "{\"Name\":\"invalid-ttl\",\"NamespaceId\":\"" + namespaceId
+                + "\",\"DnsConfig\":{\"DnsRecords\":[{\"Type\":\"A\",\"TTL\":2147483648}]}}")
+                .then().statusCode(400);
+
         serviceId = call("CreateService",
                 "{\"Name\":\"floci-cm-svc\",\"NamespaceId\":\"" + namespaceId + "\"}")
                 .then().statusCode(200)

@@ -141,8 +141,8 @@ class EmbeddedDnsServerTest {
         EmbeddedDnsServer withSource = new EmbeddedDnsServer(
                 List.of(), List.of(source("empty.sapphire.internal", List.of())));
 
-        assertEquals(Optional.of(List.of()),
-                withSource.resolveARecordWithOwnership("empty.sapphire.internal", "172.31.0.2"));
+        assertEquals(List.of(), withSource.resolveARecordWithOwnership(
+                "empty.sapphire.internal", "172.31.0.2").orElseThrow().addresses());
     }
 
     @Test
@@ -179,7 +179,42 @@ class EmbeddedDnsServerTest {
     }
 
     private static DnsRecordSource source(String owned, List<String> addresses) {
-        return name -> owned.equals(name) ? Optional.of(addresses) : Optional.empty();
+        return source(owned, addresses, DnsAnswer.DEFAULT_TTL_SECONDS);
+    }
+
+    private static DnsRecordSource source(String owned, List<String> addresses, int ttlSeconds) {
+        return name -> owned.equals(name)
+                ? Optional.of(DnsAnswer.records(addresses, ttlSeconds)) : Optional.empty();
+    }
+
+    private static DnsAnswer answer(String... addresses) {
+        return DnsAnswer.records(List.of(addresses), DnsAnswer.DEFAULT_TTL_SECONDS);
+    }
+
+    @Test
+    void buildAResponse_usesTheDefaultTtlForFlociNames() {
+        DnsAnswer answer = dns.resolveARecordWithOwnership(
+                "bucket.localhost.floci.io", "172.31.0.2").orElseThrow();
+        byte[] query = buildQuery("bucket.localhost.floci.io", (short) 10);
+        byte[] response = dns.buildAResponse(query, (short) 10, 12, query.length, answer);
+
+        assertEquals(DnsAnswer.DEFAULT_TTL_SECONDS,
+                ByteBuffer.wrap(response).getInt(query.length + 6));
+    }
+
+    @Test
+    void buildAResponse_writesTheAnswerTtlOnEveryRecord() {
+        EmbeddedDnsServer withSource = new EmbeddedDnsServer(List.of(),
+                List.of(source("api.sapphire.internal", List.of("172.31.0.6", "172.31.0.7"), 15)));
+        DnsAnswer answer = withSource.resolveARecordWithOwnership(
+                "api.sapphire.internal", "172.31.0.2").orElseThrow();
+        byte[] query = buildQuery("api.sapphire.internal", (short) 9);
+        byte[] response = dns.buildAResponse(query, (short) 9, 12, query.length, answer);
+        int firstTtl = 12 + (query.length - 12) + 6;
+        ByteBuffer buffer = ByteBuffer.wrap(response);
+
+        assertEquals(15, buffer.getInt(firstTtl));
+        assertEquals(15, buffer.getInt(firstTtl + 16));
     }
 
     // ── matchesSuffix — built-in emulator domains ─────────────────────────────
@@ -267,7 +302,7 @@ class EmbeddedDnsServerTest {
     @Test
     void buildAResponse_hasCorrectTransactionId() {
         byte[] query = buildQuery("my-bucket.localhost.floci.io", (short) 0x1234);
-        byte[] response = dns.buildAResponse(query, (short) 0x1234, 12, query.length, List.of("172.19.0.2"));
+        byte[] response = dns.buildAResponse(query, (short) 0x1234, 12, query.length, answer("172.19.0.2"));
         short txId = ByteBuffer.wrap(response).getShort(0);
         assertEquals((short) 0x1234, txId);
     }
@@ -275,7 +310,7 @@ class EmbeddedDnsServerTest {
     @Test
     void buildAResponse_flagsIndicateResponse() {
         byte[] query = buildQuery("bucket.localhost.floci.io", (short) 1);
-        byte[] response = dns.buildAResponse(query, (short) 1, 12, query.length, List.of("10.0.0.1"));
+        byte[] response = dns.buildAResponse(query, (short) 1, 12, query.length, answer("10.0.0.1"));
         short flags = ByteBuffer.wrap(response).getShort(2);
         assertTrue((flags & 0x8000) != 0, "QR bit must be set");
     }
@@ -284,7 +319,7 @@ class EmbeddedDnsServerTest {
     void buildAResponse_answerCountMatchesTheAddressCount() {
         byte[] query = buildQuery("api.sapphire.internal", (short) 9);
         byte[] response = dns.buildAResponse(query, (short) 9, 12, query.length,
-                List.of("172.31.0.6", "172.31.0.7"));
+                answer("172.31.0.6", "172.31.0.7"));
         int questionLength = query.length - 12;
         ByteBuffer resp = ByteBuffer.wrap(response);
 
@@ -301,7 +336,7 @@ class EmbeddedDnsServerTest {
     @Test
     void buildAResponse_answerCountIsOne() {
         byte[] query = buildQuery("bucket.localhost.floci.io", (short) 2);
-        byte[] response = dns.buildAResponse(query, (short) 2, 12, query.length, List.of("10.0.0.1"));
+        byte[] response = dns.buildAResponse(query, (short) 2, 12, query.length, answer("10.0.0.1"));
         short ancount = ByteBuffer.wrap(response).getShort(6);
         assertEquals(1, ancount);
     }
@@ -309,7 +344,7 @@ class EmbeddedDnsServerTest {
     @Test
     void buildAResponse_ipAddressIsCorrect() {
         byte[] query = buildQuery("bucket.localhost.floci.io", (short) 3);
-        byte[] response = dns.buildAResponse(query, (short) 3, 12, query.length, List.of("172.19.0.42"));
+        byte[] response = dns.buildAResponse(query, (short) 3, 12, query.length, answer("172.19.0.42"));
         // IP starts at offset: 12 (header) + questionLength + 2+2+2+4+2 = questionLength + 24
         int questionLength = query.length - 12;
         ByteBuffer resp = ByteBuffer.wrap(response);

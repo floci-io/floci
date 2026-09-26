@@ -32,13 +32,24 @@ unhealthy still resolves rather than disappearing from DNS. At most eight record
 go back either way, as Route 53 answers a service discovery query.
 Names inside a DNS namespace stay local when no instance has a usable address:
 the resolver answers negatively instead of forwarding them to upstream DNS.
+An absent service name receives NXDOMAIN; a service with registered instances
+and only other record types receives NOERROR with no A answers. DNS service
+names are unique without regard to case, as in AWS Cloud Map.
+
+A records carry the TTL of the service's `A` entry in `DnsConfig.DnsRecords`.
+A service configured for SRV also answers A queries at
+`<InstanceId>.<service>.<namespace>` when that instance has `AWS_INSTANCE_IPV4`.
+Those answers use the service's SRV TTL. The SRV service name itself has no A
+answer. Floci uses a 60-second fallback for older stored services without a
+usable A record TTL.
+New `CreateService` requests reject TTL values outside AWS's 0 to 2147483647
+range. Names owned by Floci's embedded DNS server also use 60 seconds.
 
 Three limits are worth knowing. `HTTP` namespaces do not resolve, matching AWS,
 where they are reachable only through `DiscoverInstances`. Only A records are
-served, so a name that AWS would answer with an `SRV` record answers with the
-address alone. And the embedded DNS server only runs when Floci itself runs
-inside Docker, so name resolution is available to containers, not to processes on
-the host.
+served; SRV queries are not yet answered. The embedded DNS server only runs
+when Floci itself runs inside Docker, so name resolution is available to
+containers, not to processes on the host.
 
 ## Supported Operations
 
@@ -139,7 +150,7 @@ print(found["Instances"])
 ## Out of Scope
 
 - Route 53 hosted zone / record set creation.
-- SRV, AAAA and CNAME records: `AWS_INSTANCE_PORT` is stored and returned, but only A records are served.
+- SRV, AAAA and CNAME record responses: `AWS_INSTANCE_PORT` is stored and returned, but only A records are served, including the companion A record for an SRV instance hostname.
 - Route 53 health checks backing `HealthCheckConfig` (custom health status is stored, not actively probed).
 - `AWS_INIT_HEALTH_STATUS` and `AWS_EC2_INSTANCE_ID` on `RegisterInstance`. Every instance registers `HEALTHY`, which is AWS's own initial status when `AWS_INIT_HEALTH_STATUS` is absent, so only a caller that explicitly asks for `UNHEALTHY` sees a difference.
 - Cross-region namespace and service discovery. A DNS query carries no region, so a name resolves through whichever namespace copy holds instances.

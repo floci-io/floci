@@ -51,7 +51,6 @@ public class EmbeddedDnsServer {
 
     private static final Logger LOG = Logger.getLogger(EmbeddedDnsServer.class);
     private static final int DNS_PORT = 53;
-    private static final int TTL = 60;
     private static final String FALLBACK_UPSTREAM = "127.0.0.11";
     // EDNS0-capable resolvers (Node/c-ares, glibc) advertise UDP payloads well above the
     // legacy 512-byte limit; CDN-backed public names return larger responses. Receiving into
@@ -66,7 +65,7 @@ public class EmbeddedDnsServer {
             Pattern.compile("^ip-(\\d{1,3})-(\\d{1,3})-(\\d{1,3})-(\\d{1,3})\\.ec2\\.internal$", Pattern.CASE_INSENSITIVE);
 
     // Well-known emulator wildcard DNS domains that always resolve to Floci's IP.
-    // The suffix "localhost.X" covers "localhost.X" itself and "*.localhost.X" — it does
+    // The suffix "localhost.X" covers "localhost.X" itself and "*.localhost.X"; it does
     // NOT cover "*.X" (e.g. "localhost.floci.io" does NOT resolve bare "*.floci.io").
     //   localhost.localstack.cloud → localhost.localstack.cloud, *.localhost.localstack.cloud
     //   localhost.floci.io         → localhost.floci.io, *.localhost.floci.io
@@ -128,7 +127,7 @@ public class EmbeddedDnsServer {
 
     // ── packet handling ───────────────────────────────────────────────────────
 
-    private void handleQuery(Vertx vertx, DatagramSocket socket, byte[] data,
+    void handleQuery(Vertx vertx, DatagramSocket socket, byte[] data,
                              String senderHost, int senderPort, String myIp) {
         try {
             ByteBuffer buf = ByteBuffer.wrap(data);
@@ -149,17 +148,17 @@ public class EmbeddedDnsServer {
             buf.getShort(); // qclass
             int questionEnd = buf.position();
 
-            vertx.<Optional<List<String>>>executeBlocking(() -> resolveARecordWithOwnership(qname, myIp), false)
+            vertx.<Optional<DnsAnswer>>executeBlocking(() -> resolveARecordWithOwnership(qname, myIp), false)
                     .onSuccess(answer -> {
                         if (answer.isEmpty()) {
                             forwardAsync(vertx, socket, data, senderHost, senderPort);
                             return;
                         }
-                        List<String> addresses = answer.orElseThrow();
-                        byte[] response = qtype == 1 && !addresses.isEmpty()
-                                ? buildAResponse(data, txId, questionOffset, questionEnd, addresses)
+                        DnsAnswer records = answer.orElseThrow();
+                        byte[] response = qtype == 1 && !records.isEmpty()
+                                ? buildAResponse(data, txId, questionOffset, questionEnd, records)
                                 : buildEmptyResponse(data, txId, questionOffset, questionEnd,
-                                        addresses.isEmpty() ? 3 : 0);
+                                        records.nameExists() ? 0 : 3);
                         socket.send(Buffer.buffer(response), senderPort, senderHost, v -> {});
                     })
                     .onFailure(e -> LOG.warnv("DNS record lookup failed for {0}: {1}", qname, e.getMessage()));
@@ -185,15 +184,17 @@ public class EmbeddedDnsServer {
     }
 
     List<String> resolveARecord(String name, String myIp) {
-        return resolveARecordWithOwnership(name, myIp).orElse(List.of());
+        return resolveARecordWithOwnership(name, myIp)
+                .map(DnsAnswer::addresses).orElse(List.of());
     }
 
-    Optional<List<String>> resolveARecordWithOwnership(String name, String myIp) {
+    Optional<DnsAnswer> resolveARecordWithOwnership(String name, String myIp) {
         if (matchesSuffix(name)) {
-            return Optional.of(List.of(myIp));
+            return Optional.of(DnsAnswer.records(List.of(myIp), DnsAnswer.DEFAULT_TTL_SECONDS));
         }
         Optional<String> ec2PrivateDnsName = resolveEc2PrivateDnsName(name);
-        return ec2PrivateDnsName.<List<String>>map(List::of)
+        return ec2PrivateDnsName
+                .map(address -> DnsAnswer.records(List.of(address), DnsAnswer.DEFAULT_TTL_SECONDS))
                 .map(Optional::of).orElseGet(() -> resolveFromRecordSources(name));
     }
 
@@ -202,15 +203,15 @@ public class EmbeddedDnsServer {
      * today. A source that throws must not take the DNS server down with it: the query falls
      * through to the upstream resolvers, which is what happened before any source existed.
      */
-    private Optional<List<String>> resolveFromRecordSources(String name) {
+    private Optional<DnsAnswer> resolveFromRecordSources(String name) {
         if (recordSources == null) {
             return Optional.empty();
         }
         for (DnsRecordSource source : recordSources) {
             try {
-                Optional<List<String>> addresses = source.resolveIpv4(name);
-                if (addresses != null && addresses.isPresent()) {
-                    return addresses;
+                Optional<DnsAnswer> answer = source.resolveIpv4(name);
+                if (answer != null && answer.isPresent()) {
+                    return answer;
                 }
             } catch (Exception e) {
                 LOG.debugv("DNS record source {0} failed to resolve {1}: {2}",
@@ -284,7 +285,8 @@ public class EmbeddedDnsServer {
         return sb.toString();
     }
 
-    byte[] buildAResponse(byte[] query, short txId, int questionOffset, int questionEnd, List<String> ips) {
+    byte[] buildAResponse(byte[] query, short txId, int questionOffset, int questionEnd, DnsAnswer answer) {
+        List<String> ips = answer.addresses();
         int questionLength = questionEnd - questionOffset;
         // header(12) + question + per answer(name-ptr(2) + type(2) + class(2) + ttl(4) + rdlen(2) + rdata(4))
         ByteBuffer resp = ByteBuffer.allocate(12 + questionLength + 16 * ips.size());
@@ -306,7 +308,7 @@ public class EmbeddedDnsServer {
             resp.putShort((short) 0xC00C); // name pointer to offset 12 (start of question name)
             resp.putShort((short) 1);       // type A
             resp.putShort((short) 1);       // class IN
-            resp.putInt(TTL);
+            resp.putInt(answer.ttlSeconds());
             resp.putShort((short) 4);       // rdlength
 
             for (String octet : ip.split("\\.")) {
