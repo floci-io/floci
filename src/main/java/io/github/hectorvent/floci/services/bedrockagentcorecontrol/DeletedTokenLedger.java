@@ -36,8 +36,12 @@ final class DeletedTokenLedger {
     /** Records {@code key} as deleted unless it is already live, first purging any tokens past their TTL. */
     synchronized void record(String key) {
         purgeExpired();
-        // Keep the first timestamp: the window runs from the first request that used the token.
-        recordedAt.putIfAbsent(key, Instant.now(clock));
+        // Keep the first timestamp of a live token: the window runs from the first request that
+        // used it. contains drops an expired entry the front purge could not reach, for example
+        // after the wall clock stepped back, so reusing it starts a fresh window.
+        if (!contains(key)) {
+            recordedAt.put(key, Instant.now(clock));
+        }
     }
 
     /** Whether {@code key} was recorded within its TTL. An expired entry is dropped and treated as absent. */

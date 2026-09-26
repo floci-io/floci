@@ -272,6 +272,25 @@ class BedrockAgentCoreControlServiceTest {
     }
 
     @Test
+    void deleteRuntimeTokenReusedAfterExpiryIsHonouredEvenWhenTheClockMovedBack() {
+        // A wall clock stepping back can leave an expired token behind a live one, where the
+        // front purge cannot reach it. Reusing that token must still start a fresh window.
+        clock.advance(Duration.ofHours(2));
+        String liveId = create("liveAgent").getAgentRuntimeId();
+        assertEquals("DELETING", service.deleteAgentRuntime(liveId, "live-token", REGION).getStatus());
+
+        clock.advance(Duration.ofHours(-3));
+        String staleId = create("staleAgent").getAgentRuntimeId();
+        assertEquals("DELETING", service.deleteAgentRuntime(staleId, "stale-token", REGION).getStatus());
+
+        clock.advance(DeletedTokenLedger.TTL.plusSeconds(1));
+        String reusedId = create("reusedAgent").getAgentRuntimeId();
+        assertEquals("DELETING", service.deleteAgentRuntime(reusedId, "stale-token", REGION).getStatus());
+
+        assertEquals("DELETING", service.deleteAgentRuntime(reusedId, "stale-token", REGION).getStatus());
+    }
+
+    @Test
     void deleteRemovesAndReportsDeleting() {
         AgentRuntime rt = create("myAgent");
         String id = rt.getAgentRuntimeId();
