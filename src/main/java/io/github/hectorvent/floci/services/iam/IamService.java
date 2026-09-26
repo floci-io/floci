@@ -98,6 +98,12 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     /** Guards the read-modify-write in the OIDC provider mutators. */
     private final Object oidcProviderLock = new Object();
 
+    /**
+     * Guards the tag read-modify-write on users, roles, policies and instance profiles, so two
+     * requests that each fit the per-resource quota cannot together push a resource past it.
+     */
+    private final Object tagLock = new Object();
+
     /** CSPRNG for long-term secret access keys; ordinary resource IDs keep using {@link ThreadLocalRandom}. */
     private final SecureRandom secureRandom = new SecureRandom();
 
@@ -119,8 +125,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     /** pathType: a bare slash, or a slash-delimited run of {@code !}-{@code ~}. */
     private static final Pattern IAM_PATH_PATTERN = Pattern.compile("(/)|(/[\\x21-\\x7E]+/)");
     private static final int IAM_PATH_MAX_LENGTH = 512;
-    /** {@code tagListType} / {@code tagKeyListType} are both {@code max: 50}. */
-    private static final int MAX_TAGS_PER_INSTANCE_PROFILE = 50;
+    private static final int MAX_TAGS_PER_RESOURCE = 50;
     private static final String ROOT_FEATURES_KEY = "org-root-features";
     private static final String CREDENTIAL_REPORT_KEY = "credential-report";
     /** AWS generates a fresh report only if the most recent one is older than this. */
@@ -514,15 +519,19 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void tagUser(String userName, Map<String, String> newTags) {
-        IamUser user = getUser(userName);
-        user.getTags().putAll(newTags);
-        users.put(userName, user);
+        synchronized (tagLock) {
+            IamUser user = getUser(userName);
+            user.setTags(mergeTagsWithinQuota(user.getTags(), newTags, "TagsPerUser"));
+            users.put(userName, user);
+        }
     }
 
     public void untagUser(String userName, List<String> tagKeys) {
-        IamUser user = getUser(userName);
-        tagKeys.forEach(user.getTags()::remove);
-        users.put(userName, user);
+        synchronized (tagLock) {
+            IamUser user = getUser(userName);
+            tagKeys.forEach(user.getTags()::remove);
+            users.put(userName, user);
+        }
     }
 
     public Map<String, String> listUserTags(String userName) {
@@ -874,15 +883,19 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void tagRole(String roleName, Map<String, String> newTags) {
-        IamRole role = getRole(roleName);
-        role.getTags().putAll(newTags);
-        roles.put(roleName, role);
+        synchronized (tagLock) {
+            IamRole role = getRole(roleName);
+            role.setTags(mergeTagsWithinQuota(role.getTags(), newTags, "TagsPerRole"));
+            roles.put(roleName, role);
+        }
     }
 
     public void untagRole(String roleName, List<String> tagKeys) {
-        IamRole role = getRole(roleName);
-        tagKeys.forEach(role.getTags()::remove);
-        roles.put(roleName, role);
+        synchronized (tagLock) {
+            IamRole role = getRole(roleName);
+            tagKeys.forEach(role.getTags()::remove);
+            roles.put(roleName, role);
+        }
     }
 
     public Map<String, String> listRoleTags(String roleName) {
@@ -1241,16 +1254,20 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     public void tagPolicy(String policyArn, Map<String, String> newTags) {
         rejectIfAwsManaged(policyArn);
-        IamPolicy policy = getPolicy(policyArn);
-        policy.getTags().putAll(newTags);
-        policies.put(policyArn, policy);
+        synchronized (tagLock) {
+            IamPolicy policy = getPolicy(policyArn);
+            policy.setTags(mergeTagsWithinQuota(policy.getTags(), newTags, "TagsPerPolicy"));
+            policies.put(policyArn, policy);
+        }
     }
 
     public void untagPolicy(String policyArn, List<String> tagKeys) {
         rejectIfAwsManaged(policyArn);
-        IamPolicy policy = getPolicy(policyArn);
-        tagKeys.forEach(policy.getTags()::remove);
-        policies.put(policyArn, policy);
+        synchronized (tagLock) {
+            IamPolicy policy = getPolicy(policyArn);
+            tagKeys.forEach(policy.getTags()::remove);
+            policies.put(policyArn, policy);
+        }
     }
 
     public Map<String, String> listPolicyTags(String policyArn) {
@@ -2062,9 +2079,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         }
         synchronized (oidcProviderLock) {
             OpenIDConnectProvider provider = getOpenIDConnectProvider(arn);
-            Map<String, String> merged = new LinkedHashMap<>(provider.getTags());
-            merged.putAll(newTags);
-            provider.setTags(merged);
+            provider.setTags(mergeTagsWithinQuota(provider.getTags(), newTags, "TagsPerOpenIdConnectProvider"));
             oidcProviders.put(arn, provider);
         }
     }
@@ -2806,34 +2821,33 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void tagInstanceProfile(String instanceProfileName, Map<String, String> newTags) {
-        // Request shape before resource lookup, matching untagInstanceProfile and AWS's order.
+        // Name shape before resource lookup, matching untagInstanceProfile.
         validateIamResourceName(instanceProfileName, "InstanceProfileName");
-        if (newTags != null && newTags.size() > MAX_TAGS_PER_INSTANCE_PROFILE) {
-            throw new AwsException("ValidationError",
-                    "Value at 'tags' failed to satisfy constraint: Member must have length "
-                            + "less than or equal to " + MAX_TAGS_PER_INSTANCE_PROFILE, 400);
+        synchronized (tagLock) {
+            InstanceProfile profile = getInstanceProfile(instanceProfileName);
+            profile.setTags(mergeTagsWithinQuota(profile.getTags(), newTags, "TagsPerInstanceProfile"));
+            instanceProfiles.put(instanceProfileName, profile);
         }
-        InstanceProfile profile = getInstanceProfile(instanceProfileName);
-        Map<String, String> merged = new LinkedHashMap<>(profile.getTags());
+    }
+
+    private static Map<String, String> mergeTagsWithinQuota(Map<String, String> current,
+            Map<String, String> newTags, String quota) {
+        Map<String, String> merged = new LinkedHashMap<>(current);
         merged.putAll(newTags == null ? Map.of() : newTags);
-        if (merged.size() > MAX_TAGS_PER_INSTANCE_PROFILE) {
+        if (merged.size() > MAX_TAGS_PER_RESOURCE) {
             throw new AwsException("LimitExceeded",
-                    "Cannot exceed quota for TagsPerInstanceProfile: " + MAX_TAGS_PER_INSTANCE_PROFILE, 409);
+                    "Cannot exceed quota for " + quota + ": " + MAX_TAGS_PER_RESOURCE, 409);
         }
-        profile.getTags().putAll(newTags == null ? Map.of() : newTags);
-        instanceProfiles.put(instanceProfileName, profile);
+        return merged;
     }
 
     public void untagInstanceProfile(String instanceProfileName, List<String> tagKeys) {
         validateIamResourceName(instanceProfileName, "InstanceProfileName");
-        if (tagKeys != null && tagKeys.size() > MAX_TAGS_PER_INSTANCE_PROFILE) {
-            throw new AwsException("ValidationError",
-                    "Value at 'tagKeys' failed to satisfy constraint: Member must have length "
-                            + "less than or equal to " + MAX_TAGS_PER_INSTANCE_PROFILE, 400);
+        synchronized (tagLock) {
+            InstanceProfile profile = getInstanceProfile(instanceProfileName);
+            tagKeys.forEach(profile.getTags()::remove);
+            instanceProfiles.put(instanceProfileName, profile);
         }
-        InstanceProfile profile = getInstanceProfile(instanceProfileName);
-        tagKeys.forEach(profile.getTags()::remove);
-        instanceProfiles.put(instanceProfileName, profile);
     }
 
     public Map<String, String> listInstanceProfileTags(String instanceProfileName) {
