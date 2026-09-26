@@ -702,6 +702,28 @@ request itself still passes through the filter). Both are deliberate non-goals â
 would require IAM to resolve the caller's organization directly, which is the dependency the
 lazily-resolved `ScpProvider` exists to avoid.
 
+## Unsigned requests
+
+With enforcement on, a request carrying no `Authorization` header is refused with
+`403 MissingAuthenticationToken` when its wire shape names a management operation: a JSON, CBOR or
+Query request, identified by `X-Amz-Target`, an rpcv2 path or an `Action` parameter.
+
+Two carve-outs, both deliberate.
+
+**Operations AWS serves without credentials are still allowed.** Signing up or signing in to a
+Cognito user pool, and `AssumeRoleWithWebIdentity`, happen before the caller has any AWS
+credentials, so AWS marks them as needing none and Floci does the same. The list is taken from the
+`authtype: none` trait in AWS's own service models and covers the Cognito user-pool and identity
+flows and the two web-identity and SAML `AssumeRole` calls. A Cognito `Admin*` operation is not in that set and does require a signature.
+
+The refusal arrives in the encoding the request used: XML for Query, CBOR for a CBOR request, JSON
+otherwise.
+
+**REST requests are not checked.** The same filter sees the API Gateway execute path, Lambda
+function URLs, CloudFront serving, the Cognito OIDC endpoints and Floci's own health endpoint, all
+of which are unsigned by design, and a REST request does not say which service will serve it. An
+unsigned REST call therefore still reaches the service, including an unsigned S3 call.
+
 ## Bypass rules
 
 Enforcement is deliberately permissive in a few cases, so that enabling it does not break workloads
@@ -710,6 +732,8 @@ the emulator cannot reason about:
 | Case | Behaviour |
 | --- | --- |
 | Unresolvable action | Allowed. An action the registry cannot resolve is not evaluated. |
+| No `Authorization` header, RPC protocol | **Rejected** with `403 MissingAuthenticationToken`, unless the operation is one AWS itself serves without credentials. |
+| No `Authorization` header, REST protocol | Allowed. This filter also sees the API Gateway execute path, Lambda function URLs, CloudFront serving and the Cognito OIDC endpoints, which are unsigned by design. |
 | `sts:GetCallerIdentity` | Always allowed â€” AWS returns caller identity even when a policy denies it. |
 | Access key that exists nowhere | **Rejected** with `403`, in each protocol's own vocabulary: `InvalidAccessKeyId` for S3, `InvalidClientTokenId` for Query services, `UnrecognizedClientException` for JSON services. Allowing it would let any string authorize the request. |
 | Known credential with no mappable caller context | Allowed. A stored session carrying no role ARN is a real credential, so it is not treated as unauthenticated. |

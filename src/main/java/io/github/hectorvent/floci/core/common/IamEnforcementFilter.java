@@ -28,6 +28,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -68,6 +69,76 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
 
     /** AWS's wording for a credential it does not recognise. */
     private static final String INVALID_SECURITY_TOKEN = "The security token included in the request is invalid.";
+
+    /** AWS's wording for a request that carries no credentials at all. */
+    private static final String MISSING_AUTHENTICATION_TOKEN =
+            "The request must contain a valid AWS access key ID or X.509 certificate.";
+
+    /**
+     * Operations AWS itself serves without credentials, so an unsigned call on one is a normal
+     * client rather than an unauthenticated caller. Taken from the {@code authtype: none} trait in
+     * botocore's service models (Smithy's {@code noAuth}), restricted to the operations Floci
+     * serves. Keyed by service because the name alone is not enough: {@code GetUser} needs no
+     * credentials on {@code cognito-idp} and requires them on {@code iam}.
+     *
+     * <p>Add to this when Floci starts serving another operation AWS marks {@code noAuth}.
+     * Omitting one makes enforcement refuse a call AWS accepts; adding one that AWS does sign
+     * leaves that operation unauthenticated.
+     *
+     * <p>Only an operation reachable over a checked protocol needs an entry, since
+     * {@link WireProtocol#REST} is not checked at all. {@code signin}, {@code sso} and
+     * {@code sso-oidc} also carry {@code noAuth} operations and are absent for that reason rather
+     * than by oversight: the SSO portal calls are served on REST routes, and the {@code sso} JSON
+     * target reaches SSO Admin, whose operations AWS does sign.
+     */
+    private static final Map<String, Set<String>> NO_AUTH_OPERATIONS = Map.of(
+            "cognito-idp", Set.of(
+                    "AssociateSoftwareToken",
+                    "ChangePassword",
+                    "CompleteWebAuthnRegistration",
+                    "ConfirmDevice",
+                    "ConfirmForgotPassword",
+                    "ConfirmSignUp",
+                    "DeleteUser",
+                    "DeleteUserAttributes",
+                    "DeleteWebAuthnCredential",
+                    "ForgetDevice",
+                    "ForgotPassword",
+                    "GetDevice",
+                    "GetTokensFromRefreshToken",
+                    "GetUser",
+                    "GetUserAttributeVerificationCode",
+                    "GetUserAuthFactors",
+                    "GlobalSignOut",
+                    "InitiateAuth",
+                    "ListDevices",
+                    "ListWebAuthnCredentials",
+                    "ResendConfirmationCode",
+                    "RespondToAuthChallenge",
+                    "RevokeToken",
+                    "SetUserMFAPreference",
+                    "SetUserSettings",
+                    "SignUp",
+                    "StartWebAuthnRegistration",
+                    "UpdateAuthEventFeedback",
+                    "UpdateDeviceStatus",
+                    "UpdateUserAttributes",
+                    "VerifySoftwareToken",
+                    "VerifyUserAttribute"),
+            "cognito-identity", Set.of(
+                    "GetCredentialsForIdentity",
+                    "GetId",
+                    "GetOpenIdToken",
+                    "UnlinkIdentity"));
+
+    /**
+     * The same for the Query protocol, where the claim carries no service: an unsigned Query
+     * request has no credential scope to derive one from. Both names are unique across the Query
+     * services Floci serves, so the operation alone identifies them.
+     */
+    private static final Set<String> NO_AUTH_QUERY_OPERATIONS = Set.of(
+            "AssumeRoleWithSAML",
+            "AssumeRoleWithWebIdentity");
 
     /**
      * Implicit identity policy for the account-root principal: full access, bounded only by SCPs.
@@ -152,6 +223,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             auth = presignedCredentialAsAuthorization(ctx);
         }
         if (auth == null) {
+            refuseUnsignedManagementCall(ctx);
             return;
         }
 
@@ -783,6 +855,80 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             return queryXmlError("InvalidClientTokenId", INVALID_SECURITY_TOKEN);
         }
         String body = "{\"__type\":\"UnrecognizedClientException\",\"message\":\"" + INVALID_SECURITY_TOKEN + "\"}";
+        return Response.status(403).type(MediaType.APPLICATION_JSON).entity(body).build();
+    }
+
+    /**
+     * Refuses an unsigned request whose wire shape makes it a management API call. A JSON, CBOR or
+     * Query claim exists only for a request carrying {@code X-Amz-Target}, an rpcv2 path or an
+     * {@code Action} parameter, and no public data plane speaks any of those, so an unsigned one is
+     * an unauthenticated call on a control-plane API.
+     *
+     * <p>REST is deliberately left alone. This single filter also sees the API Gateway execute
+     * path, Lambda function URLs, CloudFront serving, the Cognito OIDC endpoints and Floci's own
+     * health endpoint, all unsigned by design, and a {@code rest()} claim cannot tell those from an
+     * unsigned S3 call. Separating them needs the route to name its service, which the catalog does
+     * not yet carry for the REST services; that half is tracked with the other route-derived gap.
+     */
+    private void refuseUnsignedManagementCall(ContainerRequestContext ctx) {
+        if (!(ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY) instanceof ProtocolClaim claim)
+                || claim.protocol() == WireProtocol.REST
+                || servesWithoutCredentials(claim, ctx)) {
+            return;
+        }
+        LOG.debugv("Refusing unsigned {0} request under IAM enforcement", claim.protocol());
+        ctx.abortWith(missingAuthenticationTokenResponse(claim.protocol(), ctx));
+    }
+
+    /** Whether the operation this request names is one AWS serves without credentials. */
+    private boolean servesWithoutCredentials(ProtocolClaim claim, ContainerRequestContext ctx) {
+        if (claim.protocol() == WireProtocol.AWS_QUERY) {
+            return NO_AUTH_QUERY_OPERATIONS.contains(queryOperation(ctx));
+        }
+        if (claim.service() == null || claim.operation() == null) {
+            // Nothing names the operation, so there is nothing to match against the list. Refusing
+            // is the safe side of that: an unsigned request whose shape cannot even be read is not
+            // one of the public flows.
+            return false;
+        }
+        return NO_AUTH_OPERATIONS
+                .getOrDefault(claim.service().externalKey(), Set.of())
+                .contains(claim.operation());
+    }
+
+    /**
+     * The {@code Action} a Query request names, via the registry so the form body is read and put
+     * back the one way this codebase already does it. The scope passed in is a placeholder: for a
+     * Query request the registry returns {@code <scope>:<Action>} and only the suffix is wanted.
+     */
+    private String queryOperation(ContainerRequestContext ctx) {
+        String resolved = actionRegistry.resolve("", ctx);
+        return resolved == null ? null : resolved.substring(resolved.indexOf(':') + 1);
+    }
+
+    /**
+     * AWS answers a request carrying no credentials with {@code MissingAuthenticationToken} at 403,
+     * "The request must contain a valid AWS access key ID or X.509 certificate." The JSON form of
+     * the name carries the {@code Exception} suffix, as {@code ApiGatewayExecuteController} already
+     * returns for the same failure on its own path.
+     */
+    static Response missingAuthenticationTokenResponse(WireProtocol protocol, ContainerRequestContext ctx) {
+        if (protocol == WireProtocol.RPCV2_CBOR || protocol == WireProtocol.AWS_CBOR_TARGET) {
+            // A CBOR client cannot read a JSON body, so the rejection has to arrive in the encoding
+            // the request used, the same shape the rpcv2 controller returns for its own errors.
+            String requestContentType = ctx.getHeaderString(AwsCborContentTypeFilter.ORIGINAL_CONTENT_TYPE_HEADER);
+            if (requestContentType == null) {
+                requestContentType = ctx.getHeaderString("Content-Type");
+            }
+            return CborErrorResponses.of(
+                    new AwsException("MissingAuthenticationTokenException", MISSING_AUTHENTICATION_TOKEN, 403),
+                    CborErrorResponses.mediaTypeFor(requestContentType));
+        }
+        if (isFormEncoded(ctx.getMediaType())) {
+            return queryXmlError("MissingAuthenticationToken", MISSING_AUTHENTICATION_TOKEN);
+        }
+        String body = "{\"__type\":\"MissingAuthenticationTokenException\",\"message\":\""
+                + MISSING_AUTHENTICATION_TOKEN + "\"}";
         return Response.status(403).type(MediaType.APPLICATION_JSON).entity(body).build();
     }
 
