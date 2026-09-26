@@ -338,6 +338,68 @@ top-level `EvalDecision` is populated. `ContextEntries.member.N.ContextKeyType` 
 read; the comparison is driven entirely by the policy's own condition operator (`Bool`,
 `NumericEquals`, `DateEquals`, and so on), not by the declared type.
 
+### Last-Accessed Reporting
+
+| Action | Description |
+|--------|-------------|
+| GenerateServiceLastAccessedDetails | Starts an Access Advisor job for a user, group, role or managed policy and returns its job ID. |
+| GetServiceLastAccessedDetails | Returns the job's status and its service-access report. |
+| GetServiceLastAccessedDetailsWithEntities | Returns the job's status and the entities that used a given service. |
+| ListPoliciesGrantingServiceAccess | Lists the policies that let an IAM identity access each requested service. |
+
+Floci does not record service access. Nothing populates a principal's usage history, and
+`GetAccessKeyLastUsed` already answers with AWS's documented "never used" shape rather than
+inventing one. That shape is what these actions reproduce: AWS lists every service an entity could
+reach through its permissions policies, and for a service with no access attempt it leaves
+`LastAuthenticated` and `TotalAuthenticatedEntities` null rather than dropping the service. So
+`GetServiceLastAccessedDetails` returns a real, policy-derived `ServicesLastAccessed` list in which
+every entry is that "no attempt" shape. The missing piece is the usage timestamps, not the list.
+
+Only the namespaces a policy names literally can be enumerated. An `Action` of `*`, a globbed
+prefix such as `s3*`, and any `NotAction` all denote a set no policy document spells out, and Floci
+has no catalog of every AWS service namespace to expand them against, so services reachable only
+through one of those are absent from the list. `ServiceName` is a required member that AWS fills
+with a display name (`Amazon S3`); Floci has no such mapping and repeats the namespace instead.
+
+`GetServiceLastAccessedDetailsWithEntities` is policy-derived in the same way. AWS reports the
+entities that *could have used* the reported permissions to reach a service, so a group report
+lists the group's users, a policy report lists the users and roles the policy is attached to, and
+a user or role report lists that entity. Entities are omitted when the reported permissions do not
+grant the requested service at all. `LastAuthenticated` is absent on every entry, since that is
+the part Floci does not record.
+
+`GenerateServiceLastAccessedDetails` resolves the ARN first and returns `NoSuchEntity` for one that
+names nothing, rather than handing out a job ID that could never be meaningful. That resolution
+checks the whole ARN: an ARN whose account is not the caller's, or whose path is not the resolved
+entity's own, names no entity and is rejected rather than falling back to a same-named local one. A
+job belongs to the account that created it, an unknown `JobId` is `NoSuchEntity`, and `Granularity`
+is validated against `SERVICE_LEVEL`/`ACTION_LEVEL` and echoed back as `JobType`.
+
+The report is produced when the job is created and stored with it, matching AWS, where
+`GenerateServiceLastAccessedDetails` produces a report and the `Get*` operations retrieve that one.
+So a completed job keeps answering what it answered first: editing the policies afterwards does not
+change it, and deleting the entity it covers does not stop a valid `JobId` from resolving. There is
+nothing left to compute asynchronously, so a job is complete when created and its creation and
+completion timestamps are the same instant. Jobs are kept for the life of the store: AWS documents
+no expiry for a `JobId`, so ageing them out would mean inventing a retention window and failing a
+caller holding an ID that AWS would still answer.
+
+Both readers honour `MaxItems` and `Marker` and report `IsTruncated` truthfully, returning a
+`Marker` only when a page remains. This differs from the rest of this page, where pagination inputs
+are accepted and ignored; these actions apply them rather than inherit that gap.
+
+`ListPoliciesGrantingServiceAccess` is not an Access Advisor job and needs no usage history: AWS
+defines it purely over permissions-policy logic, so it is answered from real policy content. It
+follows AWS's documented scoping, where a user contributes its own managed and inline policies
+plus those of every group it belongs to, while a group or role contributes only its own. Managed
+policies are reported with their ARN and their current default version is the one read; inline
+policies have no ARN and are identified by the entity holding them. Only `Allow` grants, so a
+Deny-only policy is not listed, and an `Allow` with `NotAction` grants every service the list does
+not carve out. Permissions boundaries are excluded, as the operation's documentation requires, and
+resource-based policies, ACLs, Organizations policies and trust policies are not consulted.
+Resources and conditions are not evaluated either: the question is which policies could grant the
+service at all, not whether one specific call would be authorized.
+
 ### Account
 
 | Action | Description |

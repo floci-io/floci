@@ -110,7 +110,9 @@ public class AwsQueryController {
             "GetContextKeysForCustomPolicy", "GetContextKeysForPrincipalPolicy",
             "ListSAMLProviders", "CreateSAMLProvider", "GetSAMLProvider",
             "UpdateSAMLProvider", "DeleteSAMLProvider",
-            "TagSAMLProvider", "UntagSAMLProvider", "ListSAMLProviderTags"
+            "TagSAMLProvider", "UntagSAMLProvider", "ListSAMLProviderTags",
+            "GenerateServiceLastAccessedDetails", "GetServiceLastAccessedDetails",
+            "GetServiceLastAccessedDetailsWithEntities", "ListPoliciesGrantingServiceAccess"
     );
 
     private static final Set<String> AUTOSCALING_ACTIONS = Set.of(
