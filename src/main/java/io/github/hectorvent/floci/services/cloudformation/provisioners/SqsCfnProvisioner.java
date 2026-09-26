@@ -1,6 +1,9 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
@@ -8,6 +11,7 @@ import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.services.sqs.model.Queue;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
 import java.util.HashMap;
 import java.util.List;
@@ -21,6 +25,9 @@ import java.util.UUID;
  */
 @ApplicationScoped
 public class SqsCfnProvisioner implements CfnResourceProvisioner {
+
+    private static final Logger LOG = Logger.getLogger(SqsCfnProvisioner.class);
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final SqsService sqsService;
 
@@ -51,7 +58,57 @@ public class SqsCfnProvisioner implements CfnResourceProvisioner {
         // AWS::SQS::QueuePolicy has no backing resource to delete (matches prior behavior).
     }
 
+    @Override
+    public boolean hasReplacementUpdate(StackResource resource) {
+        return ReplacementCleanup.hasReplacement(resource);
+    }
+
+    @Override
+    public String updateCleanupPhysicalId(StackResource resource) {
+        return ReplacementCleanup.cleanupPhysicalId(resource);
+    }
+
+    @Override
+    public UpdateCleanupResult completeUpdate(StackResource resource) {
+        return ReplacementCleanup.complete(resource, this::delete);
+    }
+
+    @Override
+    public void clearUpdate(StackResource resource) {
+        resource.getAttributes().remove(CfnRollback.SQS_UPDATE_SNAPSHOT_ATTR);
+        ReplacementCleanup.clear(resource);
+    }
+
+    @Override
+    public boolean rollbackUpdate(StackResource resource) {
+        if (ReplacementCleanup.rollback(resource, this::delete)) {
+            return true;
+        }
+        String rawSnapshot = resource.getAttributes().remove(CfnRollback.SQS_UPDATE_SNAPSHOT_ATTR);
+        if (rawSnapshot != null) {
+            try {
+                JsonNode snapshot = MAPPER.readTree(rawSnapshot);
+                String queueUrl = snapshot.get("queueUrl").asText();
+                String region = snapshot.get("region").asText();
+                Map<String, String> restoreAttrs = new HashMap<>();
+                snapshot.path("attributes").fields().forEachRemaining(e -> restoreAttrs.put(e.getKey(), e.getValue().asText()));
+                if (!restoreAttrs.isEmpty()) {
+                    sqsService.setQueueAttributes(queueUrl, restoreAttrs, region);
+                }
+                Map<String, String> restoreTags = new HashMap<>();
+                snapshot.path("tags").fields().forEachRemaining(e -> restoreTags.put(e.getKey(), e.getValue().asText()));
+                reconcileTags(queueUrl, restoreTags, region);
+                return true;
+            } catch (JsonProcessingException e) {
+                LOG.errorv("Could not parse SQS update snapshot for {0}: {1}", resource.getLogicalId(), e.getMessage());
+                return false;
+            }
+        }
+        return false;
+    }
+
     private void provisionQueue(StackResource r, JsonNode props, ProvisionContext ctx) {
+        Map<String, String> attributesBefore = r.getAttributes() != null ? new HashMap<>(r.getAttributes()) : new HashMap<>();
         String fifoFlag = props != null && props.has("FifoQueue")
                 ? ctx.engine().resolve(props.get("FifoQueue"))
                 : null;
@@ -119,6 +176,19 @@ public class SqsCfnProvisioner implements CfnResourceProvisioner {
         String queueUrl;
         if (ctx.isUpdate() && queueName.equals(priorName)) {
             attrs.remove("FifoQueue");
+            Map<String, String> currentAttrs = sqsService.getQueueAttributes(ctx.priorPhysicalId(), List.of("All"), ctx.region());
+            Map<String, String> currentTags = sqsService.listQueueTags(ctx.priorPhysicalId(), ctx.region());
+            ObjectNode snapshot = MAPPER.createObjectNode();
+            snapshot.put("queueUrl", ctx.priorPhysicalId());
+            snapshot.put("region", ctx.region());
+            ObjectNode attrsNode = snapshot.putObject("attributes");
+            for (String attrKey : attrs.keySet()) {
+                attrsNode.put(attrKey, currentAttrs.getOrDefault(attrKey, ""));
+            }
+            ObjectNode tagsNode = snapshot.putObject("tags");
+            currentTags.forEach(tagsNode::put);
+            r.getAttributes().put(CfnRollback.SQS_UPDATE_SNAPSHOT_ATTR, snapshot.toString());
+
             sqsService.setQueueAttributes(ctx.priorPhysicalId(), attrs, ctx.region());
             queueUrl = ctx.priorPhysicalId();
         } else {
@@ -134,6 +204,7 @@ public class SqsCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("Arn", queueArn);
         r.getAttributes().put("QueueName", queueName);
         r.getAttributes().put("QueueUrl", queueUrl);
+        ReplacementCleanup.record(r, ctx, attributesBefore);
     }
 
     /**

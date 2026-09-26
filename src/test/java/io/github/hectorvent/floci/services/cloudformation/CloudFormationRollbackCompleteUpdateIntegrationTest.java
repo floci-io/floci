@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
@@ -9,6 +10,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * A create that fails rolls its resources back and leaves the stack in ROLLBACK_COMPLETE, which
@@ -255,6 +257,70 @@ class CloudFormationRollbackCompleteUpdateIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("/cfn/rollback-" + suffix));
+        deleteStack(stackName);
+    }
+
+    @Test
+    void failedUpdateRollsBackDependentQueueWhenReferencedQueueWasReplaced() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "rollback-sqs-update-" + suffix;
+        String oldDlq = "dlq-old-" + suffix;
+        String newDlq = "dlq-new-" + suffix;
+        String mainQueue = "main-" + suffix;
+        String initialTemplate = """
+                {"Resources":{
+                  "DeadLetterQueue":{"Type":"AWS::SQS::Queue","Properties":{"QueueName":"%s"}},
+                  "MainQueue":{"Type":"AWS::SQS::Queue","Properties":{"QueueName":"%s","RedrivePolicy":{"deadLetterTargetArn":{"Fn::GetAtt":["DeadLetterQueue","Arn"]},"maxReceiveCount":3}}}
+                }}
+                """.formatted(oldDlq, mainQueue);
+        String failingTemplate = """
+                {"Resources":{
+                  "DeadLetterQueue":{"Type":"AWS::SQS::Queue","Properties":{"QueueName":"%s"}},
+                  "MainQueue":{"Type":"AWS::SQS::Queue","Properties":{"QueueName":"%s","RedrivePolicy":{"deadLetterTargetArn":{"Fn::GetAtt":["DeadLetterQueue","Arn"]},"maxReceiveCount":3}}},
+                  "ZFail":{"Type":"AWS::CloudFormation::Stack","Properties":{}}
+                }}
+                """.formatted(newDlq, mainQueue);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", initialTemplate)
+        .when().post("/").then().statusCode(200);
+        assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+
+        String initialResources = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when().post("/").then().statusCode(200).extract().body().asString();
+        String mainQueueUrl = XmlParser.extractGroups(initialResources, "member").stream()
+                .filter(m -> "MainQueue".equals(m.get("LogicalResourceId")))
+                .map(m -> m.get("PhysicalResourceId")).findFirst().orElseThrow();
+        String oldDlqUrl = XmlParser.extractGroups(initialResources, "member").stream()
+                .filter(m -> "DeadLetterQueue".equals(m.get("LogicalResourceId")))
+                .map(m -> m.get("PhysicalResourceId")).findFirst().orElseThrow();
+
+        // Update with replaced DLQ and a failing resource
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", failingTemplate)
+        .when().post("/").then().statusCode(200);
+
+        CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(stackName);
+        assertEquals("UPDATE_ROLLBACK_COMPLETE", state.status(), state.reason());
+
+        // Verify MainQueue still has the old DLQ in its redrive policy
+        String mainAttrs = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetQueueAttributes")
+            .formParam("QueueUrl", mainQueueUrl)
+            .formParam("AttributeName.1", "RedrivePolicy")
+        .when().post("/").then().statusCode(200).extract().body().asString();
+        assertTrue(mainAttrs.contains(oldDlq));
+
         deleteStack(stackName);
     }
 
