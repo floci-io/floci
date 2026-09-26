@@ -569,6 +569,38 @@ class CognitoServiceTest {
     }
 
     @Test
+    void createUserPoolRejectsUnparseableTemporaryPasswordValidity() {
+        for (Object value : new Object[] {Double.POSITIVE_INFINITY, Double.NaN, "abc", true}) {
+            AwsException exception = assertThrows(AwsException.class, () ->
+                    service.createUserPool(Map.of(
+                            "PoolName", "UnparseableTemporaryPasswordValidityPool",
+                            "Policies", Map.of("PasswordPolicy", Map.of(
+                                    "MinimumLength", 8,
+                                    "TemporaryPasswordValidityDays", value))
+                    ), "us-east-1"), "value: " + value);
+
+            assertEquals("InvalidParameterException", exception.getErrorCode());
+            assertTrue(exception.getMessage().contains("Member must be an integer"), "value: " + value);
+        }
+    }
+
+    @Test
+    void createUserPoolRejectsUnparseablePasswordHistorySize() {
+        for (Object value : new Object[] {Double.POSITIVE_INFINITY, Double.NaN, "abc", true}) {
+            AwsException exception = assertThrows(AwsException.class, () ->
+                    service.createUserPool(Map.of(
+                            "PoolName", "UnparseablePasswordHistoryPool",
+                            "Policies", Map.of("PasswordPolicy", Map.of(
+                                    "MinimumLength", 8,
+                                    "PasswordHistorySize", value))
+                    ), "us-east-1"), "value: " + value);
+
+            assertEquals("InvalidParameterException", exception.getErrorCode());
+            assertTrue(exception.getMessage().contains("Member must be an integer"), "value: " + value);
+        }
+    }
+
+    @Test
     void updateUserPoolValidatesPasswordPolicy() {
         UserPool pool = service.createUserPool(Map.of(
                 "PoolName", "ValidPool",

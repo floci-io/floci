@@ -374,7 +374,7 @@ public class CognitoService implements ResourceProvider {
                     400
             );
         }
-        BigInteger minLength = policyInteger(passwordPolicy, "MinimumLength");
+        BigInteger minLength = policyInteger(passwordPolicy, "MinimumLength", "minimumLength");
         if (minLength.compareTo(BigInteger.valueOf(6)) < 0) {
             throw new AwsException(
                     "InvalidParameterException",
@@ -393,7 +393,8 @@ public class CognitoService implements ResourceProvider {
         if (passwordPolicy.containsKey("TemporaryPasswordValidityDays")) {
             Object tempDaysVal = passwordPolicy.get("TemporaryPasswordValidityDays");
             if (tempDaysVal != null) {
-                BigInteger tempDays = policyInteger(passwordPolicy, "TemporaryPasswordValidityDays");
+                BigInteger tempDays = policyInteger(passwordPolicy, "TemporaryPasswordValidityDays",
+                        "temporaryPasswordValidityDays");
                 if (tempDays.compareTo(BigInteger.ZERO) < 0) {
                     throw new AwsException(
                             "InvalidParameterException",
@@ -414,7 +415,7 @@ public class CognitoService implements ResourceProvider {
         if (passwordPolicy.containsKey("PasswordHistorySize")) {
             Object historySizeVal = passwordPolicy.get("PasswordHistorySize");
             if (historySizeVal != null) {
-                BigInteger historySize = policyInteger(passwordPolicy, "PasswordHistorySize");
+                BigInteger historySize = policyInteger(passwordPolicy, "PasswordHistorySize", "passwordHistorySize");
                 if (historySize.compareTo(BigInteger.ZERO) < 0) {
                     throw new AwsException(
                             "InvalidParameterException",
@@ -3955,26 +3956,36 @@ public class CognitoService implements ResourceProvider {
         return 0;
     }
 
-    private BigInteger policyInteger(Map<String, Object> policy, String key) {
+    /**
+     * Reads a password policy integer without narrowing it, so range checks see the real value.
+     * A value that is not a whole-number type or string is rejected: falling back to zero would
+     * let it pass the 0-based ranges of {@code TemporaryPasswordValidityDays} and
+     * {@code PasswordHistorySize} and be stored as-is.
+     */
+    private BigInteger policyInteger(Map<String, Object> policy, String key, String member) {
         Object value = policy.get(key);
-        if (value instanceof BigInteger integer) {
-            return integer;
-        }
-        if (value instanceof Number number) {
-            try {
+        try {
+            if (value instanceof BigInteger integer) {
+                return integer;
+            }
+            if (value instanceof Number number) {
                 return new BigDecimal(number.toString()).toBigInteger();
-            } catch (NumberFormatException ignored) {
-                return BigInteger.ZERO;
             }
-        }
-        if (value instanceof String stringValue) {
-            try {
+            if (value instanceof String stringValue) {
                 return new BigInteger(stringValue);
-            } catch (NumberFormatException ignored) {
-                return BigInteger.ZERO;
             }
+        } catch (NumberFormatException e) {
+            throw notAnInteger(value, member);
         }
-        return BigInteger.ZERO;
+        throw notAnInteger(value, member);
+    }
+
+    private static AwsException notAnInteger(Object value, String member) {
+        return new AwsException(
+                "InvalidParameterException",
+                "1 validation error detected: Value '" + value + "' at 'policies.passwordPolicy." + member
+                        + "' failed to satisfy constraint: Member must be an integer",
+                400);
     }
 
     private boolean policyBoolean(Map<String, Object> policy, String key) {
