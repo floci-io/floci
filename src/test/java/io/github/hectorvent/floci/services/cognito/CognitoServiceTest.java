@@ -2543,17 +2543,23 @@ class CognitoServiceTest {
     }
 
     @Test
-    void initiateAuthWithUserAuthCapsUnansweredSessions() {
+    void initiateAuthWithUserAuthCapsSimulatedSessionsWithoutEvictingRealSessions() {
         MutableClock clock = new MutableClock();
         CognitoService clockedService = serviceWithClock(clock);
         UserPool pool = clockedService.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
         UserPoolClient client = openClient(clockedService, pool.getId(), "c", false);
         clockedService.describeUserPoolClient(client.getClientId()).setPreventUserExistenceErrors("ENABLED");
+        clockedService.adminCreateUser(pool.getId(), "alice", Map.of(), "Temp1234!");
+        clockedService.adminSetUserPassword(pool.getId(), "alice", "Perm1234!", true);
+
+        Map<String, Object> realResult = clockedService.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice", "PREFERRED_CHALLENGE", "PASSWORD"));
+        String realSession = (String) realResult.get("Session");
 
         Map<String, Object> firstResult = clockedService.initiateAuth(client.getClientId(), "USER_AUTH",
                 Map.of("USERNAME", "missing-0"));
         String firstSession = (String) firstResult.get("Session");
-        for (int index = 1; index < CognitoAuthFlowHandler.MAX_USER_AUTH_SESSIONS; index++) {
+        for (int index = 1; index < CognitoAuthFlowHandler.MAX_USER_AUTH_SESSIONS_PER_PARTITION; index++) {
             clockedService.initiateAuth(client.getClientId(), "USER_AUTH",
                     Map.of("USERNAME", "missing-" + index));
         }
@@ -2571,6 +2577,11 @@ class CognitoServiceTest {
                 client.getClientId(), "PASSWORD", newestSession,
                 Map.of("USERNAME", "missing-overflow", "PASSWORD", "anything")));
         assertEquals("Incorrect username or password", newestException.getMessage());
+
+        Map<String, Object> authResult = clockedService.respondToAuthChallenge(
+                client.getClientId(), "PASSWORD", realSession,
+                Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"));
+        assertNotNull(authResult.get("AuthenticationResult"));
     }
 
     @Test

@@ -51,8 +51,8 @@ final class CognitoAuthFlowHandler {
     private static final String CUSTOM_MESSAGE_CODE_PARAMETER = "{####}";
     /** The message of a wrong password, which managed login also shows for an unknown user. */
     static final String INCORRECT_CREDENTIALS = "Incorrect username or password";
-    /** Keeps unauthenticated callers from retaining unbounded in-memory challenge state. */
-    static final int MAX_USER_AUTH_SESSIONS = 4_096;
+    /** Keeps each USER_AUTH partition from retaining unbounded in-memory challenge state. */
+    static final int MAX_USER_AUTH_SESSIONS_PER_PARTITION = 4_096;
     /** AWS default AuthSessionValidity until UserPoolClient exposes the configurable value. */
     private static final Duration AUTH_SESSION_VALIDITY = Duration.ofMinutes(3);
 
@@ -64,6 +64,7 @@ final class CognitoAuthFlowHandler {
     private final ConcurrentHashMap<String, CustomAuthSession> customAuthSessions = new ConcurrentHashMap<>();
     private final Object userAuthSessionLock = new Object();
     private final LinkedHashMap<String, UserAuthSession> userAuthSessions = new LinkedHashMap<>();
+    private final LinkedHashMap<String, UserAuthSession> simulatedUserAuthSessions = new LinkedHashMap<>();
 
     private record SrpSession(String userPoolId, String username, String clientId,
                               String aHex, String bHex, String bPublicHex,
@@ -759,6 +760,9 @@ final class CognitoAuthFlowHandler {
         UserAuthSession state;
         synchronized (userAuthSessionLock) {
             state = session == null ? null : userAuthSessions.remove(session);
+            if (state == null && session != null) {
+                state = simulatedUserAuthSessions.remove(session);
+            }
         }
         if (state == null || !expectedChallenge.equals(state.challengeName())) {
             throw new AwsException("NotAuthorizedException", "Session not found", 400);
@@ -775,20 +779,26 @@ final class CognitoAuthFlowHandler {
 
     private void storeUserAuthSession(String session, UserAuthSession state, Instant now) {
         synchronized (userAuthSessionLock) {
-            Iterator<Map.Entry<String, UserAuthSession>> sessions = userAuthSessions.entrySet().iterator();
-            while (sessions.hasNext()) {
-                Map.Entry<String, UserAuthSession> oldest = sessions.next();
-                if (!sessionExpired(oldest.getValue().expiresAt(), now)) {
-                    break;
-                }
-                sessions.remove();
-            }
-            if (userAuthSessions.size() >= MAX_USER_AUTH_SESSIONS) {
-                Iterator<String> sessionTokens = userAuthSessions.keySet().iterator();
+            purgeExpiredUserAuthSessions(userAuthSessions, now);
+            purgeExpiredUserAuthSessions(simulatedUserAuthSessions, now);
+            LinkedHashMap<String, UserAuthSession> sessionStore = state.userExists()
+                    ? userAuthSessions : simulatedUserAuthSessions;
+            if (sessionStore.size() >= MAX_USER_AUTH_SESSIONS_PER_PARTITION) {
+                Iterator<String> sessionTokens = sessionStore.keySet().iterator();
                 sessionTokens.next();
                 sessionTokens.remove();
             }
-            userAuthSessions.put(session, state);
+            sessionStore.put(session, state);
+        }
+    }
+
+    private static void purgeExpiredUserAuthSessions(LinkedHashMap<String, UserAuthSession> sessions,
+                                                      Instant now) {
+        Iterator<Map.Entry<String, UserAuthSession>> entries = sessions.entrySet().iterator();
+        while (entries.hasNext()) {
+            if (sessionExpired(entries.next().getValue().expiresAt(), now)) {
+                entries.remove();
+            }
         }
     }
 
