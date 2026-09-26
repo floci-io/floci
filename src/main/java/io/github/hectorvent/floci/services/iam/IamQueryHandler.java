@@ -27,6 +27,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 /**
@@ -38,6 +39,11 @@ import java.util.stream.Stream;
 public class IamQueryHandler {
 
     private static final Logger LOG = Logger.getLogger(IamQueryHandler.class);
+    private static final int MAX_TAG_LIST_MEMBERS = 50;
+    private static final int MAX_TAG_KEY_LENGTH = 128;
+    private static final int MAX_TAG_VALUE_LENGTH = 256;
+    private static final Pattern TAG_KEY_PATTERN = Pattern.compile("[\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]+");
+    private static final Pattern TAG_VALUE_PATTERN = Pattern.compile("[\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]*");
 
     private final IamService iamService;
     private final IamPolicyEvaluator policyEvaluator;
@@ -380,7 +386,6 @@ public class IamQueryHandler {
     }
 
     private Response handleCreateSAMLProvider(MultivaluedMap<String, String> params, String authorization) {
-        checkSamlTagMembers(params);
         SAMLProvider provider = samlProviderService.create(regionResolver.getPartition(),
                 accountResolver.resolve(authorization), getParam(params, "Name"),
                 getParam(params, "SAMLMetadataDocument"), extractTags(params));
@@ -417,7 +422,6 @@ public class IamQueryHandler {
 
     private Response handleTagSAMLProvider(MultivaluedMap<String, String> params, String authorization) {
         String accountId = accountResolver.resolve(authorization);
-        checkSamlTagMembers(params);
         samlProviderService.tag(accountId, getParam(params, "SAMLProviderArn"), extractTags(params));
         return Response.ok(AwsQueryResponse.envelopeNoResult("TagSAMLProvider", AwsNamespaces.IAM)).build();
     }
@@ -1710,31 +1714,59 @@ public class IamQueryHandler {
     // =========================================================================
 
     /**
-     * Enforces {@code tagListType}'s {@code max: 50} on the members as sent. extractTags collapses
-     * repeated keys into a map, and AWS resolves a repeated key by overwriting rather than
-     * rejecting, so counting the map would let a 51-member list through whenever any key repeats.
+     * Every IAM request that carries tags types them as {@code tagListType}, whose {@code max: 50}
+     * binds the members as sent, so the count is taken here, before the map collapses repeated keys.
      */
-    private void checkSamlTagMembers(MultivaluedMap<String, String> params) {
-        int members = 0;
-        while (params.getFirst("Tags.member." + (members + 1) + ".Key") != null) {
-            members++;
-        }
-        if (members > SAMLProviderService.MAX_TAGS_PER_SAML_PROVIDER) {
-            throw new AwsException("ValidationError",
-                    "Value at 'tags' failed to satisfy constraint: Member must have length "
-                            + "less than or equal to " + SAMLProviderService.MAX_TAGS_PER_SAML_PROVIDER, 400);
-        }
-    }
-
     private Map<String, String> extractTags(MultivaluedMap<String, String> params) {
-        Map<String, String> tags = new HashMap<>();
+        List<Map.Entry<String, String>> members = new ArrayList<>();
         for (int i = 1; ; i++) {
             String key = params.getFirst("Tags.member." + i + ".Key");
             String value = params.getFirst("Tags.member." + i + ".Value");
             if (key == null) break;
-            tags.put(key, value != null ? value : "");
+            members.add(Map.entry(key, value != null ? value : ""));
+        }
+        checkListLength(members.size(), "tags");
+        Map<String, String> tags = new HashMap<>();
+        for (int i = 0; i < members.size(); i++) {
+            String key = members.get(i).getKey();
+            String value = members.get(i).getValue();
+            String at = "tags." + (i + 1) + ".member";
+            if (key.isEmpty()) {
+                throw tagValidationError(key, at + ".key", "Member must have length greater than or equal to 1");
+            }
+            if (key.codePointCount(0, key.length()) > MAX_TAG_KEY_LENGTH) {
+                throw tagValidationError(key, at + ".key",
+                        "Member must have length less than or equal to " + MAX_TAG_KEY_LENGTH);
+            }
+            if (!TAG_KEY_PATTERN.matcher(key).matches()) {
+                throw tagValidationError(key, at + ".key",
+                        "Member must satisfy regular expression pattern: " + TAG_KEY_PATTERN.pattern());
+            }
+            if (value.codePointCount(0, value.length()) > MAX_TAG_VALUE_LENGTH) {
+                throw tagValidationError(value, at + ".value",
+                        "Member must have length less than or equal to " + MAX_TAG_VALUE_LENGTH);
+            }
+            if (!TAG_VALUE_PATTERN.matcher(value).matches()) {
+                throw tagValidationError(value, at + ".value",
+                        "Member must satisfy regular expression pattern: " + TAG_VALUE_PATTERN.pattern());
+            }
+            tags.put(key, value);
         }
         return tags;
+    }
+
+    private static void checkListLength(int members, String param) {
+        if (members > MAX_TAG_LIST_MEMBERS) {
+            throw new AwsException("ValidationError",
+                    "1 validation error detected: Value at '" + param + "' failed to satisfy constraint: "
+                            + "Member must have length less than or equal to " + MAX_TAG_LIST_MEMBERS, 400);
+        }
+    }
+
+    private static AwsException tagValidationError(String value, String at, String constraint) {
+        return new AwsException("ValidationError",
+                "1 validation error detected: Value '" + value + "' at '" + at + "' failed to satisfy constraint: "
+                        + constraint, 400);
     }
 
     private List<String> getMemberList(MultivaluedMap<String, String> params, String name) {
@@ -1754,6 +1786,7 @@ public class IamQueryHandler {
             if (key == null) break;
             keys.add(key);
         }
+        checkListLength(keys.size(), "tagKeys");
         return keys;
     }
 
