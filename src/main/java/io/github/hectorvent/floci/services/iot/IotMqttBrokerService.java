@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.iot;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.services.iot.model.IotRetainedMessage;
 import io.netty.handler.codec.mqtt.MqttConnectReturnCode;
 import io.netty.handler.codec.mqtt.MqttQoS;
@@ -11,6 +12,7 @@ import io.quarkus.tls.TlsConfiguration;
 import io.quarkus.tls.TlsConfigurationRegistry;
 import io.quarkus.tls.runtime.config.TlsConfig;
 import io.vertx.core.Vertx;
+import io.vertx.core.WorkerExecutor;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.ClientAuth;
 import io.vertx.core.net.KeyCertOptions;
@@ -19,9 +21,11 @@ import io.vertx.core.net.TrustOptions;
 import io.vertx.mqtt.MqttEndpoint;
 import io.vertx.mqtt.MqttServer;
 import io.vertx.mqtt.MqttServerOptions;
+import io.vertx.mqtt.MqttTopicSubscription;
 import io.vertx.mqtt.messages.MqttPublishMessage;
 import io.vertx.mqtt.messages.MqttSubscribeMessage;
 import io.vertx.mqtt.messages.MqttUnsubscribeMessage;
+import jakarta.annotation.Priority;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.enterprise.inject.Instance;
@@ -46,10 +50,13 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
-public class IotMqttBrokerService {
+public class IotMqttBrokerService implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(IotMqttBrokerService.class);
 
@@ -102,12 +109,27 @@ public class IotMqttBrokerService {
 
     private static final Pattern IPV4_LITERAL = Pattern.compile("\\d{1,3}(\\.\\d{1,3}){3}");
 
+    static final int MAX_PENDING_RULE_EVALUATIONS = 1_000;
+
+    private static final long RULES_RESETTING = 1;
+    private static final long RULES_STOPPED = 2;
+    private static final long RULE_STATE_STEP = 4;
+
     private final EmulatorConfig config;
     private final Vertx vertx;
     private final Instance<IotService> iotService;
     private final TlsConfigurationRegistry tlsRegistry;
+    final WorkerExecutor ruleWorker;
     private final Map<String, ClientSession> sessionsByClient = new ConcurrentHashMap<>();
     private final Map<String, Map<String, Subscription>> subscriptionsByClient = new ConcurrentHashMap<>();
+    private final AtomicInteger pendingRuleEvaluations = new AtomicInteger();
+    private final AtomicBoolean ruleEvaluationsThrottled = new AtomicBoolean();
+    /**
+     * Rule admission in one value: the {@link #RULES_RESETTING} and {@link #RULES_STOPPED} bits suspend rules, and
+     * every change also adds {@link #RULE_STATE_STEP}, so an evaluation runs its rules only while the state is still
+     * the one it was admitted under.
+     */
+    private final AtomicLong ruleState = new AtomicLong();
     private MqttServer server;
     private MqttServer tlsServer;
     private ReloadingKeyManager keyManager;
@@ -119,6 +141,7 @@ public class IotMqttBrokerService {
         this.vertx = vertx;
         this.iotService = iotService;
         this.tlsRegistry = tlsRegistry;
+        this.ruleWorker = vertx.createSharedWorkerExecutor("floci-iot-mqtt-rules", 1);
     }
 
     void onStart(@Observes StartupEvent ignored) {
@@ -133,8 +156,43 @@ public class IotMqttBrokerService {
         startIfEnabled();
     }
 
+    // Rules stop before EmulatorLifecycle's default-priority storage flush and shutdown. The blocking server close
+    // stays at default priority, so this ordering does not move it ahead of the flush.
+    void onShutdownStarted(@Observes @Priority(1000) ShutdownEvent ignored) {
+        suspendRules(RULES_STOPPED);
+    }
+
     void onStop(@Observes ShutdownEvent ignored) {
         stop();
+    }
+
+    /**
+     * Emulator reset: rules still waiting are skipped, and publishes received until
+     * {@link #afterReset()} run none, so none writes into the cleared state; one already running
+     * finishes.
+     */
+    @Override
+    public void beforeReset() {
+        suspendRules(RULES_RESETTING);
+    }
+
+    /**
+     * Rules run again for publishes received from now on, unless the broker is stopped. The state
+     * moves on only if {@link #beforeReset()} suspended rules, so an evaluation queued before or
+     * during the reset still skips its rules, and one waiting when a lone afterReset() runs does
+     * not.
+     */
+    @Override
+    public void afterReset() {
+        resumeRules(RULES_RESETTING);
+    }
+
+    /**
+     * The broker keeps nothing in Floci storage; a reset only suspends rules, in
+     * {@link #beforeReset()}.
+     */
+    @Override
+    public void clear() {
     }
 
     synchronized void startIfEnabled() {
@@ -145,14 +203,21 @@ public class IotMqttBrokerService {
             return;
         }
 
-        MqttServer mqttServer = listen(new MqttServerOptions()
-                .setHost(config.services().iot().mqtt().host())
-                .setPort(config.services().iot().mqtt().port())
-                .setMaxMessageSize(MAX_PACKET_SIZE), "IoT MQTT broker", false);
+        // Rules resume before either listener accepts a connection, so a shutdown starting during the listen
+        // keeps them off, and a failed start suspends them again.
+        resumeRules(RULES_STOPPED);
+        MqttServer mqttServer = null;
         try {
+            mqttServer = listen(new MqttServerOptions()
+                    .setHost(config.services().iot().mqtt().host())
+                    .setPort(config.services().iot().mqtt().port())
+                    .setMaxMessageSize(MAX_PACKET_SIZE), "IoT MQTT broker", false);
             startTlsListener();
         } catch (RuntimeException e) {
-            mqttServer.close().toCompletionStage().toCompletableFuture().join();
+            suspendRules(RULES_STOPPED);
+            if (mqttServer != null) {
+                mqttServer.close().toCompletionStage().toCompletableFuture().join();
+            }
             throw e;
         }
         server = mqttServer;
@@ -225,6 +290,7 @@ public class IotMqttBrokerService {
     }
 
     synchronized void stop() {
+        suspendRules(RULES_STOPPED);
         MqttServer mqttServer = server;
         MqttServer mqttTlsServer = tlsServer;
         if (mqttServer == null && mqttTlsServer == null) {
@@ -251,15 +317,20 @@ public class IotMqttBrokerService {
         LOG.info("IoT MQTT broker stopped");
     }
 
+    private void suspendRules(long reason) {
+        ruleState.updateAndGet(state -> (state | reason) + RULE_STATE_STEP);
+    }
+
+    private void resumeRules(long reason) {
+        ruleState.updateAndGet(state -> (state & reason) == 0 ? state : (state & ~reason) + RULE_STATE_STEP);
+    }
+
     public synchronized boolean isRunning() {
         return server != null;
     }
 
     void publish(String topic, byte[] payload) {
-        if (server == null) {
-            return;
-        }
-        fanOut(topic, payload == null ? new byte[0] : payload, false);
+        fanOut(topic, payload, false);
     }
 
     boolean disconnectClient(String clientId, boolean cleanSession) {
@@ -299,7 +370,7 @@ public class IotMqttBrokerService {
      * connection. The plaintext listener, which the WebSocket bridge also lands on, stays open to
      * every client.
      */
-    private void handleEndpoint(MqttEndpoint endpoint, boolean verifyDevice) {
+    void handleEndpoint(MqttEndpoint endpoint, boolean verifyDevice) {
         String clientId = endpoint.clientIdentifier();
         SocketAddress remoteAddress = endpoint.remoteAddress();
         String sourceIp = remoteAddress == null ? null : remoteAddress.host();
@@ -412,7 +483,7 @@ public class IotMqttBrokerService {
         List<MqttQoS> grantedQos = new ArrayList<>();
         List<Subscription> accepted = new ArrayList<>();
 
-        for (io.vertx.mqtt.MqttTopicSubscription requested : message.topicSubscriptions()) {
+        for (MqttTopicSubscription requested : message.topicSubscriptions()) {
             String topicFilter = requested.topicName();
             MqttQoS qos = requested.qualityOfService();
             if (!isValidTopicFilter(topicFilter) || qos == MqttQoS.EXACTLY_ONCE) {
@@ -466,8 +537,47 @@ public class IotMqttBrokerService {
             return;
         }
 
-        iotService.get().publish(topic, payload, message.isRetain(), message.qosLevel().value(), null, session.clientId());
+        iotService.get().publish(topic, payload, message.isRetain(), message.qosLevel().value(), null,
+                session.clientId(), rules -> evaluateRulesOnWorker(topic, rules));
         fanOut(topic, payload, false);
+    }
+
+    /**
+     * Runs a publish's topic rules on the broker's own single-thread worker, one publish at a time
+     * in the order they were submitted, so a rule action that blocks holds neither an event loop
+     * nor another service's blocking tasks, though it delays the rules of later publishes. At most
+     * {@link #MAX_PENDING_RULE_EVALUATIONS} evaluations are pending, running or waiting; beyond
+     * that a publish's rules are skipped. A reset or a stop skips the rules of publishes still
+     * waiting, and a publish received during the reset or while the broker is stopped never runs
+     * its rules.
+     */
+    void evaluateRulesOnWorker(String topic, Runnable rules) {
+        long admitted = ruleState.get();
+        if ((admitted & (RULES_RESETTING | RULES_STOPPED)) != 0) {
+            return;
+        }
+        // ponytail: beyond the bound a publish's rules are skipped rather than applying backpressure, since QoS 0 has no PUBACK to withhold.
+        if (pendingRuleEvaluations.incrementAndGet() > MAX_PENDING_RULE_EVALUATIONS) {
+            pendingRuleEvaluations.decrementAndGet();
+            if (ruleEvaluationsThrottled.compareAndSet(false, true)) {
+                LOG.warnv("IoT rule evaluation for topic {0} is skipped because {1} evaluations are already pending; later skips are not logged until the backlog drains",
+                        topic, Integer.toString(MAX_PENDING_RULE_EVALUATIONS));
+            }
+            return;
+        }
+        ruleWorker.executeBlocking(() -> {
+            if (ruleState.get() == admitted) {
+                rules.run();
+            }
+            return null;
+        }, false).onComplete(result -> {
+            if (pendingRuleEvaluations.decrementAndGet() == 0) {
+                ruleEvaluationsThrottled.set(false);
+            }
+            if (result.failed()) {
+                LOG.warnv(result.cause(), "IoT rule evaluation for topic {0} failed", topic);
+            }
+        });
     }
 
     private void fanOut(String topic, byte[] payload, boolean retained) {
@@ -476,7 +586,11 @@ public class IotMqttBrokerService {
             if (!session.endpoint().isConnected() || !hasMatchingSubscription(session.clientId(), topic)) {
                 continue;
             }
-            session.endpoint().publish(topic, Buffer.buffer(safePayload), MqttQoS.AT_MOST_ONCE, false, retained);
+            try {
+                session.endpoint().publish(topic, Buffer.buffer(safePayload), MqttQoS.AT_MOST_ONCE, false, retained);
+            } catch (IllegalStateException e) {
+                LOG.debugv("IoT MQTT client {0} closed before the publish on {1} reached it", session.clientId(), topic);
+            }
         }
     }
 

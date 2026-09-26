@@ -72,6 +72,7 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
 import java.util.function.BiConsumer;
 import java.util.function.Predicate;
 import java.util.regex.Pattern;
@@ -884,6 +885,15 @@ public class IotService {
 
     /** {@code clientId} is the MQTT client that published, or null for a message that did not come over MQTT. */
     public void publish(String topic, byte[] payload, boolean retain, int qos, String region, String clientId) {
+        publish(topic, payload, retain, qos, region, clientId, Runnable::run);
+    }
+
+    /**
+     * Stores or clears the retained message and records the publish on the calling thread, then
+     * hands the topic rule evaluation to {@code ruleRunner}.
+     */
+    public void publish(String topic, byte[] payload, boolean retain, int qos, String region, String clientId,
+                        Executor ruleRunner) {
         byte[] eventPayload = payload == null ? new byte[0] : payload;
         if (retain) {
             if (eventPayload.length == 0) {
@@ -897,7 +907,7 @@ public class IotService {
                 retainedMessageStore.put(retainedMessageKey(topic), retained);
             }
         }
-        handlePublish(topic, eventPayload, true, region, clientId);
+        handlePublish(topic, eventPayload, true, region, clientId, ruleRunner);
     }
 
     public void deleteConnection(String clientId, boolean cleanSession) {
@@ -1281,18 +1291,21 @@ public class IotService {
         topicRuleStore.put(topicRuleKey(region, ruleName), rule);
     }
 
-    void handlePublish(String topic, byte[] payload, boolean evaluateRules, String region, String clientId) {
+    void handlePublish(String topic, byte[] payload, boolean evaluateRules, String region, String clientId,
+                       Executor ruleRunner) {
         byte[] eventPayload = payload == null ? new byte[0] : payload;
         publishEventRecorder.record(topic, eventPayload);
         if (!evaluateRules) {
             return;
         }
-        for (IotTopicRule rule : rulesForPublish(region)) {
-            if (!rule.isRuleDisabled()) {
-                matchAndProject(rule, topic, clientId, eventPayload)
-                        .ifPresent(document -> executeTopicRule(rule, topic, eventPayload, document));
+        ruleRunner.execute(() -> {
+            for (IotTopicRule rule : rulesForPublish(region)) {
+                if (!rule.isRuleDisabled()) {
+                    matchAndProject(rule, topic, clientId, eventPayload)
+                            .ifPresent(document -> executeTopicRule(rule, topic, eventPayload, document));
+                }
             }
-        }
+        });
     }
 
     /**
@@ -1492,7 +1505,7 @@ public class IotService {
             case "republish" -> {
                 String targetTopic = action.path("topic").asText(null);
                 if (targetTopic != null && !targetTopic.isBlank()) {
-                    handlePublish(targetTopic, payload, false, region, null);
+                    handlePublish(targetTopic, payload, false, region, null, Runnable::run);
                     mqttBrokerService.publish(targetTopic, payload);
                 }
             }
