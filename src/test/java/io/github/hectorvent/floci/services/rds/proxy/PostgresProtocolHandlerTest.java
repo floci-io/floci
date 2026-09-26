@@ -410,8 +410,8 @@ class PostgresProtocolHandlerTest {
                         if (session != null) {
                             PostgresProtocolHandler.bridge(session);
                         }
-                    } catch (IOException e) {
-                        throw new RuntimeException(e);
+                    } catch (IOException expected) {
+                        // The test closes proxyClient once the handshake succeeds, which ends authenticate.
                     }
                 });
 
