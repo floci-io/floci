@@ -20,8 +20,8 @@ import io.github.hectorvent.floci.services.s3.model.S3Object;
 import jakarta.enterprise.context.ApplicationScoped;
 import org.jboss.logging.Logger;
 
-import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -42,7 +42,7 @@ import java.util.stream.Collectors;
 public class ExternalTableMaterializer {
     private static final Logger LOG = Logger.getLogger(ExternalTableMaterializer.class);
     private static final ObjectMapper JSON = new ObjectMapper();
-    public static final String SCRATCH_BUCKET = S3Service.INTERNAL_BUCKET_PREFIX + "redshift-spectrum-scratch";
+    public static final String SCRATCH_BUCKET = S3Service.REDSHIFT_SPECTRUM_SCRATCH_BUCKET;
     private static final String SQLSTATE_LOAD_FAILED = "58030";
     private static final String SQLSTATE_INSUFFICIENT_PRIVILEGE = "42501";
     private static final long LOCK_TIMEOUT_SECONDS = 30;
@@ -492,19 +492,28 @@ public class ExternalTableMaterializer {
         }
         String schema = quote(binding.schemaName());
         String target = schema + "." + quote(table.getName());
-        String staging = schema + "." + quote(table.getName() + "__stg");
+        String stagingName = "floci_spectrum_stg_" + UUID.randomUUID().toString().replace("-", "");
+        String staging = "pg_temp." + quote(stagingName);
         String definitions = plan.columns().stream().map(column -> quote(column.getName()) + " " + GlueTypeMapper.toPostgres(column.getType())).collect(Collectors.joining(", "));
         boolean stagingCreated = false;
         String scratchKey = null;
         try {
-            backend.execute("DROP TABLE IF EXISTS " + staging + "; CREATE TABLE " + staging + " (" + definitions + ")");
+            backend.execute("CREATE TEMP TABLE " + quote(stagingName) + " (" + definitions + ")");
             stagingCreated = true;
             boolean hasObjects = sources.stream().anyMatch(source -> !source.objects().isEmpty());
             if (plan.iceberg() || hasObjects) {
                 scratchKey = "spectrum-" + UUID.randomUUID() + ".csv";
-                byte[] csv = readWithDuckDb(session.accountId(), table, sources,
+                readWithDuckDb(session.accountId(), table, sources,
                         config.services().redshift().spectrumMaxRows(), scratchKey);
-                long rows = backend.copyIn("COPY " + staging + " FROM STDIN " + COPY_OPTIONS, new ByteArrayInputStream(csv));
+                long rows;
+                String resultKey = scratchKey;
+                try (InputStream csv = RequestScopes.callAs(session.accountId(),
+                        () -> s3Service.openObjectStream(SCRATCH_BUCKET, resultKey, null))) {
+                    rows = backend.copyIn("COPY " + staging + " FROM STDIN " + COPY_OPTIONS, csv);
+                } catch (IOException exception) {
+                    throw new SpectrumReadException(SQLSTATE_LOAD_FAILED,
+                            "Unable to stream external table data into PostgreSQL", exception);
+                }
                 if (rows > config.services().redshift().spectrumMaxRows()) {
                     throw new SpectrumReadException(SQLSTATE_LOAD_FAILED, "External table \"" + binding.schemaName() + "." + table.getName() + "\" exceeds configured row limit");
                 }
@@ -513,7 +522,8 @@ public class ExternalTableMaterializer {
                 backend.execute("CREATE TABLE IF NOT EXISTS " + target + " (" + definitions + "); TRUNCATE " + target
                         + "; INSERT INTO " + target + " SELECT * FROM " + staging + "; DROP TABLE " + staging);
             } else {
-                backend.execute("DROP TABLE IF EXISTS " + target + "; ALTER TABLE " + staging + " RENAME TO " + quote(table.getName()));
+                backend.execute("DROP TABLE IF EXISTS " + target + "; CREATE TABLE " + target + " (" + definitions
+                        + "); INSERT INTO " + target + " SELECT * FROM " + staging + "; DROP TABLE " + staging);
             }
             stagingCreated = false;
             return definitions;
@@ -538,8 +548,8 @@ public class ExternalTableMaterializer {
         }
     }
 
-    private byte[] readWithDuckDb(String accountId, Table table, List<ReadSource> sources, long maxRows,
-                                  String scratchKey) {
+    private void readWithDuckDb(String accountId, Table table, List<ReadSource> sources, long maxRows,
+                                String scratchKey) {
         RequestScopes.runAs(accountId, () -> {
             try {
                 s3Service.createBucket(SCRATCH_BUCKET, config.defaultRegion());
@@ -560,7 +570,6 @@ public class ExternalTableMaterializer {
         String setup = GlueTableResolver.isIcebergTable(table) ? ICEBERG_SETUP : null;
         duckClient.execute(query + " LIMIT " + (maxRows + 1), setup,
                 "s3://" + SCRATCH_BUCKET + "/" + scratchKey, accountId);
-        return RequestScopes.callAs(accountId, () -> s3Service.getObject(SCRATCH_BUCKET, scratchKey).getData());
     }
 
     private String readSelect(ReadSource source) {

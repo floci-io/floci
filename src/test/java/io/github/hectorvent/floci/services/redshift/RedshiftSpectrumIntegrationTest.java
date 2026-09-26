@@ -90,7 +90,7 @@ class RedshiftSpectrumIntegrationTest {
             redshiftService.deleteCluster(clusterId);
         }
         if (glueDatabase != null) {
-            for (String tableName : List.of("events", "more")) {
+            for (String tableName : List.of("events", "events__stg", "more")) {
                 try {
                     glueService.deleteTable(glueDatabase, tableName);
                 } catch (RuntimeException ignored) {
@@ -101,7 +101,7 @@ class RedshiftSpectrumIntegrationTest {
         }
         if (bucket != null) {
             for (String key : List.of("events/part-1.csv", "events/part-2.csv", "events/part-1.parquet",
-                    "more/part-1.csv")) {
+                    "events__stg/part-1.csv", "more/part-1.csv")) {
                 try {
                     s3Service.deleteObject(bucket, key);
                 } catch (RuntimeException ignored) {
@@ -129,11 +129,15 @@ class RedshiftSpectrumIntegrationTest {
     }
 
     private void seedCsvTable(String tableName, String csv, String skipHeaderLines) {
-        bucket = "spectrum-it-" + System.nanoTime();
-        s3Service.createBucket(bucket, "us-east-1");
+        if (bucket == null) {
+            bucket = "spectrum-it-" + System.nanoTime();
+            s3Service.createBucket(bucket, "us-east-1");
+        }
         s3Service.putObject(bucket, tableName + "/part-1.csv", csv.getBytes(StandardCharsets.UTF_8), "text/csv", null);
-        glueDatabase = "spectrum_it_" + System.nanoTime();
-        glueService.createDatabase(new Database(glueDatabase));
+        if (glueDatabase == null) {
+            glueDatabase = "spectrum_it_" + System.nanoTime();
+            glueService.createDatabase(new Database(glueDatabase));
+        }
         Column id = new Column();
         id.setName("id");
         id.setType("int");
@@ -189,11 +193,15 @@ class RedshiftSpectrumIntegrationTest {
     }
 
     private static Connection connect(Cluster cluster) {
+        return connect(cluster, "admin", "Secret123");
+    }
+
+    private static Connection connect(Cluster cluster, String username, String password) {
         String url = "jdbc:postgresql://127.0.0.1:" + cluster.getEndpoint().getPort()
                 + "/dev?socketTimeout=30&loginTimeout=20";
         return Awaitility.await().atMost(Duration.ofSeconds(30)).pollDelay(Duration.ZERO)
                 .pollInterval(Duration.ofMillis(500)).ignoreExceptions()
-                .until(() -> DriverManager.getConnection(url, "admin", "Secret123"), Objects::nonNull);
+                .until(() -> DriverManager.getConnection(url, username, password), Objects::nonNull);
     }
 
     @Test
@@ -292,6 +300,53 @@ class RedshiftSpectrumIntegrationTest {
                     () -> statement.execute("INSERT INTO analytics.events VALUES (9, 'no')"));
             assertEquals("0A000", write.getSQLState());
             statement.execute("DROP TABLE analytics.more");
+        }
+    }
+
+    @Test
+    @Timeout(120)
+    void nonMasterUserCanReadExternalCatalogViewsWithoutWriteAccessToInternalTables() throws SQLException {
+        seedCsvTable("events", "id,name\n1,Alice\n");
+        Cluster cluster = newCluster("catalog-reader");
+        try (Connection admin = connect(cluster); Statement statement = admin.createStatement()) {
+            statement.execute(createSchemaSql("analytics"));
+            statement.execute("CREATE USER spectrum_reader WITH PASSWORD 'ReadOnly123!'");
+        }
+
+        try (Connection reader = connect(cluster, "spectrum_reader", "ReadOnly123!");
+             Statement statement = reader.createStatement()) {
+            try (ResultSet schemas = statement.executeQuery(
+                    "SELECT databasename FROM svv_external_schemas WHERE schemaname = 'analytics'")) {
+                assertTrue(schemas.next());
+                assertEquals(glueDatabase, schemas.getString(1));
+            }
+            SQLException write = assertThrows(SQLException.class,
+                    () -> statement.execute("DELETE FROM floci_internal.external_schemas"));
+            assertEquals("42501", write.getSQLState());
+        }
+    }
+
+    @Test
+    @Timeout(120)
+    void preservesMaterializedGlueTableWhoseNameMatchesTheOldStagingSuffix() throws SQLException {
+        seedCsvTable("events", "id,name\n1,Primary\n");
+        seedCsvTable("events__stg", "id,name\n2,Preserved\n");
+        Cluster cluster = newCluster("staging-collision");
+
+        try (Connection connection = connect(cluster); Statement statement = connection.createStatement()) {
+            statement.execute(createSchemaSql("analytics"));
+            assertEquals("Preserved", queryOnlyValue(statement, "SELECT name FROM analytics.events__stg"));
+            assertEquals("Primary", queryOnlyValue(statement, "SELECT name FROM analytics.events"));
+            assertEquals("Preserved", queryOnlyValue(statement, "SELECT name FROM analytics.events__stg"));
+        }
+    }
+
+    private static String queryOnlyValue(Statement statement, String sql) throws SQLException {
+        try (ResultSet rows = statement.executeQuery(sql)) {
+            assertTrue(rows.next());
+            String value = rows.getString(1);
+            assertFalse(rows.next());
+            return value;
         }
     }
 

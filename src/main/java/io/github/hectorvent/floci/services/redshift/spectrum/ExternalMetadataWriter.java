@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.glue.model.Table;
 import jakarta.enterprise.context.ApplicationScoped;
 import org.jboss.logging.Logger;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -54,82 +55,85 @@ public class ExternalMetadataWriter {
     }
 
     String purgeSql(String schemaName) {
-        String schema = literal(schemaName);
-        return "DELETE FROM floci_internal.external_schemas WHERE schemaname = " + schema + ";\n"
-                + "DELETE FROM floci_internal.external_tables WHERE schemaname = " + schema + ";\n"
-                + "DELETE FROM floci_internal.external_columns WHERE schemaname = " + schema + ";\n"
-                + "DELETE FROM floci_internal.external_partitions WHERE schemaname = " + schema + ";\n";
+        return "SELECT floci_internal.purge_external_schema(" + literal(schemaName) + ")";
     }
 
     String refreshSql(ExternalSchemaBinding binding, List<Table> tables,
                       Map<String, List<Partition>> partitionsByTable) {
-        String schema = literal(binding.schemaName());
-        StringBuilder sql = new StringBuilder(purgeSql(binding.schemaName()));
-        sql.append("INSERT INTO floci_internal.external_schemas (schemaname, databasename, esoptions) VALUES (")
-                .append(schema).append(", ").append(literal(binding.glueDatabase())).append(", ")
-                .append(literal(json(Map.of("IAM_ROLE", binding.iamRoleArn())))).append(");\n");
+        List<Map<String, Object>> tableRows = new ArrayList<>();
+        List<Map<String, Object>> columnRows = new ArrayList<>();
+        List<Map<String, Object>> partitionRows = new ArrayList<>();
         for (Table table : tables) {
             StorageDescriptor descriptor = table.getStorageDescriptor();
             String serdeLibrary = serdeLibrary(descriptor);
             String serdeParameters = json(serdeParameters(descriptor));
             int compressed = descriptor != null && Boolean.TRUE.equals(descriptor.getCompressed()) ? 1 : 0;
-            String tableName = literal(table.getName());
-            sql.append("INSERT INTO floci_internal.external_tables (schemaname, tablename, tabletype, location, ")
-                    .append("input_format, output_format, serialization_lib, serde_parameters, compressed, parameters) VALUES (")
-                    .append(schema).append(", ").append(tableName).append(", ")
-                    .append(literal("VIRTUAL_VIEW".equals(table.getTableType()) ? "VIEW" : "TABLE")).append(", ")
-                    .append(literal(descriptor == null ? "" : descriptor.getLocation())).append(", ")
-                    .append(literal(descriptor == null ? "" : descriptor.getInputFormat())).append(", ")
-                    .append(literal(descriptor == null ? "" : descriptor.getOutputFormat())).append(", ")
-                    .append(literal(serdeLibrary)).append(", ").append(literal(serdeParameters)).append(", ")
-                    .append(compressed).append(", ").append(literal(json(table.getParameters()))).append(");\n");
-            appendColumns(sql, schema, tableName, table);
+            tableRows.add(row(
+                    "tablename", table.getName(),
+                    "tabletype", "VIRTUAL_VIEW".equals(table.getTableType()) ? "VIEW" : "TABLE",
+                    "location", descriptor == null ? "" : descriptor.getLocation(),
+                    "input_format", descriptor == null ? "" : descriptor.getInputFormat(),
+                    "output_format", descriptor == null ? "" : descriptor.getOutputFormat(),
+                    "serialization_lib", serdeLibrary,
+                    "serde_parameters", serdeParameters,
+                    "compressed", compressed,
+                    "parameters", json(table.getParameters())));
+            appendColumns(columnRows, table);
             List<Partition> partitions = partitionsByTable.get(table.getName());
             if (partitions != null) {
                 for (Partition partition : partitions) {
-                    appendPartition(sql, schema, tableName, partition, serdeLibrary, serdeParameters, compressed);
+                    appendPartition(partitionRows, table.getName(), partition, serdeLibrary, serdeParameters, compressed);
                 }
             }
         }
-        return sql.toString();
+        Map<String, Object> payload = row(
+                "databasename", binding.glueDatabase(),
+                "esoptions", json(Map.of("IAM_ROLE", binding.iamRoleArn())),
+                "tables", tableRows,
+                "columns", columnRows,
+                "partitions", partitionRows);
+        return "SELECT floci_internal.refresh_external_catalog(" + literal(binding.schemaName()) + ", "
+                + literal(json(payload)) + "::jsonb)";
     }
 
-    private static void appendColumns(StringBuilder sql, String schema, String tableName, Table table) {
+    private static void appendColumns(List<Map<String, Object>> rows, Table table) {
         StorageDescriptor descriptor = table.getStorageDescriptor();
         List<Column> dataColumns = descriptor == null || descriptor.getColumns() == null
                 ? List.of() : descriptor.getColumns();
         List<Column> partitionKeys = table.getPartitionKeys() == null ? List.of() : table.getPartitionKeys();
         int number = 1;
         for (Column column : dataColumns) {
-            appendColumn(sql, schema, tableName, column, number++, 0);
+            appendColumn(rows, table.getName(), column, number++, 0);
         }
         int partitionOrder = 1;
         for (Column column : partitionKeys) {
-            appendColumn(sql, schema, tableName, column, number++, partitionOrder++);
+            appendColumn(rows, table.getName(), column, number++, partitionOrder++);
         }
     }
 
-    private static void appendColumn(StringBuilder sql, String schema, String tableName, Column column,
+    private static void appendColumn(List<Map<String, Object>> rows, String tableName, Column column,
                                      int columnNumber, int partitionOrder) {
-        sql.append("INSERT INTO floci_internal.external_columns (schemaname, tablename, columnname, external_type, ")
-                .append("columnnum, part_key, is_nullable) VALUES (").append(schema).append(", ")
-                .append(tableName).append(", ").append(literal(column.getName())).append(", ")
-                .append(literal(column.getType())).append(", ").append(columnNumber).append(", ")
-                .append(partitionOrder).append(", 'true');\n");
+        rows.add(row("tablename", tableName,
+                "columnname", column.getName(),
+                "external_type", column.getType(),
+                "columnnum", columnNumber,
+                "part_key", partitionOrder,
+                "is_nullable", "true"));
     }
 
-    private void appendPartition(StringBuilder sql, String schema, String tableName, Partition partition,
+    private void appendPartition(List<Map<String, Object>> rows, String tableName, Partition partition,
                                  String serdeLibrary, String serdeParameters, int compressed) {
         StorageDescriptor descriptor = partition.getStorageDescriptor();
         String values = jsonValues(partition.getValues());
-        sql.append("INSERT INTO floci_internal.external_partitions (schemaname, tablename, \"values\", location, ")
-                .append("input_format, output_format, serialization_lib, serde_parameters, compressed, parameters) VALUES (")
-                .append(schema).append(", ").append(tableName).append(", ").append(literal(values)).append(", ")
-                .append(literal(descriptor == null ? "" : descriptor.getLocation())).append(", ")
-                .append(literal(descriptor == null ? "" : descriptor.getInputFormat())).append(", ")
-                .append(literal(descriptor == null ? "" : descriptor.getOutputFormat())).append(", ")
-                .append(literal(serdeLibrary)).append(", ").append(literal(serdeParameters)).append(", ")
-                .append(compressed).append(", ").append(literal(json(partition.getParameters()))).append(");\n");
+        rows.add(row("tablename", tableName,
+                "values", values,
+                "location", descriptor == null ? "" : descriptor.getLocation(),
+                "input_format", descriptor == null ? "" : descriptor.getInputFormat(),
+                "output_format", descriptor == null ? "" : descriptor.getOutputFormat(),
+                "serialization_lib", serdeLibrary,
+                "serde_parameters", serdeParameters,
+                "compressed", compressed,
+                "parameters", json(partition.getParameters())));
     }
 
     private static String serdeLibrary(StorageDescriptor descriptor) {
@@ -143,9 +147,9 @@ public class ExternalMetadataWriter {
                 ? Map.of() : descriptor.getSerdeInfo().getParameters();
     }
 
-    private String json(Map<String, String> value) {
+    private String json(Object value) {
         try {
-            return objectMapper.writeValueAsString(value == null ? new LinkedHashMap<String, String>() : value);
+            return objectMapper.writeValueAsString(value == null ? new LinkedHashMap<>() : value);
         } catch (JsonProcessingException exception) {
             throw new IllegalStateException("Unable to serialize external table metadata", exception);
         }
@@ -161,5 +165,13 @@ public class ExternalMetadataWriter {
 
     private static String literal(String value) {
         return "'" + (value == null ? "" : value.replace("'", "''")) + "'";
+    }
+
+    private static Map<String, Object> row(Object... values) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        for (int index = 0; index < values.length; index += 2) {
+            result.put((String) values[index], values[index + 1]);
+        }
+        return result;
     }
 }

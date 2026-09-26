@@ -405,6 +405,93 @@ CREATE TABLE IF NOT EXISTS floci_internal.external_partitions (
     parameters text
 );
 
+REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON floci_internal.external_schemas,
+    floci_internal.external_tables, floci_internal.external_columns,
+    floci_internal.external_partitions FROM PUBLIC;
+GRANT USAGE ON SCHEMA floci_internal TO PUBLIC;
+
+CREATE OR REPLACE FUNCTION floci_internal.refresh_external_catalog(p_schema text, p_metadata jsonb)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, floci_internal
+AS $function$
+DECLARE
+    actor_name name;
+    schema_oid oid;
+BEGIN
+    actor_name := COALESCE(NULLIF(pg_catalog.current_setting('role'), 'none'), session_user::text)::name;
+    SELECT namespace.oid INTO schema_oid
+    FROM pg_catalog.pg_namespace AS namespace
+    WHERE namespace.nspname = p_schema;
+    IF schema_oid IS NULL OR NOT pg_catalog.has_schema_privilege(actor_name, schema_oid, 'CREATE') THEN
+        RETURN;
+    END IF;
+
+    DELETE FROM floci_internal.external_schemas WHERE schemaname = p_schema;
+    DELETE FROM floci_internal.external_tables WHERE schemaname = p_schema;
+    DELETE FROM floci_internal.external_columns WHERE schemaname = p_schema;
+    DELETE FROM floci_internal.external_partitions WHERE schemaname = p_schema;
+
+    INSERT INTO floci_internal.external_schemas (schemaname, databasename, esoptions)
+    VALUES (p_schema, p_metadata->>'databasename', p_metadata->>'esoptions');
+
+    INSERT INTO floci_internal.external_tables (schemaname, tablename, tabletype, location,
+            input_format, output_format, serialization_lib, serde_parameters, compressed, parameters)
+    SELECT p_schema, metadata.tablename, metadata.tabletype, metadata.location,
+           metadata.input_format, metadata.output_format, metadata.serialization_lib,
+           metadata.serde_parameters, metadata.compressed, metadata.parameters
+    FROM pg_catalog.jsonb_to_recordset(COALESCE(p_metadata->'tables', '[]'::jsonb)) AS metadata(
+            tablename name, tabletype text, location text, input_format text, output_format text,
+            serialization_lib text, serde_parameters text, compressed integer, parameters text);
+
+    INSERT INTO floci_internal.external_columns (schemaname, tablename, columnname, external_type,
+            columnnum, part_key, is_nullable)
+    SELECT p_schema, metadata.tablename, metadata.columnname, metadata.external_type,
+           metadata.columnnum, metadata.part_key, metadata.is_nullable
+    FROM pg_catalog.jsonb_to_recordset(COALESCE(p_metadata->'columns', '[]'::jsonb)) AS metadata(
+            tablename name, columnname name, external_type text, columnnum integer,
+            part_key integer, is_nullable text);
+
+    INSERT INTO floci_internal.external_partitions (schemaname, tablename, "values", location,
+            input_format, output_format, serialization_lib, serde_parameters, compressed, parameters)
+    SELECT p_schema, metadata.tablename, metadata."values", metadata.location,
+           metadata.input_format, metadata.output_format, metadata.serialization_lib,
+           metadata.serde_parameters, metadata.compressed, metadata.parameters
+    FROM pg_catalog.jsonb_to_recordset(COALESCE(p_metadata->'partitions', '[]'::jsonb)) AS metadata(
+            tablename name, "values" text, location text, input_format text, output_format text,
+            serialization_lib text, serde_parameters text, compressed integer, parameters text);
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION floci_internal.purge_external_schema(p_schema text)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, floci_internal
+AS $function$
+DECLARE
+    actor_name name;
+    schema_oid oid;
+BEGIN
+    actor_name := COALESCE(NULLIF(pg_catalog.current_setting('role'), 'none'), session_user::text)::name;
+    SELECT namespace.oid INTO schema_oid
+    FROM pg_catalog.pg_namespace AS namespace
+    WHERE namespace.nspname = p_schema;
+    IF schema_oid IS NOT NULL AND NOT pg_catalog.has_schema_privilege(actor_name, schema_oid, 'CREATE') THEN
+        RETURN;
+    END IF;
+
+    DELETE FROM floci_internal.external_schemas WHERE schemaname = p_schema;
+    DELETE FROM floci_internal.external_tables WHERE schemaname = p_schema;
+    DELETE FROM floci_internal.external_columns WHERE schemaname = p_schema;
+    DELETE FROM floci_internal.external_partitions WHERE schemaname = p_schema;
+END;
+$function$;
+
+GRANT EXECUTE ON FUNCTION floci_internal.refresh_external_catalog(text, jsonb) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION floci_internal.purge_external_schema(text) TO PUBLIC;
+
 DROP VIEW IF EXISTS pg_catalog.svv_external_schemas CASCADE;
 CREATE OR REPLACE VIEW pg_catalog.svv_external_schemas AS
 SELECT (100000 + row_number() OVER (ORDER BY schemaname))::oid AS esoid,
@@ -432,3 +519,5 @@ SELECT schemaname::text AS schemaname, tablename::text AS tablename, "values"::t
        serialization_lib::text AS serialization_lib, serde_parameters::text AS serde_parameters,
        compressed::integer AS compressed, parameters::text AS parameters
 FROM floci_internal.external_partitions;
+GRANT SELECT ON pg_catalog.svv_external_schemas, pg_catalog.svv_external_tables,
+    pg_catalog.svv_external_columns, pg_catalog.svv_external_partitions TO PUBLIC;

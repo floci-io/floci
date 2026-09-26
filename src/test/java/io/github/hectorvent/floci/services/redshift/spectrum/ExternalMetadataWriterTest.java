@@ -14,6 +14,7 @@ import java.util.Map;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.mockito.Mockito.mock;
 
@@ -23,7 +24,7 @@ class ExternalMetadataWriterTest {
     private final ExternalMetadataWriter writer = new ExternalMetadataWriter(mock(GlueService.class), new ObjectMapper());
 
     @Test
-    void refreshSqlWritesGlueTablesColumnsAndPartitionMetadata() {
+    void refreshSqlCallsPrivilegedWriterWithGlueMetadataPayload() {
         Column id = new Column();
         id.setName("id");
         id.setType("int");
@@ -43,21 +44,20 @@ class ExternalMetadataWriterTest {
 
         String sql = writer.refreshSql(BINDING, List.of(table), Map.of("events", List.of(partition)));
 
-        assertThat(sql, containsString("INSERT INTO floci_internal.external_schemas"));
-        assertThat(sql, containsString("{\"IAM_ROLE\":\"arn:aws:iam::000000000000:role/R\"}"));
-        assertThat(sql, containsString("'s3://bucket/o''brien/'"));
-        assertThat(sql, containsString("'id', 'int', 1, 0"));
-        assertThat(sql, containsString("'dt', 'string', 2, 1"));
-        assertThat(sql, containsString("[\"2024-01-01\"]"));
+        assertThat(sql, containsString("SELECT floci_internal.refresh_external_catalog('analytics'"));
+        assertThat(sql, containsString("IAM_ROLE"));
+        assertThat(sql, containsString("\"location\":\"s3://bucket/o''brien/\""));
+        assertThat(sql, containsString("\"columnname\":\"id\",\"external_type\":\"int\""));
+        assertThat(sql, containsString("\"columnname\":\"dt\",\"external_type\":\"string\""));
+        assertThat(sql, containsString("2024-01-01"));
+        assertThat(sql.contains("INSERT INTO floci_internal."), equalTo(false));
     }
 
     @Test
-    void purgeDeletesRowsFromEveryMetadataTable() {
+    void purgeCallsPrivilegedWriterForOneSchema() {
         String sql = writer.purgeSql("analytics");
-        assertThat(sql, containsString("external_schemas WHERE schemaname = 'analytics'"));
-        assertThat(sql, containsString("external_tables WHERE schemaname = 'analytics'"));
-        assertThat(sql, containsString("external_columns WHERE schemaname = 'analytics'"));
-        assertThat(sql, containsString("external_partitions WHERE schemaname = 'analytics'"));
+        assertThat(sql, containsString("SELECT floci_internal.purge_external_schema('analytics')"));
+        assertThat(sql.contains("DELETE FROM floci_internal."), equalTo(false));
     }
 
     @Test

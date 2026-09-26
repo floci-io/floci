@@ -136,7 +136,7 @@ For `AWS::Redshift::ClusterParameterGroup`, `Parameters` is applied via `ModifyC
 | `FLOCI_SERVICES_REDSHIFT_PROXY_HANDSHAKE_TIMEOUT_MILLIS` | `10000` | Max time a client has to complete the startup/auth handshake before the proxy drops it |
 | `FLOCI_SERVICES_REDSHIFT_PROXY_BACKEND_CONNECT_TIMEOUT_MILLIS` | `5000` | Max time the proxy waits for the backend TCP connect |
 | `FLOCI_SERVICES_REDSHIFT_PROXY_MAX_CONNECTIONS` | `100` | Max concurrent connections per proxy before new ones are refused |
-| `FLOCI_SERVICES_REDSHIFT_SPECTRUM_ENABLED` | `true` | Turns external-schema interception off, so a cluster needs no floci-duck sidecar |
+| `FLOCI_SERVICES_REDSHIFT_SPECTRUM_ENABLED` | `true` | Enables external-schema interception; set to `false` to turn it off. Compatible CSV reads need no floci-duck sidecar |
 | `FLOCI_SERVICES_REDSHIFT_SPECTRUM_MAX_ROWS` | `1000000` | Cap on rows loaded per external table per query; exceeding it fails the query |
 
 Redshift needs the Docker socket so it can launch PostgreSQL containers. Each cluster's container is published on a dynamically assigned host port, returned by `DescribeClusters`.

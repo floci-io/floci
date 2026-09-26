@@ -17,6 +17,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Answers;
 
+import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -84,9 +85,8 @@ class ExternalTableMaterializerTest {
         when(duck.query(anyString(), any(), anyString())).thenReturn(List.of());
         backend = new RecordingBackend();
         materializer = new ExternalTableMaterializer(duck, glue, s3, iam, config);
-        S3Object scratch = new S3Object(ExternalTableMaterializer.SCRATCH_BUCKET, "scratch.csv",
-                "id,name\n1,Alice\n2,Bob\n".getBytes(StandardCharsets.UTF_8), "text/csv");
-        when(s3.getObject(eq(ExternalTableMaterializer.SCRATCH_BUCKET), anyString())).thenReturn(scratch);
+        when(s3.openObjectStream(eq(ExternalTableMaterializer.SCRATCH_BUCKET), anyString(), isNull()))
+                .thenReturn(new ByteArrayInputStream("id,name\n1,Alice\n2,Bob\n".getBytes(StandardCharsets.UTF_8)));
         S3Object icebergMetadata = new S3Object("bucket", "events/metadata/v1.json",
                 "{\"current-snapshot-id\":\"1\",\"snapshots\":[{\"snapshot-id\":\"1\","
                         .concat("\"manifest-list\":\"s3://bucket/events/metadata/snap*.avro\"}]}")
@@ -107,10 +107,14 @@ class ExternalTableMaterializerTest {
 
         assertThat(materializer.ensureCurrent(backend, session(false), BINDING, "events"),
                 equalTo(ExternalTableMaterializer.Outcome.LOADED));
-        assertThat(backend.statements.get(0), containsString("CREATE TABLE \"analytics\".\"events__stg\""));
+        assertThat(backend.statements.get(0), containsString("CREATE TEMP TABLE \"floci_spectrum_stg_"));
         assertThat(backend.statements.get(0), containsString("\"id\" integer, \"name\" text"));
-        assertThat(backend.statements.get(1), containsString("COPY \"analytics\".\"events__stg\" FROM STDIN"));
-        assertThat(backend.statements.get(2), containsString("RENAME TO \"events\""));
+        assertThat(backend.statements.get(1), containsString("COPY pg_temp.\"floci_spectrum_stg_"));
+        assertThat(backend.statements.get(2), containsString("CREATE TABLE \"analytics\".\"events\""));
+        assertThat(backend.statements.get(2), containsString("FROM pg_temp.\"floci_spectrum_stg_"));
+        assertThat(backend.statements.stream().noneMatch(sql -> sql.contains("events__stg")), equalTo(true));
+        verify(s3).openObjectStream(eq(ExternalTableMaterializer.SCRATCH_BUCKET), anyString(), isNull());
+        verify(s3, never()).getObject(eq(ExternalTableMaterializer.SCRATCH_BUCKET), anyString());
         verify(duck).execute(argThat(sql -> sql.contains("LIMIT 1001")), isNull(), anyString(), eq(ACCOUNT));
         int size = backend.statements.size();
 
@@ -321,7 +325,7 @@ class ExternalTableMaterializerTest {
 
         String swap = backend.statements.getLast();
         assertThat(swap, containsString("TRUNCATE \"analytics\".\"events\""));
-        assertThat(swap, containsString("INSERT INTO \"analytics\".\"events\" SELECT * FROM \"analytics\".\"events__stg\""));
+        assertThat(swap, containsString("INSERT INTO \"analytics\".\"events\" SELECT * FROM pg_temp.\"floci_spectrum_stg_"));
         assertThat(swap.contains("RENAME TO"), equalTo(false));
         assertThat(swap.contains("DROP TABLE IF EXISTS \"analytics\".\"events\";"), equalTo(false));
     }
@@ -339,7 +343,7 @@ class ExternalTableMaterializerTest {
         int create = swap.indexOf("CREATE TABLE IF NOT EXISTS \"analytics\".\"events\"");
         int truncate = swap.indexOf("TRUNCATE");
         int insert = swap.indexOf("INSERT INTO");
-        int dropStaging = swap.indexOf("DROP TABLE \"analytics\".\"events__stg\"");
+        int dropStaging = swap.indexOf("DROP TABLE pg_temp.\"floci_spectrum_stg_");
         assertThat(create >= 0 && create < truncate && truncate < insert && insert < dropStaging, equalTo(true));
     }
 
@@ -352,7 +356,7 @@ class ExternalTableMaterializerTest {
 
         materializer.ensureCurrent(backend, session(false), BINDING, "events");
 
-        assertThat(backend.statements.getLast(), containsString("RENAME TO \"events\""));
+        assertThat(backend.statements.getLast(), containsString("CREATE TABLE \"analytics\".\"events\""));
     }
 
     @Test
@@ -364,7 +368,7 @@ class ExternalTableMaterializerTest {
 
         materializer.ensureCurrent(backend, session(false), BINDING, "events");
 
-        assertThat(backend.statements.getLast(), containsString("RENAME TO \"events\""));
+        assertThat(backend.statements.getLast(), containsString("CREATE TABLE \"analytics\".\"events\""));
     }
 
     private void forceReload() {
@@ -386,7 +390,7 @@ class ExternalTableMaterializerTest {
 
         materializer.ensureCurrent(backend, session(false), BINDING, "events");
 
-        assertThat(backend.statements.getLast(), containsString("RENAME TO \"events\""));
+        assertThat(backend.statements.getLast(), containsString("CREATE TABLE \"analytics\".\"events\""));
     }
 
     @Test
