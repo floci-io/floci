@@ -149,7 +149,7 @@ public class SsmJsonHandler {
         }
         response.set("Parameters", parametersArray);
         response.set("InvalidParameters", invalidParameterNames(names,
-                params.stream().map(Parameter::getName).toList()));
+                params.stream().map(p -> p.getName() + (p.getSelector() == null ? "" : p.getSelector())).toList()));
         return Response.ok(response).build();
     }
 
@@ -987,6 +987,9 @@ public class SsmJsonHandler {
         node.put("LastModifiedDate", p.getLastModifiedDate().toEpochMilli() / 1000.0);
         node.put("ARN", p.getArn());
         node.put("DataType", p.getDataType());
+        if (p.getSelector() != null) {
+            node.put("Selector", p.getSelector());
+        }
         return node;
     }
 

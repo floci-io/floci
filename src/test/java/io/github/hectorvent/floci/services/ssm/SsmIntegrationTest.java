@@ -1624,6 +1624,85 @@ class SsmIntegrationTest {
             .statusCode(200);
     }
 
+    @Test
+    void getParameterWithVersionAndLabelSelectors() {
+        for (String value : new String[] {"key1", "key2"}) {
+            given()
+                .header("X-Amz-Target", "AmazonSSM.PutParameter")
+                .contentType(SSM_CONTENT_TYPE)
+                .body("""
+                    { "Name": "/selector/param", "Value": "%s", "Type": "SecureString", "Overwrite": true }
+                    """.formatted(value))
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+        }
+        given()
+            .header("X-Amz-Target", "AmazonSSM.LabelParameterVersion")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "Name": "/selector/param", "ParameterVersion": 1, "Labels": ["previous"] }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.GetParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "Name": "/selector/param:1", "WithDecryption": true }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Parameter.Name", equalTo("/selector/param"))
+            .body("Parameter.Selector", equalTo(":1"))
+            .body("Parameter.Value", equalTo("key1"))
+            .body("Parameter.Version", equalTo(1));
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.GetParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "Name": "/selector/param:previous" }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Parameter.Selector", equalTo(":previous"))
+            .body("Parameter.Version", equalTo(1));
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.GetParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "Name": "/selector/param:9" }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ParameterVersionNotFound"));
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.GetParameters")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "Names": ["/selector/param:1", "/selector/param:9"] }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Parameters.Value", contains("key1"))
+            .body("InvalidParameters", contains("/selector/param:9"));
+    }
+
     private io.restassured.response.ValidatableResponse describeParameters(String body) {
         return given()
             .header("X-Amz-Target", "AmazonSSM.DescribeParameters")
