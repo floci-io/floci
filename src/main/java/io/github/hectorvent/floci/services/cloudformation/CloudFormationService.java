@@ -1300,6 +1300,18 @@ public class CloudFormationService implements ResourceProvider {
             if (resources.isObject()) {
                 List<String> sortedLogicalIds = topologicalSort(resources, conditions);
 
+                if (!isCreate) {
+                    Set<String> allResourceIds = new LinkedHashSet<>();
+                    resources.fieldNames().forEachRemaining(allResourceIds::add);
+                    for (String logicalId : sortedLogicalIds) {
+                        Set<String> propertyDependencies = new LinkedHashSet<>();
+                        collectDependencies(resources.path(logicalId).path("Properties"),
+                                allResourceIds, propertyDependencies, conditions);
+                        if (propertyDependencies.stream().anyMatch(changedResourceIds::contains)) {
+                            changedResourceIds.add(logicalId);
+                        }
+                    }
+                }
                 for (String logicalId : sortedLogicalIds) {
                     if (!isCreate && !changedResourceIds.contains(logicalId)) {
                         continue;
