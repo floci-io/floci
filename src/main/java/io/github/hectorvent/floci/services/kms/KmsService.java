@@ -870,7 +870,7 @@ public class KmsService implements ResourceProvider {
         KmsKey key = resolveKey(keyId, region);
         requireExternalOrigin(key);
         requireNotPendingDeletion(key);
-        KmsKeyImport.validateWrappingAlgorithm(key.getKeySpec(), wrappingAlgorithm);
+        KmsKeyImport.validateWrappingAlgorithm(key.getKeySpec(), wrappingAlgorithm, wrappingKeySpec);
 
         KmsKeyImport.WrappingKeyPair wrappingKeyPair = KmsKeyImport.generateWrappingKeyPair(wrappingKeySpec);
         KmsImportParameters parameters = new KmsImportParameters();

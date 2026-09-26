@@ -3009,6 +3009,8 @@ class KmsServiceTest {
                 "ECC_SECG_P256K1, RSA_AES_KEY_WRAP_SHA_256, RSA_2048",
                 "ECC_NIST_P256, RSAES_OAEP_SHA_256, RSA_2048",
                 "ECC_NIST_P521, RSAES_OAEP_SHA_1, RSA_4096",
+                "ECC_NIST_P521, RSAES_OAEP_SHA_256, RSA_3072",
+                "ECC_NIST_P521, RSA_AES_KEY_WRAP_SHA_256, RSA_2048",
                 "ECC_SECG_P256K1, RSAES_OAEP_SHA_256, RSA_3072"
         })
         void supportedEccKeyAndWrappingSpecsImportUsablePrivateKeyMaterial(
@@ -3290,6 +3292,17 @@ class KmsServiceTest {
             assertEquals("Enabled", imported.getKeyState());
             assertArrayEquals(keyPair.getPublic().getEncoded(),
                     Base64.getDecoder().decode(imported.getPublicKeyEncoded()));
+        }
+
+        @ParameterizedTest
+        @ValueSource(strings = {"RSAES_OAEP_SHA_1", "RSAES_OAEP_SHA_256"})
+        void p521MaterialRejectsRsaesOaepUnderAnRsa2048WrappingKey(String wrappingAlgorithm) {
+            String keyId = externalKey("ECC_NIST_P521", "SIGN_VERIFY").getKeyId();
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.getParametersForImport(keyId, wrappingAlgorithm, "RSA_2048", REGION));
+
+            assertEquals("UnsupportedOperationException", ex.getErrorCode());
         }
 
         @ParameterizedTest

@@ -126,6 +126,10 @@ following combinations:
 | Asymmetric RSA private key (`RSA_*`) | **Wrapping algorithms:** `RSA_AES_KEY_WRAP_SHA_256`, `RSA_AES_KEY_WRAP_SHA_1`<br>**Wrapping key specs:** `RSA_2048`, `RSA_3072`, `RSA_4096` |
 | Asymmetric elliptic curve private key (`ECC_NIST_P256`, `ECC_NIST_P384`, `ECC_NIST_P521`, `ECC_SECG_P256K1`) | **Wrapping algorithms:** `RSA_AES_KEY_WRAP_SHA_256`, `RSA_AES_KEY_WRAP_SHA_1`, `RSAES_OAEP_SHA_256`, `RSAES_OAEP_SHA_1`<br>**Wrapping key specs:** `RSA_2048`, `RSA_3072`, `RSA_4096` |
 
+As on AWS, `ECC_NIST_P521` material cannot use an `RSAES_OAEP_*` algorithm with the `RSA_2048`
+wrapping key spec: `GetParametersForImport` rejects that combination with
+`UnsupportedOperationException`. Use a larger wrapping key or an `RSA_AES_KEY_WRAP_*` algorithm.
+
 The hybrid `RSA_AES_KEY_WRAP_*` algorithms require a 256-bit AES key. `RSAES_PKCS1_V1_5` is
 rejected, matching AWS, which stopped supporting it on October 10, 2023.
 
