@@ -84,6 +84,39 @@ class IamServingServiceEnforcementIntegrationTest {
                 .body(not(containsString(apiName)));
     }
 
+    @Test
+    void restPutCannotBorrowListBucketPermissionThroughAction() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String bucket = "action-bypass-" + suffix;
+        String accessKeyId = createUserWithPolicy("action-bypass-user-" + suffix,
+                "ListBucketOnly", """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:ListBucket","Resource":"*"}
+                ]}""");
+
+        given().header("Authorization", authorization(ACCOUNT_ID, "s3"))
+                .when().put("/" + bucket).then().statusCode(200);
+
+        given().header("Authorization", authorization(accessKeyId, "s3"))
+                .queryParam("Action", "ListBucket")
+                .body("query-spoof")
+                .when().put("/" + bucket + "/from-query")
+                .then().statusCode(403).body(containsString("s3:PutObject"));
+
+        given().header("Authorization", authorization(accessKeyId, "s3"))
+                .contentType("application/x-www-form-urlencoded")
+                .body("Action=ListBucket")
+                .when().put("/" + bucket + "/from-form")
+                .then().statusCode(403).body(containsString("s3:PutObject"));
+
+        given().header("Authorization", authorization(ACCOUNT_ID, "s3"))
+                .when().get("/" + bucket + "/from-query")
+                .then().statusCode(404);
+        given().header("Authorization", authorization(ACCOUNT_ID, "s3"))
+                .when().get("/" + bucket + "/from-form")
+                .then().statusCode(404);
+    }
+
     private static String createUserWithPolicy(String userName, String policyName, String policyDocument) {
         adminIam("CreateUser", Map.of("UserName", userName)).statusCode(200);
         adminIam("PutUserPolicy", Map.of(
