@@ -47,6 +47,8 @@ import org.jspecify.annotations.Nullable;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyFactory;
 import java.security.KeyPair;
@@ -250,7 +252,6 @@ public class CognitoService implements ResourceProvider {
         pool.setClientIdOverride(getClientIdOverride(userPoolTags));
         pool.setClientSecretOverride(ReservedTags.extractOverrideCognitoClientSecret(userPoolTags));
         populateUserPool(pool, request);
-        normalizePasswordPolicy(pool);
 
         ensureJwtSigningKeys(pool);
         ensureRefreshTokenSecret(pool);
@@ -330,32 +331,25 @@ public class CognitoService implements ResourceProvider {
     }
 
     /**
-     * Fills in AWS's per-field password policy defaults for a pool created with a
-     * {@code PasswordPolicy} that has some fields unset: TemporaryPasswordValidityDays 7 (the one
-     * default the API reference states explicitly) and MinimumLength 8 (AWS's documented
-     * complex-password recommendation; the field itself only documents a minimum of 6).
-     * "If you don't provide a value for an attribute, Amazon Cognito sets it to its default
-     * value" (CreateUserPool).
+     * Normalizes and validates a supplied {@code PasswordPolicy}.
+     *
+     * <p>On live Cognito, when {@code PasswordPolicy} is provided, {@code MinimumLength} must be
+     * between 6 and 99. If omitted, live Cognito evaluates it as 0 and rejects the request with
+     * {@code InvalidParameterException} ("Value '0' at 'policies.passwordPolicy.minimumLength'
+     * failed to satisfy constraint: Member must have value greater than or equal to 6").
+     *
+     * <p>{@code TemporaryPasswordValidityDays} defaults to 7 (the one default the API reference
+     * documents explicitly).
      *
      * <p>RequireUppercase, RequireLowercase, RequireNumbers and RequireSymbols are deliberately
-     * left alone. The API reference documents no default for any of them, and they are unboxed
-     * booleans in the Cognito model, so a client that wants one off cannot say so on the wire:
-     * aws-sdk-go-v2 emits each under {@code if v.RequireLowercase != false}. Absence therefore
-     * means "not required", which is what the live service reports back - the Terraform provider
-     * asserts require_numbers and require_uppercase read as false immediately after a create
-     * that set them to false. Defaulting them to enabled made every Terraform plan after a
-     * create show spurious drift, and over-enforced the policy on SignUp and
-     * AdminSetUserPassword. The all-enabled policy is the console's "Cognito defaults" mode,
-     * not an API default.
+     * left alone: absence means "not required", matching live Cognito and avoiding Terraform
+     * plan drift.
      *
      * <p>Deliberately does not fabricate a {@code PasswordPolicy} for a pool that supplies none
      * at all — every other test and fixture in this codebase creates pools that way, relying on
      * "no policy configured" meaning no password validation, and defaulting one into existence
      * here would enforce it retroactively on all of them. Whether an unconfigured pool should
      * get AWS's default policy is tracked separately (hectorvent's follow-up on #2066).
-     *
-     * <p>Scoped to creation only, not UpdateUserPool, whose partial-update semantics for a
-     * re-supplied PasswordPolicy are not verified here.
      */
     @SuppressWarnings("unchecked")
     private void normalizePasswordPolicy(UserPool pool) {
@@ -363,12 +357,81 @@ public class CognitoService implements ResourceProvider {
         if (policies == null || !(policies.get("PasswordPolicy") instanceof Map<?, ?> raw)) {
             return;
         }
-        Map<String, Object> normalized = new HashMap<>(policies);
         Map<String, Object> passwordPolicy = new HashMap<>((Map<String, Object>) raw);
-        passwordPolicy.putIfAbsent("MinimumLength", 8);
+        validatePasswordPolicy(passwordPolicy);
         passwordPolicy.putIfAbsent("TemporaryPasswordValidityDays", 7);
+        Map<String, Object> normalized = new HashMap<>(policies);
         normalized.put("PasswordPolicy", passwordPolicy);
         pool.setPolicies(normalized);
+    }
+
+    private void validatePasswordPolicy(Map<String, Object> passwordPolicy) {
+        Object minLengthVal = passwordPolicy.get("MinimumLength");
+        if (minLengthVal == null) {
+            throw new AwsException(
+                    "InvalidParameterException",
+                    "1 validation error detected: Value '0' at 'policies.passwordPolicy.minimumLength' failed to satisfy constraint: Member must have value greater than or equal to 6",
+                    400
+            );
+        }
+        BigInteger minLength = policyInteger(passwordPolicy, "MinimumLength", "minimumLength");
+        if (minLength.compareTo(BigInteger.valueOf(6)) < 0) {
+            throw new AwsException(
+                    "InvalidParameterException",
+                    "1 validation error detected: Value '" + minLengthVal + "' at 'policies.passwordPolicy.minimumLength' failed to satisfy constraint: Member must have value greater than or equal to 6",
+                    400
+            );
+        }
+        if (minLength.compareTo(BigInteger.valueOf(99)) > 0) {
+            throw new AwsException(
+                    "InvalidParameterException",
+                    "1 validation error detected: Value '" + minLengthVal + "' at 'policies.passwordPolicy.minimumLength' failed to satisfy constraint: Member must have value less than or equal to 99",
+                    400
+            );
+        }
+
+        if (passwordPolicy.containsKey("TemporaryPasswordValidityDays")) {
+            Object tempDaysVal = passwordPolicy.get("TemporaryPasswordValidityDays");
+            if (tempDaysVal != null) {
+                BigInteger tempDays = policyInteger(passwordPolicy, "TemporaryPasswordValidityDays",
+                        "temporaryPasswordValidityDays");
+                if (tempDays.compareTo(BigInteger.ZERO) < 0) {
+                    throw new AwsException(
+                            "InvalidParameterException",
+                            "1 validation error detected: Value '" + tempDaysVal + "' at 'policies.passwordPolicy.temporaryPasswordValidityDays' failed to satisfy constraint: Member must have value greater than or equal to 0",
+                            400
+                    );
+                }
+                if (tempDays.compareTo(BigInteger.valueOf(365)) > 0) {
+                    throw new AwsException(
+                            "InvalidParameterException",
+                            "1 validation error detected: Value '" + tempDaysVal + "' at 'policies.passwordPolicy.temporaryPasswordValidityDays' failed to satisfy constraint: Member must have value less than or equal to 365",
+                            400
+                    );
+                }
+            }
+        }
+
+        if (passwordPolicy.containsKey("PasswordHistorySize")) {
+            Object historySizeVal = passwordPolicy.get("PasswordHistorySize");
+            if (historySizeVal != null) {
+                BigInteger historySize = policyInteger(passwordPolicy, "PasswordHistorySize", "passwordHistorySize");
+                if (historySize.compareTo(BigInteger.ZERO) < 0) {
+                    throw new AwsException(
+                            "InvalidParameterException",
+                            "1 validation error detected: Value '" + historySizeVal + "' at 'policies.passwordPolicy.passwordHistorySize' failed to satisfy constraint: Member must have value greater than or equal to 0",
+                            400
+                    );
+                }
+                if (historySize.compareTo(BigInteger.valueOf(24)) > 0) {
+                    throw new AwsException(
+                            "InvalidParameterException",
+                            "1 validation error detected: Value '" + historySizeVal + "' at 'policies.passwordPolicy.passwordHistorySize' failed to satisfy constraint: Member must have value less than or equal to 24",
+                            400
+                    );
+                }
+            }
+        }
     }
 
     private static String prefixedAttributeName(String name, boolean developerOnly) {
@@ -398,7 +461,10 @@ public class CognitoService implements ResourceProvider {
 
     @SuppressWarnings("unchecked")
     private void populateUserPool(UserPool pool, Map<String, Object> request) {
-        if (request.containsKey("Policies")) pool.setPolicies((Map<String, Object>) request.get("Policies"));
+        if (request.containsKey("Policies")) {
+            pool.setPolicies((Map<String, Object>) request.get("Policies"));
+            normalizePasswordPolicy(pool);
+        }
         if (request.containsKey("DeletionProtection")) pool.setDeletionProtection((String) request.get("DeletionProtection"));
         if (request.containsKey("LambdaConfig")) pool.setLambdaConfig((Map<String, Object>) request.get("LambdaConfig"));
         if (request.containsKey("Schema")) pool.setSchemaAttributes(prefixCustomSchemaAttributes((List<Map<String, Object>>) request.get("Schema")));
@@ -3888,6 +3954,38 @@ public class CognitoService implements ResourceProvider {
             }
         }
         return 0;
+    }
+
+    /**
+     * Reads a password policy integer without narrowing it, so range checks see the real value.
+     * A value that is not a whole-number type or string is rejected: falling back to zero would
+     * let it pass the 0-based ranges of {@code TemporaryPasswordValidityDays} and
+     * {@code PasswordHistorySize} and be stored as-is.
+     */
+    private BigInteger policyInteger(Map<String, Object> policy, String key, String member) {
+        Object value = policy.get(key);
+        try {
+            if (value instanceof BigInteger integer) {
+                return integer;
+            }
+            if (value instanceof Number number) {
+                return new BigDecimal(number.toString()).toBigInteger();
+            }
+            if (value instanceof String stringValue) {
+                return new BigInteger(stringValue);
+            }
+        } catch (NumberFormatException e) {
+            throw notAnInteger(value, member);
+        }
+        throw notAnInteger(value, member);
+    }
+
+    private static AwsException notAnInteger(Object value, String member) {
+        return new AwsException(
+                "InvalidParameterException",
+                "1 validation error detected: Value '" + value + "' at 'policies.passwordPolicy." + member
+                        + "' failed to satisfy constraint: Member must be an integer",
+                400);
     }
 
     private boolean policyBoolean(Map<String, Object> policy, String key) {

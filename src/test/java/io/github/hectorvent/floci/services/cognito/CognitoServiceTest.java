@@ -437,7 +437,7 @@ class CognitoServiceTest {
         // current password as one of the n, not an extra entry on top of n stored ones.
         UserPool pool = service.createUserPool(Map.of(
                 "PoolName", "HistorySizeOnePool",
-                "Policies", Map.of("PasswordPolicy", Map.of("PasswordHistorySize", 1))
+                "Policies", Map.of("PasswordPolicy", Map.of("PasswordHistorySize", 1, "MinimumLength", 8))
         ), "us-east-1");
         service.adminCreateUser(pool.getId(), "alice", Map.of("email", "alice@example.com"), "PasswordA1!");
         service.adminSetUserPassword(pool.getId(), "alice", "PasswordB1!", true);
@@ -474,7 +474,7 @@ class CognitoServiceTest {
         // not additionally age Pass2 out just because the current slot is temporarily empty.
         UserPool pool = service.createUserPool(Map.of(
                 "PoolName", "ResetHistoryWindowPool",
-                "Policies", Map.of("PasswordPolicy", Map.of("PasswordHistorySize", 2))
+                "Policies", Map.of("PasswordPolicy", Map.of("PasswordHistorySize", 2, "MinimumLength", 8))
         ), "us-east-1");
         service.adminCreateUser(pool.getId(), "alice", Map.of("email", "alice@example.com"), "Pass1word!");
         service.adminSetUserPassword(pool.getId(), "alice", "Pass2word!", true);
@@ -496,26 +496,134 @@ class CognitoServiceTest {
     }
 
     @Test
-    void createUserPoolDefaultsAnUnsetMinimumLengthToEight() {
-        // A policy present but silent on MinimumLength gets AWS's default (8), not policyInt's
-        // fallback of 0 for an absent key. The character classes the policy did not ask for are
-        // not enforced: only RequireSymbols was set, so a password with no uppercase and no
-        // digit is accepted once it is long enough.
+    void createUserPoolRejectsPasswordPolicyWithUnsetMinimumLength() {
+        // When a PasswordPolicy is supplied without MinimumLength, live Cognito evaluates
+        // minimumLength as 0 and rejects it against the constraint MinimumLength >= 6.
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.createUserPool(Map.of(
+                        "PoolName", "SymbolsOnlyPool",
+                        "Policies", Map.of("PasswordPolicy", Map.of("RequireSymbols", true))
+                ), "us-east-1"));
+        assertEquals("InvalidParameterException", exception.getErrorCode());
+        assertTrue(exception.getMessage().contains("policies.passwordPolicy.minimumLength"));
+        assertTrue(exception.getMessage().contains("Member must have value greater than or equal to 6"));
+    }
+
+    @Test
+    void createUserPoolRejectsMinimumLengthOutOfRange() {
+        AwsException tooShort = assertThrows(AwsException.class, () ->
+                service.createUserPool(Map.of(
+                        "PoolName", "TooShortPool",
+                        "Policies", Map.of("PasswordPolicy", Map.of("MinimumLength", 5))
+                ), "us-east-1"));
+        assertEquals("InvalidParameterException", tooShort.getErrorCode());
+        assertTrue(tooShort.getMessage().contains("Member must have value greater than or equal to 6"));
+
+        AwsException tooLong = assertThrows(AwsException.class, () ->
+                service.createUserPool(Map.of(
+                        "PoolName", "TooLongPool",
+                        "Policies", Map.of("PasswordPolicy", Map.of("MinimumLength", 100))
+                ), "us-east-1"));
+        assertEquals("InvalidParameterException", tooLong.getErrorCode());
+        assertTrue(tooLong.getMessage().contains("Member must have value less than or equal to 99"));
+    }
+
+    @Test
+    void createUserPoolRejectsOversizedMinimumLengthBeforeIntNarrowing() {
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.createUserPool(Map.of(
+                        "PoolName", "OversizedMinimumLengthPool",
+                        "Policies", Map.of("PasswordPolicy", Map.of("MinimumLength", 4_294_967_302L))
+                ), "us-east-1"));
+
+        assertEquals("InvalidParameterException", exception.getErrorCode());
+        assertTrue(exception.getMessage().contains("Member must have value less than or equal to 99"));
+    }
+
+    @Test
+    void createUserPoolRejectsOversizedTemporaryPasswordValidityBeforeIntNarrowing() {
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.createUserPool(Map.of(
+                        "PoolName", "OversizedTemporaryPasswordValidityPool",
+                        "Policies", Map.of("PasswordPolicy", Map.of(
+                                "MinimumLength", 8,
+                                "TemporaryPasswordValidityDays", 4_294_967_302L))
+                ), "us-east-1"));
+
+        assertEquals("InvalidParameterException", exception.getErrorCode());
+        assertTrue(exception.getMessage().contains("Member must have value less than or equal to 365"));
+    }
+
+    @Test
+    void createUserPoolRejectsOversizedPasswordHistorySizeBeforeIntNarrowing() {
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.createUserPool(Map.of(
+                        "PoolName", "OversizedPasswordHistoryPool",
+                        "Policies", Map.of("PasswordPolicy", Map.of(
+                                "MinimumLength", 8,
+                                "PasswordHistorySize", 4_294_967_302L))
+                ), "us-east-1"));
+
+        assertEquals("InvalidParameterException", exception.getErrorCode());
+        assertTrue(exception.getMessage().contains("Member must have value less than or equal to 24"));
+    }
+
+    @Test
+    void createUserPoolRejectsUnparseableTemporaryPasswordValidity() {
+        for (Object value : new Object[] {Double.POSITIVE_INFINITY, Double.NaN, "abc", true}) {
+            AwsException exception = assertThrows(AwsException.class, () ->
+                    service.createUserPool(Map.of(
+                            "PoolName", "UnparseableTemporaryPasswordValidityPool",
+                            "Policies", Map.of("PasswordPolicy", Map.of(
+                                    "MinimumLength", 8,
+                                    "TemporaryPasswordValidityDays", value))
+                    ), "us-east-1"), "value: " + value);
+
+            assertEquals("InvalidParameterException", exception.getErrorCode());
+            assertTrue(exception.getMessage().contains("Member must be an integer"), "value: " + value);
+        }
+    }
+
+    @Test
+    void createUserPoolRejectsUnparseablePasswordHistorySize() {
+        for (Object value : new Object[] {Double.POSITIVE_INFINITY, Double.NaN, "abc", true}) {
+            AwsException exception = assertThrows(AwsException.class, () ->
+                    service.createUserPool(Map.of(
+                            "PoolName", "UnparseablePasswordHistoryPool",
+                            "Policies", Map.of("PasswordPolicy", Map.of(
+                                    "MinimumLength", 8,
+                                    "PasswordHistorySize", value))
+                    ), "us-east-1"), "value: " + value);
+
+            assertEquals("InvalidParameterException", exception.getErrorCode());
+            assertTrue(exception.getMessage().contains("Member must be an integer"), "value: " + value);
+        }
+    }
+
+    @Test
+    void updateUserPoolValidatesPasswordPolicy() {
         UserPool pool = service.createUserPool(Map.of(
-                "PoolName", "SymbolsOnlyPool",
-                "Policies", Map.of("PasswordPolicy", Map.of("RequireSymbols", true))
+                "PoolName", "ValidPool",
+                "Policies", Map.of("PasswordPolicy", Map.of("MinimumLength", 8))
         ), "us-east-1");
-        UserPoolClient client = service.createUserPoolClient(
-                pool.getId(), "symbols-only-client", false, false, List.of(), List.of());
 
         AwsException exception = assertThrows(AwsException.class, () ->
-                service.signUp(client.getClientId(), "alice@example.com", "a!", Map.of(
-                        "email", "alice@example.com", "phone_number", "+4915112345678")));
-        assertEquals("InvalidPasswordException", exception.getErrorCode());
+                service.updateUserPool(Map.of(
+                        "UserPoolId", pool.getId(),
+                        "Policies", Map.of("PasswordPolicy", Map.of("RequireSymbols", true))
+                ), "us-east-1"));
+        assertEquals("InvalidParameterException", exception.getErrorCode());
+        assertTrue(exception.getMessage().contains("policies.passwordPolicy.minimumLength"));
 
-        assertDoesNotThrow(() -> service.signUp(
-                client.getClientId(), "bob@example.com", "lowercase!", Map.of(
-                        "email", "bob@example.com", "phone_number", "+4915112345679")));
+        assertDoesNotThrow(() -> service.updateUserPool(Map.of(
+                "UserPoolId", pool.getId(),
+                "Policies", Map.of("PasswordPolicy", Map.of("MinimumLength", 6))
+        ), "us-east-1"));
+        UserPool updated = service.describeUserPool(pool.getId());
+        @SuppressWarnings("unchecked")
+        Map<String, Object> policy = (Map<String, Object>) updated.getPolicies().get("PasswordPolicy");
+        assertEquals(6, policy.get("MinimumLength"));
+        assertEquals(7, policy.get("TemporaryPasswordValidityDays"));
     }
 
     @Test

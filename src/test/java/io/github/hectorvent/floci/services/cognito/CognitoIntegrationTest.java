@@ -540,6 +540,66 @@ class CognitoIntegrationTest {
     }
 
     @Test
+    void createUserPoolRejectsPasswordPolicyWithOmittedMinimumLength() {
+        given()
+                .header("X-Amz-Target", "AWSCognitoIdentityProviderService.CreateUserPool")
+                .contentType("application/x-amz-json-1.1")
+                .body("""
+                        {
+                          "PoolName": "InvalidMinLengthPool",
+                          "Policies": {
+                            "PasswordPolicy": {
+                              "RequireUppercase": true
+                            }
+                          }
+                        }
+                        """)
+                .when()
+                .post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterException"))
+                .body("message", containsString("policies.passwordPolicy.minimumLength"))
+                .body("message", containsString("Member must have value greater than or equal to 6"));
+    }
+
+    @Test
+    void updateUserPoolRejectsPasswordPolicyWithOmittedMinimumLength() throws Exception {
+        JsonNode created = cognitoJson("CreateUserPool", """
+                {
+                  "PoolName": "ValidPoolToUpdate",
+                  "Policies": {
+                    "PasswordPolicy": {
+                      "MinimumLength": 8
+                    }
+                  }
+                }
+                """);
+        String poolId = created.path("UserPool").path("Id").asText();
+
+        given()
+                .header("X-Amz-Target", "AWSCognitoIdentityProviderService.UpdateUserPool")
+                .contentType("application/x-amz-json-1.1")
+                .body("""
+                        {
+                          "UserPoolId": "%s",
+                          "Policies": {
+                            "PasswordPolicy": {
+                              "RequireUppercase": true
+                            }
+                          }
+                        }
+                        """.formatted(poolId))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterException"))
+                .body("message", containsString("policies.passwordPolicy.minimumLength"))
+                .body("message", containsString("Member must have value greater than or equal to 6"));
+    }
+
+    @Test
     @Order(7)
     void confirmSignUpRequiresValidConfirmationCode() throws Exception {
         given().delete("/_aws/ses").then().statusCode(200);
