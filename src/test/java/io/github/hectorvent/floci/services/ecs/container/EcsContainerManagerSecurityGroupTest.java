@@ -89,7 +89,9 @@ class EcsContainerManagerSecurityGroupTest {
                 containerDetector, config, regionResolver, awsEnv,
                 mock(SsmService.class), mock(SecretsManagerService.class), mock(S3Service.class),
                 ecrRegistryManager, mock(HostVolumePolicy.class),
-                ec2Service, firewallManager);
+                ec2Service, firewallManager,
+                mock(EcsTaskRoleCredentials.class), mock(EcsCredentialsProxy.class),
+                new EcsTaskLinkLocalAddresses());
     }
 
     @Test
