@@ -1,4 +1,4 @@
-package io.github.hectorvent.floci.services.athena;
+package io.github.hectorvent.floci.services.glue;
 
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.glue.model.Column;

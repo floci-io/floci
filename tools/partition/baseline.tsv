@@ -35,7 +35,7 @@ dns-suffix	src/main/java/io/github/hectorvent/floci/services/iam/SAMLAssertionVe
 dns-suffix	src/main/java/io/github/hectorvent/floci/services/iam/StsQueryHandler.java	2
 dns-suffix	src/main/java/io/github/hectorvent/floci/services/macie2/MacieController.java	1
 dns-suffix	src/main/java/io/github/hectorvent/floci/services/ram/RamController.java	2
-dns-suffix	src/main/java/io/github/hectorvent/floci/services/redshift/proxy/S3CopySimulator.java	2
+dns-suffix	src/main/java/io/github/hectorvent/floci/services/redshift/proxy/RedshiftRoleAccess.java	2
 dns-suffix	src/main/java/io/github/hectorvent/floci/services/s3/S3Service.java	1
 dns-suffix	src/main/java/io/github/hectorvent/floci/services/s3/S3VirtualHostFilter.java	1
 dns-suffix	src/main/java/io/github/hectorvent/floci/services/signin/SigninService.java	1
