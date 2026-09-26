@@ -8,9 +8,6 @@ import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
-import java.time.Duration;
-import java.time.Instant;
-
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -59,40 +56,53 @@ class StepFunctionsContextObjectPathIntegrationTest {
     }
 
     /**
-     * A context path that does not resolve leaves the wait at zero, which is indistinguishable from
-     * a Wait state that never waited, so the duration is what proves the value was read.
+     * ItemBatcher's MaxItemsPerBatchPath is a Reference Path. InputPath narrows the state input to
+     * the items, so the batch size exists only on the Context Object.
      */
     @Test
-    void waitSecondsPathReadsTheContextObject() throws Exception {
+    void itemBatcherMaxItemsPerBatchPathReadsTheContextObject() throws Exception {
         String definition = """
-                {"StartAt":"W","States":{"W":{"Type":"Wait",
-                  "InputPath":"$.payload","SecondsPath":"$$.Execution.Input.delay",
-                  "Next":"P"},"P":{"Type":"Pass","End":true}}}
+                {"StartAt":"M","States":{"M":{"Type":"Map",
+                  "InputPath":"$.payload","ItemsPath":"$.items",
+                  "ItemBatcher":{"MaxItemsPerBatchPath":"$$.Execution.Input.batch"},
+                  "ItemProcessor":{"ProcessorConfig":{"Mode":"DISTRIBUTED","ExecutionType":"STANDARD"},
+                    "StartAt":"P","States":{"P":{"Type":"Pass","End":true}}},
+                  "End":true}}}
                 """;
 
-        Instant started = Instant.now();
-        run(definition, "{\"delay\":1,\"payload\":{\"kept\":true}}");
-        Duration elapsed = Duration.between(started, Instant.now());
+        JsonNode batches = mapper.readTree(run(definition,
+                "{\"batch\":2,\"payload\":{\"items\":[{\"n\":1},{\"n\":2},{\"n\":3},{\"n\":4},{\"n\":5}]}}"));
 
-        assertTrue(elapsed.toMillis() >= 900,
-                "Wait must honour the context path, waited " + elapsed.toMillis() + "ms");
+        assertEquals(3, batches.size(), "batches: " + batches);
+        assertEquals(2, batches.get(0).path("Items").size());
+        assertEquals(2, batches.get(1).path("Items").size());
+        assertEquals(1, batches.get(2).path("Items").size());
     }
 
+    /**
+     * ToleratedFailureCountPath is a Reference Path. One item fails, and the Map succeeds only if
+     * the tolerance of one is read from the Context Object; the narrowed input does not carry it.
+     */
     @Test
-    void waitTimestampPathReadsTheContextObject() throws Exception {
-        String timestamp = Instant.now().plusSeconds(1).toString();
+    void toleratedFailureCountPathReadsTheContextObject() throws Exception {
         String definition = """
-                {"StartAt":"W","States":{"W":{"Type":"Wait",
-                  "InputPath":"$.payload","TimestampPath":"$$.Execution.Input.until",
-                  "Next":"P"},"P":{"Type":"Pass","End":true}}}
+                {"StartAt":"M","States":{"M":{"Type":"Map",
+                  "InputPath":"$.payload","ItemsPath":"$.items",
+                  "ToleratedFailureCountPath":"$$.Execution.Input.tolerate",
+                  "ItemProcessor":{"ProcessorConfig":{"Mode":"DISTRIBUTED","ExecutionType":"STANDARD"},
+                    "StartAt":"Check","States":{
+                      "Check":{"Type":"Choice",
+                        "Choices":[{"Variable":"$.n","NumericLessThan":0,"Next":"Boom"}],
+                        "Default":"Keep"},
+                      "Boom":{"Type":"Fail","Error":"ItemFailed"},
+                      "Keep":{"Type":"Pass","End":true}}},
+                  "End":true}}}
                 """;
 
-        Instant started = Instant.now();
-        run(definition, "{\"until\":\"" + timestamp + "\",\"payload\":{\"kept\":true}}");
-        Duration elapsed = Duration.between(started, Instant.now());
+        JsonNode results = mapper.readTree(run(definition,
+                "{\"tolerate\":1,\"payload\":{\"items\":[{\"n\":1},{\"n\":-1},{\"n\":3}]}}"));
 
-        assertTrue(elapsed.toMillis() >= 500,
-                "Wait must honour the context path, waited " + elapsed.toMillis() + "ms");
+        assertEquals(2, results.size(), "results: " + results);
     }
 
     private String run(String definition, String input) throws InterruptedException {

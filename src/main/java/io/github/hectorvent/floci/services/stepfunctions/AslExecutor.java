@@ -753,7 +753,7 @@ public class AslExecutor {
         }
 
         JsonNode output = mergeResult(stateDef, input, result);
-        output = applyOutputPath(stateDef, input, output, context);
+        output = applyOutputPath(stateDef, output, context);
         return new StateResult(output, stateDef.path("Next").asText(null));
     }
 
@@ -849,7 +849,7 @@ public class AslExecutor {
                 taskResult = resolveParameters(stateDef.get("ResultSelector"), taskResult, context);
             }
             JsonNode output = mergeResult(stateDef, input, taskResult);
-            output = applyOutputPath(stateDef, input, output, context);
+            output = applyOutputPath(stateDef, output, context);
             return new StateResult(output, stateDef.path("Next").asText(null));
         }
     }
@@ -2245,14 +2245,14 @@ public class AslExecutor {
         JsonNode choices = stateDef.path("Choices");
         for (JsonNode choice : choices) {
             if (evaluateCondition(choice, effectiveInput, context)) {
-                JsonNode output = applyOutputPath(stateDef, input, effectiveInput, context);
+                JsonNode output = applyOutputPath(stateDef, effectiveInput, context);
                 return new StateResult(output, choice.path("Next").asText());
             }
         }
         // Default branch
         String defaultState = stateDef.path("Default").asText(null);
         if (defaultState != null) {
-            JsonNode output = applyOutputPath(stateDef, input, effectiveInput, context);
+            JsonNode output = applyOutputPath(stateDef, effectiveInput, context);
             return new StateResult(output, defaultState);
         }
         throw new FailStateException("States.Runtime", NO_NEXT_STATE_CAUSE);
@@ -2318,7 +2318,7 @@ public class AslExecutor {
             JsonNode output = applyJsonataOutput(stateDef, input, null, context, variables);
             return new StateResult(output, stateDef.path("Next").asText(null));
         }
-        JsonNode output = applyOutputPath(stateDef, input, effectiveInput, context);
+        JsonNode output = applyOutputPath(stateDef, effectiveInput, context);
         return new StateResult(output, stateDef.path("Next").asText(null));
     }
 
@@ -2379,7 +2379,7 @@ public class AslExecutor {
             return new StateResult(output, null);
         }
         JsonNode effectiveInput = applyInputPath(stateDef, input, context);
-        return new StateResult(applyOutputPath(stateDef, input, effectiveInput, context), null);
+        return new StateResult(applyOutputPath(stateDef, effectiveInput, context), null);
     }
 
     private StateResult executeFail(JsonNode stateDef, JsonNode input, boolean jsonata, JsonNode context,
@@ -2519,7 +2519,7 @@ public class AslExecutor {
                 ? resolveParameters(stateDef.get("ResultSelector"), results, context)
                 : results;
         JsonNode output = mergeResult(stateDef, input, selected);
-        output = applyOutputPath(stateDef, input, output, context);
+        output = applyOutputPath(stateDef, output, context);
         return new StateResult(output, stateDef.path("Next").asText(null));
     }
 
@@ -2767,7 +2767,7 @@ public class AslExecutor {
                 ? resolveParameters(stateDef.get("ResultSelector"), mapResult, context)
                 : mapResult;
         JsonNode output = mergeResult(stateDef, input, selected);
-        output = applyOutputPath(stateDef, input, output, context);
+        output = applyOutputPath(stateDef, output, context);
         return new StateResult(output, stateDef.path("Next").asText(null));
     }
 
@@ -3743,8 +3743,7 @@ public class AslExecutor {
     }
 
     /** {@code OutputPath} is a Reference Path, so it reads the Context Object as InputPath does. */
-    private JsonNode applyOutputPath(JsonNode stateDef, JsonNode input, JsonNode output,
-                                     JsonNode context) {
+    private JsonNode applyOutputPath(JsonNode stateDef, JsonNode output, JsonNode context) {
         if (!stateDef.has("OutputPath")) {
             return output;
         }
