@@ -544,6 +544,115 @@ class NetworkFirewallIntegrationTest {
     }
 
     @Test
+    void updateRuleGroup_whenReplacementIsRejected_keepsTheOriginal() {
+        call("CreateRuleGroup", "{\"RuleGroupName\":\"atomic-keep-a\",\"Type\":\"STATEFUL\","
+                + "\"Capacity\":100,\"RuleGroup\":{\"RulesSource\":{\"RulesString\":\"pass ip any any\"}}}")
+            .statusCode(200);
+        call("CreateRuleGroup", "{\"RuleGroupName\":\"atomic-keep-b\",\"Type\":\"STATEFUL\","
+                + "\"Capacity\":100,\"RuleGroup\":{\"RulesSource\":{\"RulesString\":\"drop ip any any\"}}}")
+            .statusCode(200);
+
+        String arnA = "arn:aws:network-firewall:us-east-1:723679240095:stateful-rulegroup/atomic-keep-a";
+
+        call("UpdateRuleGroup", "{\"RuleGroupArn\":\"" + arnA + "\","
+                + "\"RuleGroupName\":\"atomic-keep-b\",\"Type\":\"STATEFUL\","
+                + "\"Capacity\":100,\"RuleGroup\":{\"RulesSource\":{\"RulesString\":\"pass ip any any\"}}}")
+            .statusCode(400)
+            .body("__type", equalTo("InvalidRequestException"));
+
+        call("DescribeRuleGroup", "{\"RuleGroupName\":\"atomic-keep-a\"}")
+            .statusCode(200)
+            .body("RuleGroup.RulesSource.RulesString", equalTo("pass ip any any"))
+            .body("RuleGroupResponse.RuleGroupArn", equalTo(arnA));
+    }
+
+    @Test
+    void updateRuleGroup_replacesTheStoredDefinitionAtomically() {
+        String name = "atomic-replace-rule-group";
+        String arn = "arn:aws:network-firewall:us-east-1:723679240095:stateful-rulegroup/" + name;
+        call("CreateRuleGroup", "{\"RuleGroupName\":\"" + name + "\",\"Type\":\"STATEFUL\","
+                + "\"Capacity\":100,\"RuleGroup\":{\"RulesSource\":{\"RulesString\":\"pass ip any any\"}}}")
+            .statusCode(200);
+
+        call("UpdateRuleGroup", "{\"RuleGroupArn\":\"" + arn + "\","
+                + "\"RuleGroupName\":\"" + name + "\",\"Type\":\"STATEFUL\","
+                + "\"Capacity\":200,\"RuleGroup\":{\"RulesSource\":{\"RulesString\":\"drop ip any any\"}}}")
+            .statusCode(200);
+
+        call("DescribeRuleGroup", "{\"RuleGroupName\":\"" + name + "\"}")
+            .statusCode(200)
+            .body("RuleGroup.RulesSource.RulesString", equalTo("drop ip any any"))
+            .body("RuleGroupResponse.Capacity", equalTo(200))
+            .body("RuleGroupResponse.RuleGroupArn", equalTo(arn));
+    }
+
+    @Test
+    void updateFirewallPolicy_whenReplacementIsRejected_keepsTheOriginal() {
+        String arnA = "arn:aws:network-firewall:us-east-1:723679240095:firewall-policy/atomic-policy-a";
+        call("CreateFirewallPolicy", "{\"FirewallPolicyName\":\"atomic-policy-a\","
+                + "\"FirewallPolicy\":{\"StatelessDefaultActions\":[\"aws:pass\"],"
+                + "\"StatelessFragmentDefaultActions\":[\"aws:pass\"]}}")
+            .statusCode(200);
+        call("CreateFirewallPolicy", "{\"FirewallPolicyName\":\"atomic-policy-b\","
+                + "\"FirewallPolicy\":{\"StatelessDefaultActions\":[\"aws:drop\"],"
+                + "\"StatelessFragmentDefaultActions\":[\"aws:drop\"]}}")
+            .statusCode(200);
+
+        call("UpdateFirewallPolicy", "{\"FirewallPolicyArn\":\"" + arnA + "\","
+                + "\"FirewallPolicyName\":\"atomic-policy-b\","
+                + "\"FirewallPolicy\":{\"StatelessDefaultActions\":[\"aws:drop\"],"
+                + "\"StatelessFragmentDefaultActions\":[\"aws:drop\"]}}")
+            .statusCode(400)
+            .body("__type", equalTo("InvalidRequestException"));
+
+        call("DescribeFirewallPolicy", "{\"FirewallPolicyName\":\"atomic-policy-a\"}")
+            .statusCode(200)
+            .body("FirewallPolicy.StatelessDefaultActions[0]", equalTo("aws:pass"))
+            .body("FirewallPolicyResponse.FirewallPolicyArn", equalTo(arnA));
+    }
+
+    @Test
+    void updateFirewallPolicy_byArnAlone_replacesTheStoredDefinition() {
+        String name = "arn-only-policy";
+        String arn = "arn:aws:network-firewall:us-east-1:723679240095:firewall-policy/" + name;
+        call("CreateFirewallPolicy", "{\"FirewallPolicyName\":\"" + name + "\","
+                + "\"FirewallPolicy\":{\"StatelessDefaultActions\":[\"aws:pass\"],"
+                + "\"StatelessFragmentDefaultActions\":[\"aws:pass\"]}}")
+            .statusCode(200);
+
+        call("UpdateFirewallPolicy", "{\"FirewallPolicyArn\":\"" + arn + "\","
+                + "\"FirewallPolicy\":{\"StatelessDefaultActions\":[\"aws:drop\"],"
+                + "\"StatelessFragmentDefaultActions\":[\"aws:drop\"]}}")
+            .statusCode(200);
+
+        call("DescribeFirewallPolicy", "{\"FirewallPolicyArn\":\"" + arn + "\"}")
+            .statusCode(200)
+            .body("FirewallPolicy.StatelessDefaultActions[0]", equalTo("aws:drop"))
+            .body("FirewallPolicyResponse.FirewallPolicyName", equalTo(name));
+    }
+
+    @Test
+    void updateRuleGroup_byArnAlone_carriesTheStoredNameAndType() {
+        String name = "arn-only-rule-group";
+        String arn = "arn:aws:network-firewall:us-east-1:723679240095:stateful-rulegroup/" + name;
+        call("CreateRuleGroup", "{\"RuleGroupName\":\"" + name + "\",\"Type\":\"STATEFUL\","
+                + "\"Capacity\":100,\"RuleGroup\":{\"RulesSource\":{\"RulesString\":\"pass ip any any\"}}}")
+            .statusCode(200);
+
+        call("UpdateRuleGroup", "{\"RuleGroupArn\":\"" + arn + "\","
+                + "\"Capacity\":200,\"RuleGroup\":{\"RulesSource\":{\"RulesString\":\"drop ip any any\"}}}")
+            .statusCode(200);
+
+        call("DescribeRuleGroup", "{\"RuleGroupArn\":\"" + arn + "\"}")
+            .statusCode(200)
+            .body("RuleGroup.RulesSource.RulesString", equalTo("drop ip any any"))
+            .body("RuleGroupResponse.Capacity", equalTo(200))
+            .body("RuleGroupResponse.RuleGroupName", equalTo(name))
+            .body("RuleGroupResponse.Type", equalTo("STATEFUL"))
+            .body("RuleGroupResponse.RuleGroupArn", equalTo(arn));
+    }
+
+    @Test
     void createRuleGroup_withStatefulDomainType_usesTheStatefulArnPrefix() {
         call("CreateRuleGroup", "{\"RuleGroupName\":\"domain-list-rule-group\",\"Type\":\"STATEFUL_DOMAIN\","
                 + "\"Capacity\":100,\"RuleGroup\":{\"RulesSource\":{\"RulesString\":\"pass ip any any\"}}}")

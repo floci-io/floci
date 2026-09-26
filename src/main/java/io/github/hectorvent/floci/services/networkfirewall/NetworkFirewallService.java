@@ -72,9 +72,13 @@ public class NetworkFirewallService {
         return describeNamed(ruleGroups, arn, name, "RuleGroup");
     }
 
-    public ObjectNode updateRuleGroup(JsonNode request, String region, String accountId) {
-        deleteIfPresent(ruleGroups, textOrNull(request, "RuleGroupArn"), textOrNull(request, "RuleGroupName"));
-        return createRuleGroup(request, region, accountId);
+    public ObjectNode updateRuleGroup(JsonNode request) {
+        String type = textOrNull(request, "Type");
+        if (type != null) {
+            requireEnum(type, RULE_GROUP_TYPES, "Type");
+        }
+        return replaceNamed(request, "RuleGroupName", "RuleGroup", "RuleGroupResponse",
+                "RuleGroupArn", "RuleGroupId", ruleGroups);
     }
 
     public ObjectNode deleteRuleGroup(String arn, String name) {
@@ -97,10 +101,9 @@ public class NetworkFirewallService {
         return describeNamed(firewallPolicies, arn, name, "FirewallPolicy");
     }
 
-    public ObjectNode updateFirewallPolicy(JsonNode request, String region, String accountId) {
-        deleteIfPresent(firewallPolicies, textOrNull(request, "FirewallPolicyArn"),
-                textOrNull(request, "FirewallPolicyName"));
-        return createFirewallPolicy(request, region, accountId);
+    public ObjectNode updateFirewallPolicy(JsonNode request) {
+        return replaceNamed(request, "FirewallPolicyName", "FirewallPolicy", "FirewallPolicyResponse",
+                "FirewallPolicyArn", "FirewallPolicyId", firewallPolicies);
     }
 
     public ObjectNode deleteFirewallPolicy(String arn, String name) {
@@ -115,7 +118,7 @@ public class NetworkFirewallService {
     public ObjectNode createFirewall(JsonNode request, String region, String accountId) {
         String name = requiredText(request, "FirewallName");
         String firewallArn = arn(region, accountId, "firewall", name);
-        ensureUnique(firewalls, firewallArn, name, "Firewall");
+        ensureUnique(firewalls, firewallArn, name, "Firewall", null);
 
         ObjectNode firewall = copyObject(request);
         firewall.remove("UpdateToken");
@@ -451,8 +454,55 @@ public class NetworkFirewallService {
     private ObjectNode createNamed(JsonNode request, String nameField, String requestBodyField,
                                    String responseField, String arnField, String idField,
                                    String resourceArn, StorageBackend<String, ObjectNode> store) {
+        ObjectNode stored = buildNamed(request, nameField, requestBodyField, responseField,
+                arnField, idField, resourceArn, store, null);
+        store.put(resourceArn, stored);
+        return stored.deepCopy();
+    }
+
+    /**
+     * Builds and validates the replacement for an existing resource, then swaps it in. Validation
+     * runs before the store is touched, so a rejected update leaves the old resource intact. The
+     * replacement keeps the existing ARN: AWS identifies the resource by ARN and does not rename it.
+     * The name (and a rule group's {@code Type}) may be omitted when the ARN identifies the
+     * resource; the values are then taken from the stored resource, which is how Terraform updates.
+     */
+    private ObjectNode replaceNamed(JsonNode request, String nameField, String requestBodyField,
+                                    String responseField, String arnField, String idField,
+                                    StorageBackend<String, ObjectNode> store) {
+        String arn = textOrNull(request, arnField);
+        String requestedName = textOrNull(request, nameField);
+        ObjectNode existing = require(store, arn, requestedName, requestBodyField, "ResourceArn", "ResourceName");
+        String existingArn = resourceArn(existing);
+        ObjectNode existingResponse = existing.path(responseField).isObject()
+                ? (ObjectNode) existing.path(responseField)
+                : objectMapper.createObjectNode();
+        String storedName = existingResponse.path(nameField).asText(null);
+        if (requestedName != null && storedName != null && !storedName.equals(requestedName)) {
+            throw new AwsException("InvalidRequestException",
+                    "The " + requestBodyField + " ARN does not match the requested name.", 400);
+        }
+
+        ObjectNode effectiveRequest = copyObject(request);
+        if (requestedName == null || requestedName.isBlank()) {
+            effectiveRequest.put(nameField, storedName);
+        }
+        if (!effectiveRequest.hasNonNull("Type") && existingResponse.hasNonNull("Type")) {
+            effectiveRequest.put("Type", existingResponse.path("Type").asText());
+        }
+
+        ObjectNode replacement = buildNamed(effectiveRequest, nameField, requestBodyField, responseField,
+                arnField, idField, existingArn, store, existingArn);
+        store.put(existingArn, replacement);
+        return replacement.deepCopy();
+    }
+
+    private ObjectNode buildNamed(JsonNode request, String nameField, String requestBodyField,
+                                  String responseField, String arnField, String idField,
+                                  String resourceArn, StorageBackend<String, ObjectNode> store,
+                                  String replacingArn) {
         String name = requiredText(request, nameField);
-        ensureUnique(store, resourceArn, name, requestBodyField);
+        ensureUnique(store, resourceArn, name, requestBodyField, replacingArn);
         ObjectNode responseInfo = copyObject(request);
         JsonNode body = responseInfo.remove(requestBodyField);
         responseInfo.remove("UpdateToken");
@@ -467,8 +517,7 @@ public class NetworkFirewallService {
         }
         stored.set(responseField, responseInfo);
         stored.put("UpdateToken", UUID.randomUUID().toString());
-        store.put(resourceArn, stored);
-        return stored.deepCopy();
+        return stored;
     }
 
     private ObjectNode describeNamed(StorageBackend<String, ObjectNode> store, String arn, String name,
@@ -550,8 +599,14 @@ public class NetworkFirewallService {
      * a name collision is InvalidRequestException, so that is what a typed SDK client can
      * actually deserialize here.
      */
-    private void ensureUnique(StorageBackend<String, ObjectNode> store, String arn, String name, String kind) {
-        if (store.get(arn).isPresent() || find(store, null, name, "ResourceArn", "ResourceName") != null) {
+    private void ensureUnique(StorageBackend<String, ObjectNode> store, String arn, String name,
+                              String kind, String replacingArn) {
+        boolean arnTaken = store.get(arn).isPresent()
+                && (replacingArn == null || !arn.equals(replacingArn));
+        ObjectNode byName = find(store, null, name, "ResourceArn", "ResourceName");
+        boolean nameTaken = byName != null
+                && (replacingArn == null || !replacingArn.equals(resourceArn(byName)));
+        if (arnTaken || nameTaken) {
             throw new AwsException("InvalidRequestException", kind + " already exists: " + name, 400);
         }
     }
@@ -597,13 +652,6 @@ public class NetworkFirewallService {
     private void deleteRequired(StorageBackend<String, ObjectNode> store, String arn, String name, String kind) {
         ObjectNode stored = require(store, arn, name, kind, "ResourceArn", "ResourceName");
         store.delete(resourceArn(stored));
-    }
-
-    private void deleteIfPresent(StorageBackend<String, ObjectNode> store, String arn, String name) {
-        ObjectNode stored = find(store, arn, name, "ResourceArn", "ResourceName");
-        if (stored != null) {
-            store.delete(resourceArn(stored));
-        }
     }
 
     private String resourceArn(JsonNode stored) {

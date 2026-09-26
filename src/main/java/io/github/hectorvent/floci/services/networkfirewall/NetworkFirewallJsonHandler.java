@@ -21,14 +21,14 @@ public class NetworkFirewallJsonHandler {
             case "CreateRuleGroup" -> ok(service.createRuleGroup(request, region, accountId));
             case "DescribeRuleGroup" -> ok(service.describeRuleGroup(
                     textOrNull(request, "RuleGroupArn"), textOrNull(request, "RuleGroupName")));
-            case "UpdateRuleGroup" -> ok(service.updateRuleGroup(request, region, accountId));
+            case "UpdateRuleGroup" -> ok(service.updateRuleGroup(request));
             case "DeleteRuleGroup" -> ok(service.deleteRuleGroup(
                     textOrNull(request, "RuleGroupArn"), textOrNull(request, "RuleGroupName")));
             case "ListRuleGroups" -> ok(service.listRuleGroups(textOrNull(request, "Type")));
             case "CreateFirewallPolicy" -> ok(service.createFirewallPolicy(request, region, accountId));
             case "DescribeFirewallPolicy" -> ok(service.describeFirewallPolicy(
                     textOrNull(request, "FirewallPolicyArn"), textOrNull(request, "FirewallPolicyName")));
-            case "UpdateFirewallPolicy" -> ok(service.updateFirewallPolicy(request, region, accountId));
+            case "UpdateFirewallPolicy" -> ok(service.updateFirewallPolicy(request));
             case "DeleteFirewallPolicy" -> ok(service.deleteFirewallPolicy(
                     textOrNull(request, "FirewallPolicyArn"), textOrNull(request, "FirewallPolicyName")));
             case "ListFirewallPolicies" -> ok(service.listFirewallPolicies());
