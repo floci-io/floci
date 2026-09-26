@@ -2585,6 +2585,38 @@ class CognitoServiceTest {
     }
 
     @Test
+    void initiateAuthWithUserAuthCapsRealSessionsWithinTheirPartition() {
+        MutableClock clock = new MutableClock();
+        CognitoService clockedService = serviceWithClock(clock);
+        UserPool pool = clockedService.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        UserPoolClient client = openClient(clockedService, pool.getId(), "c", false);
+        clockedService.adminCreateUser(pool.getId(), "alice", Map.of(), "Temp1234!");
+        clockedService.adminSetUserPassword(pool.getId(), "alice", "Perm1234!", true);
+
+        Map<String, Object> firstResult = clockedService.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice", "PREFERRED_CHALLENGE", "PASSWORD"));
+        String firstSession = (String) firstResult.get("Session");
+        for (int index = 1; index < CognitoAuthFlowHandler.MAX_USER_AUTH_SESSIONS_PER_PARTITION; index++) {
+            clockedService.initiateAuth(client.getClientId(), "USER_AUTH",
+                    Map.of("USERNAME", "alice", "PREFERRED_CHALLENGE", "PASSWORD"));
+        }
+
+        Map<String, Object> newestResult = clockedService.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice", "PREFERRED_CHALLENGE", "PASSWORD"));
+
+        AwsException firstException = assertThrows(AwsException.class, () -> clockedService.respondToAuthChallenge(
+                client.getClientId(), "PASSWORD", firstSession,
+                Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!")));
+        assertEquals("Session not found", firstException.getMessage());
+
+        String newestSession = (String) newestResult.get("Session");
+        Map<String, Object> authResult = clockedService.respondToAuthChallenge(
+                client.getClientId(), "PASSWORD", newestSession,
+                Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"));
+        assertNotNull(authResult.get("AuthenticationResult"));
+    }
+
+    @Test
     void initiateAuthWithUserAuthPreferredChallengePasswordThenRespondCompletesAuth() {
         UserPool pool = createPoolAndUser();
         UserPoolClient client = openClient(service, pool.getId(), "c", false);

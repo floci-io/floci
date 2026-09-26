@@ -736,10 +736,7 @@ final class CognitoAuthFlowHandler {
                                                             Map<String, String> challengeParameters,
                                                             boolean userExists) {
         String session = buildSessionToken(pool.getId(), username, client.getClientId());
-        Instant now = clock.instant();
-        UserAuthSession state = new UserAuthSession(pool.getId(), username, client.getClientId(), challengeName,
-                userExists, now.plus(AUTH_SESSION_VALIDITY));
-        storeUserAuthSession(session, state, now);
+        storeUserAuthSession(session, pool.getId(), username, client.getClientId(), challengeName, userExists);
         Map<String, Object> result = new HashMap<>();
         result.put("ChallengeName", challengeName);
         result.put("Session", session);
@@ -777,8 +774,12 @@ final class CognitoAuthFlowHandler {
         return state;
     }
 
-    private void storeUserAuthSession(String session, UserAuthSession state, Instant now) {
+    private void storeUserAuthSession(String session, String userPoolId, String username, String clientId,
+                                      String challengeName, boolean userExists) {
         synchronized (userAuthSessionLock) {
+            Instant now = clock.instant();
+            UserAuthSession state = new UserAuthSession(userPoolId, username, clientId, challengeName,
+                    userExists, now.plus(AUTH_SESSION_VALIDITY));
             purgeExpiredUserAuthSessions(userAuthSessions, now);
             purgeExpiredUserAuthSessions(simulatedUserAuthSessions, now);
             LinkedHashMap<String, UserAuthSession> sessionStore = state.userExists()
@@ -798,6 +799,8 @@ final class CognitoAuthFlowHandler {
         while (entries.hasNext()) {
             if (sessionExpired(entries.next().getValue().expiresAt(), now)) {
                 entries.remove();
+            } else {
+                break;
             }
         }
     }
