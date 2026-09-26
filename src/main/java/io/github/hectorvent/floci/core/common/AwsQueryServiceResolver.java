@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.core.common;
 
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import jakarta.ws.rs.core.MultivaluedMap;
 
 /**
  * Resolves the service that {@link AwsQueryController} will dispatch a Query-protocol action to.
@@ -26,5 +27,15 @@ public class AwsQueryServiceResolver {
             return descriptor.externalKey();
         }
         return AwsQueryController.inferServiceFromAction(action);
+    }
+
+    /** Returns the operation the Query controller will dispatch from a form request. */
+    public static String action(MultivaluedMap<String, String> formParams) {
+        return action(formParams.getFirst("Action"), formParams.getFirst("Operation"));
+    }
+
+    /** Applies the Query controller's legacy {@code Operation} fallback. */
+    public static String action(String action, String operation) {
+        return action != null ? action : operation;
     }
 }

@@ -39,6 +39,23 @@ class IamServingServiceEnforcementIntegrationTest {
     }
 
     @Test
+    void operationOnlyQueryRequestCannotBypassIamEnforcement() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String caller = "operation-scope-" + suffix;
+        String attempted = "created-through-operation-" + suffix;
+        String accessKeyId = createUserWithPolicy(caller, "LambdaOnly", """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"lambda:*","Resource":"*"}
+                ]}""");
+
+        iamOperationCall(accessKeyId, "lambda", "CreateUser", Map.of("UserName", attempted))
+                .statusCode(403)
+                .body(containsString("iam:CreateUser"));
+
+        adminIam("GetUser", Map.of("UserName", attempted)).statusCode(404);
+    }
+
+    @Test
     void restRequestCannotBypassApiGatewayPolicyWithIamScope() {
         String suffix = UUID.randomUUID().toString().substring(0, 8);
         String caller = "rest-scope-" + suffix;
@@ -84,10 +101,20 @@ class IamServingServiceEnforcementIntegrationTest {
 
     private static ValidatableResponse iamCall(String accessKeyId, String scope, String action,
                                                Map<String, String> params) {
+        return iamCall(accessKeyId, scope, "Action", action, params);
+    }
+
+    private static ValidatableResponse iamOperationCall(String accessKeyId, String scope, String operation,
+                                                        Map<String, String> params) {
+        return iamCall(accessKeyId, scope, "Operation", operation, params);
+    }
+
+    private static ValidatableResponse iamCall(String accessKeyId, String scope, String operationName,
+                                               String operation, Map<String, String> params) {
         RequestSpecification spec = given()
                 .header("Authorization", authorization(accessKeyId, scope))
                 .contentType("application/x-www-form-urlencoded")
-                .formParam("Action", action)
+                .formParam(operationName, operation)
                 .formParam("Version", "2010-05-08");
         params.forEach(spec::formParam);
         return spec.when().post("/").then();

@@ -268,10 +268,7 @@ public class AwsQueryController {
             @Context HttpHeaders httpHeaders,
             MultivaluedMap<String, String> formParams) {
 
-        String action = formParams.getFirst("Action");
-        if (action == null) {
-            action = formParams.getFirst("Operation");
-        }
+        String action = AwsQueryServiceResolver.action(formParams);
         if (action == null) {
             return xmlErrorResponse("MissingAction",
                     "The request must contain the parameter Action", 400);

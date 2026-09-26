@@ -1,19 +1,20 @@
 package io.github.hectorvent.floci.services.iam;
 
-import java.util.List;
-import java.util.regex.Pattern;
-
-import org.jboss.logging.Logger;
-
+import io.github.hectorvent.floci.core.common.AwsQueryServiceResolver;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MultivaluedMap;
+import org.jboss.logging.Logger;
+
+import java.util.List;
+import java.util.regex.Pattern;
 
 /**
  * Maps (credentialScope, httpMethod, requestPath) → IAM action string.
  *
  * For Query-protocol services (SQS, SNS, IAM, STS, ...) the Action form
- * parameter is mapped directly to {@code <service>:<Action>}.
+ * parameter, or the controller's Operation fallback, is mapped directly to
+ * {@code <service>:<Action>}.
  *
  * For REST-JSON services the first matching rule wins (specific before wildcard).
  */
@@ -104,7 +105,7 @@ public class IamActionRegistry {
      * Returns {@code null} when the action is unknown (caller treats this as ALLOW).
      */
     public String resolve(String credentialScope, ContainerRequestContext ctx) {
-        // Query-protocol: Action param → service:Action.
+        // Query-protocol: Action or Operation param → service:Action.
         // AWS SDKs send Query-protocol calls (IAM, STS, EC2, SQS, SNS, ...) as
         // POST with Action=... in the application/x-www-form-urlencoded body,
         // not the URL query string — so we look in both places.
@@ -151,13 +152,16 @@ public class IamActionRegistry {
 
     /**
      * Returns the Query-protocol action from the URL or form body while preserving the entity
-     * stream for the controller. Exposed so IAM enforcement can ask the shared Query dispatcher
-     * which service will actually handle the request.
+     * stream for the controller. Form bodies use the same Action-first, Operation-second rule as
+     * the controller. Exposed so IAM enforcement can ask the shared Query dispatcher which service
+     * will actually handle the request.
      */
     public String queryAction(ContainerRequestContext ctx) {
         String queryAction = ctx.getUriInfo().getQueryParameters().getFirst("Action");
         if (queryAction == null || queryAction.isBlank()) {
-            queryAction = readFormAction(ctx);
+            queryAction = AwsQueryServiceResolver.action(
+                    RequestBodyReader.formField(ctx, "Action"),
+                    RequestBodyReader.formField(ctx, "Operation"));
         }
         return queryAction;
     }
@@ -270,17 +274,4 @@ public class IamActionRegistry {
         return null;
     }
 
-    /**
-     * Reads {@code Action} from a {@code application/x-www-form-urlencoded}
-     * request body and restores the entity stream so downstream consumers
-     * (e.g. {@code AwsQueryController}'s {@code MultivaluedMap} injection)
-     * can still parse the form themselves. Returns {@code null} if the
-     * request is not form-encoded or the body has no {@code Action} field.
-     */
-    private static String readFormAction(ContainerRequestContext ctx) {
-        // Delegates to RequestBodyReader so this and ResourceArnBuilder's per-service resource
-        // lookups share one buffered copy of the body per request instead of each independently
-        // reading (and needing to reset) the live entity stream.
-        return RequestBodyReader.formField(ctx, "Action");
-    }
 }

@@ -41,6 +41,26 @@ class IamActionRegistryTest {
     }
 
     @Test
+    void resolvesOperationFromFormEncodedBody() {
+        ContainerRequestContext ctx = mockCtx(
+                "POST", "/",
+                new MultivaluedHashMap<>(),
+                MediaType.APPLICATION_FORM_URLENCODED_TYPE,
+                "Operation=CreateUser&Version=2010-05-08&UserName=alice");
+        assertEquals("iam:CreateUser", registry.resolve("iam", ctx));
+    }
+
+    @Test
+    void actionTakesPrecedenceOverOperation() {
+        ContainerRequestContext ctx = mockCtx(
+                "POST", "/",
+                new MultivaluedHashMap<>(),
+                MediaType.APPLICATION_FORM_URLENCODED_TYPE,
+                "Action=ListUsers&Operation=CreateUser");
+        assertEquals("iam:ListUsers", registry.resolve("iam", ctx));
+    }
+
+    @Test
     void resolvesUrlEncodedActionValueFromFormBody() {
         ContainerRequestContext ctx = mockCtx(
                 "POST", "/",

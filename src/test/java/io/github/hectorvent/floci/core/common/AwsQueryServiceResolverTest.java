@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.core.common;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.Optional;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -22,7 +23,7 @@ class AwsQueryServiceResolverTest {
 
     @Test
     void unsupportedSignedScopeFallsBackToActionDispatch() {
-        when(catalog.byCredentialScope("lambda")).thenReturn(java.util.Optional.of(
+        when(catalog.byCredentialScope("lambda")).thenReturn(Optional.of(
                 descriptor("lambda", ServiceProtocol.REST_JSON)));
 
         assertEquals("iam", resolver.resolve(authorization("lambda"), "CreateUser"));
@@ -30,7 +31,7 @@ class AwsQueryServiceResolverTest {
 
     @Test
     void queryCapableSignedScopeKeepsControllerDispatch() {
-        when(catalog.byCredentialScope("sqs")).thenReturn(java.util.Optional.of(
+        when(catalog.byCredentialScope("sqs")).thenReturn(Optional.of(
                 descriptor("sqs", ServiceProtocol.QUERY)));
 
         assertEquals("sqs", resolver.resolve(authorization("sqs"), "CreateUser"));
@@ -38,7 +39,7 @@ class AwsQueryServiceResolverTest {
 
     @Test
     void matchingQueryScopeResolvesNormally() {
-        when(catalog.byCredentialScope("iam")).thenReturn(java.util.Optional.of(
+        when(catalog.byCredentialScope("iam")).thenReturn(Optional.of(
                 descriptor("iam", ServiceProtocol.QUERY)));
 
         assertEquals("iam", resolver.resolve(authorization("iam"), "CreateUser"));

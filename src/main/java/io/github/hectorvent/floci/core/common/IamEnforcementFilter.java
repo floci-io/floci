@@ -406,12 +406,10 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
      * would let a header attached to, say, an S3 request move the authorization to another
      * service while S3 still served it.
      *
-     * <p>{@link WireProtocol#AWS_QUERY} is out of scope for this method, not solved by it. A Query
-     * claim carries the credential-scope service, which restates the caller whenever that service
-     * serves Query at all; when it does not, {@code AwsQueryController} falls through to inferring
-     * the service from the action name and can dispatch somewhere else entirely. Closing that needs
-     * the controller's inference shared rather than duplicated here, and is tracked in
-     * <a href="https://github.com/floci-io/floci/issues/4296">#4296</a>.
+     * <p>{@link WireProtocol#AWS_QUERY} is resolved before this method by
+     * {@link #resolveAuthorization(String, String, ContainerRequestContext)}, which shares
+     * {@link AwsQueryServiceResolver} with the controller so IAM enforcement follows the service
+     * that will handle the request.
      */
     private String servingCredentialScope(String claimedScope, ContainerRequestContext ctx) {
         if (ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY) instanceof ProtocolClaim claim
