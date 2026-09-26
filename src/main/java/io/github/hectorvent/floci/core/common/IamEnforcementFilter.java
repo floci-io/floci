@@ -399,10 +399,15 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
      * for the duration of this call so that {@link IamService#resolveCallerContext} and
      * {@link IamService#resolveCallerArn}, which both key their per-account lookups off the
      * ambient account, resolve the credential's actual owner instead of the default account.
+     *
+     * <p>The caller supplies no resource-policy decision here, so this overload resolves the
+     * applicable resource policies itself through {@link ResourcePolicyProvider}, exactly as
+     * {@link #filter} does for the request's primary resource. Skipping that resolution would
+     * make the resource policy invisible on this path and leave a same-account principal that
+     * only a resource policy names without any grant at all.
      */
     public void authorizeAdditionalResource(String authorizationHeader, String action, String resource) {
-        authorizeAdditionalResource(
-                authorizationHeader, action, resource, ResourcePolicyDecision.NEUTRAL, null);
+        authorizeAdditionalResource(authorizationHeader, action, resource, null, null);
     }
 
     /**
@@ -422,6 +427,19 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     /**
      * Authorizes a secondary resource whose owning account is known. Resource-policy grants
      * crossing an account boundary require a matching identity-policy grant as well.
+     *
+     * <p>A {@code null} {@code resourcePolicyDecision} means the caller has no decision of its
+     * own and the registered {@link ResourcePolicyProvider}s are consulted here instead, under
+     * the credential's own account context.
+     *
+     * <p>The condition context built here never includes per-action, header-derived keys (such as
+     * {@code s3:RequestObjectTag/*} from an {@code x-amz-tagging} header) the way {@link #filter}
+     * builds for the request's primary resource. A presigned POST's outer HTTP headers are not
+     * covered by its signed policy document and do not correspond to what {@code S3Controller}
+     * actually applies to the uploaded object, so trusting one here would let an attacker satisfy a
+     * tag-scoped grant condition with a header the object is never actually tagged with. Only the
+     * caller-identity {@code aws:PrincipalArn} and the server-derived global keys (via {@link
+     * IamConditionContextResolver#withGlobalContext}) are safe to add.
      */
     public void authorizeAdditionalResource(
             String authorizationHeader,
@@ -439,7 +457,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         if (akid == null || "test".equals(akid)) {
             return;
         }
-        if (extractCredentialScope(authorizationHeader) == null) {
+        String credentialScope = extractCredentialScope(authorizationHeader);
+        if (credentialScope == null) {
             return;
         }
 
@@ -476,13 +495,34 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 conditionContext.put("aws:PrincipalArn", List.of(principalArn.get()));
             }
 
-            ResourceAccountRelationship accountRelationship = resourceOwnerAccountId == null
-                    || accountId.equals(resourceOwnerAccountId)
+            Map<String, List<String>> effectiveContext = conditionContext;
+            ResourcePolicyDecision effectiveDecision = resourcePolicyDecision;
+            String effectiveOwnerAccountId = resourceOwnerAccountId;
+            if (effectiveDecision == null) {
+                List<ResourcePolicyProvider.ResourcePolicy> resourcePolicies = resolveResourcePolicies(
+                        credentialScope, resource);
+                effectiveOwnerAccountId = resourcePolicies.isEmpty()
+                        ? null : resourcePolicies.getFirst().ownerAccountId();
+                List<String> policyDocs = resourcePolicies.stream()
+                        .map(ResourcePolicyProvider.ResourcePolicy::policyDocument)
+                        .filter(doc -> doc != null && !doc.isBlank())
+                        .toList();
+                String region = requestContext.getRegion() == null
+                        ? config.defaultRegion() : requestContext.getRegion();
+                effectiveContext = IamConditionContextResolver.withGlobalContext(
+                        conditionContext, resource, region, accountId, effectiveOwnerAccountId);
+                effectiveDecision = evaluator.evaluateResourcePolicy(
+                        policyDocs.isEmpty() ? null : policyDocs,
+                        caller.principalArn(), action, resource, effectiveContext);
+            }
+
+            ResourceAccountRelationship accountRelationship = effectiveOwnerAccountId == null
+                    || accountId.equals(effectiveOwnerAccountId)
                     ? ResourceAccountRelationship.SAME_ACCOUNT
                     : ResourceAccountRelationship.CROSS_ACCOUNT;
             Decision decision = evaluator.evaluateResolvedResourcePolicy(
-                    caller, resourcePolicyDecision, accountRelationship,
-                    action, resource, conditionContext);
+                    caller, effectiveDecision, accountRelationship,
+                    action, resource, effectiveContext);
             if (decision != Decision.DENY) {
                 return;
             }
