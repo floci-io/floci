@@ -176,6 +176,28 @@ class GuardedMessageQueueTest {
     }
 
     @Test
+    void addMessageRollsBackTheInMemoryAddWhenPersistFails() {
+        AtomicBoolean storeDown = new AtomicBoolean();
+        InMemoryStorage<String, List<Message>> store = new InMemoryStorage<String, List<Message>>() {
+            @Override
+            public void put(String key, List<Message> value) {
+                if (storeDown.get()) {
+                    throw new IllegalStateException("store unavailable");
+                }
+                super.put(key, value);
+            }
+        };
+        GuardedMessageQueue target = new GuardedMessageQueue(store, "us-east-1::/000000000000/target");
+        target.addMessage(new Message("already-there"));
+        storeDown.set(true);
+
+        assertThrows(IllegalStateException.class, () -> target.addMessage(new Message("incoming")));
+
+        assertEquals(List.of("already-there"), target.peekAll().stream().map(Message::getBody).toList());
+        assertEquals(1, target.messageCounts().visible());
+    }
+
+    @Test
     void messageCountsReturnsVisibleInFlightAndDelayed() {
         queue.addMessage(new Message("msg1"));
         queue.addMessage(new Message("msg2"));

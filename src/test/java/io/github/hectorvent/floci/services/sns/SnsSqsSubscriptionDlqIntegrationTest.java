@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.sns;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
@@ -55,7 +56,7 @@ class SnsSqsSubscriptionDlqIntegrationTest {
         assertNotNull(publishMessageId);
         List<Message> deadLetterMessages = sqsService.receiveMessage(dlqUrl, 1, 30, 0, REGION);
         assertEquals(1, deadLetterMessages.size());
-        var envelope = new ObjectMapper().readTree(deadLetterMessages.getFirst().getBody());
+        JsonNode envelope = new ObjectMapper().readTree(deadLetterMessages.getFirst().getBody());
         assertEquals("Notification", envelope.path("Type").asText());
         assertEquals(publishMessageId, envelope.path("MessageId").asText());
         assertEquals(topic.getTopicArn(), envelope.path("TopicArn").asText());
@@ -63,5 +64,30 @@ class SnsSqsSubscriptionDlqIntegrationTest {
         assertEquals("synthetic-subject", envelope.path("Subject").asText());
         assertTrue(sqsService.receiveMessage(dlqUrl, 1, 30, 0, REGION).isEmpty(),
                 "The notification should appear only once in the subscription DLQ");
+    }
+
+    @Test
+    void publish_routesStandardTopicNotificationToFifoSubscriptionDlq() throws Exception {
+        String dlqName = "sns-subscription-dlq.fifo";
+        String dlqArn = "arn:aws:sqs:" + REGION + ":" + ACCOUNT + ":" + dlqName;
+        String dlqUrl = BASE_URL + "/" + ACCOUNT + "/" + dlqName;
+        sqsService.createQueue(dlqName, Map.of("FifoQueue", "true"), REGION);
+
+        Topic topic = snsService.createTopic("sns-standard-topic", null, null, REGION);
+        Subscription subscription = snsService.subscribe(topic.getTopicArn(), "sqs",
+                "arn:aws:sqs:" + REGION + ":" + ACCOUNT + ":unavailable-fifo-source.fifo", REGION, Map.of());
+        snsService.setSubscriptionAttribute(subscription.getSubscriptionArn(), "RedrivePolicy",
+                "{\"deadLetterTargetArn\":\"" + dlqArn + "\"}", REGION);
+
+        String publishMessageId = snsService.publish(topic.getTopicArn(), null,
+                "synthetic-payload", null, REGION);
+
+        List<Message> deadLetterMessages = sqsService.receiveMessage(dlqUrl, 1, 30, 0, REGION);
+        assertEquals(1, deadLetterMessages.size());
+        Message deadLetter = deadLetterMessages.getFirst();
+        JsonNode envelope = new ObjectMapper().readTree(deadLetter.getBody());
+        assertEquals(publishMessageId, deadLetter.getMessageGroupId());
+        assertEquals(publishMessageId, deadLetter.getMessageDeduplicationId());
+        assertEquals(publishMessageId, envelope.path("MessageId").asText());
     }
 }

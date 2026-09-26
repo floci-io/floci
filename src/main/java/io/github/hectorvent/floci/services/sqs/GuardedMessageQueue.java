@@ -54,8 +54,14 @@ class GuardedMessageQueue {
 
     void addMessage(Message message) {
         try (Guard _ = hold()) {
+            int mark = messages.size();
             messages.add(message);
-            persist();
+            try {
+                persist();
+            } catch (RuntimeException e) {
+                messages.remove(mark);
+                throw e;
+            }
         }
     }
 

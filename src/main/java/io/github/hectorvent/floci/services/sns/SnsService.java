@@ -1733,7 +1733,7 @@ public class SnsService implements Resettable, ResourceProvider {
                     Map<String, MessageAttributeValue> sqsAttributes = rawDelivery
                             ? toSqsMessageAttributes(messageAttributes)
                             : Collections.emptyMap();
-                    deliverToSqsSubscription(sub, queueUrl, body, messageGroupId,
+                    deliverToSqsSubscription(sub, queueUrl, body, messageId, messageGroupId,
                             messageDeduplicationId, sqsAttributes, region, rawDelivery);
                 }
                 case "lambda" -> {
@@ -1849,7 +1849,7 @@ public class SnsService implements Resettable, ResourceProvider {
         }
     }
 
-    private void deliverToSqsSubscription(Subscription sub, String queueUrl, String body,
+    private void deliverToSqsSubscription(Subscription sub, String queueUrl, String body, String messageId,
                                           String messageGroupId, String messageDeduplicationId,
                                           Map<String, MessageAttributeValue> sqsAttributes,
                                           String region, boolean rawDelivery) {
@@ -1873,8 +1873,20 @@ public class SnsService implements Resettable, ResourceProvider {
                 if (deadLetterRegion == null) {
                     deadLetterRegion = region;
                 }
+                boolean fifoDeadLetterQueue = AwsArnUtils.parse(deadLetterTargetArn)
+                        .resource().endsWith(".fifo");
+                String deadLetterGroupId = messageGroupId;
+                String deadLetterDeduplicationId = messageDeduplicationId;
+                if (fifoDeadLetterQueue) {
+                    if (deadLetterGroupId == null || deadLetterGroupId.isBlank()) {
+                        deadLetterGroupId = messageId;
+                    }
+                    if (deadLetterDeduplicationId == null || deadLetterDeduplicationId.isBlank()) {
+                        deadLetterDeduplicationId = messageId;
+                    }
+                }
                 sqsService.sendMessage(sqsArnToUrl(deadLetterTargetArn), body, null,
-                        messageGroupId, messageDeduplicationId, sqsAttributes, deadLetterRegion);
+                        deadLetterGroupId, deadLetterDeduplicationId, sqsAttributes, deadLetterRegion);
                 LOG.warnv("SNS delivery to {0} failed after {1} attempts; sent notification to subscription DLQ {2}",
                         sub.getEndpoint(), SQS_SUBSCRIPTION_DELIVERY_ATTEMPTS, deadLetterTargetArn);
                 return;
