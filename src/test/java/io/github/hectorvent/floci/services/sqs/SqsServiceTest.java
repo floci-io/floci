@@ -568,7 +568,8 @@ class SqsServiceTest {
     void fifoDeduplicationStillSuppressesMessageAfterOriginalIsDeleted() {
         String region = "eu-west-1";
         Queue queue = sqsService.createQueue("deleted-original.fifo", null, region);
-        sqsService.sendMessage(queue.getQueueUrl(), "original", 0, "group-a", "dedup-a", region);
+        Message original = sqsService.sendMessage(
+                queue.getQueueUrl(), "original", 0, "group-a", "dedup-a", region);
 
         List<Message> received = sqsService.receiveMessage(queue.getQueueUrl(), 1, 30, 0, region);
         assertEquals(1, received.size());
@@ -578,10 +579,38 @@ class SqsServiceTest {
                 queue.getQueueUrl(), "duplicate", 0, "group-a", "dedup-a", region);
 
         assertNotNull(duplicateResponse.getMessageId());
+        assertEquals(original.getMessageId(), duplicateResponse.getMessageId());
+        assertEquals(original.getSequenceNumber(), duplicateResponse.getSequenceNumber());
         assertEquals("dedup-a", duplicateResponse.getMessageDeduplicationId());
         assertTrue(sqsService.peekMessages(queue.getQueueUrl(), region).isEmpty(),
                 "A duplicate must remain suppressed after its original message is deleted");
         assertTrue(sqsService.receiveMessage(queue.getQueueUrl(), 1, 30, 0, region).isEmpty());
+    }
+
+    @Test
+    void fifoDeduplicationIdentitySurvivesRestartAfterOriginalIsDeleted() {
+        String region = "us-east-1";
+        InMemoryStorage<String, Queue> queueStore = new InMemoryStorage<>();
+        InMemoryStorage<String, List<Message>> messageStore = new InMemoryStorage<>();
+        InMemoryStorage<String, Map<String, Long>> dedupStore = new InMemoryStorage<>();
+        InMemoryStorage<String, Map<String, Map<String, String>>> identityStore = new InMemoryStorage<>();
+        RegionResolver regionResolver = new RegionResolver(region, "000000000000");
+        SqsService initialService = new SqsService(queueStore, messageStore, dedupStore, identityStore,
+                30, 1048576, BASE_URL, regionResolver, false, null, clock);
+        Queue queue = initialService.createQueue("deleted-before-restart.fifo", null, region);
+        Message original = initialService.sendMessage(
+                queue.getQueueUrl(), "original", 0, "group-a", "dedup-a", region);
+        List<Message> received = initialService.receiveMessage(queue.getQueueUrl(), 1, 30, 0, region);
+        initialService.deleteMessage(queue.getQueueUrl(), received.getFirst().getReceiptHandle(), region);
+
+        SqsService restartedService = new SqsService(queueStore, messageStore, dedupStore, identityStore,
+                30, 1048576, BASE_URL, regionResolver, false, null, clock);
+        Message duplicateResponse = restartedService.sendMessage(
+                queue.getQueueUrl(), "duplicate", 0, "group-a", "dedup-a", region);
+
+        assertEquals(original.getMessageId(), duplicateResponse.getMessageId());
+        assertEquals(original.getSequenceNumber(), duplicateResponse.getSequenceNumber());
+        assertTrue(restartedService.peekMessages(queue.getQueueUrl(), region).isEmpty());
     }
 
     @Test

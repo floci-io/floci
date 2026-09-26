@@ -68,10 +68,13 @@ public class SqsService implements Resettable, ResourceProvider {
     private final StorageBackend<String, Queue> queueStore;
     private final StorageBackend<String, List<Message>> messageStore;
     private final StorageBackend<String, Map<String, Long>> dedupStore;
+    private final StorageBackend<String, Map<String, Map<String, String>>> dedupIdentityStore;
     private final ConcurrentHashMap<String, GuardedMessageQueue> messagesByQueue = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Object> queueLocks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, RedrivePolicy> redrivePolicyCache = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, Instant>> deduplicationCache = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, ConcurrentHashMap<String, DeduplicationIdentity>> deduplicationIdentityCache =
+            new ConcurrentHashMap<>();
     /** Move tasks keyed by opaque task handle. */
     private final MoveTaskStore moveTasksByHandle;
     /** Per-task cancellation signal: the move worker waits on it between moves, so a cancel wakes
@@ -90,6 +93,9 @@ public class SqsService implements Resettable, ResourceProvider {
     private static final HexFormat HEX = HexFormat.of();
 
     private record RedrivePolicy(int maxReceiveCount, String deadLetterTargetArn) {
+    }
+
+    private record DeduplicationIdentity(String messageId, long sequenceNumber) {
     }
 
     public record MoveTask(String taskHandle, String sourceArn, String destinationArn,
@@ -278,6 +284,9 @@ public class SqsService implements Resettable, ResourceProvider {
                 storageFactory.create("sqs", "sqs-dedup.json",
                         new TypeReference<Map<String, Map<String, Long>>>() {
                         }),
+                storageFactory.create("sqs", "sqs-dedup-identities.json",
+                        new TypeReference<Map<String, Map<String, Map<String, String>>>>() {
+                        }),
                 config.services().sqs().defaultVisibilityTimeout(),
                 config.services().sqs().maxMessageSize(),
                 config.effectiveBaseUrl(),
@@ -325,9 +334,20 @@ public class SqsService implements Resettable, ResourceProvider {
                int defaultVisibilityTimeout, int maxMessageSize, String baseUrl,
                RegionResolver regionResolver, boolean clearFifoDeduplicationCacheOnPurge,
                SnsService snsService, Clock clock) {
+        this(queueStore, messageStore, dedupStore, null, defaultVisibilityTimeout, maxMessageSize,
+                baseUrl, regionResolver, clearFifoDeduplicationCacheOnPurge, snsService, clock);
+    }
+
+    SqsService(StorageBackend<String, Queue> queueStore, StorageBackend<String, List<Message>> messageStore,
+               StorageBackend<String, Map<String, Long>> dedupStore,
+               StorageBackend<String, Map<String, Map<String, String>>> dedupIdentityStore,
+               int defaultVisibilityTimeout, int maxMessageSize, String baseUrl,
+               RegionResolver regionResolver, boolean clearFifoDeduplicationCacheOnPurge,
+               SnsService snsService, Clock clock) {
         this.queueStore = queueStore;
         this.messageStore = messageStore;
         this.dedupStore = dedupStore;
+        this.dedupIdentityStore = dedupIdentityStore;
         this.defaultVisibilityTimeout = defaultVisibilityTimeout;
         this.maxMessageSize = maxMessageSize;
         this.maxAllowedMessageSize = Math.max(AWS_MAXIMUM_MESSAGE_SIZE, maxMessageSize);
@@ -339,6 +359,7 @@ public class SqsService implements Resettable, ResourceProvider {
         this.moveTasksByHandle = new MoveTaskStore(clock);
         loadPersistedMessages();
         loadPersistedDedup();
+        loadPersistedDedupIdentities();
     }
 
     @PreDestroy
@@ -352,6 +373,7 @@ public class SqsService implements Resettable, ResourceProvider {
         queueLocks.clear();
         redrivePolicyCache.clear();
         deduplicationCache.clear();
+        deduplicationIdentityCache.clear();
         moveTaskCancellation.values().forEach(MoveTaskCancellation::request);
         moveTaskCancellation.clear();
         moveTasksByHandle.clear();
@@ -399,6 +421,44 @@ public class SqsService implements Resettable, ResourceProvider {
         }
     }
 
+    private void loadPersistedDedupIdentities() {
+        if (dedupIdentityStore == null) {
+            return;
+        }
+        if (dedupIdentityStore instanceof AccountAwareStorageBackend<Map<String, Map<String, String>>> aware) {
+            aware.scanAllAccountsAsMap().forEach(this::loadDedupIdentities);
+        } else {
+            for (String key : dedupIdentityStore.keys()) {
+                dedupIdentityStore.get(key).ifPresent(identities -> loadDedupIdentities(key, identities));
+            }
+        }
+    }
+
+    private void loadDedupIdentities(String key, Map<String, Map<String, String>> entries) {
+        ConcurrentHashMap<String, Instant> activeDedupEntries = deduplicationCache.get(key);
+        if (activeDedupEntries == null) {
+            return;
+        }
+        ConcurrentHashMap<String, DeduplicationIdentity> activeIdentities = new ConcurrentHashMap<>();
+        entries.forEach((dedupKey, identityFields) -> {
+            if (!activeDedupEntries.containsKey(dedupKey)) {
+                return;
+            }
+            try {
+                String messageId = identityFields.get("messageId");
+                long sequenceNumber = Long.parseLong(identityFields.get("sequenceNumber"));
+                if (messageId != null && !messageId.isBlank()) {
+                    activeIdentities.put(dedupKey, new DeduplicationIdentity(messageId, sequenceNumber));
+                }
+            } catch (RuntimeException e) {
+                LOG.warnv("Ignoring invalid FIFO deduplication identity for queue {0}, key {1}", key, dedupKey);
+            }
+        });
+        if (!activeIdentities.isEmpty()) {
+            deduplicationIdentityCache.put(key, activeIdentities);
+        }
+    }
+
     private GuardedMessageQueue getOrCreateQueue(String storageKey) {
         return messagesByQueue.computeIfAbsent(storageKey,
                 k -> new GuardedMessageQueue(messageStore, k));
@@ -416,6 +476,22 @@ public class SqsService implements Resettable, ResourceProvider {
         } else {
             dedupStore.delete(storageKey);
         }
+    }
+
+    private void persistDedupIdentities(String storageKey) {
+        if (dedupIdentityStore == null) {
+            return;
+        }
+        ConcurrentHashMap<String, DeduplicationIdentity> identityMap = deduplicationIdentityCache.get(storageKey);
+        if (identityMap == null || identityMap.isEmpty()) {
+            dedupIdentityStore.delete(storageKey);
+            return;
+        }
+        Map<String, Map<String, String>> serializable = new HashMap<>();
+        identityMap.forEach((dedupKey, identity) -> serializable.put(dedupKey, Map.of(
+                "messageId", identity.messageId(),
+                "sequenceNumber", Long.toString(identity.sequenceNumber()))));
+        dedupIdentityStore.put(storageKey, serializable);
     }
 
     @Override
@@ -532,11 +608,15 @@ public class SqsService implements Resettable, ResourceProvider {
             removed.close();
         }
         deduplicationCache.remove(storageKey);
+        deduplicationIdentityCache.remove(storageKey);
         if (messageStore != null) {
             messageStore.delete(storageKey);
         }
         if (dedupStore != null) {
             dedupStore.delete(storageKey);
+        }
+        if (dedupIdentityStore != null) {
+            dedupIdentityStore.delete(storageKey);
         }
         // Wake parked ReceiveMessage long polls so they observe the deletion
         // and finish, instead of staying registered against this queue URL.
@@ -714,6 +794,11 @@ public class SqsService implements Resettable, ResourceProvider {
                 Message existing = getOrCreateQueue(storageKey).findByDeduplicationId(
                         dedupId, groupScoped ? messageGroupId : null);
                 if (existing != null) {
+                    DeduplicationIdentity identity = new DeduplicationIdentity(
+                            existing.getMessageId(), existing.getSequenceNumber());
+                    deduplicationIdentityCache.computeIfAbsent(storageKey, k -> new ConcurrentHashMap<>())
+                            .putIfAbsent(dedupCacheKey, identity);
+                    persistDedupIdentities(storageKey);
                     Message response = new Message(body);
                     response.setMessageId(existing.getMessageId());
                     response.setMessageGroupId(messageGroupId);
@@ -727,11 +812,19 @@ public class SqsService implements Resettable, ResourceProvider {
                 }
                 // The original message may have been received and deleted, but SQS
                 // continues tracking the deduplication ID for the full interval.
-                // Return a successful SendMessage response without re-enqueueing it.
+                // Return the original identity without re-enqueueing a message.
                 Message response = new Message(body);
+                ConcurrentHashMap<String, DeduplicationIdentity> identities =
+                        deduplicationIdentityCache.get(storageKey);
+                DeduplicationIdentity identity = identities == null ? null : identities.get(dedupCacheKey);
+                if (identity != null) {
+                    response.setMessageId(identity.messageId());
+                    response.setSequenceNumber(identity.sequenceNumber());
+                } else {
+                    response.setSequenceNumber(sequenceCounter.incrementAndGet());
+                }
                 response.setMessageGroupId(messageGroupId);
                 response.setMessageDeduplicationId(dedupId);
-                response.setSequenceNumber(sequenceCounter.incrementAndGet());
                 if (messageAttributes != null && !messageAttributes.isEmpty()) {
                     response.getMessageAttributes().putAll(messageAttributes);
                     response.updateMd5OfMessageAttributes();
@@ -753,6 +846,10 @@ public class SqsService implements Resettable, ResourceProvider {
             }
 
             getOrCreateQueue(storageKey).addMessage(message);
+            deduplicationIdentityCache.computeIfAbsent(storageKey, k -> new ConcurrentHashMap<>())
+                    .putIfAbsent(dedupCacheKey,
+                            new DeduplicationIdentity(message.getMessageId(), message.getSequenceNumber()));
+            persistDedupIdentities(storageKey);
             notifyReceivers(storageKey);
             LOG.debugv("Sent FIFO message {0} to queue {1}, group={2}, seq={3}",
                     message.getMessageId(), queueUrl, messageGroupId, message.getSequenceNumber());
@@ -896,7 +993,19 @@ public class SqsService implements Resettable, ResourceProvider {
         ConcurrentHashMap<String, Instant> dedupMap = deduplicationCache.get(queueUrl);
         if (dedupMap != null) {
             Instant now = clock.instant();
-            dedupMap.entrySet().removeIf(e -> !now.isBefore(e.getValue()));
+            Set<String> expiredKeys = dedupMap.entrySet().stream()
+                    .filter(e -> !now.isBefore(e.getValue()))
+                    .map(Map.Entry::getKey)
+                    .collect(Collectors.toSet());
+            expiredKeys.forEach(dedupMap::remove);
+            if (!expiredKeys.isEmpty()) {
+                ConcurrentHashMap<String, DeduplicationIdentity> identityMap =
+                        deduplicationIdentityCache.get(queueUrl);
+                if (identityMap != null) {
+                    expiredKeys.forEach(identityMap::remove);
+                }
+                persistDedupIdentities(queueUrl);
+            }
         }
     }
 
@@ -1098,8 +1207,12 @@ public class SqsService implements Resettable, ResourceProvider {
         getOrCreateQueue(storageKey).purge();
         if (clearFifoDeduplicationCacheOnPurge) {
             deduplicationCache.remove(storageKey);
+            deduplicationIdentityCache.remove(storageKey);
             if (dedupStore != null) {
                 dedupStore.delete(storageKey);
+            }
+            if (dedupIdentityStore != null) {
+                dedupIdentityStore.delete(storageKey);
             }
             if (snsService != null) {
                 snsService.clearFifoDeduplicationCacheForSqsQueueSubscriptions(queueUrl, region);
