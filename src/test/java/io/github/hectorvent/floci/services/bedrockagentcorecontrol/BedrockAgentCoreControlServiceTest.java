@@ -255,9 +255,9 @@ class BedrockAgentCoreControlServiceTest {
     }
 
     @Test
-    void deleteRuntimeTokenReusedWithinItsWindowKeepsTheNewerRecord() {
-        // Reusing a token while its first record is still live restamps it. Purging the
-        // first record once it expires must not take the newer one with it.
+    void deleteRuntimeTokenReusedWithinItsWindowStillExpiresFromItsFirstUse() {
+        // The window runs from the first request that used the token, so reusing it does
+        // not extend the window.
         String firstId = create("firstAgent").getAgentRuntimeId();
         assertEquals("DELETING", service.deleteAgentRuntime(firstId, "reused-token", REGION).getStatus());
 
@@ -266,10 +266,9 @@ class BedrockAgentCoreControlServiceTest {
         assertEquals("DELETING", service.deleteAgentRuntime(secondId, "reused-token", REGION).getStatus());
 
         clock.advance(Duration.ofHours(1).plusSeconds(1));
-        String thirdId = create("thirdAgent").getAgentRuntimeId();
-        assertEquals("DELETING", service.deleteAgentRuntime(thirdId, "other-token", REGION).getStatus());
 
-        assertEquals("DELETING", service.deleteAgentRuntime(secondId, "reused-token", REGION).getStatus());
+        assertEquals(404, assertThrows(AwsException.class,
+                () -> service.deleteAgentRuntime(secondId, "reused-token", REGION)).getHttpStatus());
     }
 
     @Test

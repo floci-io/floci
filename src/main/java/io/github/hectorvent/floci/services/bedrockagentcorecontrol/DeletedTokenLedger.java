@@ -15,11 +15,11 @@ import java.util.Map;
  * <p>AWS does not document an idempotency window for the AgentCore delete
  * operations themselves, so this follows the window AWS documents for a
  * clientToken elsewhere (for example DynamoDB's ImportTable and SageMaker
- * APIs): valid for 8 hours after the request that used it, after which a
- * repeat is treated as a new request. A token past that window behaves as if
+ * APIs): valid for 8 hours after the first request that used it, after which
+ * a repeat is treated as a new request. A token past that window behaves as if
  * it were never recorded, both when it is looked up and, so this does not
  * grow without bound, whenever another token is recorded. Tokens are kept
- * in the order they were last recorded, one entry per token, so purge only
+ * in the order they were first recorded, one entry per token, so purge only
  * visits the expired ones at the front instead of scanning every live token.
  */
 final class DeletedTokenLedger {
@@ -33,12 +33,11 @@ final class DeletedTokenLedger {
         this.clock = clock;
     }
 
-    /** Records {@code key} as deleted just now, first purging any tokens past their TTL. */
+    /** Records {@code key} as deleted unless it is already live, first purging any tokens past their TTL. */
     synchronized void record(String key) {
         purgeExpired();
-        // Remove first so a reused token moves to the back instead of keeping its old position.
-        recordedAt.remove(key);
-        recordedAt.put(key, Instant.now(clock));
+        // Keep the first timestamp: the window runs from the first request that used the token.
+        recordedAt.putIfAbsent(key, Instant.now(clock));
     }
 
     /** Whether {@code key} was recorded within its TTL. An expired entry is dropped and treated as absent. */
