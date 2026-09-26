@@ -376,7 +376,7 @@ public class SqsService implements Resettable, ResourceProvider {
         if (dedupStore == null) {
             return;
         }
-        Instant now = Instant.now();
+        Instant now = clock.instant();
         if (dedupStore instanceof AccountAwareStorageBackend<Map<String, Long>> aware) {
             aware.scanAllAccountsAsMap().forEach((key, entries) -> loadDedupEntries(key, entries, now));
         } else {
@@ -702,10 +702,11 @@ public class SqsService implements Resettable, ResourceProvider {
             String dedupCacheKey = groupScoped ? messageGroupId + "\0" + dedupId : dedupId;
             cleanupDeduplicationCache(storageKey);
             ConcurrentHashMap<String, Instant> dedupMap = deduplicationCache.computeIfAbsent(storageKey, k -> new ConcurrentHashMap<>());
-            Instant expiry = Instant.now().plusSeconds(DEDUP_WINDOW_SECONDS);
+            Instant now = clock.instant();
+            Instant expiry = now.plusSeconds(DEDUP_WINDOW_SECONDS);
             Instant previous = dedupMap.putIfAbsent(dedupCacheKey, expiry);
             persistDedup(storageKey);
-            if (previous != null && Instant.now().isBefore(previous)) {
+            if (previous != null && now.isBefore(previous)) {
                 // Duplicate within window — keep the original messageId and
                 // sequenceNumber but compute response MD5s from this request's
                 // body and attributes, otherwise SDK clients (which validate
@@ -724,6 +725,18 @@ public class SqsService implements Resettable, ResourceProvider {
                     }
                     return response;
                 }
+                // The original message may have been received and deleted, but SQS
+                // continues tracking the deduplication ID for the full interval.
+                // Return a successful SendMessage response without re-enqueueing it.
+                Message response = new Message(body);
+                response.setMessageGroupId(messageGroupId);
+                response.setMessageDeduplicationId(dedupId);
+                response.setSequenceNumber(sequenceCounter.incrementAndGet());
+                if (messageAttributes != null && !messageAttributes.isEmpty()) {
+                    response.getMessageAttributes().putAll(messageAttributes);
+                    response.updateMd5OfMessageAttributes();
+                }
+                return response;
             }
 
             Message message = new Message(body);
@@ -882,8 +895,8 @@ public class SqsService implements Resettable, ResourceProvider {
     private void cleanupDeduplicationCache(String queueUrl) {
         ConcurrentHashMap<String, Instant> dedupMap = deduplicationCache.get(queueUrl);
         if (dedupMap != null) {
-            Instant now = Instant.now();
-            dedupMap.entrySet().removeIf(e -> now.isAfter(e.getValue()));
+            Instant now = clock.instant();
+            dedupMap.entrySet().removeIf(e -> !now.isBefore(e.getValue()));
         }
     }
 

@@ -565,6 +565,57 @@ class SqsServiceTest {
     }
 
     @Test
+    void fifoDeduplicationStillSuppressesMessageAfterOriginalIsDeleted() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("deleted-original.fifo", null, region);
+        sqsService.sendMessage(queue.getQueueUrl(), "original", 0, "group-a", "dedup-a", region);
+
+        List<Message> received = sqsService.receiveMessage(queue.getQueueUrl(), 1, 30, 0, region);
+        assertEquals(1, received.size());
+        sqsService.deleteMessage(queue.getQueueUrl(), received.getFirst().getReceiptHandle(), region);
+
+        Message duplicateResponse = sqsService.sendMessage(
+                queue.getQueueUrl(), "duplicate", 0, "group-a", "dedup-a", region);
+
+        assertNotNull(duplicateResponse.getMessageId());
+        assertEquals("dedup-a", duplicateResponse.getMessageDeduplicationId());
+        assertTrue(sqsService.peekMessages(queue.getQueueUrl(), region).isEmpty(),
+                "A duplicate must remain suppressed after its original message is deleted");
+        assertTrue(sqsService.receiveMessage(queue.getQueueUrl(), 1, 30, 0, region).isEmpty());
+    }
+
+    @Test
+    void fifoDeduplicationExpiresAtTheFiveMinuteBoundary() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("expired-dedup.fifo", null, region);
+        sqsService.sendMessage(queue.getQueueUrl(), "original", 0, "group-a", "dedup-a", region);
+
+        clock.advance(Duration.ofMinutes(5));
+        sqsService.sendMessage(queue.getQueueUrl(), "after-window", 0, "group-a", "dedup-a", region);
+
+        List<Message> received = sqsService.receiveMessage(queue.getQueueUrl(), 2, 30, 0, region);
+        assertEquals(2, received.size());
+        assertTrue(received.stream().anyMatch(message -> "after-window".equals(message.getBody())));
+    }
+
+    @Test
+    void contentBasedFifoDeduplicationStillSuppressesMessageAfterOriginalIsDeleted() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("content-deleted-original.fifo",
+                Map.of("ContentBasedDeduplication", "true"), region);
+        sqsService.sendMessage(queue.getQueueUrl(), "same-body", 0, "group-a", null, region);
+
+        List<Message> received = sqsService.receiveMessage(queue.getQueueUrl(), 1, 30, 0, region);
+        assertEquals(1, received.size());
+        sqsService.deleteMessage(queue.getQueueUrl(), received.getFirst().getReceiptHandle(), region);
+
+        sqsService.sendMessage(queue.getQueueUrl(), "same-body", 0, "group-a", null, region);
+
+        assertTrue(sqsService.peekMessages(queue.getQueueUrl(), region).isEmpty(),
+                "Content-based duplicate IDs must remain suppressed after deletion");
+    }
+
+    @Test
     void fifoQueueReceiveReturnsMultipleMessagesPerGroupInOrder() {
         // AWS FIFO: a single ReceiveMessage call may return multiple messages
         // from the same MessageGroupId (in order), up to MaxNumberOfMessages.
@@ -761,13 +812,13 @@ class SqsServiceTest {
         assertTrue(sqsService.receiveMessage(queue.getQueueUrl(), 10, 0, 0, region).isEmpty(),
                 "Queue must be empty after purge");
 
-        // Re-send with same dedup ID — dedup cache fires but finds no message (purged),
-        // so it falls through and creates a new message
+        // Re-send with the same dedup ID. Purging removed the original message,
+        // but does not end its five-minute deduplication interval.
         sqsService.sendMessage(queue.getQueueUrl(), "msg", 0, "group1", "dedup-1", region);
 
         List<Message> received = sqsService.receiveMessage(queue.getQueueUrl(), 10, 30, 0, region);
-        assertEquals(1, received.size(),
-                "Re-send after purge must produce exactly one message in the queue");
+        assertTrue(received.isEmpty(),
+                "A duplicate must remain suppressed after purge during the deduplication interval");
     }
 
     @Test
