@@ -1,12 +1,13 @@
 package io.github.hectorvent.floci.services.ec2.net;
 
-import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
-import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.Network;
+import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
+import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -534,6 +535,44 @@ public class VpcNetworkManager {
                             + "its bridge address and its reported private IP will not be reachable.",
                     containerId, networkName, address, e.getMessage());
             return Optional.empty();
+        }
+    }
+
+    /**
+     * Attaches an existing container to the VPC's Docker network without allocating a static
+     * private IP address (for instance, an EKS cluster container reaching VPC targets).
+     *
+     * @return true if the container is attached to the VPC network, false otherwise
+     */
+    public boolean attachContainer(String region, String vpcId, String containerId) {
+        if (!enabled() || containerId == null || vpcId == null) {
+            return false;
+        }
+        VpcBinding vpc = bindings.get(key(region, vpcId));
+        if (vpc == null || vpc.effective == null) {
+            return false;
+        }
+        String networkName = materialise(vpc);
+        if (networkName == null) {
+            return false;
+        }
+        try {
+            InspectContainerResponse inspect = dockerClient.inspectContainerCmd(containerId).exec();
+            if (inspect.getNetworkSettings() != null && inspect.getNetworkSettings().getNetworks() != null) {
+                if (inspect.getNetworkSettings().getNetworks().containsKey(networkName)) {
+                    return true;
+                }
+            }
+            dockerClient.connectToNetworkCmd()
+                    .withContainerId(containerId)
+                    .withNetworkId(networkName)
+                    .exec();
+            LOG.infov("Attached container {0} to VPC network {1}", containerId, networkName);
+            return true;
+        } catch (Exception e) {
+            LOG.warnv("Could not attach container {0} to VPC network {1}: {2}",
+                    containerId, networkName, e.getMessage());
+            return false;
         }
     }
 

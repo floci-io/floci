@@ -650,6 +650,7 @@ floci:
       irsa-signing-key: true       # sign k3s service account tokens with the cluster OIDC key
       pod-identity-webhook: true   # register a mutating webhook that injects pod identity credentials (needs floci.tls.enabled)
       embedded-dns: true           # point cluster containers at Floci's embedded DNS to resolve Route 53 private zones
+      vpc-route-programming: true  # program VPC routes into the cluster container for associated subnets
     mwaa:
       enabled: true
       mock: false

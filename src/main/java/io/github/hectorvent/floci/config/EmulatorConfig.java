@@ -3180,6 +3180,13 @@ public interface EmulatorConfig {
          */
         @WithDefault("true")
         boolean embeddedDns();
+
+        /**
+         * When true, programs static routes inside EKS cluster containers from emulated VPC route
+         * tables associated with the cluster's subnets or VPC.
+         */
+        @WithDefault("true")
+        boolean vpcRouteProgramming();
     }
 
     /**

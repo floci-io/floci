@@ -126,6 +126,9 @@ public class EksService implements TagHandler, ResourceProvider {
         this.accessEntries = accessEntries;
         this.podIdentityAssociations = podIdentityAssociations;
         this.addons = addons;
+        if (this.clusterManager != null) {
+            this.clusterManager.setEc2Service(this.ec2Service);
+        }
     }
 
     public EksService(StorageFactory storageFactory, EmulatorConfig config,
