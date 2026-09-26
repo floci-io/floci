@@ -38,10 +38,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 @ApplicationScoped
 public class CloudControlService {
@@ -77,8 +79,14 @@ public class CloudControlService {
      * Entries are dropped when the resource is deleted.
      */
     private final Map<String, CreatedResource> created = new ConcurrentHashMap<>();
-    private final ExecutorService executor =
-            Executors.newFixedThreadPool(4);
+    private static final int DEFAULT_WORKER_COUNT = 4;
+    private static final int DEFAULT_QUEUE_CAPACITY = 64;
+
+    /**
+     * Bounded so a burst of CreateResource calls cannot grow the backlog without limit; a full
+     * queue surfaces as {@code ThrottlingException}, the async contract's backpressure signal.
+     */
+    private final ThreadPoolExecutor executor;
 
     @PreDestroy
     void shutdown() {
@@ -203,6 +211,16 @@ public class CloudControlService {
                                 ObjectMapper mapper,
                                 AccountAwareStorageBackend<PersistedRequest> requestStore,
                                 AccountAwareStorageBackend<PersistedCreatedResource> createdStore) {
+        this(s3Service, ec2Service, iamService, provisioner, mapper, requestStore, createdStore,
+                DEFAULT_WORKER_COUNT, DEFAULT_QUEUE_CAPACITY);
+    }
+
+    CloudControlService(S3Service s3Service, Ec2Service ec2Service,
+                                IamService iamService, CfnResourceDispatcher provisioner,
+                                ObjectMapper mapper,
+                                AccountAwareStorageBackend<PersistedRequest> requestStore,
+                                AccountAwareStorageBackend<PersistedCreatedResource> createdStore,
+                                int workerCount, int queueCapacity) {
         this.s3Service = s3Service;
         this.ec2Service = ec2Service;
         this.iamService = iamService;
@@ -210,6 +228,14 @@ public class CloudControlService {
         this.mapper = mapper;
         this.requestStore = requestStore;
         this.createdStore = createdStore;
+        this.executor = new ThreadPoolExecutor(workerCount, workerCount, 0L, TimeUnit.MILLISECONDS,
+                new ArrayBlockingQueue<>(queueCapacity),
+                r -> {
+                    Thread t = new Thread(r, "cloudcontrol-worker");
+                    t.setDaemon(true);
+                    return t;
+                },
+                new ThreadPoolExecutor.AbortPolicy());
         restorePersistedState();
     }
 
@@ -255,24 +281,34 @@ public class CloudControlService {
     private void submitCreate(String region, String accountId, String typeName, String desiredStateJson,
                               String token, ProgressEvent pending, JsonNode props) {
         persistRequest(new PersistedRequest(pending, region, desiredStateJson, System.currentTimeMillis()));
-        executor.submit(() -> RequestScopes.runAs(accountId, () -> {
-            try {
-                StackResource resource = provisioner.provisionStandalone(typeName, props, region, accountId);
-                if (resource == null || resource.getPhysicalId() == null) {
-                    record(pending.failed("CreateResource is not supported for " + typeName + "."));
-                } else {
-                    String model = resourceModel(region, typeName, resource.getPhysicalId(), props);
-                    CreatedResource createdResource = new CreatedResource(token, accountId,
-                            resource.getAttributes() == null ? Map.of() : Map.copyOf(resource.getAttributes()), model);
-                    created.put(createdKey(accountId, region, typeName, resource.getPhysicalId()), createdResource);
-                    persistCreated(accountId, region, typeName, resource.getPhysicalId(), createdResource);
-                    record(new ProgressEvent(typeName, resource.getPhysicalId(),
-                            token, "CREATE", "SUCCESS", null, model, accountId));
+        try {
+            executor.submit(() -> RequestScopes.runAs(accountId, () -> {
+                try {
+                    StackResource resource = provisioner.provisionStandalone(typeName, props, region, accountId);
+                    if (resource == null || resource.getPhysicalId() == null) {
+                        record(pending.failed("CreateResource is not supported for " + typeName + "."));
+                    } else {
+                        String model = resourceModel(region, typeName, resource.getPhysicalId(), props);
+                        CreatedResource createdResource = new CreatedResource(token, accountId,
+                                resource.getAttributes() == null ? Map.of() : Map.copyOf(resource.getAttributes()), model);
+                        created.put(createdKey(accountId, region, typeName, resource.getPhysicalId()), createdResource);
+                        persistCreated(accountId, region, typeName, resource.getPhysicalId(), createdResource);
+                        record(new ProgressEvent(typeName, resource.getPhysicalId(),
+                                token, "CREATE", "SUCCESS", null, model, accountId));
+                    }
+                } catch (Exception e) {
+                    record(pending.failed(e.getMessage() == null ? e.toString() : e.getMessage()));
                 }
-            } catch (Exception e) {
-                record(pending.failed(e.getMessage() == null ? e.toString() : e.getMessage()));
-            }
-        }));
+            }));
+        } catch (RejectedExecutionException e) {
+            // The queue is full. Drop the pending token so it is not left unfulfillable and report
+            // the async API's backpressure error rather than leaking a raw 500.
+            requests.remove(token);
+            requestOrder.remove(token);
+            requestStore.deleteForAccount(accountId == null ? DEFAULT_ACCOUNT : accountId, token);
+            throw new AwsException("ThrottlingException",
+                    "Cloud Control is at capacity; retry the request.", 429);
+        }
     }
 
     /**
