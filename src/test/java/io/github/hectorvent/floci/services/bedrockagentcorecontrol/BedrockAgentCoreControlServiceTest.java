@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
@@ -251,6 +252,24 @@ class BedrockAgentCoreControlServiceTest {
         // The old runtime's id is unrelated to the reused token and stays gone.
         assertEquals(404, assertThrows(AwsException.class,
                 () -> service.deleteAgentRuntime(firstId, "some-other-token", REGION)).getHttpStatus());
+    }
+
+    @Test
+    void deleteRuntimeTokenReusedWithinItsWindowKeepsTheNewerRecord() {
+        // Reusing a token while its first record is still live restamps it. Purging the
+        // first record once it expires must not take the newer one with it.
+        String firstId = create("firstAgent").getAgentRuntimeId();
+        assertEquals("DELETING", service.deleteAgentRuntime(firstId, "reused-token", REGION).getStatus());
+
+        clock.advance(Duration.ofHours(7));
+        String secondId = create("secondAgent").getAgentRuntimeId();
+        assertEquals("DELETING", service.deleteAgentRuntime(secondId, "reused-token", REGION).getStatus());
+
+        clock.advance(Duration.ofHours(1).plusSeconds(1));
+        String thirdId = create("thirdAgent").getAgentRuntimeId();
+        assertEquals("DELETING", service.deleteAgentRuntime(thirdId, "other-token", REGION).getStatus());
+
+        assertEquals("DELETING", service.deleteAgentRuntime(secondId, "reused-token", REGION).getStatus());
     }
 
     @Test

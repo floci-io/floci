@@ -3,7 +3,9 @@ package io.github.hectorvent.floci.services.bedrockagentcorecontrol;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayDeque;
 import java.util.Map;
+import java.util.Queue;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -17,13 +19,16 @@ import java.util.concurrent.ConcurrentHashMap;
  * APIs): valid for 8 hours after the request that used it, after which a
  * repeat is treated as a new request. A token past that window behaves as if
  * it were never recorded, both when it is looked up and, so this does not
- * grow without bound, whenever another token is recorded.
+ * grow without bound, whenever another token is recorded. Tokens are also
+ * queued in the order they were recorded, so that purge only visits the
+ * expired ones at the front instead of scanning every live token.
  */
 final class DeletedTokenLedger {
 
     static final Duration TTL = Duration.ofHours(8);
 
     private final Map<String, Instant> recordedAt = new ConcurrentHashMap<>();
+    private final Queue<Map.Entry<String, Instant>> recordOrder = new ArrayDeque<>();
     private final Clock clock;
 
     DeletedTokenLedger(Clock clock) {
@@ -31,9 +36,11 @@ final class DeletedTokenLedger {
     }
 
     /** Records {@code key} as deleted just now, first purging any tokens past their TTL. */
-    void record(String key) {
+    synchronized void record(String key) {
         purgeExpired();
-        recordedAt.put(key, Instant.now(clock));
+        Instant now = Instant.now(clock);
+        recordedAt.put(key, now);
+        recordOrder.add(Map.entry(key, now));
     }
 
     /** Whether {@code key} was recorded within its TTL. An expired entry is dropped and treated as absent. */
@@ -50,7 +57,13 @@ final class DeletedTokenLedger {
     }
 
     private void purgeExpired() {
-        recordedAt.entrySet().removeIf(entry -> isExpired(entry.getValue()));
+        Map.Entry<String, Instant> oldest = recordOrder.peek();
+        while (oldest != null && isExpired(oldest.getValue())) {
+            recordOrder.poll();
+            // Only drop the map entry if it is still this record; a later reuse of the token restamped it.
+            recordedAt.remove(oldest.getKey(), oldest.getValue());
+            oldest = recordOrder.peek();
+        }
     }
 
     private boolean isExpired(Instant at) {
