@@ -68,6 +68,9 @@ public class SnsService implements Resettable, ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(SnsService.class);
     private static final Duration FIFO_DEDUP_WINDOW = Duration.ofMinutes(5);
+    /** Includes the original send and two immediate retries for local SQS fan-out. */
+    private static final int SQS_SUBSCRIPTION_DELIVERY_ATTEMPTS = 3;
+    private static final String SUBSCRIPTION_REDRIVE_POLICY = "RedrivePolicy";
     /** Default value of the {@code MaximumMessageSize} topic attribute, and the ceiling below
      *  which a topic carries no subscription restrictions. AWS raised the maximum to 1 MiB in
      *  September 2026 but left the default at 256 KiB, so an unconfigured topic is unchanged. */
@@ -1730,8 +1733,8 @@ public class SnsService implements Resettable, ResourceProvider {
                     Map<String, MessageAttributeValue> sqsAttributes = rawDelivery
                             ? toSqsMessageAttributes(messageAttributes)
                             : Collections.emptyMap();
-                    sqsService.sendMessage(queueUrl, body, null, messageGroupId, messageDeduplicationId, sqsAttributes, region);
-                    LOG.debugv("Delivered SNS message to SQS: {0} ({1}) raw={2}", sub.getEndpoint(), queueUrl, rawDelivery);
+                    deliverToSqsSubscription(sub, queueUrl, body, messageGroupId,
+                            messageDeduplicationId, sqsAttributes, region, rawDelivery);
                 }
                 case "lambda" -> {
                     String region = extractRegionFromArn(sub.getEndpoint());
@@ -1843,6 +1846,61 @@ public class SnsService implements Resettable, ResourceProvider {
             // with room to spare; a queue configured with a smaller MaximumMessageSize crosses
             // the limit more easily. Either way the message is dropped here.
             LOG.warnv("Failed to deliver SNS message to {0}: {1}", sub.getEndpoint(), e.getMessage());
+        }
+    }
+
+    private void deliverToSqsSubscription(Subscription sub, String queueUrl, String body,
+                                          String messageGroupId, String messageDeduplicationId,
+                                          Map<String, MessageAttributeValue> sqsAttributes,
+                                          String region, boolean rawDelivery) {
+        RuntimeException deliveryFailure = null;
+        for (int attempt = 1; attempt <= SQS_SUBSCRIPTION_DELIVERY_ATTEMPTS; attempt++) {
+            try {
+                sqsService.sendMessage(queueUrl, body, null, messageGroupId,
+                        messageDeduplicationId, sqsAttributes, region);
+                LOG.debugv("Delivered SNS message to SQS: {0} ({1}) raw={2}",
+                        sub.getEndpoint(), queueUrl, rawDelivery);
+                return;
+            } catch (RuntimeException e) {
+                deliveryFailure = e;
+            }
+        }
+
+        String deadLetterTargetArn = subscriptionDeadLetterTargetArn(sub);
+        if (deadLetterTargetArn != null) {
+            try {
+                String deadLetterRegion = extractRegionFromArn(deadLetterTargetArn);
+                if (deadLetterRegion == null) {
+                    deadLetterRegion = region;
+                }
+                sqsService.sendMessage(sqsArnToUrl(deadLetterTargetArn), body, null,
+                        messageGroupId, messageDeduplicationId, sqsAttributes, deadLetterRegion);
+                LOG.warnv("SNS delivery to {0} failed after {1} attempts; sent notification to subscription DLQ {2}",
+                        sub.getEndpoint(), SQS_SUBSCRIPTION_DELIVERY_ATTEMPTS, deadLetterTargetArn);
+                return;
+            } catch (RuntimeException deadLetterFailure) {
+                LOG.warnv("SNS delivery to {0} and subscription DLQ {1} failed: {2}",
+                        sub.getEndpoint(), deadLetterTargetArn, deadLetterFailure.getMessage());
+            }
+        }
+        LOG.warnv("SNS delivery to {0} failed after {1} attempts: {2}",
+                sub.getEndpoint(), SQS_SUBSCRIPTION_DELIVERY_ATTEMPTS,
+                deliveryFailure == null ? "unknown failure" : deliveryFailure.getMessage());
+    }
+
+    private String subscriptionDeadLetterTargetArn(Subscription sub) {
+        String redrivePolicy = sub.getAttributes().get(SUBSCRIPTION_REDRIVE_POLICY);
+        if (redrivePolicy == null || redrivePolicy.isBlank()) {
+            return null;
+        }
+        try {
+            JsonNode policy = objectMapper.readTree(redrivePolicy);
+            String targetArn = policy.path("deadLetterTargetArn").asText(null);
+            return AwsArnUtils.isArnFor(targetArn, "sqs") ? targetArn : null;
+        } catch (Exception e) {
+            LOG.warnv("Ignoring invalid SNS subscription RedrivePolicy for {0}: {1}",
+                    sub.getSubscriptionArn(), e.getMessage());
+            return null;
         }
     }
 

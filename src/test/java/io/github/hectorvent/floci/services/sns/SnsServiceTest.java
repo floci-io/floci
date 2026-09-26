@@ -11,6 +11,8 @@ import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.sns.model.Subscription;
 import io.github.hectorvent.floci.services.sns.model.Topic;
+import io.github.hectorvent.floci.services.sqs.SqsService;
+import io.github.hectorvent.floci.services.sqs.model.Message;
 import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -24,9 +26,13 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyMap;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
 class SnsServiceTest {
@@ -78,6 +84,55 @@ class SnsServiceTest {
     void createTopic_requiresName() {
         assertThrows(AwsException.class, () -> snsService.createTopic(null, null, null, REGION));
         assertThrows(AwsException.class, () -> snsService.createTopic("", null, null, REGION));
+    }
+
+    @Test
+    void publish_retriesTransientSqsSubscriptionDeliveryFailure() {
+        SqsService sqs = mock(SqsService.class);
+        SnsService service = new SnsService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver(REGION, ACCOUNT), sqs, null);
+        Topic topic = service.createTopic("retry-topic", null, null, REGION);
+        String queueArn = "arn:aws:sqs:us-east-1:000000000000:retry-queue";
+        String queueUrl = BASE_URL + "/" + ACCOUNT + "/retry-queue";
+        service.subscribe(topic.getTopicArn(), "sqs", queueArn, REGION, Map.of());
+        doThrow(new AwsException("ServiceUnavailable", "temporarily unavailable", 503))
+                .doReturn(new Message("delivered"))
+                .when(sqs).sendMessage(eq(queueUrl), anyString(), isNull(), isNull(), isNull(), anyMap(), eq(REGION));
+
+        String messageId = service.publish(topic.getTopicArn(), null, "payload", null, REGION);
+
+        assertNotNull(messageId);
+        verify(sqs, times(2)).sendMessage(eq(queueUrl), anyString(), isNull(), isNull(), isNull(), anyMap(), eq(REGION));
+    }
+
+    @Test
+    void publish_sendsExhaustedSqsSubscriptionDeliveryToConfiguredDlq() throws Exception {
+        SqsService sqs = mock(SqsService.class);
+        SnsService service = new SnsService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver(REGION, ACCOUNT), sqs, null);
+        Topic topic = service.createTopic("dlq-topic", null, null, REGION);
+        String queueArn = "arn:aws:sqs:us-east-1:000000000000:unavailable-queue";
+        String queueUrl = BASE_URL + "/" + ACCOUNT + "/unavailable-queue";
+        String dlqArn = "arn:aws:sqs:us-east-1:000000000000:subscription-dlq";
+        String dlqUrl = BASE_URL + "/" + ACCOUNT + "/subscription-dlq";
+        service.subscribe(topic.getTopicArn(), "sqs", queueArn, REGION,
+                Map.of("RedrivePolicy", "{\"deadLetterTargetArn\":\"" + dlqArn + "\"}"));
+        doThrow(new AwsException("AWS.SimpleQueueService.NonExistentQueue", "unavailable", 400))
+                .when(sqs).sendMessage(eq(queueUrl), anyString(), isNull(), isNull(), isNull(), anyMap(), eq(REGION));
+
+        String messageId = service.publish(topic.getTopicArn(), null,
+                "payload", "subject", REGION);
+
+        assertNotNull(messageId, "SNS Publish acceptance is independent of downstream SQS delivery");
+        verify(sqs, times(3)).sendMessage(eq(queueUrl), anyString(), isNull(), isNull(), isNull(), anyMap(), eq(REGION));
+        ArgumentCaptor<String> deadLetterBody = ArgumentCaptor.forClass(String.class);
+        verify(sqs).sendMessage(eq(dlqUrl), deadLetterBody.capture(), isNull(), isNull(), isNull(), anyMap(), eq(REGION));
+        JsonNode envelope = new ObjectMapper().readTree(deadLetterBody.getValue());
+        assertEquals("Notification", envelope.path("Type").asText());
+        assertEquals(topic.getTopicArn(), envelope.path("TopicArn").asText());
+        assertEquals("payload", envelope.path("Message").asText());
+        assertEquals("subject", envelope.path("Subject").asText());
+        assertTrue(envelope.hasNonNull("MessageId"));
     }
 
     @Test

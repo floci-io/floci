@@ -93,6 +93,12 @@ Supported subscription protocols:
 For `FilterPolicyScope=MessageBody`, nested policy objects descend into JSON objects and arrays.
 An object inside an array matches when one array element satisfies the complete nested policy.
 
+For SQS subscriptions, Floci retries a failed delivery up to three times total, with two immediate
+retries. If all attempts fail and the subscription has a `RedrivePolicy` containing a valid
+`deadLetterTargetArn` for an SQS queue, Floci sends the original notification to that queue. SNS
+`Publish` still returns its message ID after downstream delivery fails. This is a bounded local
+policy; it does not reproduce AWS delivery retry timing or scale.
+
 ## HTTP and HTTPS endpoint addresses
 
 Floci posts the `SubscriptionConfirmation` and every notification to a subscribed `http`/`https`
