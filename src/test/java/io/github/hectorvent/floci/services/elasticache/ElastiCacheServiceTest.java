@@ -187,6 +187,7 @@ class ElastiCacheServiceTest {
 
         // Single-arg AUTH with group auth token should succeed
         assertTrue(service.validatePassword("grp", null, "group-token"));
+        assertTrue(service.validatePassword("grp", "default", "group-token"));
 
         // Single-arg AUTH with wrong password should fail
         assertFalse(service.validatePassword("grp", null, "wrong-token"));
