@@ -17,14 +17,19 @@ import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * Owns Cognito authentication-flow protocol logic: USER_PASSWORD_AUTH,
@@ -46,13 +51,22 @@ final class CognitoAuthFlowHandler {
     private static final String CUSTOM_MESSAGE_CODE_PARAMETER = "{####}";
     /** The message of a wrong password, which managed login also shows for an unknown user. */
     static final String INCORRECT_CREDENTIALS = "Incorrect username or password";
+    /** Keeps each USER_AUTH partition from retaining unbounded in-memory challenge state. */
+    static final int MAX_USER_AUTH_SESSIONS_PER_PARTITION = 4_096;
+    /** AWS default AuthSessionValidity until UserPoolClient exposes the configurable value. */
+    private static final Duration AUTH_SESSION_VALIDITY = Duration.ofMinutes(3);
 
     private final CognitoService service;
     private final LambdaService lambdaService;
     private final RegionResolver regionResolver;
+    private final Clock clock;
     private final ConcurrentHashMap<String, SrpSession> srpSessions = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, CustomAuthSession> customAuthSessions = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, UserAuthSession> userAuthSessions = new ConcurrentHashMap<>();
+    private final Object userAuthSessionLock = new Object();
+    private final LinkedHashMap<String, UserAuthSession> userAuthSessions = new LinkedHashMap<>();
+    private final LinkedHashMap<String, UserAuthSession> simulatedUserAuthSessions = new LinkedHashMap<>();
+    private boolean userAuthSessionExpiriesOrdered = true;
+    private boolean simulatedUserAuthSessionExpiriesOrdered = true;
 
     private record SrpSession(String userPoolId, String username, String clientId,
                               String aHex, String bHex, String bPublicHex,
@@ -65,7 +79,8 @@ final class CognitoAuthFlowHandler {
      * factor answer with no session at all, bypassing handleUserAuth's tier gate and letting a
      * caller trigger an OTP send without ever starting a flow.
      */
-    private record UserAuthSession(String userPoolId, String username, String clientId, String challengeName) {}
+    private record UserAuthSession(String userPoolId, String username, String clientId, String challengeName,
+                                   boolean userExists, Instant expiresAt) {}
 
     static final class CustomAuthSession {
         final String userPoolId;
@@ -83,10 +98,12 @@ final class CognitoAuthFlowHandler {
         }
     }
 
-    CognitoAuthFlowHandler(CognitoService service, LambdaService lambdaService, RegionResolver regionResolver) {
+    CognitoAuthFlowHandler(CognitoService service, LambdaService lambdaService, RegionResolver regionResolver,
+                           Clock clock) {
         this.service = service;
         this.lambdaService = lambdaService;
         this.regionResolver = regionResolver;
+        this.clock = clock;
     }
 
     // ──────────────────────────── Public entry points ────────────────────────────
@@ -240,15 +257,15 @@ final class CognitoAuthFlowHandler {
             return handleSelectChallenge(pool, client, session, responses, clientMetadata);
         }
         if ("PASSWORD".equals(challengeName)) {
-            consumeUserAuthSession(pool, client, session, "PASSWORD");
+            rejectSimulatedUser(consumeUserAuthSession(pool, client, session, "PASSWORD"));
             return authenticateWithPassword(pool, client, responses, clientMetadata);
         }
         if ("PASSWORD_SRP".equals(challengeName)) {
-            consumeUserAuthSession(pool, client, session, "PASSWORD_SRP");
+            rejectSimulatedUser(consumeUserAuthSession(pool, client, session, "PASSWORD_SRP"));
             return handleUserSrpAuth(pool, client, responses, clientMetadata);
         }
         if ("EMAIL_OTP".equals(challengeName) || "SMS_OTP".equals(challengeName)) {
-            consumeUserAuthSession(pool, client, session, challengeName);
+            rejectSimulatedUser(consumeUserAuthSession(pool, client, session, challengeName));
             return handleOtpChallengeResponse(pool, client, challengeName, responses, clientMetadata);
         }
         if ("NEW_PASSWORD_REQUIRED".equals(challengeName)) {
@@ -586,7 +603,16 @@ final class CognitoAuthFlowHandler {
             throw new AwsException("InvalidParameterException", "USERNAME is required", 400);
         }
         validateSecretHash(client, params, username);
-        CognitoUser user = service.adminGetUser(pool.getId(), username);
+        CognitoUser user;
+        try {
+            user = service.adminGetUser(pool.getId(), username);
+        } catch (AwsException exception) {
+            if (!"UserNotFoundException".equals(exception.getErrorCode())
+                    || !"ENABLED".equals(client.getPreventUserExistenceErrors())) {
+                throw exception;
+            }
+            return simulatedUserAuthChallenge(pool, client, username);
+        }
         requireSignInEligible(user);
 
         List<String> available = availableUserAuthChallenges(user);
@@ -611,7 +637,7 @@ final class CognitoAuthFlowHandler {
     private Map<String, Object> handleSelectChallenge(UserPool pool, UserPoolClient client, String session,
                                                         Map<String, String> responses,
                                                         Map<String, String> clientMetadata) {
-        consumeUserAuthSession(pool, client, session, "SELECT_CHALLENGE");
+        rejectSimulatedUser(consumeUserAuthSession(pool, client, session, "SELECT_CHALLENGE"));
         String username = responses.get("USERNAME");
         String answer = responses.get("ANSWER");
         if (username == null || answer == null) {
@@ -703,9 +729,16 @@ final class CognitoAuthFlowHandler {
     private Map<String, Object> userAuthChallengeResponse(UserPool pool, UserPoolClient client, CognitoUser user,
                                                             String challengeName, List<String> available,
                                                             Map<String, String> challengeParameters) {
-        String session = buildSessionToken(pool.getId(), user.getUsername(), client.getClientId());
-        userAuthSessions.put(session,
-                new UserAuthSession(pool.getId(), user.getUsername(), client.getClientId(), challengeName));
+        return userAuthChallengeResponse(pool, client, user.getUsername(), challengeName, available,
+                challengeParameters, true);
+    }
+
+    private Map<String, Object> userAuthChallengeResponse(UserPool pool, UserPoolClient client, String username,
+                                                            String challengeName, List<String> available,
+                                                            Map<String, String> challengeParameters,
+                                                            boolean userExists) {
+        String session = buildSessionToken(pool.getId(), username, client.getClientId());
+        storeUserAuthSession(session, pool.getId(), username, client.getClientId(), challengeName, userExists);
         Map<String, Object> result = new HashMap<>();
         result.put("ChallengeName", challengeName);
         result.put("Session", session);
@@ -721,15 +754,115 @@ final class CognitoAuthFlowHandler {
      * {@code expectedChallenge} against this same pool and client, and consumes it so it cannot
      * be replayed against a second RespondToAuthChallenge call.
      */
-    private void consumeUserAuthSession(UserPool pool, UserPoolClient client, String session,
-                                         String expectedChallenge) {
-        UserAuthSession state = session == null ? null : userAuthSessions.remove(session);
+    private UserAuthSession consumeUserAuthSession(UserPool pool, UserPoolClient client, String session,
+                                                    String expectedChallenge) {
+        UserAuthSession state;
+        synchronized (userAuthSessionLock) {
+            state = session == null ? null : userAuthSessions.remove(session);
+            if (state == null && session != null) {
+                state = simulatedUserAuthSessions.remove(session);
+            }
+        }
         if (state == null || !expectedChallenge.equals(state.challengeName())) {
             throw new AwsException("NotAuthorizedException", "Session not found", 400);
+        }
+        if (sessionExpired(state.expiresAt(), clock.instant())) {
+            throw new AwsException("NotAuthorizedException",
+                    "Invalid session for the user, session is expired.", 400);
         }
         if (!state.userPoolId().equals(pool.getId()) || !state.clientId().equals(client.getClientId())) {
             throw new AwsException("NotAuthorizedException", "Session does not match client", 400);
         }
+        return state;
+    }
+
+    private void storeUserAuthSession(String session, String userPoolId, String username, String clientId,
+                                      String challengeName, boolean userExists) {
+        synchronized (userAuthSessionLock) {
+            Instant now = clock.instant();
+            UserAuthSession state = new UserAuthSession(userPoolId, username, clientId, challengeName,
+                    userExists, now.plus(AUTH_SESSION_VALIDITY));
+            userAuthSessionExpiriesOrdered = purgeExpiredUserAuthSessions(
+                    userAuthSessions, now, userAuthSessionExpiriesOrdered);
+            simulatedUserAuthSessionExpiriesOrdered = purgeExpiredUserAuthSessions(
+                    simulatedUserAuthSessions, now, simulatedUserAuthSessionExpiriesOrdered);
+            LinkedHashMap<String, UserAuthSession> sessionStore = state.userExists()
+                    ? userAuthSessions : simulatedUserAuthSessions;
+            Map.Entry<String, UserAuthSession> lastSession = sessionStore.lastEntry();
+            boolean expiresInOrder = lastSession == null
+                    || !state.expiresAt().isBefore(lastSession.getValue().expiresAt());
+            if (state.userExists()) {
+                userAuthSessionExpiriesOrdered &= expiresInOrder;
+            } else {
+                simulatedUserAuthSessionExpiriesOrdered &= expiresInOrder;
+            }
+            if (sessionStore.size() >= MAX_USER_AUTH_SESSIONS_PER_PARTITION) {
+                Iterator<String> sessionTokens = sessionStore.keySet().iterator();
+                sessionTokens.next();
+                sessionTokens.remove();
+            }
+            sessionStore.put(session, state);
+        }
+    }
+
+    private static boolean purgeExpiredUserAuthSessions(LinkedHashMap<String, UserAuthSession> sessions,
+                                                         Instant now, boolean expiriesOrdered) {
+        Iterator<Map.Entry<String, UserAuthSession>> entries = sessions.entrySet().iterator();
+        Instant previousExpiry = null;
+        boolean remainingExpiriesOrdered = true;
+        while (entries.hasNext()) {
+            Instant expiresAt = entries.next().getValue().expiresAt();
+            if (sessionExpired(expiresAt, now)) {
+                entries.remove();
+            } else if (expiriesOrdered) {
+                break;
+            } else {
+                remainingExpiriesOrdered &= previousExpiry == null || !expiresAt.isBefore(previousExpiry);
+                previousExpiry = expiresAt;
+            }
+        }
+        return expiriesOrdered || remainingExpiriesOrdered;
+    }
+
+    private static boolean sessionExpired(Instant expiresAt, Instant now) {
+        return !expiresAt.isAfter(now);
+    }
+
+    private void rejectSimulatedUser(UserAuthSession session) {
+        if (!session.userExists()) {
+            throw new AwsException("NotAuthorizedException", INCORRECT_CREDENTIALS, 400);
+        }
+    }
+
+    private Map<String, Object> simulatedUserAuthChallenge(UserPool pool, UserPoolClient client, String username) {
+        List<String> available = configuredUserAuthChallenges(pool);
+        if (available.isEmpty()) {
+            throw new AwsException("NotAuthorizedException", INCORRECT_CREDENTIALS, 400);
+        }
+        String challenge = available.get(ThreadLocalRandom.current().nextInt(available.size()));
+        return userAuthChallengeResponse(pool, client, username, challenge, available,
+                Map.of("USERNAME", username), false);
+    }
+
+    private List<String> configuredUserAuthChallenges(UserPool pool) {
+        Map<String, Object> policies = pool.getPolicies();
+        if (policies == null || !(policies.get("SignInPolicy") instanceof Map<?, ?> signInPolicy)) {
+            return List.of("PASSWORD");
+        }
+        Object configuredFactors = signInPolicy.get("AllowedFirstAuthFactors");
+        if (!(configuredFactors instanceof List<?> factors) || factors.isEmpty()) {
+            return List.of("PASSWORD");
+        }
+
+        List<String> supported = new ArrayList<>();
+        for (Object factor : factors) {
+            if (factor instanceof String name
+                    && ("PASSWORD".equals(name) || "EMAIL_OTP".equals(name) || "SMS_OTP".equals(name))
+                    && !supported.contains(name)) {
+                supported.add(name);
+            }
+        }
+        return supported;
     }
 
     /** The set of USER_AUTH challenges this user currently qualifies for. */
