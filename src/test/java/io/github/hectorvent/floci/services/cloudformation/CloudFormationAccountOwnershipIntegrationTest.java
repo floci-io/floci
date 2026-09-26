@@ -110,6 +110,16 @@ class CloudFormationAccountOwnershipIntegrationTest {
         createStack(ACCOUNT_1, US_EAST_1, "cfn-management-stack",
                 "{\"Resources\":{\"ManagementBucket\":{\"Type\":\"AWS::S3::Bucket\"}}}");
 
+        given()
+                .header("Authorization", auth(ACCOUNT_2, US_EAST_1, "iam"))
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "CreateRole")
+                .formParam("RoleName", "cfn-member-deploy-role")
+                .formParam("AssumeRolePolicyDocument", "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                        + "\"Principal\":{\"AWS\":\"arn:aws:iam::" + ACCOUNT_1 + ":root\"},\"Action\":\"sts:AssumeRole\"}]}")
+                .when().post("/").then()
+                .statusCode(200);
+
         String memberAccessKeyId = given()
                 .header("Authorization", auth(ACCOUNT_1, US_EAST_1, "sts"))
                 .contentType("application/x-www-form-urlencoded")

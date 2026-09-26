@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.AccountResolver;
 import io.github.hectorvent.floci.core.common.OidcIssuerKeyLookup;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.WebIdentityTokenVerifier;
+import io.github.hectorvent.floci.services.iam.model.IamRole;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
@@ -12,12 +13,14 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -30,6 +33,10 @@ class StsQueryHandlerTest {
             Pattern.compile("<SessionToken>([^<]+)</SessionToken>");
 
     private static StsQueryHandler newHandler() {
+        return newHandler(Optional.of(new IamRole()));
+    }
+
+    private static StsQueryHandler newHandler(Optional<IamRole> role) {
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
         EmulatorConfig.IamServiceConfig iam = mock(EmulatorConfig.IamServiceConfig.class);
@@ -37,8 +44,11 @@ class StsQueryHandlerTest {
         when(services.iam()).thenReturn(iam);
         when(iam.enforcementEnabled()).thenReturn(false);
 
+        IamService iamService = mock(IamService.class);
+        when(iamService.findRole(anyString(), anyString())).thenReturn(role);
+
         return new StsQueryHandler(
-                mock(IamService.class),
+                iamService,
                 mock(AccountResolver.class),
                 new RegionResolver(REGION, "000000000000"),
                 config,
@@ -71,6 +81,19 @@ class StsQueryHandlerTest {
 
         assertNotEquals(extract(SECRET_ACCESS_KEY, firstBody), extract(SECRET_ACCESS_KEY, secondBody));
         assertNotEquals(extract(SESSION_TOKEN, firstBody), extract(SESSION_TOKEN, secondBody));
+    }
+
+    @Test
+    void assumeRoleDeniesRoleThatDoesNotExist() {
+        StsQueryHandler handler = newHandler(Optional.empty());
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("RoleArn", "arn:aws:iam::000000000000:role/definitely-does-not-exist");
+        params.putSingle("RoleSessionName", "test-session");
+
+        Response response = handler.handle("AssumeRole", params);
+
+        assertEquals(403, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("<Code>AccessDenied</Code>"));
     }
 
     @ParameterizedTest
