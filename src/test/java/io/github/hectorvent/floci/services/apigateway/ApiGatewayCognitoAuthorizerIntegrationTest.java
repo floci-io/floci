@@ -102,6 +102,38 @@ class ApiGatewayCognitoAuthorizerIntegrationTest {
         }
     }
 
+    @Test
+    void rejectsTokensOfDeletedUser() throws Exception {
+        UserPool pool = cognitoService.createUserPool(Map.of("PoolName", "deleted-user-pool"), "us-east-1");
+        Map<String, Object> tokens = issueTokens(pool);
+        String accessToken = (String) tokens.get("AccessToken");
+        String idToken = (String) tokens.get("IdToken");
+        String apiId = given().contentType(ContentType.JSON)
+                .body(Map.of("name", "cognito-deleted-user-test"))
+                .post("/restapis").then().statusCode(201).extract().path("id");
+        try {
+            String rootId = given().get("/restapis/" + apiId + "/resources")
+                    .then().statusCode(200).extract().path("item[0].id");
+            String securedId = createResource(apiId, rootId, "secured");
+            String authorizerId = createAuthorizer(apiId, "Guard", pool.getArn());
+            configureMethod(apiId, securedId, authorizerId, "COGNITO_USER_POOLS", List.of());
+            given().contentType(ContentType.JSON).body(Map.of("stageName", "test"))
+                    .post("/restapis/" + apiId + "/deployments").then().statusCode(201);
+            String securedPath = "/execute-api/" + apiId + "/test/secured";
+            given().header("X-Id-Token", "Bearer " + accessToken)
+                    .get(securedPath).then().statusCode(200);
+
+            cognitoService.deleteUser(accessToken);
+
+            given().header("X-Id-Token", "Bearer " + accessToken)
+                    .get(securedPath).then().statusCode(401);
+            given().header("X-Id-Token", "Bearer " + idToken)
+                    .get(securedPath).then().statusCode(401);
+        } finally {
+            given().delete("/restapis/" + apiId).then().statusCode(202);
+        }
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"", ", \"providerARNs\": null"})
     void mergingPartialCognitoAuthorizerKeepsRetainedMethodAuthorized(String providerArnsField)
