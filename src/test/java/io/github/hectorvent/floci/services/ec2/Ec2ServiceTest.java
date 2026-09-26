@@ -89,6 +89,24 @@ import static org.mockito.Mockito.when;
 class Ec2ServiceTest {
 
     @Test
+    void sharedDescribeVpcsOmitsUnknownIdsButExplicitLookupStillRejectsThem() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String region = "us-east-1";
+        String unknown = "vpc-0000000000000dead";
+        Vpc known = service.createVpc(region, "10.95.0.0/16", false);
+
+        assertTrue(service.describeVpcs(region, List.of(unknown), Map.of()).isEmpty());
+        assertEquals(List.of(known), service.describeVpcs(region, List.of(known.getVpcId(), unknown), Map.of()));
+        assertTrue(service.describeVpcs("eu-west-1", List.of(known.getVpcId()), Map.of()).isEmpty());
+        assertTrue(service.describeVpcs(region, List.of(known.getVpcId()),
+                Map.of("cidr-block", List.of("10.96.0.0/16"))).isEmpty());
+        assertEquals("InvalidVpcID.NotFound", assertThrows(AwsException.class,
+                () -> service.requireVpc(region, unknown)).getErrorCode());
+    }
+
+    @Test
     void deleteVpcRemovesVpcOwnedDefaultResourcesAndRules() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class),

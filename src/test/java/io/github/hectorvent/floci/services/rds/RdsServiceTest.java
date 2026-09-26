@@ -4156,6 +4156,21 @@ class RdsServiceTest {
     }
 
     @Test
+    void createDbProxyReportsItsOwnIpv6ErrorWhenVpcLookupReturnsEmpty() {
+        when(ec2Service.describeVpcs(eq("us-east-1"), eq(List.of("vpc-default")), eq(Map.of())))
+                .thenReturn(List.of());
+
+        AwsException rejected = assertThrows(AwsException.class, () ->
+                rdsService.createDbProxy("missing-vpc-proxy", "POSTGRESQL", true, false, "NONE",
+                        PROXY_ROLE_ARN, PROXY_SUBNET_IDS, List.of(), PROXY_AUTH,
+                        1800, false, Map.of(), "us-east-1", "DUAL", null));
+
+        assertEquals("InvalidParameterValue", rejected.getErrorCode());
+        assertTrue(rejected.getMessage().contains("IPv6 CIDR block"));
+        assertTrue(rdsService.listDbProxies(null).isEmpty());
+    }
+
+    @Test
     void createDbProxyAcceptsIpv6NetworkTypeWhenVpcHasIpv6CidrBlock() {
         List<String> dualStackSubnetIds = List.of("subnet-dualstack-a", "subnet-dualstack-b");
         Subnet subnetA = subnet("subnet-dualstack-a", "vpc-dualstack", "us-east-1a");

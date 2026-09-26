@@ -4043,11 +4043,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         // unsupported filter matches every VPC instead of narrowing anything. Real EC2 rejects the
         // name outright, which is the difference between a wrong result and an error.
         requireSupportedFilters(filters, VPC_FILTERS);
-        if (!vpcIds.isEmpty()) {
-            for (String id : vpcIds) {
-                getRequiredVpc(region, id);
-            }
-        }
         return vpcs.scan(k -> true).stream()
                 .filter(v -> v.getRegion().equals(region))
                 .filter(v -> vpcIds.isEmpty() || vpcIds.contains(v.getVpcId()))

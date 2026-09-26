@@ -25,7 +25,6 @@ import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dimension;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricDatum;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
-import io.github.hectorvent.floci.services.ec2.model.Vpc;
 import io.github.hectorvent.floci.services.rds.container.AutoPauseListener;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerHandle;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
@@ -8389,8 +8388,8 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     private void validateVpcHasIpv6CidrBlock(String vpcId, String region) {
-        List<Vpc> vpcs = ec2Service.describeVpcs(region, List.of(vpcId), Map.of());
-        boolean hasIpv6 = !vpcs.isEmpty() && vpcs.get(0).getIpv6CidrBlockAssociationSet().stream()
+        boolean hasIpv6 = ec2Service.describeVpcs(region, List.of(vpcId), Map.of()).stream()
+                .flatMap(vpc -> vpc.getIpv6CidrBlockAssociationSet().stream())
                 .anyMatch(assoc -> "associated".equalsIgnoreCase(assoc.getIpv6CidrBlockState()));
         if (!hasIpv6) {
             throw new AwsException("InvalidParameterValue",

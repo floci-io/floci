@@ -1531,7 +1531,12 @@ public class Ec2QueryHandler {
     private Response handleDescribeVpcs(MultivaluedMap<String, String> p, String region) {
         List<String> ids = getList(p, "VpcId");
         Map<String, List<String>> filters = getFilters(p);
+        // Resolve the lookup first so unsupported filters retain their error precedence.
         List<Vpc> vpcs = service.describeVpcs(region, ids, filters);
+        // Shared service callers decide their own missing-resource behavior, as with subnets.
+        for (String vpcId : ids) {
+            service.requireVpc(region, vpcId);
+        }
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeVpcsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())

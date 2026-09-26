@@ -2,7 +2,6 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
@@ -143,7 +142,7 @@ class Ec2VpcCfnProvisionerTest {
     @Test
     void aVpcDeletedOutOfBandFallsBackToCreate() {
         when(ec2.describeVpcs(REGION, List.of("vpc-gone"), Map.of()))
-                .thenThrow(new AwsException("InvalidVpcID.NotFound", "not found", 400));
+                .thenReturn(List.of());
         when(ec2.createVpc(anyString(), anyString(), anyBoolean())).thenReturn(vpc("vpc-fresh", "10.0.0.0/16"));
 
         StackResource r = provision("vpc-gone", """
