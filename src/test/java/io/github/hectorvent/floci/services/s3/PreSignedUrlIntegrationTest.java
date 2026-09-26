@@ -1,6 +1,9 @@
 package io.github.hectorvent.floci.services.s3;
 
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.QuarkusTestProfile;
+import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -10,14 +13,23 @@ import org.junit.jupiter.api.TestMethodOrder;
 import java.net.URI;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 import static org.junit.jupiter.api.Assertions.*;
 
 @QuarkusTest
+@TestProfile(PreSignedUrlIntegrationTest.PresignValidationProfile.class)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class PreSignedUrlIntegrationTest {
+
+    public static final class PresignValidationProfile implements QuarkusTestProfile {
+        @Override
+        public Map<String, String> getConfigOverrides() {
+            return Map.of("floci.auth.validate-signatures", "true");
+        }
+    }
 
     private static final String BUCKET = "presign-test-bucket";
 
@@ -26,6 +38,9 @@ class PreSignedUrlIntegrationTest {
 
     @Inject
     PreSignedUrlGenerator presignGenerator;
+
+    @Inject
+    IamService iamService;
 
     @Test
     @Order(1)
@@ -53,6 +68,7 @@ class PreSignedUrlIntegrationTest {
         URI uri = URI.create(presignedUrl);
 
         given()
+            .urlEncodingEnabled(false)
         .when()
             .get(uri.getRawPath() + "?" + uri.getRawQuery())
         .then()
@@ -70,6 +86,7 @@ class PreSignedUrlIntegrationTest {
         assertTrue(url.contains("X-Amz-Credential="));
         assertTrue(url.contains("X-Amz-Date="));
         assertTrue(url.contains("X-Amz-Expires=300"));
+        assertTrue(url.contains("X-Amz-Security-Token="));
         assertTrue(url.contains("X-Amz-SignedHeaders=host"));
         assertTrue(url.contains("X-Amz-Signature="));
 
@@ -77,14 +94,23 @@ class PreSignedUrlIntegrationTest {
         assertFalse(url.contains("AKIAIOSFODNN7EXAMPLE"),
                 "X-Amz-Credential must not contain hardcoded AKIAIOSFODNN7EXAMPLE");
 
-        int credStart = url.indexOf("X-Amz-Credential=");
-        int credEnd = url.indexOf("&", credStart);
-        String encodedCredential = credEnd > 0
-                ? url.substring(credStart + "X-Amz-Credential=".length(), credEnd)
-                : url.substring(credStart + "X-Amz-Credential=".length());
-        String credential = URLDecoder.decode(encodedCredential, StandardCharsets.UTF_8);
-        assertTrue(credential.startsWith("000000000000/"),
-                "X-Amz-Credential should start with 12-digit account ID, got: " + credential);
+        URI uri = URI.create(url);
+        String credential = queryParam(uri, "X-Amz-Credential");
+        String sessionToken = queryParam(uri, "X-Amz-Security-Token");
+        String accessKeyId = credential.substring(0, credential.indexOf('/'));
+
+        assertTrue(accessKeyId.matches("ASIA[A-Z0-9]{16}"),
+                "X-Amz-Credential should use a temporary access key, got: " + credential);
+        assertNotNull(sessionToken);
+        assertTrue(iamService.findSecretKey(accessKeyId, sessionToken).isPresent(),
+                "The temporary credential must be registered for SigV4 validation");
+
+        URI secondUri = URI.create(presignGenerator.generatePresignedUrl(
+                "http://localhost:8080", BUCKET, "second-file.txt", "GET", 300));
+        String secondCredential = queryParam(secondUri, "X-Amz-Credential");
+        assertEquals(accessKeyId, secondCredential.substring(0, secondCredential.indexOf('/')),
+                "Generated URLs should reuse the account and region credential while it is valid");
+        assertEquals(sessionToken, queryParam(secondUri, "X-Amz-Security-Token"));
     }
 
     @Test
@@ -121,6 +147,7 @@ class PreSignedUrlIntegrationTest {
         URI uri = URI.create(url);
 
         given()
+            .urlEncodingEnabled(false)
             .body("uploaded via presigned PUT")
         .when()
             .put(uri.getRawPath() + "?" + uri.getRawQuery())
@@ -134,6 +161,35 @@ class PreSignedUrlIntegrationTest {
         .then()
             .statusCode(200)
             .body(equalTo("uploaded via presigned PUT"));
+    }
+
+    @Test
+    @Order(6)
+    void tamperedPresignedUrlReturnsSignatureMismatch() {
+        int port = io.restassured.RestAssured.port;
+        String url = presignGenerator.generatePresignedUrl(
+                "http://localhost:" + port, BUCKET, "secret-file.txt", "GET", 3600);
+        URI uri = URI.create(url);
+        String tamperedQuery = uri.getRawQuery().replaceFirst(
+                "X-Amz-Signature=[0-9a-f]+", "X-Amz-Signature=" + "0".repeat(64));
+
+        given()
+            .urlEncodingEnabled(false)
+        .when()
+            .get(uri.getRawPath() + "?" + tamperedQuery)
+        .then()
+            .statusCode(403)
+            .body("Error.Code", equalTo("SignatureDoesNotMatch"));
+    }
+
+    private static String queryParam(URI uri, String name) {
+        for (String pair : uri.getRawQuery().split("&")) {
+            int equals = pair.indexOf('=');
+            if (equals > 0 && name.equals(pair.substring(0, equals))) {
+                return URLDecoder.decode(pair.substring(equals + 1), StandardCharsets.UTF_8);
+            }
+        }
+        return null;
     }
 
     // --- response-* query parameter overrides on presigned GET/HEAD ---
