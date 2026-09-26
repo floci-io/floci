@@ -17,9 +17,13 @@ import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -47,13 +51,19 @@ final class CognitoAuthFlowHandler {
     private static final String CUSTOM_MESSAGE_CODE_PARAMETER = "{####}";
     /** The message of a wrong password, which managed login also shows for an unknown user. */
     static final String INCORRECT_CREDENTIALS = "Incorrect username or password";
+    /** Keeps unauthenticated callers from retaining unbounded in-memory challenge state. */
+    static final int MAX_USER_AUTH_SESSIONS = 4_096;
+    /** AWS default AuthSessionValidity until UserPoolClient exposes the configurable value. */
+    private static final Duration AUTH_SESSION_VALIDITY = Duration.ofMinutes(3);
 
     private final CognitoService service;
     private final LambdaService lambdaService;
     private final RegionResolver regionResolver;
+    private final Clock clock;
     private final ConcurrentHashMap<String, SrpSession> srpSessions = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, CustomAuthSession> customAuthSessions = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, UserAuthSession> userAuthSessions = new ConcurrentHashMap<>();
+    private final Object userAuthSessionLock = new Object();
+    private final LinkedHashMap<String, UserAuthSession> userAuthSessions = new LinkedHashMap<>();
 
     private record SrpSession(String userPoolId, String username, String clientId,
                               String aHex, String bHex, String bPublicHex,
@@ -67,7 +77,7 @@ final class CognitoAuthFlowHandler {
      * caller trigger an OTP send without ever starting a flow.
      */
     private record UserAuthSession(String userPoolId, String username, String clientId, String challengeName,
-                                   boolean userExists) {}
+                                   boolean userExists, Instant expiresAt) {}
 
     static final class CustomAuthSession {
         final String userPoolId;
@@ -85,10 +95,12 @@ final class CognitoAuthFlowHandler {
         }
     }
 
-    CognitoAuthFlowHandler(CognitoService service, LambdaService lambdaService, RegionResolver regionResolver) {
+    CognitoAuthFlowHandler(CognitoService service, LambdaService lambdaService, RegionResolver regionResolver,
+                           Clock clock) {
         this.service = service;
         this.lambdaService = lambdaService;
         this.regionResolver = regionResolver;
+        this.clock = clock;
     }
 
     // ──────────────────────────── Public entry points ────────────────────────────
@@ -723,8 +735,10 @@ final class CognitoAuthFlowHandler {
                                                             Map<String, String> challengeParameters,
                                                             boolean userExists) {
         String session = buildSessionToken(pool.getId(), username, client.getClientId());
-        userAuthSessions.put(session,
-                new UserAuthSession(pool.getId(), username, client.getClientId(), challengeName, userExists));
+        Instant now = clock.instant();
+        UserAuthSession state = new UserAuthSession(pool.getId(), username, client.getClientId(), challengeName,
+                userExists, now.plus(AUTH_SESSION_VALIDITY));
+        storeUserAuthSession(session, state, now);
         Map<String, Object> result = new HashMap<>();
         result.put("ChallengeName", challengeName);
         result.put("Session", session);
@@ -742,14 +756,44 @@ final class CognitoAuthFlowHandler {
      */
     private UserAuthSession consumeUserAuthSession(UserPool pool, UserPoolClient client, String session,
                                                     String expectedChallenge) {
-        UserAuthSession state = session == null ? null : userAuthSessions.remove(session);
+        UserAuthSession state;
+        synchronized (userAuthSessionLock) {
+            state = session == null ? null : userAuthSessions.remove(session);
+        }
         if (state == null || !expectedChallenge.equals(state.challengeName())) {
             throw new AwsException("NotAuthorizedException", "Session not found", 400);
+        }
+        if (sessionExpired(state.expiresAt(), clock.instant())) {
+            throw new AwsException("NotAuthorizedException",
+                    "Invalid session for the user, session is expired.", 400);
         }
         if (!state.userPoolId().equals(pool.getId()) || !state.clientId().equals(client.getClientId())) {
             throw new AwsException("NotAuthorizedException", "Session does not match client", 400);
         }
         return state;
+    }
+
+    private void storeUserAuthSession(String session, UserAuthSession state, Instant now) {
+        synchronized (userAuthSessionLock) {
+            Iterator<Map.Entry<String, UserAuthSession>> sessions = userAuthSessions.entrySet().iterator();
+            while (sessions.hasNext()) {
+                Map.Entry<String, UserAuthSession> oldest = sessions.next();
+                if (!sessionExpired(oldest.getValue().expiresAt(), now)) {
+                    break;
+                }
+                sessions.remove();
+            }
+            if (userAuthSessions.size() >= MAX_USER_AUTH_SESSIONS) {
+                Iterator<String> sessionTokens = userAuthSessions.keySet().iterator();
+                sessionTokens.next();
+                sessionTokens.remove();
+            }
+            userAuthSessions.put(session, state);
+        }
+    }
+
+    private static boolean sessionExpired(Instant expiresAt, Instant now) {
+        return !expiresAt.isAfter(now);
     }
 
     private void rejectSimulatedUser(UserAuthSession session) {

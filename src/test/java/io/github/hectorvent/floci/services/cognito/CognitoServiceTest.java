@@ -24,6 +24,7 @@ import io.github.hectorvent.floci.services.cognito.verification.CognitoMessageDi
 import io.github.hectorvent.floci.services.cognito.verification.VerificationCode;
 import io.github.hectorvent.floci.services.cognito.verification.VerificationCodeException;
 import io.github.hectorvent.floci.services.cognito.verification.VerificationCodeService;
+import io.github.hectorvent.floci.testing.MutableClock;
 import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
@@ -32,6 +33,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
@@ -86,6 +88,15 @@ class CognitoServiceTest {
                 null,
                 acmService
         );
+    }
+
+    private CognitoService serviceWithClock(MutableClock clock) {
+        return new CognitoService(
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                "http://localhost:4566", regionResolver, null, acmService,
+                null, null, mock(TlsCertificateManager.class), clock);
     }
 
     private UserPool createPoolAndUser() {
@@ -2479,6 +2490,87 @@ class CognitoServiceTest {
                 client.getClientId(), "USER_AUTH", Map.of("USERNAME", "missing")));
 
         assertEquals("UserNotFoundException", exception.getErrorCode());
+    }
+
+    @Test
+    void respondToAuthChallengeRejectsASimulatedUserSessionAtExactExpiry() {
+        MutableClock clock = new MutableClock();
+        CognitoService clockedService = serviceWithClock(clock);
+        UserPool pool = clockedService.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        UserPoolClient client = openClient(clockedService, pool.getId(), "c", false);
+        clockedService.describeUserPoolClient(client.getClientId()).setPreventUserExistenceErrors("ENABLED");
+
+        Map<String, Object> initResult = clockedService.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "missing"));
+        String session = (String) initResult.get("Session");
+        // MutableClock advances one millisecond when issuance reads it, so this reaches expiresAt exactly.
+        clock.advance(Duration.ofMinutes(3).minusMillis(1));
+
+        AwsException exception = assertThrows(AwsException.class, () -> clockedService.respondToAuthChallenge(
+                client.getClientId(), "PASSWORD", session,
+                Map.of("USERNAME", "missing", "PASSWORD", "anything")));
+
+        assertEquals("NotAuthorizedException", exception.getErrorCode());
+        assertEquals("Invalid session for the user, session is expired.", exception.getMessage());
+    }
+
+    @Test
+    void initiateAuthWithUserAuthPurgesExpiredSimulatedSessions() {
+        MutableClock clock = new MutableClock();
+        CognitoService clockedService = serviceWithClock(clock);
+        UserPool pool = clockedService.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        UserPoolClient client = openClient(clockedService, pool.getId(), "c", false);
+        clockedService.describeUserPoolClient(client.getClientId()).setPreventUserExistenceErrors("ENABLED");
+
+        Map<String, Object> oldResult = clockedService.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "missing-old"));
+        String oldSession = (String) oldResult.get("Session");
+        clock.advance(Duration.ofMinutes(3).plusSeconds(1));
+
+        Map<String, Object> newResult = clockedService.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "missing-new"));
+
+        AwsException oldException = assertThrows(AwsException.class, () -> clockedService.respondToAuthChallenge(
+                client.getClientId(), "PASSWORD", oldSession,
+                Map.of("USERNAME", "missing-old", "PASSWORD", "anything")));
+        assertEquals("Session not found", oldException.getMessage());
+
+        String newSession = (String) newResult.get("Session");
+        AwsException newException = assertThrows(AwsException.class, () -> clockedService.respondToAuthChallenge(
+                client.getClientId(), "PASSWORD", newSession,
+                Map.of("USERNAME", "missing-new", "PASSWORD", "anything")));
+        assertEquals("Incorrect username or password", newException.getMessage());
+    }
+
+    @Test
+    void initiateAuthWithUserAuthCapsUnansweredSessions() {
+        MutableClock clock = new MutableClock();
+        CognitoService clockedService = serviceWithClock(clock);
+        UserPool pool = clockedService.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        UserPoolClient client = openClient(clockedService, pool.getId(), "c", false);
+        clockedService.describeUserPoolClient(client.getClientId()).setPreventUserExistenceErrors("ENABLED");
+
+        Map<String, Object> firstResult = clockedService.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "missing-0"));
+        String firstSession = (String) firstResult.get("Session");
+        for (int index = 1; index < CognitoAuthFlowHandler.MAX_USER_AUTH_SESSIONS; index++) {
+            clockedService.initiateAuth(client.getClientId(), "USER_AUTH",
+                    Map.of("USERNAME", "missing-" + index));
+        }
+
+        Map<String, Object> newestResult = clockedService.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "missing-overflow"));
+
+        AwsException firstException = assertThrows(AwsException.class, () -> clockedService.respondToAuthChallenge(
+                client.getClientId(), "PASSWORD", firstSession,
+                Map.of("USERNAME", "missing-0", "PASSWORD", "anything")));
+        assertEquals("Session not found", firstException.getMessage());
+
+        String newestSession = (String) newestResult.get("Session");
+        AwsException newestException = assertThrows(AwsException.class, () -> clockedService.respondToAuthChallenge(
+                client.getClientId(), "PASSWORD", newestSession,
+                Map.of("USERNAME", "missing-overflow", "PASSWORD", "anything")));
+        assertEquals("Incorrect username or password", newestException.getMessage());
     }
 
     @Test

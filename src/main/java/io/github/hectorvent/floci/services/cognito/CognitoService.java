@@ -182,7 +182,8 @@ public class CognitoService implements ResourceProvider {
                 acmService,
                 new VerificationCodeService(storageFactory, clock),
                 new CognitoMessageDispatcher(sesService, snsService),
-                certificateManager
+                certificateManager,
+                clock
         );
     }
 
@@ -214,6 +215,25 @@ public class CognitoService implements ResourceProvider {
             VerificationCodeService verificationCodeService,
             CognitoMessageDispatcher messageDispatcher,
             TlsCertificateManager certificateManager) {
+        this(poolStore, clientStore, resourceServerStore, domainStore, identityProviderStore, userStore,
+                groupStore, revokedTokenStore, baseUrl, regionResolver, lambdaService, acmService,
+                verificationCodeService, messageDispatcher, certificateManager, Clock.systemUTC());
+    }
+
+    CognitoService(StorageBackend<String, UserPool> poolStore,
+            StorageBackend<String, UserPoolClient> clientStore,
+            StorageBackend<String, ResourceServer> resourceServerStore,
+            StorageBackend<String, UserPoolDomain> domainStore,
+            StorageBackend<String, IdentityProvider> identityProviderStore,
+            StorageBackend<String, CognitoUser> userStore,
+            StorageBackend<String, CognitoGroup> groupStore,
+            StorageBackend<String, RevokedTokenInfo> revokedTokenStore,
+            String baseUrl,
+            RegionResolver regionResolver, LambdaService lambdaService, AcmService acmService,
+            VerificationCodeService verificationCodeService,
+            CognitoMessageDispatcher messageDispatcher,
+            TlsCertificateManager certificateManager,
+            Clock clock) {
         this.poolStore = poolStore;
         this.clientStore = clientStore;
         this.resourceServerStore = resourceServerStore;
@@ -229,7 +249,7 @@ public class CognitoService implements ResourceProvider {
         this.verificationCodeService = verificationCodeService;
         this.messageDispatcher = messageDispatcher;
         this.certificateManager = certificateManager;
-        this.authFlowHandler = new CognitoAuthFlowHandler(this, lambdaService, regionResolver);
+        this.authFlowHandler = new CognitoAuthFlowHandler(this, lambdaService, regionResolver, clock);
     }
 
     // ──────────────────────────── User Pools ────────────────────────────
