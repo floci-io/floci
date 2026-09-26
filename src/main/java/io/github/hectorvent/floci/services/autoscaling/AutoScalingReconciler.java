@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.services.autoscaling.model.AsgInstance;
 import io.github.hectorvent.floci.services.autoscaling.model.AutoScalingGroup;
 import io.github.hectorvent.floci.services.autoscaling.model.LaunchConfiguration;
 import io.github.hectorvent.floci.services.autoscaling.model.MixedInstancesPolicy;
+import io.github.hectorvent.floci.services.autoscaling.model.ScalingActivity;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
@@ -216,16 +217,16 @@ public class AutoScalingReconciler {
         if ("InService".equals(lifecycleState)) {
             return !ec2Service.isInstanceContainerRunning(instance.getInstanceId());
         }
-        if ("Pending".equals(lifecycleState)) {
-            return isMissingOrTerminalEc2Instance(asg, instance);
+        if ("Pending".equals(lifecycleState) || "Terminating".equals(lifecycleState)) {
+            return isMissingOrTerminalEc2Instance(asg, instance.getInstanceId());
         }
         return false;
     }
 
-    private boolean isMissingOrTerminalEc2Instance(AutoScalingGroup asg, AsgInstance instance) {
+    private boolean isMissingOrTerminalEc2Instance(AutoScalingGroup asg, String instanceId) {
         try {
             List<Instance> ec2Instances = ec2Service
-                    .describeInstances(asg.getRegion(), List.of(instance.getInstanceId()), null)
+                    .describeInstances(asg.getRegion(), List.of(instanceId), null)
                     .stream()
                     .flatMap(r -> r.getInstances().stream())
                     .collect(Collectors.toList());
@@ -241,8 +242,8 @@ public class AutoScalingReconciler {
                     || "stopped".equals(state);
         }
         catch (Exception e) {
-            LOG.debugv("ASG {0}: keeping pending instance {1} during stale check: {2}",
-                    asg.getAutoScalingGroupName(), instance.getInstanceId(), e.getMessage());
+            LOG.debugv("ASG {0}: keeping instance {1} during stale check: {2}",
+                    asg.getAutoScalingGroupName(), instanceId, e.getMessage());
             return false;
         }
     }
@@ -290,15 +291,25 @@ public class AutoScalingReconciler {
         List<String> instanceIds = terminatingInstances.stream()
                 .map(AsgInstance::getInstanceId)
                 .collect(Collectors.toList());
-        deregisterFromTargetGroups(asg, instanceIds);
-        deregisterFromClassicLoadBalancers(asg, instanceIds);
         try {
             ec2Service.terminateInstances(asg.getRegion(), instanceIds);
         } catch (Exception e) {
             LOG.warnv("ASG {0}: failed to terminate refreshing instances {1}: {2}",
                     asg.getAutoScalingGroupName(), instanceIds, e.getMessage());
+            // A terminating instance whose EC2 record is already gone is not a failure: it is pruned
+            // as stale by removeStaleInstances in this same pass. Only real failures are recorded.
+            List<String> stillPresent = instanceIds.stream()
+                    .filter(id -> !isMissingOrTerminalEc2Instance(asg, id))
+                    .toList();
+            if (!stillPresent.isEmpty()) {
+                recordFailedActivity(asg, "Terminating EC2 instance(s) for refresh: " + stillPresent,
+                        "An instance refresh requested replacement of active instances.", e.getMessage());
+            }
+            return;
         }
 
+        deregisterFromTargetGroups(asg, instanceIds);
+        deregisterFromClassicLoadBalancers(asg, instanceIds);
         asg.getInstances().removeIf(instance -> instanceIds.contains(instance.getInstanceId()));
         asgService.saveAutoScalingGroupIfPresent(asg);
         asgService.recordActivity(asg.getRegion(), asg.getAutoScalingGroupName(),
@@ -403,15 +414,18 @@ public class AutoScalingReconciler {
                 .map(AsgInstance::getInstanceId)
                 .collect(Collectors.toList());
 
-        deregisterFromTargetGroups(asg, instanceIds);
-        deregisterFromClassicLoadBalancers(asg, instanceIds);
-
         try {
             ec2Service.terminateInstances(asg.getRegion(), instanceIds);
         } catch (Exception e) {
             LOG.warnv("ASG {0}: failed to terminate instances {1}: {2}",
                     asg.getAutoScalingGroupName(), instanceIds, e.getMessage());
+            recordFailedActivity(asg, "Terminating EC2 instance(s): " + instanceIds,
+                    "An instance was terminated in response to a desired capacity change.", e.getMessage());
+            return;
         }
+
+        deregisterFromTargetGroups(asg, instanceIds);
+        deregisterFromClassicLoadBalancers(asg, instanceIds);
 
         asg.getInstances().removeIf(i -> instanceIds.contains(i.getInstanceId()));
         asgService.saveAutoScalingGroupIfPresent(asg);
@@ -419,6 +433,23 @@ public class AutoScalingReconciler {
                 "Terminating EC2 instance(s): " + instanceIds,
                 "An instance was terminated in response to a desired capacity change.",
                 "Successful");
+    }
+
+    /**
+     * Records a failed scaling activity with the error text, matching AWS (100% progress and a
+     * {@code StatusMessage}). A failure that repeats on the next pass, because termination keeps
+     * failing, is not recorded again: the previous failed activity already describes it.
+     */
+    private void recordFailedActivity(AutoScalingGroup asg, String description, String cause, String message) {
+        ScalingActivity latest = asgService.describeScalingActivities(asg.getRegion(), asg.getAutoScalingGroupName())
+                .stream().findFirst().orElse(null);
+        if (latest != null && "Failed".equals(latest.getStatusCode())
+                && description.equals(latest.getDescription())) {
+            return;
+        }
+        ScalingActivity activity = asgService.recordActivity(asg.getRegion(), asg.getAutoScalingGroupName(),
+                description, cause, "Failed");
+        asgService.completeActivity(activity.getActivityId(), "Failed", message);
     }
 
     private void deregisterFromTargetGroups(AutoScalingGroup asg, List<String> instanceIds) {
