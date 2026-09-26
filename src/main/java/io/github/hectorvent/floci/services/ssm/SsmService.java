@@ -205,9 +205,15 @@ public class SsmService implements ResourceProvider {
     }
 
     public Parameter getParameter(String name, String region) {
-        return findParameter(name, region)
-                .orElseThrow(() -> new AwsException("ParameterNotFound",
-                        "Parameter " + name + " not found.", 400));
+        return findParameter(name, region).orElseThrow(() -> {
+            int separator = name.lastIndexOf(':');
+            if (separator > 0 && parameterStore.get(regionKey(region, name.substring(0, separator))).isPresent()) {
+                return new AwsException("ParameterVersionNotFound",
+                        "Systems Manager could not find version or label " + name.substring(separator + 1)
+                                + " of " + name.substring(0, separator) + ". Verify the version and try again.", 400);
+            }
+            return new AwsException("ParameterNotFound", "Parameter " + name + " not found.", 400);
+        });
     }
 
     public List<Parameter> getParameters(List<String> names, String region) {
@@ -243,7 +249,48 @@ public class SsmService implements ResourceProvider {
         if (stored.isPresent()) {
             return stored;
         }
+        Optional<Parameter> selected = findSelectedVersion(name, region);
+        if (selected.isPresent()) {
+            return selected;
+        }
         return publicParameter(name, region);
+    }
+
+    /**
+     * A read may name a version or label as {@code name:version} or {@code name:label}. A
+     * parameter name cannot contain a colon, so the last one always starts the selector. The
+     * answer is a copy built from the history entry: it carries the base name and the selector
+     * as AWS returns them, and nothing is written back.
+     */
+    private Optional<Parameter> findSelectedVersion(String name, String region) {
+        int separator = name == null ? -1 : name.lastIndexOf(':');
+        if (separator <= 0 || separator == name.length() - 1) {
+            return Optional.empty();
+        }
+        String baseName = name.substring(0, separator);
+        String selector = name.substring(separator + 1);
+        String storageKey = regionKey(region, baseName);
+        Optional<Parameter> current = parameterStore.get(storageKey);
+        if (current.isEmpty()) {
+            return Optional.empty();
+        }
+        boolean isVersion = selector.chars().allMatch(Character::isDigit);
+        // A label may sit on several versions; the newest one wins.
+        return historyStore.get(storageKey).orElse(List.of()).stream()
+                .filter(h -> isVersion
+                        ? String.valueOf(h.getVersion()).equals(selector)
+                        : h.getLabels() != null && h.getLabels().contains(selector))
+                .max(Comparator.comparingLong(ParameterHistory::getVersion))
+                .map(h -> {
+                    Parameter parameter = new Parameter(baseName, h.getValue(), h.getType());
+                    parameter.setVersion(h.getVersion());
+                    parameter.setDescription(h.getDescription());
+                    parameter.setLastModifiedDate(h.getLastModifiedDate());
+                    parameter.setArn(current.get().getArn());
+                    parameter.setDataType(current.get().getDataType());
+                    parameter.setSelector(":" + selector);
+                    return parameter;
+                });
     }
 
     /**

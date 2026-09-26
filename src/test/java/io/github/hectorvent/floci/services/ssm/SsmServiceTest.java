@@ -202,6 +202,64 @@ class SsmServiceTest {
     }
 
     @Test
+    void getParameterByVersionSelectorReturnsThatVersion() {
+        String region = "eu-west-1";
+        ssmService.putParameter("/app/key", "v1", "SecureString", null, false, region);
+        ssmService.putParameter("/app/key", "v2", "SecureString", null, true, region);
+
+        Parameter first = ssmService.getParameter("/app/key:1", region);
+        assertEquals("/app/key", first.getName());
+        assertEquals("v1", first.getValue());
+        assertEquals(1, first.getVersion());
+        assertEquals(":1", first.getSelector());
+        assertEquals("v2", ssmService.getParameter("/app/key:2", region).getValue());
+        assertEquals("v2", ssmService.getParameter("/app/key", region).getValue());
+    }
+
+    @Test
+    void getParameterByLabelSelectorReturnsLabeledVersion() {
+        String region = "eu-west-1";
+        ssmService.putParameter("/app/key", "v1", "String", null, false, region);
+        ssmService.putParameter("/app/key", "v2", "String", null, true, region);
+        ssmService.labelParameterVersion("/app/key", 1, List.of("previous"), region);
+
+        Parameter labeled = ssmService.getParameter("/app/key:previous", region);
+        assertEquals("v1", labeled.getValue());
+        assertEquals(":previous", labeled.getSelector());
+    }
+
+    @Test
+    void getParameterWithUnknownVersionThrowsParameterVersionNotFound() {
+        String region = "eu-west-1";
+        ssmService.putParameter("/app/key", "v1", "String", null, false, region);
+
+        AwsException version = assertThrows(AwsException.class,
+                () -> ssmService.getParameter("/app/key:9", region));
+        assertEquals("ParameterVersionNotFound", version.getErrorCode());
+        AwsException label = assertThrows(AwsException.class,
+                () -> ssmService.getParameter("/app/key:nolabel", region));
+        assertEquals("ParameterVersionNotFound", label.getErrorCode());
+    }
+
+    @Test
+    void getParameterWithSelectorOnMissingParameterThrowsParameterNotFound() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> ssmService.getParameter("/missing:1", "eu-west-1"));
+        assertEquals("ParameterNotFound", ex.getErrorCode());
+    }
+
+    @Test
+    void getParametersSkipsUnknownVersionSelector() {
+        String region = "eu-west-1";
+        ssmService.putParameter("/app/key", "v1", "String", null, false, region);
+        ssmService.putParameter("/app/key", "v2", "String", null, true, region);
+
+        List<Parameter> found = ssmService.getParameters(List.of("/app/key:1", "/app/key:9"), region);
+        assertEquals(1, found.size());
+        assertEquals("v1", found.getFirst().getValue());
+    }
+
+    @Test
     void parameterHistoryIsTrimmedToMax() {
         String region = "eu-west-1";
         for (int i = 1; i <= 7; i++) {
