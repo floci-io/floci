@@ -115,10 +115,10 @@ class KinesisEventSourcePollerTest {
     private void stubStreamWith(List<KinesisRecord> records) {
         KinesisStream stream = new KinesisStream("s", STREAM_ARN);
         stream.setShards(List.of(new KinesisShard(SHARD, "0", "1", "0")));
-        when(kinesisService.describeStream(anyString(), eq(REGION))).thenReturn(stream);
-        when(kinesisService.getShardIterator(anyString(), eq(SHARD), anyString(), any(), eq(REGION)))
+        when(kinesisService.describeStreamForAccount(eq(ACCOUNT), anyString(), eq(REGION))).thenReturn(stream);
+        when(kinesisService.getShardIteratorForAccount(eq(ACCOUNT), anyString(), eq(SHARD), anyString(), any(), eq(REGION)))
                 .thenReturn("iter-0");
-        when(kinesisService.getRecords(eq("iter-0"), anyInt(), eq(REGION)))
+        when(kinesisService.getRecordsForAccount(eq(ACCOUNT), eq("iter-0"), anyInt(), eq(REGION)))
                 .thenReturn(Map.of("Records", records));
     }
 
@@ -147,7 +147,7 @@ class KinesisEventSourcePollerTest {
         while (true) {
             poller.pollAndInvoke(esm);
             try {
-                verify(kinesisService, atLeast(2)).getRecords(eq("iter-0"), anyInt(), eq(REGION));
+                verify(kinesisService, atLeast(2)).getRecordsForAccount(eq(ACCOUNT), eq("iter-0"), anyInt(), eq(REGION));
                 return;
             } catch (AssertionError retry) {
                 if (System.currentTimeMillis() > deadline) {
@@ -348,5 +348,39 @@ class KinesisEventSourcePollerTest {
 
         verify(esmStore, never()).saveForAccount(eq(ACCOUNT), any());
         assertNull(esm.getShardSequenceNumbers().get(SHARD));
+    }
+
+    /**
+     * Regression for the account leak: a non-default ESM must read its stream through the
+     * account-aware Kinesis overloads. The old request-context calls resolved against the ambient
+     * request account, which defaults outside a request, so a same-named stream in the default
+     * account could be read instead.
+     */
+    @Test
+    void readsTheStreamInTheEventSourceMappingsAccountNotTheRequestAccount() {
+        String esmAccount = "111111111111";
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("fn");
+        when(functionStore.getForAccount(esmAccount, REGION, "fn")).thenReturn(Optional.of(fn));
+
+        KinesisStream stream = new KinesisStream("s", STREAM_ARN);
+        stream.setShards(List.of(new KinesisShard(SHARD, "0", "1", "0")));
+        when(kinesisService.describeStreamForAccount(eq(esmAccount), anyString(), eq(REGION))).thenReturn(stream);
+        when(kinesisService.getShardIteratorForAccount(eq(esmAccount), anyString(), eq(SHARD), anyString(), any(), eq(REGION)))
+                .thenReturn("iter-0");
+        when(kinesisService.getRecordsForAccount(eq(esmAccount), eq("iter-0"), anyInt(), eq(REGION)))
+                .thenReturn(Map.of("Records", List.of(record("s1", "p1", "{\"type\":\"order\"}"))));
+        when(executorService.invoke(any(), any(), eq(InvocationType.RequestResponse))).thenReturn(new InvokeResult());
+
+        EventSourceMapping esm = esm();
+        esm.setAccountId(esmAccount);
+
+        poller.pollAndInvoke(esm);
+
+        verify(executorService, timeout(2000)).invoke(any(), any(), eq(InvocationType.RequestResponse));
+        verify(esmStore, timeout(2000)).saveForAccount(eq(esmAccount), any());
+        verify(kinesisService, never()).describeStream(anyString(), anyString());
+        verify(kinesisService, never()).getShardIterator(anyString(), anyString(), anyString(), any(), anyString());
+        verify(kinesisService, never()).getRecords(anyString(), anyInt(), anyString());
     }
 }

@@ -119,18 +119,22 @@ public class KinesisEventSourcePoller implements Resettable {
                 if (fn == null) return;
 
                 String streamName = streamNameFromArn(esm.getEventSourceArn());
-                KinesisStream stream = kinesisService.describeStream(streamName, esm.getRegion());
+                KinesisStream stream = kinesisService.describeStreamForAccount(
+                        esm.getAccountId(), streamName, esm.getRegion());
 
                 for (KinesisShard shard : stream.getShards()) {
                     String lastSeq = esm.getShardSequenceNumbers().get(shard.getShardId());
                     String iterator;
                     if (lastSeq == null) {
-                        iterator = kinesisService.getShardIterator(streamName, shard.getShardId(), "TRIM_HORIZON", null, esm.getRegion());
+                        iterator = kinesisService.getShardIteratorForAccount(esm.getAccountId(),
+                                streamName, shard.getShardId(), "TRIM_HORIZON", null, esm.getRegion());
                     } else {
-                        iterator = kinesisService.getShardIterator(streamName, shard.getShardId(), "AFTER_SEQUENCE_NUMBER", lastSeq, esm.getRegion());
+                        iterator = kinesisService.getShardIteratorForAccount(esm.getAccountId(),
+                                streamName, shard.getShardId(), "AFTER_SEQUENCE_NUMBER", lastSeq, esm.getRegion());
                     }
 
-                    Map<String, Object> result = kinesisService.getRecords(iterator, esm.getBatchSize(), esm.getRegion());
+                    Map<String, Object> result = kinesisService.getRecordsForAccount(
+                            esm.getAccountId(), iterator, esm.getBatchSize(), esm.getRegion());
                     List<KinesisRecord> records = (List<KinesisRecord>) result.get("Records");
 
                     if (records.isEmpty()) {
