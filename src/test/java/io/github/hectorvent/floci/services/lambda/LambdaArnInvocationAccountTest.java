@@ -20,6 +20,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.AdditionalMatchers.aryEq;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -48,7 +50,7 @@ class LambdaArnInvocationAccountTest {
 
         LambdaExecutorService executor = mock(LambdaExecutorService.class);
         InvokeResult executorResult = new InvokeResult();
-        when(executor.invoke(eq(function), aryEq("{}".getBytes()), eq(InvocationType.Event), eq(0)))
+        when(executor.invoke(eq(function), aryEq("{}".getBytes()), eq(InvocationType.Event), eq(0), isNull()))
                 .thenReturn(executorResult);
         LambdaService service = new LambdaService(
                 store,
@@ -76,7 +78,7 @@ class LambdaArnInvocationAccountTest {
         InvokeResult result = service.invokeArn(functionArn, "{}".getBytes(), InvocationType.Event);
 
         assertEquals("$LATEST", result.getExecutedVersion());
-        verify(executor).invoke(eq(function), aryEq("{}".getBytes()), eq(InvocationType.Event), eq(0));
+        verify(executor).invoke(eq(function), aryEq("{}".getBytes()), eq(InvocationType.Event), eq(0), isNull());
     }
 
     @Test
@@ -111,7 +113,7 @@ class LambdaArnInvocationAccountTest {
                 "alias::" + region + "::" + functionName + "::live", alias);
 
         LambdaExecutorService executor = mock(LambdaExecutorService.class);
-        when(executor.invoke(eq(version), aryEq("{}".getBytes()), eq(InvocationType.Event), eq(0)))
+        when(executor.invoke(eq(version), aryEq("{}".getBytes()), eq(InvocationType.Event), eq(0), nullable(String.class)))
                 .thenAnswer(ignored -> new InvokeResult());
         LambdaService service = new LambdaService(
                 functionStore,
@@ -143,8 +145,8 @@ class LambdaArnInvocationAccountTest {
 
         assertEquals("7", versionResult.getExecutedVersion());
         assertEquals("7", aliasResult.getExecutedVersion());
-        verify(executor, org.mockito.Mockito.times(2))
-                .invoke(eq(version), aryEq("{}".getBytes()), eq(InvocationType.Event), eq(0));
+        verify(executor).invoke(eq(version), aryEq("{}".getBytes()), eq(InvocationType.Event), eq(0), eq("7"));
+        verify(executor).invoke(eq(version), aryEq("{}".getBytes()), eq(InvocationType.Event), eq(0), eq("live"));
     }
 
     @Test
@@ -178,9 +180,9 @@ class LambdaArnInvocationAccountTest {
                 new AccountAwareStorageBackend<>(rawAliases, null, defaultAccount));
 
         LambdaExecutorService executor = mock(LambdaExecutorService.class);
-        when(executor.invoke(eq(latest), aryEq("{}".getBytes()), eq(InvocationType.Event), eq(0)))
+        when(executor.invoke(eq(latest), aryEq("{}".getBytes()), eq(InvocationType.Event), eq(0), isNull()))
                 .thenAnswer(ignored -> new InvokeResult());
-        when(executor.invoke(eq(version), aryEq("{}".getBytes()), eq(InvocationType.Event), eq(0)))
+        when(executor.invoke(eq(version), aryEq("{}".getBytes()), eq(InvocationType.Event), eq(0), nullable(String.class)))
                 .thenAnswer(ignored -> new InvokeResult());
         LambdaService service = service(functionStore, aliasStore, executor, region, defaultAccount);
 

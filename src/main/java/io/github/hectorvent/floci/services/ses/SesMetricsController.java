@@ -30,6 +30,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
 
+import static io.github.hectorvent.floci.services.ses.SesV2Json.epochSeconds;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.readOptionBody;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.stringMemberOrAbsent;
 
@@ -151,7 +152,7 @@ public class SesMetricsController {
         node.put("Id", query.id());
         ArrayNode timestamps = node.putArray("Timestamps");
         for (Instant timestamp : series.timestamps()) {
-            timestamps.add(timestamp.toEpochMilli() / 1000.0);
+            timestamps.add(epochSeconds(timestamp));
         }
         ArrayNode values = node.putArray("Values");
         for (Long value : series.values()) {

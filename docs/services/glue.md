@@ -140,8 +140,23 @@ retroactively.
 | CreateJob | Creates a new job definition. |
 | GetJob | Retrieves an existing job definition. |
 | GetJobs | Retrieves all current job definitions. |
+| ListJobs | Lists job names, optionally only those carrying every given tag. |
+| BatchGetJobs | Retrieves several job definitions by name and reports the names not found. |
 | UpdateJob | Updates an existing job definition. |
-| DeleteJob | Deletes a specified job definition. |
+| DeleteJob | Deletes a specified job definition and its runs. |
+| StartJobRun | Starts a run of a job, with per-run arguments and capacity overrides. |
+| GetJobRun | Retrieves one run of a job. |
+| GetJobRuns | Lists a job's runs, newest first. |
+| BatchStopJobRun | Stops running runs of a job and reports the rest in `Errors`. |
+
+Job runs do not execute the job's script. A run follows Glue's state machine and response shape: it
+takes the job's worker type, worker count, timeout and Glue version unless the request overrides them,
+and `MaxConcurrentRuns` (1 when unset) rejects a start with `ConcurrentRunsExceededException` unless
+`JobRunQueuingEnabled` is set. With the default `job-run-duration-seconds` of 0 a run is `SUCCEEDED` as
+soon as it starts. A positive value keeps each run `RUNNING` for that many seconds, so a test can observe
+`BatchStopJobRun` (the run ends `STOPPED`) and the concurrency limit; a run whose duration exceeds the job
+timeout ends `TIMEOUT` when the timeout is reached. Queued runs are admitted straight away rather than
+waiting in `WAITING`.
 
 #### Crawlers
 
@@ -150,8 +165,50 @@ retroactively.
 | CreateCrawler | Creates a new crawler with specified targets, role, configuration, and optional schedule. |
 | GetCrawler | Retrieves metadata for a specified crawler. |
 | GetCrawlers | Retrieves metadata for all crawlers defined in the customer account. |
-| UpdateCrawler | Updates a crawler. |
-| DeleteCrawler | Removes a specified crawler from the AWS Glue Data Catalog. |
+| ListCrawlers | Lists crawler names, optionally only those carrying every given tag. |
+| BatchGetCrawlers | Retrieves several crawlers by name and reports the names not found. |
+| UpdateCrawler | Updates a crawler; refused with `CrawlerRunningException` while a crawl runs. |
+| DeleteCrawler | Removes a crawler and its crawl history; refused with `CrawlerRunningException` while a crawl runs. |
+| StartCrawler | Starts a crawl. |
+| StopCrawler | Stops the running crawl, which is then recorded as `CANCELLED`. |
+| GetCrawlerMetrics | Reports time left, last and median runtime for the named crawlers, or for all of them. |
+| UpdateCrawlerSchedule | Replaces a crawler's cron schedule. |
+| StartCrawlerSchedule | Sets a crawler's schedule to `SCHEDULED`. |
+| StopCrawlerSchedule | Sets a crawler's schedule to `NOT_SCHEDULED`. |
+
+Crawls do not read the data store or write tables. A crawl follows the crawler's state machine:
+`GetCrawler` reports `RUNNING` with `CrawlElapsedTime` while it runs, then `READY` with a `LastCrawl`
+of `SUCCEEDED` (or `CANCELLED` after `StopCrawler`). With the default `crawler-run-duration-seconds` of
+0 a crawl finishes as soon as it starts; a positive value keeps the crawler `RUNNING` that long.
+`GetCrawlerMetrics` reports zero tables created, updated and deleted. Schedules are stored and their
+state can be switched, but a schedule never starts a crawl on its own.
+
+#### Triggers
+
+| Action | Description |
+|--------|-------------|
+| CreateTrigger | Creates an `ON_DEMAND`, `SCHEDULED` or `CONDITIONAL` trigger whose actions start jobs or crawlers. |
+| GetTrigger | Retrieves a trigger. |
+| GetTriggers | Retrieves triggers; with `DependentJobName`, those that start the job, or all when none do. |
+| ListTriggers | Lists trigger names, with the same `DependentJobName` rule and an optional tag filter. |
+| BatchGetTriggers | Retrieves several triggers by name and reports the names not found. |
+| UpdateTrigger | Applies the members a `TriggerUpdate` sets and returns the trigger. |
+| DeleteTrigger | Deletes a trigger; deleting one that does not exist succeeds. |
+| StartTrigger | Runs an `ON_DEMAND` trigger's actions now, or activates a `SCHEDULED` or `CONDITIONAL` one. |
+| StopTrigger | Deactivates a `SCHEDULED` or `CONDITIONAL` trigger. |
+
+An activated `CONDITIONAL` trigger fires for each job run or crawl its predicate watches that finishes
+in the named state (`ANY` on each matching completion, `AND` on a matching completion once every
+condition's latest outcome matches). Runs finished before the trigger was activated do not count.
+Floci evaluates conditional triggers after each request that starts, stops or reads job runs or crawls,
+so with the default run durations of 0 a whole chain of triggers completes within the request that
+starts it; with a positive duration the trigger fires on the first such request after the watched run
+finishes. One request runs at most 25 firing rounds; a longer chain continues on the next such request.
+As an emulator safeguard (AWS has no such limit), triggers start at most 100 runs on behalf of the run
+that set off a chain, the one no trigger started, so a loop of triggers of any shape stops there.
+A run a trigger starts carries its `TriggerName`. `SCHEDULED` triggers are stored and can
+be activated, but no timer fires them. `EVENT` triggers and `WorkflowName` need workflows, which are
+not emulated yet.
 
 #### Classifiers
 
@@ -215,6 +272,8 @@ Supported schema formats are `AVRO`, `JSON`, and `PROTOBUF`. Compatibility modes
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_GLUE_ENABLED` | `true` | Enable or disable the service |
+| `FLOCI_SERVICES_GLUE_JOB_RUN_DURATION_SECONDS` | `0` | Seconds a job run stays `RUNNING` before it succeeds; `0` finishes it as soon as it starts |
+| `FLOCI_SERVICES_GLUE_CRAWLER_RUN_DURATION_SECONDS` | `0` | Seconds a crawl keeps the crawler `RUNNING` before it succeeds; `0` finishes it as soon as it starts |
 
 ## Integration with Athena
 

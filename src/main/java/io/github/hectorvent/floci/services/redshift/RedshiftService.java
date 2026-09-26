@@ -11,7 +11,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
-import io.github.hectorvent.floci.services.dynamodb.DynamoDbStreamService;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbStreamReader;
 import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerHandle;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerManager;
@@ -83,7 +83,7 @@ public class RedshiftService {
     private final RedshiftCredentialBroker credentialBroker;
     private final SecretsManagerService secretsManagerService;
     private final ObjectMapper objectMapper;
-    private final DynamoDbStreamService streamService;
+    private final DynamoDbStreamReader streamReader;
     // Proxy ports currently handed out, so allocateProxyPort never double-assigns within this JVM.
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
 
@@ -93,7 +93,7 @@ public class RedshiftService {
                             RedshiftProxyManager proxyManager, DockerHostResolver dockerHostResolver,
                             RedshiftCredentialBroker credentialBroker,
                             SecretsManagerService secretsManagerService, ObjectMapper objectMapper,
-                            DynamoDbStreamService streamService) {
+                            DynamoDbStreamReader streamReader) {
         this.clusters = storageFactory.create("redshift", "redshift-clusters.json", new TypeReference<Map<String, Cluster>>() {});
         this.snapshots = storageFactory.create("redshift", "redshift-snapshots.json", new TypeReference<Map<String, Snapshot>>() {});
         this.parameterGroups = storageFactory.create("redshift", "redshift-parameter-groups.json", new TypeReference<Map<String, ClusterParameterGroup>>() {});
@@ -108,7 +108,7 @@ public class RedshiftService {
         this.credentialBroker = credentialBroker;
         this.secretsManagerService = secretsManagerService;
         this.objectMapper = objectMapper;
-        this.streamService = streamService;
+        this.streamReader = streamReader;
     }
 
     RedshiftService(StorageFactory storageFactory, RedshiftContainerManager containerManager,
@@ -335,10 +335,10 @@ public class RedshiftService {
             throw new AwsException("InvalidParameterValue",
                     "SourceArn must identify a DynamoDB stream.", 400);
         }
-        if (streamService == null) {
+        if (streamReader == null) {
             throw new AwsException("InternalFailure", "DynamoDB stream service is unavailable.", 500);
         }
-        streamService.describeStream(sourceArn);
+        streamReader.describeStream(DynamoDbStreamReader.Stream.of(sourceArn), null, null);
         AwsArnUtils.Arn target = parseZeroEtlArn(targetArn, "Redshift cluster");
         if (!"redshift".equals(target.service()) || !target.resource().startsWith("cluster:")) {
             throw new AwsException("InvalidParameterValue",
@@ -370,15 +370,14 @@ public class RedshiftService {
         String integrationId = UUID.randomUUID().toString();
         Integration integration = new Integration();
         integration.setAccountId(integrations.accountId());
-        integration.setIntegrationArn("arn:aws:redshift:" + region + ":" + regionResolver.getAccountId()
-                + ":integration:" + integrationId);
+        integration.setIntegrationArn(AwsArnUtils.Arn.of("redshift", region, regionResolver.getAccountId(),
+                "integration:" + integrationId).toString());
         integration.setIntegrationName(integrationName);
         integration.setSourceArn(sourceArn);
         integration.setTargetArn(targetArn);
         integration.setSourceStreamArn(sourceArn);
         integration.setTargetClusterIdentifier(clusterIdentifier);
         integration.setLandingTableName("floci_zetl_" + integrationId.replace('-', '_'));
-        integration.setCheckpointSequenceNumber(null);
         integration.setRetryCount(0);
         integration.setLastError(null);
         integration.setPollingEnabled(true);
@@ -467,7 +466,7 @@ public class RedshiftService {
     }
 
     public synchronized void updateIntegrationRuntime(String accountId, String integrationArn,
-                                                       String checkpointSequenceNumber,
+                                                       Map<String, String> shardSequenceNumbers,
                                                        boolean successful, String error) {
         for (String key : integrations.keysForAccount(accountId)) {
             Optional<Integration> stored = integrations.getForAccount(accountId, key);
@@ -476,7 +475,7 @@ public class RedshiftService {
             }
             Integration integration = stored.get();
             if (successful) {
-                integration.setCheckpointSequenceNumber(checkpointSequenceNumber);
+                integration.setShardSequenceNumbers(shardSequenceNumbers);
                 integration.setRetryCount(0);
                 integration.setLastError(null);
                 integration.setStatus("active");
@@ -732,10 +731,26 @@ public class RedshiftService {
 
     public synchronized Cluster enableLogging(String clusterIdentifier, String bucketName, String s3KeyPrefix,
                                               String logDestinationType, List<String> logExports) {
+        return enableLogging(clusterIdentifier, bucketName, s3KeyPrefix, logDestinationType, logExports, null, null);
+    }
+
+    public synchronized Cluster enableLogging(String clusterIdentifier, String bucketName, String s3KeyPrefix,
+                                              String logDestinationType, List<String> logExports,
+                                              String s3TableKmsKeyId, String s3TableGranularity) {
         Cluster cluster = clusters.get(clusterIdentifier)
                 .orElseThrow(() -> new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404));
         boolean cloudWatch = "cloudwatch".equalsIgnoreCase(logDestinationType);
-        if (!cloudWatch && (bucketName == null || bucketName.isBlank())) {
+        boolean s3Table = "s3table".equalsIgnoreCase(logDestinationType);
+        if (s3Table && s3TableGranularity != null
+                && !List.of("cluster", "account").contains(s3TableGranularity)) {
+            throw new AwsException("InvalidParameterValue",
+                    "S3TableGranularity must be cluster or account", 400);
+        }
+        if (!s3Table && (s3TableKmsKeyId != null || s3TableGranularity != null)) {
+            throw new AwsException("InvalidParameterCombination",
+                    "S3-table logging settings are valid only when LogDestinationType is s3table", 400);
+        }
+        if (!cloudWatch && !s3Table && (bucketName == null || bucketName.isBlank())) {
             throw new AwsException("InvalidParameterValue", "BucketName is required for an S3 log destination", 400);
         }
         cluster.setLoggingEnabled(true);
@@ -743,6 +758,8 @@ public class RedshiftService {
         cluster.setLoggingDestinationType(logDestinationType);
         cluster.setLoggingExports(logExports == null || logExports.isEmpty() ? null : List.copyOf(logExports));
         cluster.setLoggingS3KeyPrefix(s3KeyPrefix);
+        cluster.setLoggingS3TableKmsKeyId(s3TableKmsKeyId);
+        cluster.setLoggingS3TableGranularity(s3TableGranularity);
         clusters.put(clusterIdentifier, cluster);
         clusters.flush();
         return cluster;
@@ -756,6 +773,8 @@ public class RedshiftService {
         cluster.setLoggingS3KeyPrefix(null);
         cluster.setLoggingDestinationType(null);
         cluster.setLoggingExports(null);
+        cluster.setLoggingS3TableKmsKeyId(null);
+        cluster.setLoggingS3TableGranularity(null);
         clusters.put(clusterIdentifier, cluster);
         clusters.flush();
         return cluster;

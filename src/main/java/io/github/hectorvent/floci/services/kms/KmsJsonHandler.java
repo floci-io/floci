@@ -761,7 +761,7 @@ public class KmsJsonHandler {
         keyMetadata.put("Arn", k.getArn());
         keyMetadata.put("CreationDate", k.getCreationDate());
         keyMetadata.put("Enabled", k.isEnabled());
-        keyMetadata.put("Description", k.getDescription());
+        keyMetadata.put("Description", k.getDescription() == null ? "" : k.getDescription());
         keyMetadata.put("KeyUsage", k.getKeyUsage().name());
         keyMetadata.put("KeyState", k.getKeyState());
         keyMetadata.put("Origin", k.getOrigin());

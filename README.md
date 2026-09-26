@@ -81,7 +81,7 @@ This short demo shows the CLI flow: start Floci, export the local AWS environmen
 
 https://github.com/user-attachments/assets/b55714dc-ef36-40ae-a734-cd2cadc288a8
 
-All AWS services are available at `http://localhost:4566`. Any region works. Credentials can be any non-empty values unless you explicitly enable stricter service-specific auth checks.
+All AWS services are available at `http://localhost:4566`. Any [published AWS region](https://floci.io/floci/configuration/partitions/) works, in every partition. Credentials can be any non-empty values unless you explicitly enable stricter service-specific auth checks.
 
 <details>
 <summary>Prefer Docker Compose?</summary>

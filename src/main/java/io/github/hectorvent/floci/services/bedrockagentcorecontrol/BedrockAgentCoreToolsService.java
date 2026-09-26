@@ -177,8 +177,8 @@ public class BedrockAgentCoreToolsService {
         if ("aws.codeinterpreter.v1".equals(codeInterpreterId)) {
             ObjectNode interpreter = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode();
             interpreter.put("codeInterpreterId", codeInterpreterId);
-            interpreter.put("codeInterpreterArn", "arn:aws:bedrock-agentcore:" + region
-                    + ":aws:code-interpreter/aws.codeinterpreter.v1");
+            interpreter.put("codeInterpreterArn", AwsArnUtils.Arn.of("bedrock-agentcore", region, "aws",
+                    "code-interpreter/aws.codeinterpreter.v1").toString());
             interpreter.put("name", codeInterpreterId);
             interpreter.put("status", "READY");
             interpreter.put("createdAt", "1970-01-01T00:00:00Z");

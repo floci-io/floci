@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.s3;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import org.jboss.logging.Logger;
 
@@ -313,12 +314,12 @@ final class S3PublicAccessEvaluator {
         }
     }
 
-    static String bucketArn(String bucketName) {
-        return "arn:aws:s3:::" + bucketName;
+    static String bucketArn(String partition, String bucketName) {
+        return AwsArnUtils.Arn.global(partition, "s3", "", bucketName).toString();
     }
 
-    static String objectArn(String bucketName, String key) {
-        return bucketArn(bucketName) + "/" + key;
+    static String objectArn(String partition, String bucketName, String key) {
+        return bucketArn(partition, bucketName) + "/" + key;
     }
 
     private static boolean statementMatchesPublicPrincipalActionResource(JsonNode statement, String action, String resourceArn) {

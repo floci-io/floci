@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.iam;
 
 import io.github.hectorvent.floci.core.common.*;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.iam.model.AccessKey;
 import io.github.hectorvent.floci.services.iam.model.AccountPasswordPolicy;
 import io.github.hectorvent.floci.services.iam.model.IamGroup;
@@ -42,14 +43,17 @@ public class IamQueryHandler {
     private final IamPolicyEvaluator policyEvaluator;
     private final AccountResolver accountResolver;
     private final SAMLProviderService samlProviderService;
+    private final RegionResolver regionResolver;
 
     @Inject
     public IamQueryHandler(IamService iamService, IamPolicyEvaluator policyEvaluator,
-                           AccountResolver accountResolver, SAMLProviderService samlProviderService) {
+                           AccountResolver accountResolver, SAMLProviderService samlProviderService,
+                           RegionResolver regionResolver) {
         this.iamService = iamService;
         this.policyEvaluator = policyEvaluator;
         this.accountResolver = accountResolver;
         this.samlProviderService = samlProviderService;
+        this.regionResolver = regionResolver;
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params, String authorization) {
@@ -76,6 +80,11 @@ public class IamQueryHandler {
             case "ListSAMLProviders" -> handleListSAMLProviders(authorization);
             case "CreateSAMLProvider" -> handleCreateSAMLProvider(params, authorization);
             case "GetSAMLProvider" -> handleGetSAMLProvider(params, authorization);
+            case "UpdateSAMLProvider" -> handleUpdateSAMLProvider(params, authorization);
+            case "DeleteSAMLProvider" -> handleDeleteSAMLProvider(params, authorization);
+            case "TagSAMLProvider" -> handleTagSAMLProvider(params, authorization);
+            case "UntagSAMLProvider" -> handleUntagSAMLProvider(params, authorization);
+            case "ListSAMLProviderTags" -> handleListSAMLProviderTags(params, authorization);
             case "ListOpenIDConnectProviders" -> handleListOpenIDConnectProviders(params);
             case "CreateOpenIDConnectProvider" -> handleCreateOpenIDConnectProvider(params);
             case "GetOpenIDConnectProvider" -> handleGetOpenIDConnectProvider(params);
@@ -371,10 +380,13 @@ public class IamQueryHandler {
     }
 
     private Response handleCreateSAMLProvider(MultivaluedMap<String, String> params, String authorization) {
-        SAMLProvider provider = samlProviderService.create(accountResolver.resolve(authorization),
-                getParam(params, "Name"), getParam(params, "SAMLMetadataDocument"));
+        checkSamlTagMembers(params);
+        SAMLProvider provider = samlProviderService.create(regionResolver.getPartition(),
+                accountResolver.resolve(authorization), getParam(params, "Name"),
+                getParam(params, "SAMLMetadataDocument"), extractTags(params));
         return Response.ok(AwsQueryResponse.envelope("CreateSAMLProvider", AwsNamespaces.IAM,
-                new XmlBuilder().elem("SAMLProviderArn", provider.getArn()).build())).build();
+                new XmlBuilder().elem("SAMLProviderArn", provider.getArn())
+                        .raw(tagsElement(new TreeMap<>(provider.getTags()))).build())).build();
     }
 
     private Response handleGetSAMLProvider(MultivaluedMap<String, String> params, String authorization) {
@@ -385,7 +397,44 @@ public class IamQueryHandler {
                 + provider.getCertificate() + "</ds:X509Certificate></ds:X509Data></ds:KeyInfo></md:KeyDescriptor></md:EntityDescriptor>";
         return Response.ok(AwsQueryResponse.envelope("GetSAMLProvider", AwsNamespaces.IAM,
                 new XmlBuilder().elem("SAMLProviderArn", provider.getArn()).elem("CreateDate", isoDate(provider.getCreateDate()))
-                        .elem("ValidUntil", isoDate(provider.getCreateDate().plusSeconds(31536000))).elem("SAMLMetadataDocument", metadata).build())).build();
+                        .elem("ValidUntil", isoDate(provider.getCreateDate().plusSeconds(31536000))).elem("SAMLMetadataDocument", metadata)
+                        .raw(tagsElement(new TreeMap<>(provider.getTags()))).build())).build();
+    }
+
+    private Response handleUpdateSAMLProvider(MultivaluedMap<String, String> params, String authorization) {
+        String accountId = accountResolver.resolve(authorization);
+        SAMLProvider provider = samlProviderService.update(accountId,
+                getParam(params, "SAMLProviderArn"), getParam(params, "SAMLMetadataDocument"));
+        return Response.ok(AwsQueryResponse.envelope("UpdateSAMLProvider", AwsNamespaces.IAM,
+                new XmlBuilder().elem("SAMLProviderArn", provider.getArn()).build())).build();
+    }
+
+    private Response handleDeleteSAMLProvider(MultivaluedMap<String, String> params, String authorization) {
+        String accountId = accountResolver.resolve(authorization);
+        samlProviderService.delete(accountId, getParam(params, "SAMLProviderArn"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteSAMLProvider", AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleTagSAMLProvider(MultivaluedMap<String, String> params, String authorization) {
+        String accountId = accountResolver.resolve(authorization);
+        checkSamlTagMembers(params);
+        samlProviderService.tag(accountId, getParam(params, "SAMLProviderArn"), extractTags(params));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("TagSAMLProvider", AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleUntagSAMLProvider(MultivaluedMap<String, String> params, String authorization) {
+        String accountId = accountResolver.resolve(authorization);
+        samlProviderService.untag(accountId, getParam(params, "SAMLProviderArn"), extractTagKeys(params));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("UntagSAMLProvider", AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleListSAMLProviderTags(MultivaluedMap<String, String> params, String authorization) {
+        String accountId = accountResolver.resolve(authorization);
+        Map<String, String> tags = new TreeMap<>(
+                samlProviderService.listTags(accountId, getParam(params, "SAMLProviderArn")));
+        String result = new XmlBuilder().start("Tags").raw(tagsXml(tags)).end("Tags")
+                .elem("IsTruncated", false).build();
+        return Response.ok(AwsQueryResponse.envelope("ListSAMLProviderTags", AwsNamespaces.IAM, result)).build();
     }
 
     // ListOpenIDConnectProviders is not paginated and carries only ARNs — the client fetches
@@ -1659,6 +1708,23 @@ public class IamQueryHandler {
     // =========================================================================
     // Parameter parsing helpers
     // =========================================================================
+
+    /**
+     * Enforces {@code tagListType}'s {@code max: 50} on the members as sent. extractTags collapses
+     * repeated keys into a map, and AWS resolves a repeated key by overwriting rather than
+     * rejecting, so counting the map would let a 51-member list through whenever any key repeats.
+     */
+    private void checkSamlTagMembers(MultivaluedMap<String, String> params) {
+        int members = 0;
+        while (params.getFirst("Tags.member." + (members + 1) + ".Key") != null) {
+            members++;
+        }
+        if (members > SAMLProviderService.MAX_TAGS_PER_SAML_PROVIDER) {
+            throw new AwsException("ValidationError",
+                    "Value at 'tags' failed to satisfy constraint: Member must have length "
+                            + "less than or equal to " + SAMLProviderService.MAX_TAGS_PER_SAML_PROVIDER, 400);
+        }
+    }
 
     private Map<String, String> extractTags(MultivaluedMap<String, String> params) {
         Map<String, String> tags = new HashMap<>();

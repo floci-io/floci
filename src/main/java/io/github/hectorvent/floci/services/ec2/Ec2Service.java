@@ -172,6 +172,23 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     private static final Set<String> VPN_GATEWAY_FILTERS = Set.of(
             "amazon-side-asn", "attachment.state", "attachment.vpc-id", "availability-zone",
             "state", "tag-key", "tag-value", "type", "vpn-gateway-id");
+    /**
+     * The filter names DescribeVpcs documents, plus three undocumented aliases matchesFilters
+     * already honours and real EC2 accepts: "cidr-block", "isDefault" and "tag-value". Being more
+     * permissive than the documentation is the safe direction, since the cost of refusing a name
+     * callers really use is higher than the cost of serving one the docs omit.
+     *
+     * <p>Every name here has a matching arm in matchesFilters. Accepting a name the matcher does
+     * not implement would be worse than refusing it, because the filter would then be accepted and
+     * silently match everything.
+     */
+    private static final Set<String> VPC_FILTERS = Set.of(
+            "cidr", "cidr-block",
+            "cidr-block-association.association-id", "cidr-block-association.cidr-block",
+            "cidr-block-association.state", "dhcp-options-id",
+            "ipv6-cidr-block-association.association-id", "ipv6-cidr-block-association.ipv6-cidr-block",
+            "ipv6-cidr-block-association.ipv6-pool", "ipv6-cidr-block-association.state",
+            "is-default", "isDefault", "owner-id", "state", "tag-key", "tag-value", "vpc-id");
     private static final Set<String> EGRESS_ONLY_INTERNET_GATEWAY_FILTERS = Set.of(
             "attachment.state", "attachment.vpc-id",
             "egress-only-internet-gateway-id", "tag-key", "tag-value");
@@ -4022,6 +4039,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
     public List<Vpc> describeVpcs(String region, List<String> vpcIds, Map<String, List<String>> filters) {
         ensureDefaultResources(region);
+        // matchesFilters answers true for a name it does not recognise, so without this an
+        // unsupported filter matches every VPC instead of narrowing anything. Real EC2 rejects the
+        // name outright, which is the difference between a wrong result and an error.
+        requireSupportedFilters(filters, VPC_FILTERS);
         if (!vpcIds.isEmpty()) {
             for (String id : vpcIds) {
                 getRequiredVpc(region, id);
@@ -8162,6 +8183,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                         .anyMatch(a -> matchesValue(values, a.getCidrBlock()));
                 case "cidr-block-association.state" -> vpc.getCidrBlockAssociationSet().stream()
                         .anyMatch(a -> matchesValue(values, a.getCidrBlockState()));
+                case "dhcp-options-id" -> matchesValue(values, vpc.getDhcpOptionsId());
+                case "owner-id" -> matchesValue(values, vpc.getOwnerId());
+                case "ipv6-cidr-block-association.ipv6-pool" -> vpc.getIpv6CidrBlockAssociationSet()
+                        .stream().anyMatch(a -> matchesValue(values, a.getIpv6Pool()));
                 case "ipv6-cidr-block-association.association-id" -> vpc.getIpv6CidrBlockAssociationSet().stream()
                         .anyMatch(a -> matchesValue(values, a.getAssociationId()));
                 case "ipv6-cidr-block-association.ipv6-cidr-block" -> vpc.getIpv6CidrBlockAssociationSet().stream()
@@ -9459,7 +9484,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             }
             Instant created = createdAt.apply(resource);
             out.add(new ExplorerResource(
-                    "arn:aws:ec2:" + resourceRegion + ":" + ownerAccountId + ":" + resourceType + "/" + resourceId,
+                    AwsArnUtils.Arn.of("ec2", resourceRegion, ownerAccountId, resourceType + "/" + resourceId).toString(),
                     "ec2:" + resourceType, "ec2", resourceRegion, ownerAccountId,
                     created != null ? created : Instant.now(),
                     explorerTags(tags.apply(resource))));

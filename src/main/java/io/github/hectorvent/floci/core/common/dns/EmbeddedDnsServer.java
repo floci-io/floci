@@ -8,6 +8,7 @@ import io.vertx.core.buffer.Buffer;
 import io.vertx.core.datagram.DatagramSocket;
 import io.vertx.core.datagram.DatagramSocketOptions;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
@@ -33,6 +34,9 @@ import java.util.regex.Pattern;
  * Resolves *.{floci.hostname} (and any configured extra-suffixes) to Floci's own
  * Docker network IP so virtual-hosted S3 URLs (my-bucket.floci:4566) work from
  * inside Lambda containers without requiring wildcard Docker aliases.
+ *
+ * Also answers for any name a {@link DnsRecordSource} owns, which is how a service that holds
+ * a private DNS zone (Cloud Map) gets real records rather than only API responses.
  *
  * All other queries are forwarded to the upstream resolvers read from /etc/resolv.conf
  * (Docker's embedded DNS at 127.0.0.11), falling back to the configured public resolvers
@@ -71,14 +75,24 @@ public class EmbeddedDnsServer {
     private volatile String serverIp;
     private final SequencedSet<String> suffixes = new LinkedHashSet<>();
     private volatile List<String> upstreamDnsServers = List.of();
+    // Held as the Iterable a CDI Instance already is, so iterating resolves the beans lazily on
+    // the packet path rather than at startup, where a source's storage must not be touched yet.
+    private final Iterable<DnsRecordSource> recordSources;
 
     EmbeddedDnsServer(List<String> suffixes) {
+        this(suffixes, List.of());
+    }
+
+    EmbeddedDnsServer(List<String> suffixes, Iterable<DnsRecordSource> recordSources) {
         this.suffixes.addAll(BUILTIN_SUFFIXES);
         this.suffixes.addAll(suffixes);
+        this.recordSources = recordSources;
     }
 
     @Inject
-    public EmbeddedDnsServer(EmulatorConfig config, ContainerDetector containerDetector, Vertx vertx) {
+    public EmbeddedDnsServer(EmulatorConfig config, ContainerDetector containerDetector, Vertx vertx,
+                             Instance<DnsRecordSource> recordSources) {
+        this.recordSources = recordSources;
         if (!containerDetector.isRunningInContainer()) {
             return;
         }
@@ -135,13 +149,20 @@ public class EmbeddedDnsServer {
             buf.getShort(); // qclass
             int questionEnd = buf.position();
 
-            Optional<String> resolvedAddress = qtype == 1 ? resolveARecord(qname, myIp) : Optional.empty();
-            if (resolvedAddress.isPresent()) {
-                byte[] response = buildAResponse(data, txId, questionOffset, questionEnd, resolvedAddress.get());
-                socket.send(Buffer.buffer(response), senderPort, senderHost, v -> {});
-            } else {
-                forwardAsync(vertx, socket, data, senderHost, senderPort);
-            }
+            vertx.<Optional<List<String>>>executeBlocking(() -> resolveARecordWithOwnership(qname, myIp), false)
+                    .onSuccess(answer -> {
+                        if (answer.isEmpty()) {
+                            forwardAsync(vertx, socket, data, senderHost, senderPort);
+                            return;
+                        }
+                        List<String> addresses = answer.orElseThrow();
+                        byte[] response = qtype == 1 && !addresses.isEmpty()
+                                ? buildAResponse(data, txId, questionOffset, questionEnd, addresses)
+                                : buildEmptyResponse(data, txId, questionOffset, questionEnd,
+                                        addresses.isEmpty() ? 3 : 0);
+                        socket.send(Buffer.buffer(response), senderPort, senderHost, v -> {});
+                    })
+                    .onFailure(e -> LOG.warnv("DNS record lookup failed for {0}: {1}", qname, e.getMessage()));
         } catch (Exception e) {
             LOG.debugv("DNS packet error: {0}", e.getMessage());
         }
@@ -163,11 +184,52 @@ public class EmbeddedDnsServer {
         return false;
     }
 
-    Optional<String> resolveARecord(String name, String myIp) {
+    List<String> resolveARecord(String name, String myIp) {
+        return resolveARecordWithOwnership(name, myIp).orElse(List.of());
+    }
+
+    Optional<List<String>> resolveARecordWithOwnership(String name, String myIp) {
         if (matchesSuffix(name)) {
-            return Optional.of(myIp);
+            return Optional.of(List.of(myIp));
         }
-        return resolveEc2PrivateDnsName(name);
+        Optional<String> ec2PrivateDnsName = resolveEc2PrivateDnsName(name);
+        return ec2PrivateDnsName.<List<String>>map(List::of)
+                .map(Optional::of).orElseGet(() -> resolveFromRecordSources(name));
+    }
+
+    /**
+     * Answers from a service that owns a private DNS zone, Cloud Map being the one that does
+     * today. A source that throws must not take the DNS server down with it: the query falls
+     * through to the upstream resolvers, which is what happened before any source existed.
+     */
+    private Optional<List<String>> resolveFromRecordSources(String name) {
+        if (recordSources == null) {
+            return Optional.empty();
+        }
+        for (DnsRecordSource source : recordSources) {
+            try {
+                Optional<List<String>> addresses = source.resolveIpv4(name);
+                if (addresses != null && addresses.isPresent()) {
+                    return addresses;
+                }
+            } catch (Exception e) {
+                LOG.debugv("DNS record source {0} failed to resolve {1}: {2}",
+                        source.getClass().getSimpleName(), name, e.getMessage());
+            }
+        }
+        return Optional.empty();
+    }
+
+    byte[] buildEmptyResponse(byte[] query, short txId, int questionOffset, int questionEnd, int responseCode) {
+        ByteBuffer response = ByteBuffer.allocate(12 + questionEnd - questionOffset);
+        response.putShort(txId);
+        response.putShort((short) (0x8580 | responseCode));
+        response.putShort((short) 1);
+        response.putShort((short) 0);
+        response.putShort((short) 0);
+        response.putShort((short) 0);
+        response.put(query, questionOffset, questionEnd - questionOffset);
+        return response.array();
     }
 
     Optional<String> resolveEc2PrivateDnsName(String name) {
@@ -222,31 +284,34 @@ public class EmbeddedDnsServer {
         return sb.toString();
     }
 
-    byte[] buildAResponse(byte[] query, short txId, int questionOffset, int questionEnd, String ip) {
+    byte[] buildAResponse(byte[] query, short txId, int questionOffset, int questionEnd, List<String> ips) {
         int questionLength = questionEnd - questionOffset;
-        // header(12) + question + answer(name-ptr(2) + type(2) + class(2) + ttl(4) + rdlen(2) + rdata(4))
-        ByteBuffer resp = ByteBuffer.allocate(12 + questionLength + 16);
+        // header(12) + question + per answer(name-ptr(2) + type(2) + class(2) + ttl(4) + rdlen(2) + rdata(4))
+        ByteBuffer resp = ByteBuffer.allocate(12 + questionLength + 16 * ips.size());
 
         // header
         resp.putShort(txId);
-        resp.putShort((short) 0x8180); // QR=1, AA=1, RD=1, RCODE=0
-        resp.putShort((short) 1);      // qdcount
-        resp.putShort((short) 1);      // ancount
-        resp.putShort((short) 0);      // nscount
-        resp.putShort((short) 0);      // arcount
+        resp.putShort((short) 0x8180);      // QR=1, AA=1, RD=1, RCODE=0
+        resp.putShort((short) 1);           // qdcount
+        resp.putShort((short) ips.size());  // ancount
+        resp.putShort((short) 0);           // nscount
+        resp.putShort((short) 0);           // arcount
 
         // question (copied verbatim from query)
         resp.put(query, questionOffset, questionLength);
 
-        // answer
-        resp.putShort((short) 0xC00C); // name pointer to offset 12 (start of question name)
-        resp.putShort((short) 1);       // type A
-        resp.putShort((short) 1);       // class IN
-        resp.putInt(TTL);
-        resp.putShort((short) 4);       // rdlength
+        // answers. A name with several registered addresses gets one A record each, which is
+        // what a Cloud Map service backed by more than one instance resolves to on AWS.
+        for (String ip : ips) {
+            resp.putShort((short) 0xC00C); // name pointer to offset 12 (start of question name)
+            resp.putShort((short) 1);       // type A
+            resp.putShort((short) 1);       // class IN
+            resp.putInt(TTL);
+            resp.putShort((short) 4);       // rdlength
 
-        for (String octet : ip.split("\\.")) {
-            resp.put((byte) Integer.parseInt(octet));
+            for (String octet : ip.split("\\.")) {
+                resp.put((byte) Integer.parseInt(octet));
+            }
         }
 
         return resp.array();

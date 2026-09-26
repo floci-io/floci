@@ -13,6 +13,8 @@ public class SessionCredential {
     private String secretAccessKey;
     private String sessionToken;
     private String roleArn;
+    private String roleSessionName;
+    private String assumedRoleId;
     private Instant expiration;
     /** Inline session policy passed to AssumeRole/GetFederationToken — further restricts role policies. */
     private String sessionPolicyDocument;
@@ -85,6 +87,12 @@ public class SessionCredential {
 
     public String getRoleArn() { return roleArn; }
     public void setRoleArn(String roleArn) { this.roleArn = roleArn; }
+
+    public String getRoleSessionName() { return roleSessionName; }
+    public void setRoleSessionName(String roleSessionName) { this.roleSessionName = roleSessionName; }
+
+    public String getAssumedRoleId() { return assumedRoleId; }
+    public void setAssumedRoleId(String assumedRoleId) { this.assumedRoleId = assumedRoleId; }
 
     public Instant getExpiration() { return expiration; }
     public void setExpiration(Instant expiration) { this.expiration = expiration; }

@@ -2,7 +2,6 @@ package io.github.hectorvent.floci.services.ec2;
 
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
-import com.github.dockerjava.api.command.BuildImageResultCallback;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Container;
@@ -15,6 +14,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
+import io.github.hectorvent.floci.core.common.docker.LocallyBuiltHelperImage;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -23,8 +23,6 @@ import org.jboss.logging.Logger;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -134,41 +132,10 @@ public class SecurityGroupFirewallManager {
         }
     }
 
-    private synchronized void ensureHelperImage() {
-        String configured = config.network().securityGroupEnforcement().helperImage();
-        if (!"floci/network-helper:local".equals(configured)) {
-            return;
-        }
-        String image = containerBuilder.resolveImage(configured);
-        try {
-            dockerClient.inspectImageCmd(image).exec();
-            return;
-        } catch (NotFoundException missing) {
-            // Build the versioned Floci recipe in the daemon used for workloads.
-        }
-        try (InputStream dockerfile = getClass().getResourceAsStream("/docker/network-helper.Dockerfile")) {
-            if (dockerfile == null) {
-                throw new IllegalStateException("Floci network helper Dockerfile is missing");
-            }
-            byte[] content = dockerfile.readAllBytes();
-            ByteArrayOutputStream archive = new ByteArrayOutputStream(content.length + 1024);
-            try (TarArchiveOutputStream tar = new TarArchiveOutputStream(archive)) {
-                TarArchiveEntry entry = new TarArchiveEntry("Dockerfile");
-                entry.setSize(content.length);
-                tar.putArchiveEntry(entry);
-                tar.write(content);
-                tar.closeArchiveEntry();
-            }
-            try (BuildImageResultCallback callback = new BuildImageResultCallback()) {
-                String built = dockerClient.buildImageCmd(new ByteArrayInputStream(archive.toByteArray()))
-                        .withTags(Set.of(image)).exec(callback).awaitImageId();
-                if (built == null || built.isBlank()) {
-                    throw new IllegalStateException("Docker did not build the Floci network helper image");
-                }
-            }
-        } catch (IOException e) {
-            throw new IllegalStateException("Cannot build the Floci network helper image", e);
-        }
+    private void ensureHelperImage() {
+        LocallyBuiltHelperImage.ensureBuilt(dockerClient, containerBuilder,
+                config.network().securityGroupEnforcement().helperImage(), "floci/network-helper:local",
+                "/docker/network-helper.Dockerfile");
     }
 
     /** Registers only after the default-deny table exists, before workload startup. */

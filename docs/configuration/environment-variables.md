@@ -12,6 +12,7 @@ Floci is configured exclusively through environment variables. Every option belo
 | `FLOCI_HOSTNAME` | _(none)_ | Overrides only the hostname part of `FLOCI_BASE_URL`. Set to the Compose service name (e.g. `floci`) so other containers can reach Floci by DNS |
 | `FLOCI_DEFAULT_REGION` | `us-east-1` | AWS region used in ARNs and API responses when a request names none. Also selects the deployment's partition (`cn-north-1` means `aws-cn`), see [AWS Partitions](./partitions.md) |
 | `FLOCI_PARTITIONS_ID` | _(derived)_ | Pins the partition (`aws`, `aws-cn`, `aws-us-gov`, `aws-iso`, `aws-iso-b`, `aws-iso-e`, `aws-iso-f`, `aws-eusc`). Startup refuses a value that contradicts `FLOCI_DEFAULT_REGION` |
+| `FLOCI_PARTITIONS_ALLOW_UNKNOWN_REGIONS` | `false` | Accept a request signed for a region no AWS partition publishes or admits by its region pattern (`polygondwanaland-west-1`), giving the label its own namespace. Off, such a request is refused with a 400, as moto and LocalStack refuse it. See [AWS Partitions](./partitions.md#which-partition-a-request-belongs-to) |
 | `FLOCI_DEFAULT_ACCOUNT_ID` | `000000000000` | Fallback account ID used in ARNs when the request's access key is not exactly 12 digits. When the access key IS 12 digits, it is used directly as the account ID — see [Multi-Account Isolation](./multi-account.md) |
 | `FLOCI_DEFAULT_AVAILABILITY_ZONE` | `us-east-1a` | Availability zone reported in EC2 and other responses |
 

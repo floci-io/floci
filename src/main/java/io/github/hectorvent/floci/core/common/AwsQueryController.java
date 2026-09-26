@@ -107,7 +107,10 @@ public class AwsQueryController {
             "GenerateCredentialReport", "GetCredentialReport",
             "GetAccountSummary", "GetAccountAuthorizationDetails",
             "SimulatePrincipalPolicy", "SimulateCustomPolicy",
-            "GetContextKeysForCustomPolicy", "GetContextKeysForPrincipalPolicy"
+            "GetContextKeysForCustomPolicy", "GetContextKeysForPrincipalPolicy",
+            "ListSAMLProviders", "CreateSAMLProvider", "GetSAMLProvider",
+            "UpdateSAMLProvider", "DeleteSAMLProvider",
+            "TagSAMLProvider", "UntagSAMLProvider", "ListSAMLProviderTags"
     );
 
     private static final Set<String> AUTOSCALING_ACTIONS = Set.of(

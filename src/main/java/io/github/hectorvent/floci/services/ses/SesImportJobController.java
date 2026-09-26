@@ -26,6 +26,7 @@ import org.jboss.logging.Logger;
 import java.util.List;
 
 import static io.github.hectorvent.floci.services.ses.SesV2Json.intMemberOrAbsent;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.putTimestamp;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.readRequiredStringField;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.remapV1Exception;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.requireJsonObject;
@@ -119,9 +120,7 @@ public class SesImportJobController {
         ObjectNode source = result.putObject("ImportDataSource");
         source.put("S3Url", job.getS3Url());
         source.put("DataFormat", job.getDataFormat());
-        if (job.getCompletedTimestamp() != null) {
-            result.put("CompletedTimestamp", job.getCompletedTimestamp().toEpochMilli() / 1000.0);
-        }
+        putTimestamp(result, "CompletedTimestamp", job.getCompletedTimestamp());
         if (job.getErrorMessage() != null) {
             result.putObject("FailureInfo").put("ErrorMessage", job.getErrorMessage());
         }
@@ -170,7 +169,7 @@ public class SesImportJobController {
             contactList.put("ContactListImportAction", job.getImportAction());
         }
         node.put("JobStatus", job.getJobStatus());
-        node.put("CreatedTimestamp", job.getCreatedTimestamp().toEpochMilli() / 1000.0);
+        putTimestamp(node, "CreatedTimestamp", job.getCreatedTimestamp());
         node.put("ProcessedRecordsCount", job.getProcessedRecordsCount());
         node.put("FailedRecordsCount", job.getFailedRecordsCount());
     }

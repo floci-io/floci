@@ -2671,9 +2671,18 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
         }
     }
 
+    /**
+     * A Reference Path selects a single node, so wildcards, filters and slices are rejected. The
+     * root is either the state input ({@code $}) or the Context Object ({@code $$}): ASL takes a
+     * {@code string_sampler} wherever it takes a Reference Path, and a context path is one of its
+     * spellings, so {@code "$$.Execution.Input.count"} is as valid as {@code "$.count"}.
+     */
     private static boolean isReferencePath(String path) {
         if (path == null || path.isEmpty() || path.charAt(0) != '$') {
             return false;
+        }
+        if (path.startsWith("$$")) {
+            path = path.substring(1);
         }
         int index = 1;
         while (index < path.length()) {

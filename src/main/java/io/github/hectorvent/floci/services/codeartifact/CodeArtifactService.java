@@ -71,7 +71,7 @@ public class CodeArtifactService implements Resettable {
      * and the backfill in {@link #ensureFormatContainerId} already handle it, including for
      * repositories created before that format's proxy existed.
      */
-    private static final List<String> CONTAINER_BACKED_FORMATS = List.of("maven");
+    private static final List<String> CONTAINER_BACKED_FORMATS = List.of("maven", "npm");
 
     private static final Logger LOG = Logger.getLogger(CodeArtifactService.class);
 
@@ -313,16 +313,22 @@ public class CodeArtifactService implements Resettable {
         String key = repositoryKey(region, domain, repository);
         CodeArtifactRepository r = requireRepository(owner, key, repository);
         repositories.deleteForAccount(owner, key);
-        // Generic over whatever formats this repository actually has sidecar ids for: adding the
-        // next format's sidecar needs no change here, only a new RepositorySidecarManager
-        // implementation that CodeArtifactSidecarRegistry discovers.
-        //
         // Best-effort: the metadata delete above already committed, matching real CodeArtifact's
         // own DeleteRepository (synchronous and always succeeds once the repository exists; actual
         // content cleanup is an internal detail never exposed to the caller). A sidecar that is
         // unreachable when this runs must not turn an already-successful delete into a 500, and
         // must not leave the repository stuck: a retry would just 404, since the record above is
         // already gone.
+        releaseSidecarStorage(r, domain, repository);
+        return r;
+    }
+
+    /**
+     * Generic over whatever formats a repository actually has sidecar ids for: adding the next
+     * format's sidecar needs no change here, only a new {@link RepositorySidecarManager}
+     * implementation that {@link CodeArtifactSidecarRegistry} discovers.
+     */
+    private void releaseSidecarStorage(CodeArtifactRepository r, String domain, String repository) {
         r.getSidecarContainerIds().forEach((format, containerId) ->
                 sidecarRegistry.forFormat(format).ifPresent(manager -> {
                     try {
@@ -332,7 +338,6 @@ public class CodeArtifactService implements Resettable {
                                 format, domain, repository, e.getMessage());
                     }
                 }));
-        return r;
     }
 
     public CodeArtifactRepository describeRepository(String region, String domain, String domainOwner,

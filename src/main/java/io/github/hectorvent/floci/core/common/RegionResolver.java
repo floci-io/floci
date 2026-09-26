@@ -86,12 +86,27 @@ public class RegionResolver {
         return resolveRegionFromAuth(headers.getHeaderString("Authorization"));
     }
 
+    /**
+     * The region label the SigV4 credential scope names, unvalidated: {@code AccountContextFilter}
+     * decides whether an unknown label is served or refused (see {@link #isKnownRegion}), and
+     * needs the raw label either way so the rejection can name it.
+     */
     public String resolveRegionFromAuth(String authorizationHeader) {
         if (authorizationHeader == null || authorizationHeader.isEmpty()) {
             return defaultRegion;
         }
         Matcher matcher = CREDENTIAL_REGION_PATTERN.matcher(authorizationHeader);
         return matcher.find() ? matcher.group(1) : defaultRegion;
+    }
+
+    /**
+     * True when some partition publishes {@code region} or its region pattern admits it, which
+     * is the AWS SDKs' own rule: a region launched after the vendored data was refreshed still
+     * resolves by pattern. A {@code <partition>-global} pseudo-region counts. Null and blank do
+     * not.
+     */
+    public static boolean isKnownRegion(String region) {
+        return AwsPartitions.forRegion(region).isPresent();
     }
 
     /**

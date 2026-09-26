@@ -1,21 +1,18 @@
 package io.github.hectorvent.floci.services.codeartifact;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.EndpointInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
-import io.quarkus.runtime.ShutdownEvent;
+import io.github.hectorvent.floci.core.common.docker.SidecarHealthHelper;
 import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.io.IOException;
-import java.net.HttpURLConnection;
-import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.util.Base64;
@@ -32,9 +29,15 @@ import java.util.Optional;
  * <p>One repository-agnostic container backs every CodeArtifact domain/repository pair; a
  * CodeArtifact repository maps to a named Reposilite repository provisioned on first use (see
  * {@link ReposiliteSidecarClient#ensureRepository}), not to its own container.
+ *
+ * <p>Implements {@link ContainerTeardown} rather than observing {@code ShutdownEvent} directly:
+ * {@code ContainerTeardowns.stopAll} already runs every implementation both at process shutdown
+ * and on {@code /state/reset}/{@code /state/nuke}, so a reset now actually stops the managed
+ * container instead of leaving it running with every {@code CodeArtifactRepository} record that
+ * named it gone.
  */
 @ApplicationScoped
-public class ReposiliteSidecarManager {
+public class ReposiliteSidecarManager implements ContainerTeardown {
     static final String IMAGE_ENV = "FLOCI_SERVICES_CODEARTIFACT_MAVEN_IMAGE";
     static final String URL_ENV = "FLOCI_SERVICES_CODEARTIFACT_MAVEN_URL";
     static final String MANAGED_TOKEN_NAME = "floci-manager";
@@ -42,8 +45,7 @@ public class ReposiliteSidecarManager {
     private static final Logger LOG = Logger.getLogger(ReposiliteSidecarManager.class);
     private static final String CONTAINER_NAME = "floci-reposilite";
     private static final int REPOSILITE_PORT = 8080;
-    private static final int HEALTH_POLL_MAX_MS = 30_000;
-    private static final int HEALTH_POLL_INTERVAL_MS = 500;
+    private static final String HEALTH_PATH = "/api/status/health";
     private static final int GENERATED_SECRET_BYTES = 24;
 
     private final ContainerBuilder containerBuilder;
@@ -93,7 +95,7 @@ public class ReposiliteSidecarManager {
     /** Base URL of a ready Reposilite instance, starting the managed container if needed. */
     public synchronized String ensureReady() {
         if (resolvedUrl != null) {
-            if (containerId == null || probeHealth(resolvedUrl)) {
+            if (containerId == null || SidecarHealthHelper.probeHealth(resolvedUrl, HEALTH_PATH)) {
                 return resolvedUrl;
             }
             discardStaleManagedEndpoint();
@@ -109,7 +111,7 @@ public class ReposiliteSidecarManager {
             }
             resolvedTokenName = token.substring(0, separator);
             resolvedTokenSecret = token.substring(separator + 1);
-            probeHealth(url);
+            SidecarHealthHelper.probeHealth(url, HEALTH_PATH);
             resolvedUrl = url;
             LOG.infov("Using pre-configured Reposilite sidecar URL: {0}", resolvedUrl);
             return resolvedUrl;
@@ -159,42 +161,13 @@ public class ReposiliteSidecarManager {
         resolvedTokenName = MANAGED_TOKEN_NAME;
         resolvedTokenSecret = managedSecret;
         String url = "http://" + endpoint;
-        waitForHealth(url);
+        SidecarHealthHelper.waitForHealth(url, HEALTH_PATH);
         resolvedUrl = url;
         LOG.infov("Reposilite sidecar is ready at {0}", resolvedUrl);
     }
 
-    private boolean probeHealth(String baseUrl) {
-        try {
-            HttpURLConnection connection = (HttpURLConnection) URI.create(baseUrl + "/api/status/health").toURL()
-                    .openConnection();
-            connection.setConnectTimeout(500);
-            connection.setReadTimeout(500);
-            return connection.getResponseCode() == 200;
-        } catch (IOException e) {
-            LOG.debugv(e, "Reposilite sidecar health probe failed for {0}", baseUrl);
-            return false;
-        }
-    }
-
-    private void waitForHealth(String baseUrl) {
-        long deadline = System.currentTimeMillis() + HEALTH_POLL_MAX_MS;
-        while (System.currentTimeMillis() < deadline) {
-            if (probeHealth(baseUrl)) {
-                return;
-            }
-            try {
-                Thread.sleep(HEALTH_POLL_INTERVAL_MS);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new IllegalStateException("Interrupted while waiting for Reposilite sidecar", e);
-            }
-        }
-        throw new IllegalStateException("Reposilite sidecar did not become healthy within " + HEALTH_POLL_MAX_MS
-                + " ms");
-    }
-
-    void onStop(@Observes ShutdownEvent event) {
+    @Override
+    public void stopManagedContainers() {
         if (containerId == null) {
             return;
         }

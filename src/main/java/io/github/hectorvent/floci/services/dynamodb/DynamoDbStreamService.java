@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.dynamodb;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.dynamodb.model.DynamoDbStreamRecord;
@@ -32,13 +34,14 @@ public class DynamoDbStreamService {
 
     private static final Logger LOG = Logger.getLogger(DynamoDbStreamService.class);
 
-    public static final String SHARD_ID = "shardId-0000000001-00000000001";
+    static final String SHARD_ID = "shardId-0000000001-00000000001";
     static final int MAX_RECORDS = 1000;
     private static final String ZERO_SEQUENCE_NUMBER = "000000000000000000000";
 
     private static final DateTimeFormatter STREAM_LABEL_FORMAT =
             DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS").withZone(ZoneOffset.UTC);
 
+    /** Keyed by table ARN, which is unique per partition, region, account and table. */
     private final ConcurrentHashMap<String, StreamDescription> streams = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ConcurrentLinkedDeque<DynamoDbStreamRecord>> records =
             new ConcurrentHashMap<>();
@@ -61,13 +64,23 @@ public class DynamoDbStreamService {
 
 
     private void loadPersistedStreams(StorageBackend<String, TableDefinition> tableStore) {
-        if (tableStore == null) return;
-        for (String tableKey : tableStore.keys()){
-                String region = tableKey.split("::", 2)[0];
-                tableStore.get(tableKey).ifPresent(table -> {
-                        if (!table.isStreamEnabled()) return;
-                        this.enableStream(table.getTableName(), table.getTableArn(), table.getStreamViewType(), region, table.getStreamArn());
-                    });
+        if (tableStore == null) {
+            return;
+        }
+        // No request scope at startup, so keys() would only see the default account's tables.
+        if (tableStore instanceof AccountAwareStorageBackend<TableDefinition> aware) {
+            aware.scanAllAccountsRaw().values().forEach(this::loadPersistedStream);
+            return;
+        }
+        for (String tableKey : tableStore.keys()) {
+            tableStore.get(tableKey).ifPresent(this::loadPersistedStream);
+        }
+    }
+
+    private void loadPersistedStream(TableDefinition table) {
+        if (table.isStreamEnabled()) {
+            enableStream(table.getTableName(), table.getTableArn(), table.getStreamViewType(),
+                    AwsArnUtils.parse(table.getTableArn()).region(), table.getStreamArn());
         }
     }
 
@@ -76,8 +89,7 @@ public class DynamoDbStreamService {
     }
 
     public StreamDescription enableStream(String tableName, String tableArn, String viewType, String region, String streamArnInput) {
-        String key = streamKey(region, tableName);
-        StreamDescription existing = streams.get(key);
+        StreamDescription existing = streams.get(tableArn);
         if (existing != null && "ENABLED".equals(existing.getStreamStatus())) {
             // Re-enabling a live stream with a different view type retargets it. The records this
             // stream emits are built from the description's view type, so leaving it untouched
@@ -110,37 +122,33 @@ public class DynamoDbStreamService {
         sd.setCreationDateTime(now);
         sd.setStartingSequenceNumber(String.format("%021d", 1));
 
-        streams.put(key, sd);
+        streams.put(tableArn, sd);
         records.put(streamArn, new ConcurrentLinkedDeque<>());
         streamRecordCounts.put(streamArn, new AtomicLong());
         LOG.infov("Enabled stream for table {0} in region {1}: {2}", tableName, region, streamArn);
         return sd;
     }
 
-    public void disableStream(String tableName, String region) {
-        String key = streamKey(region, tableName);
-        StreamDescription sd = streams.get(key);
+    public void disableStream(String tableArn) {
+        StreamDescription sd = streams.get(tableArn);
         if (sd != null) {
             sd.setStreamStatus("DISABLED");
-            LOG.infov("Disabled stream for table {0} in region {1}", tableName, region);
+            LOG.infov("Disabled stream for table {0}", tableArn);
         }
     }
 
-    public void deleteStream(String tableName, String region) {
-        String key = streamKey(region, tableName);
-        StreamDescription sd = streams.remove(key);
+    public void deleteStream(String tableArn) {
+        StreamDescription sd = streams.remove(tableArn);
         if (sd != null) {
             records.remove(sd.getStreamArn());
             streamRecordCounts.remove(sd.getStreamArn());
-            LOG.infov("Deleted stream for table {0} in region {1}", tableName, region);
+            LOG.infov("Deleted stream for table {0}", tableArn);
         }
     }
 
-    public void captureEvent(String tableName, String eventName,
-                             JsonNode oldItem, JsonNode newItem,
+    public void captureEvent(String eventName, JsonNode oldItem, JsonNode newItem,
                              TableDefinition table, String region) {
-        String key = streamKey(region, tableName);
-        StreamDescription sd = streams.get(key);
+        StreamDescription sd = streams.get(table.getTableArn());
         if (sd == null || !"ENABLED".equals(sd.getStreamStatus())) {
             return;
         }
@@ -208,13 +216,14 @@ public class DynamoDbStreamService {
         };
     }
 
-    public List<StreamDescription> listStreams(String tableNameFilter, String region) {
+    public List<StreamDescription> listStreams(String tableNameFilter, String accountId, String region) {
         List<StreamDescription> result = new ArrayList<>();
         for (StreamDescription sd : streams.values()) {
             if (tableNameFilter != null && !tableNameFilter.equals(sd.getTableName())) {
                 continue;
             }
-            if (region != null && !sd.getStreamArn().contains(":" + region + ":")) {
+            AwsArnUtils.Arn streamArn = AwsArnUtils.parse(sd.getStreamArn());
+            if (!accountId.equals(streamArn.accountId()) || !region.equals(streamArn.region())) {
                 continue;
             }
             result.add(sd);
@@ -222,7 +231,7 @@ public class DynamoDbStreamService {
         return result;
     }
 
-    public StreamDescription describeStream(String streamArn) {
+    StreamDescription describeStream(String streamArn) {
         for (StreamDescription sd : streams.values()) {
             if (streamArn.equals(sd.getStreamArn())) {
                 return sd;
@@ -232,8 +241,8 @@ public class DynamoDbStreamService {
                 "Stream not found: " + streamArn, 400);
     }
 
-    public String getShardIterator(String streamArn, String shardId,
-                                   String iteratorType, String sequenceNumber) {
+    String getShardIterator(String streamArn, String shardId,
+                            String iteratorType, String sequenceNumber) {
         StreamDescription sd = describeStream(streamArn);
         if (!"ENABLED".equals(sd.getStreamStatus()) && !"DISABLED".equals(sd.getStreamStatus())) {
             throw new AwsException("ResourceNotFoundException",
@@ -283,9 +292,9 @@ public class DynamoDbStreamService {
         return records.size();
     }
 
-    public record GetRecordsResult(List<DynamoDbStreamRecord> records, String nextShardIterator) {}
+    record GetRecordsResult(List<DynamoDbStreamRecord> records, String nextShardIterator) {}
 
-    public GetRecordsResult getRecords(String shardIterator, Integer limit) {
+    GetRecordsResult getRecords(String shardIterator, Integer limit) {
         String[] parts = decodeIterator(shardIterator);
         String streamArn = parts[0];
         String cursorSequence = parts[1];
@@ -333,6 +342,11 @@ public class DynamoDbStreamService {
         return Base64.getEncoder().encodeToString(raw.getBytes());
     }
 
+    /** The stream an iterator reads, rejecting a malformed iterator as GetRecords does. */
+    String streamArnOf(String shardIterator) {
+        return decodeIterator(shardIterator)[0];
+    }
+
     private String[] decodeIterator(String iterator) {
         try {
             String raw = new String(Base64.getDecoder().decode(iterator));
@@ -369,9 +383,5 @@ public class DynamoDbStreamService {
 
     private String zeroSequence() {
         return ZERO_SEQUENCE_NUMBER;
-    }
-
-    private String streamKey(String region, String tableName) {
-        return region + "::" + tableName;
     }
 }

@@ -80,6 +80,19 @@ class RegionResolverTest {
         assertEquals("us-east-1", resolver.resolveRegion(headers));
     }
 
+    /** Published, pseudo, and pattern-admitted labels are regions; garbage, null and blank are not. */
+    @Test
+    void isKnownRegionFollowsThePartitionCatalogAndItsRegionPatterns() {
+        assertTrue(RegionResolver.isKnownRegion("us-east-1"));
+        assertTrue(RegionResolver.isKnownRegion("cn-north-1"));
+        assertTrue(RegionResolver.isKnownRegion("aws-cn-global"));
+        assertTrue(RegionResolver.isKnownRegion("eu-south-9"), "unpublished but matches the commercial pattern");
+        assertFalse(RegionResolver.isKnownRegion("polygondwanaland-west-1"));
+        assertFalse(RegionResolver.isKnownRegion("s3"));
+        assertFalse(RegionResolver.isKnownRegion(null));
+        assertFalse(RegionResolver.isKnownRegion(" "));
+    }
+
     @Test
     void getAccountId() {
         assertEquals("000000000000", resolver.getAccountId());

@@ -42,6 +42,7 @@ floci:
   default-account-id: "000000000000"
   partitions:
     # id: aws                         # Pin the partition explicitly; derived from default-region when unset
+    allow-unknown-regions: false      # true serves a scope region no partition publishes or matches by pattern
 
   storage:
     mode: memory                      # memory | persistent | hybrid | wal

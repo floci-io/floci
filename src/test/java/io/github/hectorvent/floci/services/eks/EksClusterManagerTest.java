@@ -295,6 +295,8 @@ class EksClusterManagerTest {
         RegionResolver regionResolver = Mockito.mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn("000000000000");
         when(regionResolver.getDefaultRegion()).thenReturn("us-east-1");
+        when(regionResolver.buildGlobalArn(anyString(), anyString(), anyString())).thenAnswer(invocation ->
+                "arn:aws:" + invocation.getArgument(0) + "::" + invocation.getArgument(1) + ":" + invocation.getArgument(2));
 
         EksClusterManager manager = new EksClusterManager(containerBuilder, lifecycleManager,
                 Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
@@ -806,6 +808,8 @@ class EksClusterManagerTest {
             regionResolver = Mockito.mock(RegionResolver.class);
             when(regionResolver.getAccountId()).thenReturn("000000000000");
             when(regionResolver.getDefaultRegion()).thenReturn("us-east-1");
+            when(regionResolver.buildGlobalArn(anyString(), anyString(), anyString())).thenAnswer(invocation ->
+                    "arn:aws:" + invocation.getArgument(0) + "::" + invocation.getArgument(1) + ":" + invocation.getArgument(2));
 
             capturedCmds = new ArrayList<>();
             execCreate = Mockito.mock(ExecCreateCmd.class, Mockito.withSettings().defaultAnswer(Mockito.RETURNS_SELF));
@@ -1245,6 +1249,8 @@ class EksClusterManagerTest {
             regionResolver = Mockito.mock(RegionResolver.class);
             when(regionResolver.getAccountId()).thenReturn("000000000000");
             when(regionResolver.getDefaultRegion()).thenReturn("us-east-1");
+            when(regionResolver.buildGlobalArn(anyString(), anyString(), anyString())).thenAnswer(invocation ->
+                    "arn:aws:" + invocation.getArgument(0) + "::" + invocation.getArgument(1) + ":" + invocation.getArgument(2));
 
             oidcService = Mockito.mock(EksOidcService.class);
             when(oidcService.newIssuerUrl(anyString())).thenReturn(
@@ -1674,6 +1680,8 @@ class EksClusterManagerTest {
             RegionResolver regionResolver = Mockito.mock(RegionResolver.class);
             when(regionResolver.getAccountId()).thenReturn("000000000000");
             when(regionResolver.getDefaultRegion()).thenReturn("us-east-1");
+            when(regionResolver.buildGlobalArn(anyString(), anyString(), anyString())).thenAnswer(invocation ->
+                    "arn:aws:" + invocation.getArgument(0) + "::" + invocation.getArgument(1) + ":" + invocation.getArgument(2));
 
             manager = new EksClusterManager(containerBuilder, lifecycleManager,
                     Mockito.mock(ContainerDetector.class), portAllocator,
@@ -1872,6 +1880,8 @@ class EksClusterManagerTest {
             RegionResolver regionResolver = Mockito.mock(RegionResolver.class);
             when(regionResolver.getAccountId()).thenReturn("000000000000");
             when(regionResolver.getDefaultRegion()).thenReturn("us-east-1");
+            when(regionResolver.buildGlobalArn(anyString(), anyString(), anyString())).thenAnswer(invocation ->
+                    "arn:aws:" + invocation.getArgument(0) + "::" + invocation.getArgument(1) + ":" + invocation.getArgument(2));
 
             FlociCertificateAuthority certificateAuthority = Mockito.mock(FlociCertificateAuthority.class);
             when(certificateAuthority.caPem()).thenReturn(CA_PEM);
@@ -2003,6 +2013,8 @@ class EksClusterManagerTest {
             RegionResolver regionResolver = Mockito.mock(RegionResolver.class);
             when(regionResolver.getAccountId()).thenReturn("000000000000");
             when(regionResolver.getDefaultRegion()).thenReturn("us-east-1");
+            when(regionResolver.buildGlobalArn(anyString(), anyString(), anyString())).thenAnswer(invocation ->
+                    "arn:aws:" + invocation.getArgument(0) + "::" + invocation.getArgument(1) + ":" + invocation.getArgument(2));
 
             logStreamer = Mockito.mock(ContainerLogStreamer.class);
             mockHandle = Mockito.mock(Closeable.class);

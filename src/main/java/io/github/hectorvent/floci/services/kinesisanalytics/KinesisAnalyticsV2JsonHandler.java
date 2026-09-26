@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.services.kinesisanalytics.model.FlinkApplication;
 import io.github.hectorvent.floci.services.kinesisanalytics.model.Snapshot;
@@ -104,8 +105,7 @@ public class KinesisAnalyticsV2JsonHandler {
         if (bucketArn == null) {
             return null;
         }
-        String prefix = "arn:aws:s3:::";
-        return bucketArn.startsWith(prefix) ? bucketArn.substring(prefix.length()) : bucketArn;
+        return AwsArnUtils.resourceIfArnFor(bucketArn, "s3").orElse(bucketArn);
     }
 
     private Response handleDescribeApplication(JsonNode request, String region) {
@@ -329,7 +329,8 @@ public class KinesisAnalyticsV2JsonHandler {
         codeDesc.put("CodeContentType", "ZIPFILE");
         ObjectNode s3Desc = codeDesc.putObject("CodeContentDescription")
                 .putObject("S3ApplicationCodeLocationDescription");
-        s3Desc.put("BucketARN", "arn:aws:s3:::" + app.getCodeS3Bucket());
+        s3Desc.put("BucketARN", AwsArnUtils.Arn.global(AwsArnUtils.parse(app.getApplicationArn()).partition(),
+                "s3", "", app.getCodeS3Bucket()).toString());
         s3Desc.put("FileKey", app.getCodeS3Key());
         if (app.getCodeS3ObjectVersion() != null) {
             s3Desc.put("ObjectVersion", app.getCodeS3ObjectVersion());

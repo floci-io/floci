@@ -138,6 +138,8 @@ floci:
   partitions:
     # id: aws  # Partition served (aws, aws-cn, aws-us-gov, aws-iso, aws-iso-b, aws-iso-e, aws-iso-f, aws-eusc).
                # Derived from default-region when unset. Env: FLOCI_PARTITIONS_ID
+    allow-unknown-regions: false  # true accepts a SigV4 scope region no partition publishes or admits by its
+                                  # region pattern, giving it its own namespace. Env: FLOCI_PARTITIONS_ALLOW_UNKNOWN_REGIONS
   # Shared mock-response config for Textract/Comprehend/Rekognition/Translate. See AiMockConfigLoader.
   ai-mock-config-file: ${AI_MOCK_CONFIG:}
   storage:
@@ -507,6 +509,8 @@ floci:
       default-image: "floci/floci-duck:latest"
     glue:
       enabled: true
+      job-run-duration-seconds: 0   # 0 = job runs succeed as soon as they start
+      crawler-run-duration-seconds: 0   # 0 = crawls finish as soon as they start
     ses:
       enabled: true
       # smtp-host: mailpit          # SMTP server for email relay (empty = store only)
@@ -574,6 +578,7 @@ floci:
         enabled: false
         ttl-seconds: 21600
         port: 51679
+        proxy-image: floci/network-helper:local
     appconfig:
       enabled: true
     appconfigdata:
@@ -879,6 +884,7 @@ floci:
       enabled: true
       # maven-url: http://floci-reposilite:8080  # set to skip Reposilite sidecar container management
       maven-image: "dzikoysk/reposilite:3.6.3"
+      npm-image: "verdaccio/verdaccio:6.10.4"
     marketplace:
       enabled: true
     dms:

@@ -1,15 +1,19 @@
 package io.github.hectorvent.floci.services.lambda;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import java.time.Instant;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.lambda.model.FunctionEventInvokeConfig;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
+import io.github.hectorvent.floci.services.lambda.zip.CodeStore;
+import io.github.hectorvent.floci.services.lambda.zip.ZipExtractor;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
+import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -20,19 +24,27 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -339,6 +351,125 @@ class AsyncInvokeDestinationRouterTest {
         assertEquals("3", detail.path("responseContext").path("executedVersion").asText());
     }
 
+    @Test
+    void realAliasConfigDeliversToAliasBusAndFallsBackToVersionBus() {
+        String versionBusArn = "arn:aws:events:us-east-1:000000000000:event-bus/version-bus";
+        LambdaService realService = new LambdaService(
+                new LambdaFunctionStore(new InMemoryStorage<>()),
+                new WarmPool(),
+                new CodeStore(Path.of("target/test-data/lambda-code")),
+                new ZipExtractor(),
+                new RegionResolver("us-east-1", "000000000000"));
+        realService.createFunction("us-east-1", Map.of(
+                "FunctionName", "bank-pawnshop",
+                "PackageType", "Image",
+                "Role", "arn:aws:iam::000000000000:role/test-role",
+                "Code", Map.of("ImageUri", "public.ecr.aws/lambda/nodejs:20")));
+        LambdaFunction version = realService.publishVersion("us-east-1", "bank-pawnshop", null);
+        realService.putEventInvokeConfig("us-east-1", "bank-pawnshop", version.getVersion(), Map.of(
+                "DestinationConfig", Map.of("OnSuccess", Map.of("Destination", versionBusArn))));
+        realService.putEventInvokeConfig("us-east-1", "bank-pawnshop", "prod", Map.of(
+                "DestinationConfig", Map.of("OnSuccess", Map.of("Destination", BUS_ARN))));
+        AsyncInvokeDestinationRouter realRouter = new AsyncInvokeDestinationRouter(
+                instanceOf(realService), instanceOf(eventBridgeService), instanceOf(sqsService),
+                instanceOf(snsService), MAPPER, config);
+
+        realRouter.route(version, request(), success("{}"), 0, "prod");
+        realRouter.route(version, request(), success("{}"), 0, "other");
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<Map<String, Object>>> entries = ArgumentCaptor.forClass(List.class);
+        verify(eventBridgeService, times(2)).putEvents(entries.capture(), eq("us-east-1"), eq(null));
+        JsonNode aliasEntry = MAPPER.valueToTree(entries.getAllValues().get(0).get(0));
+        JsonNode versionEntry = MAPPER.valueToTree(entries.getAllValues().get(1).get(0));
+        assertEquals(BUS_ARN, aliasEntry.path("EventBusName").asText());
+        assertEquals(versionBusArn, versionEntry.path("EventBusName").asText());
+        assertEquals(version.getFunctionArn(), detailOf(aliasEntry)
+                .path("requestContext").path("functionArn").asText());
+        assertEquals(version.getVersion(), detailOf(aliasEntry)
+                .path("responseContext").path("executedVersion").asText());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void failedAsyncInvocation_sendsTheOriginalEventToDeadLetterQueue() {
+        fn.setDeadLetterTargetArn(QUEUE_ARN);
+
+        router.route(fn, request(), failure("Unhandled", "{\"errorMessage\":\"always fails\"}"), 0);
+
+        ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<Map<String, MessageAttributeValue>> attrs = ArgumentCaptor.forClass(Map.class);
+        String queueUrl = "http://localhost:4566/000000000000/quotes-queue";
+        verify(sqsService).sendMessage(eq(queueUrl), body.capture(), anyInt(), eq(null), eq(null), attrs.capture(), eq("us-east-1"));
+        assertThat(body.getValue(), containsString("\"amount\":100000"));
+        assertThat(attrs.getValue().get("RequestID").getStringValue(), equalTo("req-1"));
+        assertThat(attrs.getValue().get("ErrorCode").getDataType(), equalTo("Number"));
+        assertThat(attrs.getValue().get("ErrorCode").getStringValue(), equalTo("200"));
+        assertThat(attrs.getValue().get("ErrorMessage").getStringValue(), equalTo("always fails"));
+    }
+
+    @Test
+    void eventAgeExpiration_usesRetriesExhaustedConditionWhenAwsBehaviorIsUnverified() {
+        configure(null, BUS_ARN);
+
+        router.route(fn, request(), failure("Unhandled", "{\"errorMessage\":\"Event age exceeded\"}"), 3, 0);
+
+        JsonNode detail = detailOf(capturedEventEntry());
+        assertEquals("RetriesExhausted", detail.path("requestContext").path("condition").asText());
+    }
+
+    @Test
+    void succeedingAsyncInvocation_sendsNothingToDeadLetterQueue() {
+        fn.setDeadLetterTargetArn(QUEUE_ARN);
+
+        router.route(fn, request(), success("{\"ok\":true}"), 0);
+
+        verify(sqsService, never()).sendMessage(anyString(), anyString(), anyInt(), any(), any(), any(), anyString());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void deadLetterTargetMayBeAnSnsTopic() {
+        fn.setDeadLetterTargetArn(TOPIC_ARN);
+
+        router.route(fn, request(), failure("Unhandled", "{\"errorMessage\":\"always fails\"}"), 0);
+
+        ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<Map<String, MessageAttributeValue>> attrs = ArgumentCaptor.forClass(Map.class);
+        verify(snsService).publish(eq(TOPIC_ARN), eq(null), eq(null), body.capture(), eq("Lambda"), attrs.capture(), eq("us-east-1"));
+        assertThat(body.getValue(), containsString("\"amount\":100000"));
+        assertThat(attrs.getValue().get("RequestID").getStringValue(), equalTo("req-1"));
+        assertThat(attrs.getValue().get("ErrorCode").getDataType(), equalTo("Number"));
+        assertThat(attrs.getValue().get("ErrorCode").getStringValue(), equalTo("200"));
+        assertThat(attrs.getValue().get("ErrorMessage").getStringValue(), equalTo("always fails"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void deadLetterQueue_truncatesErrorMessageTo1Kb() {
+        fn.setDeadLetterTargetArn(QUEUE_ARN);
+        String longError = "x".repeat(2000);
+
+        router.route(fn, request(), failure("Unhandled", "{\"errorMessage\":\"" + longError + "\"}"), 0);
+
+        ArgumentCaptor<Map<String, MessageAttributeValue>> attrs = ArgumentCaptor.forClass(Map.class);
+        String queueUrl = "http://localhost:4566/000000000000/quotes-queue";
+        verify(sqsService).sendMessage(eq(queueUrl), anyString(), anyInt(), eq(null), eq(null), attrs.capture(), eq("us-east-1"));
+        assertEquals(1024, attrs.getValue().get("ErrorMessage").getStringValue().getBytes(StandardCharsets.UTF_8).length);
+    }
+
+    @Test
+    void whenBothDestinationAndDeadLetterConfigAreConfigured_destinationTakesPrecedence() {
+        fn.setDeadLetterTargetArn(QUEUE_ARN);
+        configure(null, TOPIC_ARN);
+
+        router.route(fn, request(), failure("Unhandled", "{\"errorMessage\":\"always fails\"}"), 0);
+
+        verify(snsService).publish(eq(TOPIC_ARN), eq(null), anyString(), eq("Lambda"), eq("us-east-1"));
+        String queueUrl = "http://localhost:4566/000000000000/quotes-queue";
+        verify(sqsService, never()).sendMessage(eq(queueUrl), anyString(), anyInt(), any(), any(), any(), anyString());
+    }
+
     private void configure(String onSuccess, String onFailure) {
         FunctionEventInvokeConfig config = new FunctionEventInvokeConfig();
         FunctionEventInvokeConfig.DestinationConfig destinations =
@@ -379,6 +510,10 @@ class AsyncInvokeDestinationRouterTest {
 
     private static InvokeResult success(String payload) {
         return new InvokeResult(200, null, payload.getBytes(), null, "req-1");
+    }
+
+    private static InvokeResult failure(String functionError, String payload) {
+        return new InvokeResult(200, functionError, payload.getBytes(), null, "req-1");
     }
 
     @SuppressWarnings("unchecked")

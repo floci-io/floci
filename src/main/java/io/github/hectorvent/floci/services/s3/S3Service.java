@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.core.common.XmlParser;
@@ -601,7 +602,7 @@ public class S3Service implements Resettable, ResourceProvider {
             // until the replacement body is on disk, so a failed write does not drop them.
             boolean[] dropPreVersioningAnnotations = {false};
             resolveObjectForAccount(bucketOwnerAccount, latestKey).ifPresent(prev -> {
-                if (prev.isLatest() && !prev.isDeleteMarker() && bucket.isObjectLockEnabled()) {
+                if (prev.isLatest() && !prev.isDeleteMarker() && bucket.isObjectLockEnabled() && prev.getVersionId() == null) {
                     checkLockProtection(prev, false);
                 }
                 if (prev.getVersionId() != null) {
@@ -795,8 +796,8 @@ public class S3Service implements Resettable, ResourceProvider {
                 bucketName,
                 key,
                 "AWS",
-                "arn:aws:iam::cloudfront:user/CloudFront Origin Access Identity "
-                        + originAccessIdentityId,
+                regionResolver.buildGlobalArn("iam", "cloudfront",
+                        "user/CloudFront Origin Access Identity " + originAccessIdentityId),
                 Map.of(),
                 canonicalUserId);
     }
@@ -822,7 +823,7 @@ public class S3Service implements Resettable, ResourceProvider {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() ->
                         new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
-        String resourceArn = S3PublicAccessEvaluator.objectArn(bucketName, key);
+        String resourceArn = S3PublicAccessEvaluator.objectArn(bucketPartition(bucketName), bucketName, key);
         S3PublicAccessEvaluator.PublicAccessDecision decision =
                 S3PublicAccessEvaluator.principalPolicyDecision(
                         objectMapper,
@@ -843,7 +844,7 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     void authorizeBucketRead(String bucketName, String action, RequestAuthorization authorization) {
-        String bucketArn = S3PublicAccessEvaluator.bucketArn(bucketName);
+        String bucketArn = S3PublicAccessEvaluator.bucketArn(bucketPartition(bucketName), bucketName);
         authorizeS3Read(bucketName, null, null, action, bucketArn, authorization);
     }
 
@@ -871,7 +872,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 ? authorization
                 : RequestAuthorization.unsigned();
         if (requestAuthorization.signed()) {
-            String bucketArn = S3PublicAccessEvaluator.bucketArn(bucketName);
+            String bucketArn = S3PublicAccessEvaluator.bucketArn(bucketPartition(bucketName), bucketName);
             authorizeSignedBucketPolicy(bucketName, null, action, bucketArn, requestAuthorization);
             return;
         }
@@ -885,7 +886,7 @@ public class S3Service implements Resettable, ResourceProvider {
             throw accessDeniedException(bucketName, null);
         }
 
-        String bucketArn = S3PublicAccessEvaluator.bucketArn(bucketName);
+        String bucketArn = S3PublicAccessEvaluator.bucketArn(bucketPartition(bucketName), bucketName);
         S3PublicAccessEvaluator.PublicAccessDecision policyDecision =
                 S3PublicAccessEvaluator.publicPolicyDecision(objectMapper, bucket.getPolicy(), action, bucketArn);
         if (policyDecision == S3PublicAccessEvaluator.PublicAccessDecision.DENY) {
@@ -899,7 +900,7 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     void authorizeObjectRead(String bucketName, String key, String versionId, String action, RequestAuthorization authorization) {
-        String objectArn = S3PublicAccessEvaluator.objectArn(bucketName, key);
+        String objectArn = S3PublicAccessEvaluator.objectArn(bucketPartition(bucketName), bucketName, key);
         authorizeS3Read(bucketName, key, versionId, action, objectArn, authorization);
     }
 
@@ -922,7 +923,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 ? authorization
                 : RequestAuthorization.unsigned();
         if (requestAuthorization.signed()) {
-            String objectArn = S3PublicAccessEvaluator.objectArn(bucketName, key);
+            String objectArn = S3PublicAccessEvaluator.objectArn(bucketPartition(bucketName), bucketName, key);
             authorizeSignedBucketPolicy(bucketName, key, action, objectArn, requestAuthorization);
             return;
         }
@@ -933,7 +934,7 @@ public class S3Service implements Resettable, ResourceProvider {
         S3BlockPublicAccessSettings blockPublicAccess =
                 blockPublicAccessFor(bucket, ownedBucket.account());
 
-        String objectArn = S3PublicAccessEvaluator.objectArn(bucketName, key);
+        String objectArn = S3PublicAccessEvaluator.objectArn(bucketPartition(bucketName), bucketName, key);
         S3PublicAccessEvaluator.PublicAccessDecision policyDecision =
                 S3PublicAccessEvaluator.publicPolicyDecision(objectMapper, bucket.getPolicy(), action, objectArn);
         if (policyDecision == S3PublicAccessEvaluator.PublicAccessDecision.DENY) {
@@ -1112,7 +1113,7 @@ public class S3Service implements Resettable, ResourceProvider {
             }
         }
         String account = accessKeyId.matches("\\d{12}") ? accessKeyId : ownerId();
-        return Optional.of("arn:aws:iam::" + account + ":root");
+        return Optional.of(regionResolver.buildGlobalArn("iam", account, "root"));
     }
 
     private boolean isSameAccountAsBucketOwner(String accessKeyId, String principalArn, String bucketOwnerAccount) {
@@ -1519,7 +1520,7 @@ public class S3Service implements Resettable, ResourceProvider {
         if (bucket.isVersioningEnabled() && versionId == null) {
             // Check lock on current latest before placing a delete marker
             objectStore.get(objectKey(bucketName, key)).ifPresent(prev -> {
-                if (!prev.isDeleteMarker()) {
+                if (!prev.isDeleteMarker() && prev.getVersionId() == null) {
                     checkLockProtection(prev, bypassGovernance);
                 }
             });
@@ -4740,6 +4741,23 @@ public class S3Service implements Resettable, ResourceProvider {
         return resolveBucketEntry(bucketName).map(AccountAwareStorageBackend.OwnedEntry::value);
     }
 
+    /**
+     * The partition a bucket's ARN is written in: the partition of the bucket's own region, not
+     * the request's. Bucket names are one namespace here, so a request signed for another
+     * partition can still reach the bucket, and a policy naming it must match as written. A
+     * bucket that does not exist yet takes the request's partition, where it would be created.
+     */
+    String bucketPartition(String bucketName) {
+        return resolveBucket(bucketName)
+                .map(Bucket::getRegion)
+                .map(AwsRegions::partitionFor)
+                .orElseGet(this::requestPartition);
+    }
+
+    private String requestPartition() {
+        return regionResolver != null ? regionResolver.getPartition() : AwsRegions.partitionFor(null);
+    }
+
     private Optional<AccountAwareStorageBackend.OwnedEntry<Bucket>> resolveBucketEntry(String bucketName) {
         if (globalBucketNamespace && bucketStore instanceof AccountAwareStorageBackend<?> aware) {
             @SuppressWarnings("unchecked")
@@ -5375,7 +5393,8 @@ public class S3Service implements Resettable, ResourceProvider {
         List<ExplorerResource> resources = new ArrayList<>();
         for (Bucket bucket : listBuckets()) {
             resources.add(new ExplorerResource(
-                    "arn:aws:s3:::" + bucket.getName(),
+                    AwsArnUtils.Arn.global(AwsRegions.partitionFor(bucket.getRegion() != null
+                            ? bucket.getRegion() : regionResolver.getDefaultRegion()), "s3", "", bucket.getName()).toString(),
                     "s3:bucket",
                     "s3",
                     bucket.getRegion() != null ? bucket.getRegion() : regionResolver.getDefaultRegion(),

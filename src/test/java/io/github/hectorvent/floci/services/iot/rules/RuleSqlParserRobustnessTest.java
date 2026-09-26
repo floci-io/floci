@@ -103,7 +103,14 @@ class RuleSqlParserRobustnessTest {
             "-17        | long:-17",
             "1.50       | decimal:1.50",
             "-0.001     | decimal:-0.001",
-            "9223372036854775807 | long:9223372036854775807"
+            "9223372036854775807 | long:9223372036854775807",
+            "-9223372036854775808 | long:-9223372036854775808",
+            "9223372036854775808 | decimal:9223372036854775808",
+            "99999999999999999999 | decimal:99999999999999999999",
+            "1e5        | decimal:1e5",
+            "1E-3       | decimal:1E-3",
+            "2.5e+3     | decimal:2.5e+3",
+            "-2.411E247 | decimal:-2.411E247"
     })
     void parsesEveryAcceptedLiteralForm(String literal, String expected) {
         Comparison where = (Comparison) RuleSqlParser.parse("SELECT * FROM 't' WHERE a = " + literal).where();
@@ -120,7 +127,9 @@ class RuleSqlParserRobustnessTest {
     @CsvSource(delimiter = '|', value = {
             "1.     | .",
             ".5     | .",
-            "1e5    | e5",
+            "1e     | e",
+            "1e+    | +",
+            "1e5.5  | .",
             "+1     | +",
             "0x1F   | x1F",
             "1_000  | _000",
@@ -184,7 +193,7 @@ class RuleSqlParserRobustnessTest {
             "SELECT * FROM 't' WHERE topic(a) = 'x'      | topic",
             "SELECT * FROM 't' WHERE topic(1.5) = 'x'    | topic",
             "SELECT * FROM 't' WHERE topic(-1) = 'x'     | topic",
-            "SELECT * FROM 't' WHERE topic(99999999999999999999) = 'x' | 99999999999999999999",
+            "SELECT * FROM 't' WHERE topic(99999999999999999999) = 'x' | topic",
             "SELECT * FROM ''                | ''",
             "SELECT * FROM '   '             | '   '",
             "SELECT * FROM t                 | t",

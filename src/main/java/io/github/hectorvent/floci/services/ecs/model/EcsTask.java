@@ -21,6 +21,8 @@ public class EcsTask {
      * caller-supplied label and therefore cannot be trusted to establish ownership.
      */
     private String owningServiceArn;
+    /** Cloud Map service ids this task actually registered in, independent of later service updates. */
+    private List<String> serviceDiscoveryServiceIds = List.of();
     private LaunchType launchType;
     private String lastStatus;
     private String desiredStatus;
@@ -81,6 +83,7 @@ public class EcsTask {
         this.taskDefinitionArn = other.taskDefinitionArn;
         this.group = other.group;
         this.owningServiceArn = other.owningServiceArn;
+        this.serviceDiscoveryServiceIds = other.serviceDiscoveryServiceIds;
         this.launchType = other.launchType;
         this.lastStatus = other.lastStatus;
         this.desiredStatus = other.desiredStatus;
@@ -137,6 +140,11 @@ public class EcsTask {
 
     public String getOwningServiceArn() { return owningServiceArn; }
     public void setOwningServiceArn(String owningServiceArn) { this.owningServiceArn = owningServiceArn; }
+
+    public List<String> getServiceDiscoveryServiceIds() { return serviceDiscoveryServiceIds; }
+    public void setServiceDiscoveryServiceIds(List<String> serviceDiscoveryServiceIds) {
+        this.serviceDiscoveryServiceIds = serviceDiscoveryServiceIds;
+    }
 
     public LaunchType getLaunchType() { return launchType; }
     public void setLaunchType(LaunchType launchType) { this.launchType = launchType; }

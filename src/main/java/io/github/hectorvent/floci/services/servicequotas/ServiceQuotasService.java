@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.servicequotas;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -132,8 +133,8 @@ public class ServiceQuotasService {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("ServiceCode", serviceCode);
         node.put("ServiceName", SERVICE_NAMES.getOrDefault(serviceCode, serviceCode));
-        node.put("QuotaArn", "arn:aws:servicequotas:" + region + ":" + accountId + ":"
-                + serviceCode + "/" + quota.quotaCode());
+        node.put("QuotaArn", AwsArnUtils.Arn.of("servicequotas", region, accountId,
+                serviceCode + "/" + quota.quotaCode()).toString());
         node.put("QuotaCode", quota.quotaCode());
         node.put("QuotaName", quota.quotaName());
         node.put("Value", quota.value());
@@ -255,8 +256,8 @@ public class ServiceQuotasService {
         requestedQuota.put("ServiceName", SERVICE_NAMES.getOrDefault(serviceCode, serviceCode));
         requestedQuota.put("QuotaCode", quotaCode);
         requestedQuota.put("QuotaName", quota.quotaName());
-        requestedQuota.put("QuotaArn", "arn:aws:servicequotas:" + region + ":" + accountId + ":"
-                + serviceCode + "/" + quotaCode);
+        requestedQuota.put("QuotaArn", AwsArnUtils.Arn.of("servicequotas", region, accountId,
+                serviceCode + "/" + quotaCode).toString());
         requestedQuota.put("DesiredValue", desiredValue);
         requestedQuota.put("Status", "PENDING");
         requestedQuota.put("Requester", "floci-emulator");

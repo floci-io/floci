@@ -342,7 +342,8 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
         return encoded.toString();
     }
 
-    static Response errorResponse(int status, String code, String message) {
+    /** S3's XML error document; also the shape the ingress filter uses to refuse an S3-signed request. */
+    public static Response errorResponse(int status, String code, String message) {
         String xml = new XmlBuilder()
                 .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                 .start("Error")

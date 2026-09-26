@@ -12,10 +12,33 @@ Asynchronous operations (`CreateHttpNamespace`, `CreatePublicDnsNamespace`,
 `CreatePrivateDnsNamespace`, `DeleteNamespace`, `RegisterInstance`,
 `DeregisterInstance`) apply their effect synchronously and return an operation
 id. The operation reaches `SUCCESS` immediately by default, so a follow-up
-`GetOperation` call returns a completed operation without polling. No real DNS
-records or Route 53 hosted zones are created — public and private DNS
-namespaces are assigned a synthetic `HostedZoneId` so SDK and CLI clients can
-exercise the full Cloud Map control flow locally.
+`GetOperation` call returns a completed operation without polling. No Route 53
+hosted zones are created: public and private DNS namespaces are assigned a
+synthetic `HostedZoneId` so SDK and CLI clients can exercise the full Cloud Map
+control flow locally.
+
+### DNS resolution
+
+A DNS namespace is answerable, not just storable. Floci's embedded DNS server
+resolves `<service>.<namespace>` to the `AWS_INSTANCE_IPV4` of the instances
+registered under that service, one A record each, so a container that uses Floci
+as its resolver reaches its peers by name. Instances registered directly through
+`RegisterInstance` and instances an ECS service registers through its
+`serviceRegistries` resolve the same way.
+
+Which instances answer follows Route 53: the healthy ones while any instance is
+healthy, and all of them when none is, so a service whose instances have all gone
+unhealthy still resolves rather than disappearing from DNS. At most eight records
+go back either way, as Route 53 answers a service discovery query.
+Names inside a DNS namespace stay local when no instance has a usable address:
+the resolver answers negatively instead of forwarding them to upstream DNS.
+
+Three limits are worth knowing. `HTTP` namespaces do not resolve, matching AWS,
+where they are reachable only through `DiscoverInstances`. Only A records are
+served, so a name that AWS would answer with an `SRV` record answers with the
+address alone. And the embedded DNS server only runs when Floci itself runs
+inside Docker, so name resolution is available to containers, not to processes on
+the host.
 
 ## Supported Operations
 
@@ -115,6 +138,8 @@ print(found["Instances"])
 
 ## Out of Scope
 
-- Real DNS resolution or Route 53 hosted zone / record set creation.
+- Route 53 hosted zone / record set creation.
+- SRV, AAAA and CNAME records: `AWS_INSTANCE_PORT` is stored and returned, but only A records are served.
 - Route 53 health checks backing `HealthCheckConfig` (custom health status is stored, not actively probed).
-- Cross-region namespace and service discovery.
+- `AWS_INIT_HEALTH_STATUS` and `AWS_EC2_INSTANCE_ID` on `RegisterInstance`. Every instance registers `HEALTHY`, which is AWS's own initial status when `AWS_INIT_HEALTH_STATUS` is absent, so only a caller that explicitly asks for `UNHEALTHY` sees a difference.
+- Cross-region namespace and service discovery. A DNS query carries no region, so a name resolves through whichever namespace copy holds instances.

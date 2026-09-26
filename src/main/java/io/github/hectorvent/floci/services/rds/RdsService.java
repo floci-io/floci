@@ -592,6 +592,29 @@ public class RdsService implements Resettable, ResourceProvider {
                                        boolean autoMinorVersionUpgrade,
                                        DbInstanceSettings settings,
                                        Boolean publiclyAccessible) {
+        return createDbInstance(id, engineParam, engineVersion, masterUsername, masterPassword,
+                dbName, dbInstanceClass, allocatedStorage, iamEnabled, paramGroupName,
+                dbSubnetGroupName, dbClusterIdentifier, availabilityZone, multiAz,
+                manageMasterUserPassword, masterUserSecretKmsKeyId, tags, vpcSecurityGroupIds,
+                optionGroupName, region, autoMinorVersionUpgrade, settings, publiclyAccessible, null);
+    }
+
+    public DbInstance createDbInstance(String id, String engineParam, String engineVersion,
+                                       String masterUsername, String masterPassword,
+                                       String dbName, String dbInstanceClass,
+                                       int allocatedStorage, boolean iamEnabled,
+                                       String paramGroupName, String dbSubnetGroupName,
+                                       String dbClusterIdentifier, String availabilityZone,
+                                       boolean multiAz, boolean manageMasterUserPassword,
+                                       String masterUserSecretKmsKeyId,
+                                       Map<String, String> tags,
+                                       List<String> vpcSecurityGroupIds,
+                                       String optionGroupName,
+                                       String region,
+                                       boolean autoMinorVersionUpgrade,
+                                       DbInstanceSettings settings,
+                                       Boolean publiclyAccessible,
+                                       Integer requestedPort) {
         validateInstanceSettings(settings);
         String provisioningKey = "instance:" + currentAccountId() + ":"
                 + dbResourceKey(effectiveRegion(region), id);
@@ -605,7 +628,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     paramGroupName, dbSubnetGroupName, dbClusterIdentifier, availabilityZone,
                     multiAz, manageMasterUserPassword, masterUserSecretKmsKeyId, tags,
                     vpcSecurityGroupIds, optionGroupName, region, autoMinorVersionUpgrade,
-                    settings, publiclyAccessible);
+                    settings, publiclyAccessible, requestedPort);
         } finally {
             provisioningIds.remove(provisioningKey);
         }
@@ -625,7 +648,7 @@ public class RdsService implements Resettable, ResourceProvider {
                                           String region,
                                           boolean autoMinorVersionUpgrade,
                                           DbInstanceSettings settings,
-                                          Boolean publiclyAccessible) {
+                                          Boolean publiclyAccessible, Integer requestedPort) {
         String effectiveRegion = effectiveRegion(region);
         String dbiResourceId = "db-" + java.util.UUID.randomUUID().toString()
                 .replace("-", "").substring(0, 24).toUpperCase();
@@ -653,9 +676,6 @@ public class RdsService implements Resettable, ResourceProvider {
         DbInstanceSettings.validateMonitoringPairOnCreate(
                 settings.monitoringInterval(), settings.monitoringRoleArn());
         boolean mock = config.services().rds().mock();
-        // Always reserve a unique port (even in mock) so endpoints stay distinct and usedPorts
-        // is consistent; mock mode only skips starting the container and auth proxy.
-        int proxyPort = allocateProxyPort();
         if (masterUsername == null || masterUsername.isBlank()) {
             masterUsername = "root";
         } else if (masterUsername.length() > engine.maxMasterUsernameLength()
@@ -666,6 +686,9 @@ public class RdsService implements Resettable, ResourceProvider {
         if (manageMasterUserPassword && (masterPassword == null || masterPassword.isBlank())) {
             masterPassword = generatedMasterPassword();
         }
+        // Always reserve a unique port (even in mock) so endpoints stay distinct and usedPorts
+        // is consistent; mock mode only skips starting the container and auth proxy.
+        int proxyPort = reserveProxyPort(requestedPort);
 
         String backendHost = null;
         int backendPort = 0;
@@ -842,6 +865,7 @@ public class RdsService implements Resettable, ResourceProvider {
         snapshot.setDbName(instance.getDbName());
         snapshot.setSnapshotType("manual");
         snapshot.setOptionGroupName(instance.getOptionGroupName());
+        snapshot.setStorageEncrypted(instance.isStorageEncrypted());
         snapshot.setKmsKeyId(instance.getKmsKeyId());
         snapshot.setTags(tags != null ? new java.util.LinkedHashMap<>(tags) : new java.util.LinkedHashMap<>());
         snapshot.setDbSnapshotArn(regionResolver.buildArn("rds", effectiveRegion, "snapshot:" + snapshotId));
@@ -897,14 +921,22 @@ public class RdsService implements Resettable, ResourceProvider {
         String accountId = currentAccountId();
         SnapshotReference sourceReference = resolveSnapshotReference(sourceIdentifier, targetRegion);
         DbSnapshot source = sourceReference.snapshot();
+        boolean crossRegion = !Objects.equals(sourceReference.region(), targetRegion);
         if (!"available".equalsIgnoreCase(source.getStatus())) {
             throw new AwsException("InvalidDBSnapshotState",
                     "DBSnapshot " + source.getDbSnapshotIdentifier() + " is not in an available state.", 400);
+        }
+        if (crossRegion && source.isStorageEncrypted()
+                && (kmsKeyId == null || kmsKeyId.isBlank())) {
+            throw new AwsException("InvalidParameterCombination",
+                    "KmsKeyId is required when copying an encrypted DBSnapshot across Regions.", 400);
         }
         if (findSnapshotForScope(accountId, targetRegion, targetIdentifier) != null) {
             throw new AwsException("DBSnapshotAlreadyExists",
                     "DBSnapshot " + targetIdentifier + " already exists.", 400);
         }
+        String targetKmsKeyId = crossRegion && kmsKeyId != null && !kmsKeyId.isBlank()
+                ? resolveKmsKeyArn(kmsKeyId, targetRegion) : kmsKeyId;
         String sourceData = getSnapshotDataForScope(
                 sourceReference.accountId(), sourceReference.region(), source.getDbSnapshotIdentifier())
                 .orElseThrow(() -> new AwsException("DBSnapshotNotFound",
@@ -916,10 +948,13 @@ public class RdsService implements Resettable, ResourceProvider {
         copy.setSnapshotCreateTime(Instant.now());
         copy.setStatus("available");
         copy.setSnapshotType("manual");
-        copy.setSourceDbSnapshotIdentifier(source.getDbSnapshotArn());
+        copy.setSourceDbSnapshotIdentifier(crossRegion ? source.getDbSnapshotArn() : null);
         copy.setOptionGroupName(optionGroupName != null && !optionGroupName.isBlank()
                 ? optionGroupName : source.getOptionGroupName());
-        copy.setKmsKeyId(kmsKeyId != null && !kmsKeyId.isBlank() ? kmsKeyId : source.getKmsKeyId());
+        copy.setStorageEncrypted(source.isStorageEncrypted()
+                || (targetKmsKeyId != null && !targetKmsKeyId.isBlank()));
+        copy.setKmsKeyId(targetKmsKeyId != null && !targetKmsKeyId.isBlank()
+                ? targetKmsKeyId : source.getKmsKeyId());
         copy.setRestoreAccountIds(new ArrayList<>());
         Map<String, String> copiedTags = new LinkedHashMap<>();
         if (copyTags) {
@@ -989,6 +1024,7 @@ public class RdsService implements Resettable, ResourceProvider {
         copy.setDbName(source.getDbName());
         copy.setDbInstanceClass(source.getDbInstanceClass());
         copy.setOptionGroupName(source.getOptionGroupName());
+        copy.setStorageEncrypted(source.isStorageEncrypted());
         copy.setKmsKeyId(source.getKmsKeyId());
         copy.setTags(new LinkedHashMap<>(source.getTags()));
         copy.setRestoreAccountIds(new ArrayList<>(source.getRestoreAccountIds()));
@@ -1054,15 +1090,24 @@ public class RdsService implements Resettable, ResourceProvider {
 
     private record SnapshotReference(String accountId, String region, DbSnapshot snapshot) {}
 
-    public DbInstance restoreDbInstanceFromDbSnapshot(String instanceId, String snapshotId, String dbInstanceClass, String availabilityZone, boolean multiAz, String dbSubnetGroupName, java.util.List<String> vpcSecurityGroupIds, java.util.Map<String, String> tags) {
+    public DbInstance restoreDbInstanceFromDbSnapshot(String instanceId, String snapshotId, String dbInstanceClass, String availabilityZone, boolean multiAz, String dbSubnetGroupName, List<String> vpcSecurityGroupIds, Map<String, String> tags) {
         return restoreDbInstanceFromDbSnapshot(instanceId, snapshotId, dbInstanceClass, availabilityZone,
                 multiAz, dbSubnetGroupName, vpcSecurityGroupIds, tags, regionResolver.getDefaultRegion());
     }
 
     public DbInstance restoreDbInstanceFromDbSnapshot(String instanceId, String snapshotId, String dbInstanceClass,
                                                        String availabilityZone, boolean multiAz, String dbSubnetGroupName,
-                                                       java.util.List<String> vpcSecurityGroupIds,
-                                                       java.util.Map<String, String> tags, String region) {
+                                                       List<String> vpcSecurityGroupIds,
+                                                       Map<String, String> tags, String region) {
+        return restoreDbInstanceFromDbSnapshot(instanceId, snapshotId, dbInstanceClass,
+                availabilityZone, multiAz, dbSubnetGroupName, vpcSecurityGroupIds, tags, region, null);
+    }
+
+    public DbInstance restoreDbInstanceFromDbSnapshot(String instanceId, String snapshotId, String dbInstanceClass,
+                                                       String availabilityZone, boolean multiAz, String dbSubnetGroupName,
+                                                       List<String> vpcSecurityGroupIds,
+                                                       Map<String, String> tags, String region,
+                                                       Integer requestedPort) {
         String effectiveRegion = effectiveRegion(region);
         DbSnapshot snapshot = Optional.ofNullable(findSnapshotForScope(currentAccountId(), effectiveRegion, snapshotId))
                 .orElseThrow(() -> new AwsException("DBSnapshotNotFound", "DBSnapshot " + snapshotId + " not found.", 404));
@@ -1075,17 +1120,20 @@ public class RdsService implements Resettable, ResourceProvider {
             targetClass = "db.t3.micro";
         }
         // Use the parameters from the snapshot
+        DbInstanceSettings restoreSettings = new DbInstanceSettings(
+                snapshot.isStorageEncrypted(), snapshot.getKmsKeyId(), null, null, null, null);
         DbInstance instance = createDbInstance(instanceId, snapshot.getEngine().name().toLowerCase(), snapshot.getEngineVersion(),
                 snapshot.getMasterUsername(), snapshot.getMasterPassword(),
                 snapshot.getDbName(), targetClass, snapshot.getAllocatedStorage(), snapshot.isIamDatabaseAuthenticationEnabled(),
-                null, dbSubnetGroupName, null, availabilityZone, multiAz, false, null, tags, vpcSecurityGroupIds);
+                null, dbSubnetGroupName, null, availabilityZone, multiAz, false, null, tags, vpcSecurityGroupIds,
+                null, effectiveRegion, true, restoreSettings, null, requestedPort);
 
         if (!config.services().rds().mock()) {
             try {
                 containerManager.restorePostgresSnapshot(instance.getContainerId(), instance.getMasterUsername(), sqlDump);
             } catch (Exception e) {
                 try {
-                    deleteDbInstance(instanceId);
+                    deleteDbInstance(instanceId, effectiveRegion);
                 } catch (Exception cleanupError) {
                     e.addSuppressed(cleanupError);
                 }
@@ -1679,7 +1727,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 .orElseThrow(() -> new AwsException("DBClusterSnapshotNotFoundFault",
                         "DB cluster snapshot data for " + resolvedSnapshotId + " not found.", 404));
 
-        DbCluster cluster = createDbCluster(clusterId, engine,
+        DbCluster cluster = createDbClusterWithPort(clusterId, engine,
                 engineVersion != null && !engineVersion.isBlank() ? engineVersion : snapshot.getEngineVersion(),
                 snapshot.getMasterUsername(), snapshot.getMasterPassword(),
                 databaseName != null && !databaseName.isBlank() ? databaseName : snapshot.getDatabaseName(),
@@ -1687,7 +1735,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 parameterGroupName, dbSubnetGroupName, availabilityZone, false, effectiveRegion,
                 null, null, null, false, null,
                 engineMode != null && !engineMode.isBlank() ? engineMode : snapshot.getEngineMode(),
-                snapshot.isStorageEncrypted());
+                snapshot.isStorageEncrypted(), port);
         if (tags != null && !tags.isEmpty()) {
             cluster.getTags().putAll(tags);
             putClusterForScope(accountId, effectiveRegion, clusterId, cluster);
@@ -3378,6 +3426,38 @@ public class RdsService implements Resettable, ResourceProvider {
                                      Integer serverlessV2SecondsUntilAutoPause,
                                      boolean manageMasterUserPassword, String masterUserSecretKmsKeyId,
                                      String engineMode, boolean storageEncrypted) {
+        return createDbCluster(id, engineParam, engineVersion, masterUsername, masterPassword,
+                databaseName, iamEnabled, paramGroupName, dbSubnetGroupName, availabilityZone,
+                multiAz, region, serverlessV2MinCapacity, serverlessV2MaxCapacity,
+                serverlessV2SecondsUntilAutoPause, manageMasterUserPassword, masterUserSecretKmsKeyId,
+                engineMode, storageEncrypted, null);
+    }
+
+    public DbCluster createDbCluster(String id, String engineParam, String engineVersion,
+                                     String masterUsername, String masterPassword,
+                                     String databaseName, boolean iamEnabled,
+                                     String paramGroupName, String dbSubnetGroupName,
+                                     String availabilityZone, boolean multiAz, String region,
+                                     Double serverlessV2MinCapacity, Double serverlessV2MaxCapacity,
+                                     Integer serverlessV2SecondsUntilAutoPause,
+                                     boolean manageMasterUserPassword, String masterUserSecretKmsKeyId,
+                                     String engineMode, boolean storageEncrypted, Integer requestedPort) {
+        return createDbClusterWithPort(id, engineParam, engineVersion, masterUsername, masterPassword,
+                databaseName, iamEnabled, paramGroupName, dbSubnetGroupName, availabilityZone,
+                multiAz, region, serverlessV2MinCapacity, serverlessV2MaxCapacity,
+                serverlessV2SecondsUntilAutoPause, manageMasterUserPassword, masterUserSecretKmsKeyId,
+                engineMode, storageEncrypted, requestedPort);
+    }
+
+    private DbCluster createDbClusterWithPort(String id, String engineParam, String engineVersion,
+                                              String masterUsername, String masterPassword,
+                                              String databaseName, boolean iamEnabled,
+                                              String paramGroupName, String dbSubnetGroupName,
+                                              String availabilityZone, boolean multiAz, String region,
+                                              Double serverlessV2MinCapacity, Double serverlessV2MaxCapacity,
+                                              Integer serverlessV2SecondsUntilAutoPause,
+                                              boolean manageMasterUserPassword, String masterUserSecretKmsKeyId,
+                                              String engineMode, boolean storageEncrypted, Integer requestedPort) {
         String provisioningKey = "cluster:" + currentAccountId() + ":"
                 + dbResourceKey(effectiveRegion(region), id);
         if (!provisioningIds.add(provisioningKey)) {
@@ -3389,7 +3469,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     databaseName, iamEnabled, paramGroupName, dbSubnetGroupName, availabilityZone,
                     multiAz, region, serverlessV2MinCapacity, serverlessV2MaxCapacity,
                     serverlessV2SecondsUntilAutoPause, manageMasterUserPassword, masterUserSecretKmsKeyId,
-                    engineMode, storageEncrypted);
+                    engineMode, storageEncrypted, requestedPort);
         } finally {
             provisioningIds.remove(provisioningKey);
         }
@@ -3403,7 +3483,7 @@ public class RdsService implements Resettable, ResourceProvider {
                                         Double serverlessV2MinCapacity, Double serverlessV2MaxCapacity,
                                         Integer serverlessV2SecondsUntilAutoPause,
                                         boolean manageMasterUserPassword, String masterUserSecretKmsKeyId,
-                                        String engineMode, boolean storageEncrypted) {
+                                        String engineMode, boolean storageEncrypted, Integer requestedPort) {
         String effectiveRegion = effectiveRegion(region);
         String clusterResourceId = "cluster-" + java.util.UUID.randomUUID().toString()
                 .replace("-", "").substring(0, 24).toUpperCase();
@@ -3426,7 +3506,7 @@ public class RdsService implements Resettable, ResourceProvider {
         boolean mock = config.services().rds().mock();
         // Always reserve a unique port (even in mock) so endpoints stay distinct and usedPorts
         // is consistent; mock mode only skips starting the container and auth proxy.
-        int proxyPort = allocateProxyPort();
+        int proxyPort = reserveProxyPort(requestedPort);
         if (manageMasterUserPassword && (masterPassword == null || masterPassword.isBlank())) {
             masterPassword = generatedMasterPassword();
         }
@@ -4004,7 +4084,7 @@ public class RdsService implements Resettable, ResourceProvider {
         global.setGlobalClusterIdentifier(id.toLowerCase(Locale.ROOT));
         global.setGlobalClusterResourceId("cluster-" + java.util.UUID.randomUUID().toString()
                 .replace("-", "").substring(0, 24).toUpperCase());
-        global.setGlobalClusterArn(globalClusterArn(accountId, global.getGlobalClusterIdentifier()));
+        global.setGlobalClusterArn(globalClusterArn(regionResolver.getPartition(), accountId, global.getGlobalClusterIdentifier()));
         global.setStatus("available");
         global.setDeletionProtection(Boolean.TRUE.equals(deletionProtection));
         global.setTags(tags);
@@ -4067,6 +4147,23 @@ public class RdsService implements Resettable, ResourceProvider {
                                                     Integer serverlessV2SecondsUntilAutoPause,
                                                     boolean manageMasterUserPassword, String masterUserSecretKmsKeyId,
                                                     String engineMode, boolean storageEncrypted) {
+        return createDbClusterInGlobalCluster(globalClusterIdentifier, id, engineParam, engineVersion,
+                masterUsername, masterPassword, databaseName, iamEnabled, paramGroupName,
+                dbSubnetGroupName, availabilityZone, multiAz, region, serverlessV2MinCapacity,
+                serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause, manageMasterUserPassword,
+                masterUserSecretKmsKeyId, engineMode, storageEncrypted, null);
+    }
+
+    public DbCluster createDbClusterInGlobalCluster(String globalClusterIdentifier, String id,
+                                                    String engineParam, String engineVersion,
+                                                    String masterUsername, String masterPassword,
+                                                    String databaseName, boolean iamEnabled,
+                                                    String paramGroupName, String dbSubnetGroupName,
+                                                    String availabilityZone, boolean multiAz, String region,
+                                                    Double serverlessV2MinCapacity, Double serverlessV2MaxCapacity,
+                                                    Integer serverlessV2SecondsUntilAutoPause,
+                                                    boolean manageMasterUserPassword, String masterUserSecretKmsKeyId,
+                                                    String engineMode, boolean storageEncrypted, Integer requestedPort) {
         String effectiveRegion = effectiveRegion(region);
         String accountId = currentAccountId();
         GlobalCluster global = requireGlobalCluster(accountId, globalClusterIdentifier);
@@ -4087,7 +4184,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     paramGroupName, dbSubnetGroupName, availabilityZone, multiAz, effectiveRegion,
                     serverlessV2MinCapacity, serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause,
                     manageMasterUserPassword, masterUserSecretKmsKeyId, engineMode,
-                    storageEncrypted || global.isStorageEncrypted());
+                    storageEncrypted || global.isStorageEncrypted(), requestedPort);
         } else {
             if (hasText(masterUsername) || hasText(masterPassword) || manageMasterUserPassword) {
                 throw new AwsException("InvalidParameterCombination",
@@ -4122,7 +4219,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     primary.getDatabaseName(), iamEnabled, paramGroupName, dbSubnetGroupName,
                     availabilityZone, multiAz, effectiveRegion, serverlessV2MinCapacity,
                     serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause, false, null,
-                    engineMode, primary.isStorageEncrypted());
+                    engineMode, primary.isStorageEncrypted(), requestedPort);
         }
         try {
             attachToGlobalCluster(accountId, global.getGlobalClusterIdentifier(), cluster, primary == null);
@@ -4194,7 +4291,7 @@ public class RdsService implements Resettable, ResourceProvider {
             }
             deleteGlobalClusterRecord(accountId, global.getGlobalClusterIdentifier());
             global.setGlobalClusterIdentifier(newId);
-            global.setGlobalClusterArn(globalClusterArn(accountId, newId));
+            global.setGlobalClusterArn(globalClusterArn(regionResolver.getPartition(), accountId, newId));
             for (GlobalClusterMember member : global.getMembers()) {
                 DbCluster cluster = findClusterByArn(accountId, member.getDbClusterArn());
                 if (cluster != null) {
@@ -4461,8 +4558,8 @@ public class RdsService implements Resettable, ResourceProvider {
         return "global:" + id.toLowerCase(Locale.ROOT);
     }
 
-    private static String globalClusterArn(String accountId, String id) {
-        return "arn:aws:rds::" + accountId + ":global-cluster:" + id;
+    private static String globalClusterArn(String partition, String accountId, String id) {
+        return AwsArnUtils.Arn.global(partition, "rds", accountId, "global-cluster:" + id).toString();
     }
 
     private static void requireGlobalClusterEngine(String engine, String clusterId) {
@@ -6279,6 +6376,25 @@ public class RdsService implements Resettable, ResourceProvider {
             requestedTag += suffix;
         }
         return imageName + ":" + requestedTag;
+    }
+
+    private int reserveProxyPort(Integer requestedPort) {
+        if (requestedPort == null) {
+            return allocateProxyPort();
+        }
+        if (requestedPort < 1150 || requestedPort > 65535) {
+            throw new AwsException("InvalidParameterValue", "Port must be between 1150 and 65535.", 400);
+        }
+        int base = config.services().rds().proxyBasePort();
+        int max = config.services().rds().proxyMaxPort();
+        if (requestedPort >= base && requestedPort <= max) {
+            if (!usedPorts.add(requestedPort)) {
+                throw new AwsException("InvalidParameterValue",
+                        "Port " + requestedPort + " is already in use by another RDS resource.", 400);
+            }
+            return requestedPort;
+        }
+        return allocateProxyPort();
     }
 
     private int allocateProxyPort() {
@@ -8586,6 +8702,59 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         eventSubscriptions.put(eventSubscriptionKey(region, subscriptionName), subscription);
         return subscription;
+    }
+
+    /**
+     * AddSourceIdentifierToSubscription. The list is otherwise write-once, because
+     * ModifyEventSubscription carries no SourceIds member.
+     *
+     * <p>Adding an id the subscription already carries is a no-op rather than an error. The model
+     * declares only SourceNotFoundFault and SubscriptionNotFoundFault for this operation, so there
+     * is no fault to raise for a duplicate.
+     */
+    public synchronized EventSubscription addSourceIdentifierToSubscription(
+            String region, String subscriptionName, String sourceIdentifier) {
+        requireSourceIdentifierRequest(subscriptionName, sourceIdentifier);
+        EventSubscription subscription = requireEventSubscription(region, subscriptionName);
+        List<String> ids = new ArrayList<>(subscription.getSourceIdsList());
+        if (!ids.contains(sourceIdentifier)) {
+            ids.add(sourceIdentifier);
+            subscription.setSourceIdsList(ids);
+            eventSubscriptions.put(eventSubscriptionKey(region, subscriptionName), subscription);
+        }
+        return subscription;
+    }
+
+    /**
+     * RemoveSourceIdentifierFromSubscription. An id the subscription does not carry is
+     * SourceNotFound, which is the fault the model declares and the only one that fits.
+     */
+    public synchronized EventSubscription removeSourceIdentifierFromSubscription(
+            String region, String subscriptionName, String sourceIdentifier) {
+        requireSourceIdentifierRequest(subscriptionName, sourceIdentifier);
+        EventSubscription subscription = requireEventSubscription(region, subscriptionName);
+        List<String> ids = new ArrayList<>(subscription.getSourceIdsList());
+        if (!ids.remove(sourceIdentifier)) {
+            throw new AwsException("SourceNotFound",
+                    "Source " + sourceIdentifier + " not found in subscription " + subscriptionName + ".", 404);
+        }
+        subscription.setSourceIdsList(ids);
+        eventSubscriptions.put(eventSubscriptionKey(region, subscriptionName), subscription);
+        return subscription;
+    }
+
+    /**
+     * Both members are required by the model, so both fail the same way. Letting a missing
+     * SubscriptionName fall through to the lookup would answer SubscriptionNotFound, which tells
+     * the caller the subscription does not exist when the request simply did not name one.
+     */
+    private static void requireSourceIdentifierRequest(String subscriptionName, String sourceIdentifier) {
+        if (subscriptionName == null || subscriptionName.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "SubscriptionName is required.", 400);
+        }
+        if (sourceIdentifier == null || sourceIdentifier.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "SourceIdentifier is required.", 400);
+        }
     }
 
     public synchronized EventSubscription deleteEventSubscription(String region, String subscriptionName) {

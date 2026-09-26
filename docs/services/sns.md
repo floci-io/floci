@@ -93,6 +93,24 @@ Supported subscription protocols:
 For `FilterPolicyScope=MessageBody`, nested policy objects descend into JSON objects and arrays.
 An object inside an array matches when one array element satisfies the complete nested policy.
 
+## HTTP and HTTPS endpoint addresses
+
+Floci posts the `SubscriptionConfirmation` and every notification to a subscribed `http`/`https`
+endpoint itself, so it screens where that request may go.
+
+`Subscribe` resolves the endpoint's host and refuses it with `InvalidParameter` when it resolves to
+a link-local or cloud instance-metadata address (`169.254.0.0/16`, `fe80::/10`, `fd00:ec2::254`).
+This is the check that judges a hostname. Loopback and private addresses stay allowed, since
+delivering to a neighbouring container is the normal case here. An endpoint whose host does not
+resolve yet is accepted, as it is on AWS.
+
+Delivery screens only an endpoint that names an address outright, an IPv4 or bracketed IPv6
+literal, which covers a subscription stored before `Subscribe` began refusing them. **It does not
+resolve a hostname again**, so a hostname that passed `Subscribe` and later resolves to a metadata
+address is not screened at delivery: Floci's HTTP client resolves the name itself when it connects
+and cannot be given the result of an earlier check, so a lookup there could not decide where the
+request goes. Treat the `Subscribe` check as the boundary, not the delivery one.
+
 ## Message size
 
 `MaximumMessageSize` is the per-topic limit, in bytes, on a published payload. It accepts `1024`

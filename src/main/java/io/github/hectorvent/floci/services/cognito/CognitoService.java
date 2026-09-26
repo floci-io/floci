@@ -1389,7 +1389,7 @@ public class CognitoService implements ResourceProvider {
         domainStore.put(domain, userPoolDomain);
         if (certificateChanged) {
             acmService.removeInUseBy(previousCertificateArn,
-                    cloudFrontDistributionArn(userPoolDomain), CERTIFICATE_REGION);
+                    cloudFrontDistributionArn(regionResolver.getPartition(), userPoolDomain), CERTIFICATE_REGION);
         }
         LOG.infov("Updated User Pool Domain: {0} for pool {1}", domain, userPoolId);
         return userPoolDomain;
@@ -1403,7 +1403,7 @@ public class CognitoService implements ResourceProvider {
         domainStore.delete(domain);
         if (userPoolDomain.isCustomDomain()) {
             acmService.removeInUseBy(userPoolDomain.getCertificateArn(),
-                    cloudFrontDistributionArn(userPoolDomain), CERTIFICATE_REGION);
+                    cloudFrontDistributionArn(regionResolver.getPartition(), userPoolDomain), CERTIFICATE_REGION);
         }
         LOG.infov("Deleted User Pool Domain: {0} for pool {1}", domain, userPoolId);
     }
@@ -1414,7 +1414,7 @@ public class CognitoService implements ResourceProvider {
      */
     private void registerCertificateUse(String certificateArn, UserPoolDomain userPoolDomain) {
         try {
-            acmService.addInUseBy(certificateArn, cloudFrontDistributionArn(userPoolDomain), CERTIFICATE_REGION);
+            acmService.addInUseBy(certificateArn, cloudFrontDistributionArn(regionResolver.getPartition(), userPoolDomain), CERTIFICATE_REGION);
         } catch (AwsException e) {
             if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
                 throw e;
@@ -1457,10 +1457,10 @@ public class CognitoService implements ResourceProvider {
      * it, which is what ACM lists on AWS. Floci has no distribution object, so the id is the label
      * of the generated CloudFront name.
      */
-    private static String cloudFrontDistributionArn(UserPoolDomain userPoolDomain) {
+    private static String cloudFrontDistributionArn(String partition, UserPoolDomain userPoolDomain) {
         String name = userPoolDomain.getCloudFrontDistribution();
         String id = name.substring(0, name.indexOf('.')).toUpperCase(Locale.ROOT);
-        return "arn:aws:cloudfront::" + userPoolDomain.getAwsAccountId() + ":distribution/" + id;
+        return AwsArnUtils.Arn.global(partition, "cloudfront", userPoolDomain.getAwsAccountId(), "distribution/" + id).toString();
     }
 
     private String generateCloudFrontDomain() {
@@ -4020,6 +4020,55 @@ public class CognitoService implements ResourceProvider {
 
     record VerifiedAccessToken(String username, String poolId, String subject) {}
 
+    /** Verified JWT details for services that enforce Cognito user-pool authorizers. */
+    public record VerifiedApiGatewayToken(String poolId, String tokenUse, Map<String, Object> claims) {}
+
+    private record VerifiedJwt(String poolId, JsonNode claims) {}
+
+    /**
+     * Verifies an access or ID token using the persisted user-pool signing key. This deliberately
+     * does not fetch keys over the network because the emulator owns the pool and its key pair.
+     */
+    public VerifiedApiGatewayToken verifyApiGatewayToken(String token) {
+        try {
+            VerifiedJwt verified = verifyJwtSignatureAndIssuer(token);
+            JsonNode claims = verified.claims();
+            String poolId = verified.poolId();
+            String tokenUse = textClaim(claims, "token_use");
+            long expiresAt = requiredNumericClaim(claims, "exp");
+            String subject = textClaim(claims, "sub");
+            if (!("access".equals(tokenUse) || "id".equals(tokenUse))
+                    || subject == null || expiresAt <= System.currentTimeMillis() / 1000L) {
+                throw new IllegalArgumentException("invalid token claims");
+            }
+            String clientId = "access".equals(tokenUse)
+                    ? textClaim(claims, "client_id") : textClaim(claims, "aud");
+            if (clientId == null || clientStore.get(clientId)
+                    .filter(c -> poolId.equals(c.getUserPoolId())).isEmpty()) {
+                throw new IllegalArgumentException("invalid client");
+            }
+            String jti = textClaim(claims, "jti");
+            validateTokenNotRevoked(jti, poolId, tokenUse);
+            String originJti = textClaim(claims, "origin_jti");
+            if (originJti != null) {
+                validateTokenNotRevoked(originJti, poolId, tokenUse);
+            }
+            String username = "access".equals(tokenUse)
+                    ? textClaim(claims, "username") : textClaim(claims, "cognito:username");
+            if (username != null) {
+                validateUserNotGloballySignedOut(username, poolId, tokenUse,
+                        requiredNumericClaim(claims, "iat"));
+            }
+            Map<String, Object> mapped = MAPPER.convertValue(claims, new TypeReference<Map<String, Object>>() {});
+            return new VerifiedApiGatewayToken(poolId, tokenUse, Map.copyOf(mapped));
+        } catch (AwsException e) {
+            throw e;
+        } catch (Exception e) {
+            LOG.debug("API Gateway Cognito token verification failed", e);
+            throw new AwsException("NotAuthorizedException", INVALID_ACCESS_TOKEN_MESSAGE, 400);
+        }
+    }
+
     /**
      * Verifies the Cognito access-token contract before any self-service operation uses its claims.
      * The pool's persisted public key is the trust anchor; claims are never trusted before the
@@ -4027,38 +4076,9 @@ public class CognitoService implements ResourceProvider {
      */
     VerifiedAccessToken verifyAccessToken(String token) {
         try {
-            if (token == null || token.isBlank()) {
-                throw new IllegalArgumentException("missing token");
-            }
-            String[] parts = token.split("\\.", -1);
-            if (parts.length != 3 || parts[0].isEmpty() || parts[1].isEmpty() || parts[2].isEmpty()) {
-                throw new IllegalArgumentException("malformed JWT");
-            }
-
-            JsonNode header = MAPPER.readTree(Base64.getUrlDecoder().decode(parts[0]));
-            JsonNode claims = MAPPER.readTree(Base64.getUrlDecoder().decode(parts[1]));
-            if (!"RS256".equals(header.path("alg").asText())
-                    || !"JWT".equalsIgnoreCase(header.path("typ").asText())) {
-                throw new IllegalArgumentException("unsupported JWT algorithm");
-            }
-
-            String issuer = textClaim(claims, "iss");
-            String poolId = null;
-            if (issuer != null && issuer.startsWith(baseUrl + "/")) {
-                poolId = issuer.substring((baseUrl + "/").length());
-            }
-            UserPool pool = poolId == null ? null : poolStore.get(poolId).orElse(null);
-            if (pool == null || !getIssuer(poolId).equals(issuer)
-                    || !getSigningKeyId(pool).equals(textClaim(header, "kid"))) {
-                throw new IllegalArgumentException("invalid issuer or key");
-            }
-
-            Signature verifier = Signature.getInstance("SHA256withRSA");
-            verifier.initVerify(getSigningPublicKey(pool));
-            verifier.update((parts[0] + "." + parts[1]).getBytes(StandardCharsets.UTF_8));
-            if (!verifier.verify(Base64.getUrlDecoder().decode(parts[2]))) {
-                throw new IllegalArgumentException("invalid signature");
-            }
+            VerifiedJwt verified = verifyJwtSignatureAndIssuer(token);
+            JsonNode claims = verified.claims();
+            String poolId = verified.poolId();
 
             String verifiedPoolId = poolId;
             String username = textClaim(claims, "username");
@@ -4087,6 +4107,37 @@ public class CognitoService implements ResourceProvider {
             LOG.debug("Access token verification failed", e);
             throw new AwsException("NotAuthorizedException", INVALID_ACCESS_TOKEN_MESSAGE, 400);
         }
+    }
+
+    private VerifiedJwt verifyJwtSignatureAndIssuer(String token) throws Exception {
+        if (token == null || token.isBlank()) {
+            throw new IllegalArgumentException("missing token");
+        }
+        String[] parts = token.split("\\.", -1);
+        if (parts.length != 3 || Arrays.stream(parts).anyMatch(String::isEmpty)) {
+            throw new IllegalArgumentException("malformed JWT");
+        }
+        JsonNode header = MAPPER.readTree(Base64.getUrlDecoder().decode(parts[0]));
+        JsonNode claims = MAPPER.readTree(Base64.getUrlDecoder().decode(parts[1]));
+        if (!"RS256".equals(header.path("alg").asText())
+                || !"JWT".equalsIgnoreCase(header.path("typ").asText())) {
+            throw new IllegalArgumentException("unsupported JWT algorithm");
+        }
+        String issuer = textClaim(claims, "iss");
+        String poolId = issuer != null && issuer.startsWith(baseUrl + "/")
+                ? issuer.substring((baseUrl + "/").length()) : null;
+        UserPool pool = poolId == null ? null : poolStore.get(poolId).orElse(null);
+        if (pool == null || !getIssuer(poolId).equals(issuer)
+                || !getSigningKeyId(pool).equals(textClaim(header, "kid"))) {
+            throw new IllegalArgumentException("invalid issuer or key");
+        }
+        Signature verifier = Signature.getInstance("SHA256withRSA");
+        verifier.initVerify(getSigningPublicKey(pool));
+        verifier.update((parts[0] + "." + parts[1]).getBytes(StandardCharsets.UTF_8));
+        if (!verifier.verify(Base64.getUrlDecoder().decode(parts[2]))) {
+            throw new IllegalArgumentException("invalid signature");
+        }
+        return new VerifiedJwt(poolId, claims);
     }
 
     private static String textClaim(JsonNode claims, String name) {

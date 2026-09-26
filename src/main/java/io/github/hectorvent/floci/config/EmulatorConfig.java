@@ -73,6 +73,16 @@ public interface EmulatorConfig {
      */
     interface PartitionsConfig {
         Optional<String> id();
+
+        /**
+         * Accept a request whose SigV4 credential scope names a region that no partition
+         * publishes or admits by its region pattern ({@code polygondwanaland-west-1}). Refused by
+         * default, as moto ({@code MOTO_ALLOW_NONEXISTENT_REGION}) and LocalStack
+         * ({@code ALLOW_NONSTANDARD_REGIONS}) do, because on AWS such a request never resolves a
+         * host; set this to give every label its own region namespace, as Floci did before.
+         */
+        @WithDefault("false")
+        boolean allowUnknownRegions();
     }
 
     /**
@@ -825,6 +835,15 @@ public interface EmulatorConfig {
 
         @WithDefault("dzikoysk/reposilite:3.6.3")
         String mavenImage();
+
+        /**
+         * Image used for the per-repository Verdaccio container backing the {@code npm} format.
+         * No URL/token override like {@link #mavenUrl()}: unlike Reposilite's one shared instance,
+         * npm gets one container per CodeArtifact repository, so there is no single external
+         * instance to point at.
+         */
+        @WithDefault("verdaccio/verdaccio:6.10.4")
+        String npmImage();
     }
 
     interface ConnectServiceConfig {
@@ -1938,6 +1957,14 @@ public interface EmulatorConfig {
     interface GlueServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /** How long a job run stays RUNNING before it succeeds; 0 = a run succeeds as soon as it starts. */
+        @WithDefault("0")
+        int jobRunDurationSeconds();
+
+        /** How long a crawl keeps the crawler RUNNING before it succeeds; 0 = a crawl finishes as soon as it starts. */
+        @WithDefault("0")
+        int crawlerRunDurationSeconds();
     }
 
     interface SesServiceConfig {
@@ -2064,6 +2091,14 @@ public interface EmulatorConfig {
          */
         @WithDefault("51679")
         int port();
+
+        /**
+         * Image for the per-network credentials proxy, reusing the same minimal helper image as
+         * security-group enforcement: it already carries {@code socat}, and one more single-purpose
+         * use of an image Floci already builds and pulls is simpler than shipping a second one.
+         */
+        @WithDefault("floci/network-helper:local")
+        String proxyImage();
     }
 
     interface ResourceGroupsTaggingServiceConfig {

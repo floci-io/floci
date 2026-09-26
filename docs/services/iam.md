@@ -249,18 +249,35 @@ nothing here performs the TLS handshake they describe.
 
 | Action | Description |
 |--------|-------------|
-| CreateSAMLProvider | Creates a SAML identity provider from a metadata document. |
-| GetSAMLProvider | Returns a provider's creation date and a metadata document rebuilt from its stored entity ID and signing certificate. |
+| CreateSAMLProvider | Creates a SAML identity provider from a metadata document, with optional tags echoed back in the response. |
+| GetSAMLProvider | Returns a provider's creation date, tags, and a metadata document rebuilt from its stored entity ID and signing certificate. |
 | ListSAMLProviders | Lists the stored SAML providers of the calling account. |
+| UpdateSAMLProvider | Replaces a provider's metadata document. |
+| DeleteSAMLProvider | Deletes a SAML identity provider. |
+| TagSAMLProvider | Adds tags to a SAML identity provider. |
+| UntagSAMLProvider | Removes tags from a SAML identity provider. |
+| ListSAMLProviderTags | Lists tags stored for a SAML identity provider. |
 
 A provider is identified by name, giving an ARN of the form `arn:aws:iam::<account>:saml-provider/<name>`.
 The name must match `[A-Za-z0-9+=,.@_-]{1,128}`, and creating the same name twice returns
-`EntityAlreadyExists`. An empty or unparseable metadata document returns `InvalidInput`.
+`EntityAlreadyExists`. An empty or unparseable metadata document returns `InvalidInput`. `Tags` on the
+create request are validated before anything is stored, so a request carrying more than 50 of them
+fails without leaving a provider behind, as AWS documents.
 
 Floci stores only the entity ID and signing certificate parsed from the metadata, so `GetSAMLProvider`
-returns a minimal rebuilt document rather than the one that was uploaded. `UpdateSAMLProvider`,
-`DeleteSAMLProvider` and the SAML provider tag operations are not implemented. Providers created here
-are used by `AssumeRoleWithSAML` for trust-policy and assertion validation.
+returns a minimal rebuilt document rather than the one that was uploaded. `UpdateSAMLProvider` re-parses
+a new `SAMLMetadataDocument` the same way and replaces the stored entity ID and certificate; omitting it
+leaves the provider unchanged, since it is optional on the request. AWS's current `UpdateSAMLProvider`
+and `GetSAMLProvider` also manage an `AssertionEncryptionMode` and a private-key list for decrypting
+encrypted assertions; Floci's assertion verifier only checks signatures against a single certificate and
+does not model encrypted assertions at all, so neither of those is modeled here either.
+`DeleteSAMLProvider` does not check or update any role whose trust policy still references the provider's
+ARN, matching AWS's own documented behavior: the delete succeeds regardless, and it is a later
+`AssumeRoleWithSAML` against the now-dangling ARN that fails, not this call. `CreateSAMLProvider` and
+`GetSAMLProvider` return their tags sorted by key, which is what AWS documents for those two responses;
+`ListSAMLProviderTags` is sorted the same way here for consistency, though AWS does not document an
+order for it. Providers created here are used by `AssumeRoleWithSAML` for trust-policy and assertion
+validation.
 
 ### Login Profiles
 

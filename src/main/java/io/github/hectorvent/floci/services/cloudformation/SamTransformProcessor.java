@@ -662,7 +662,7 @@ class SamTransformProcessor {
     private ObjectNode authorizerInvokeUri(JsonNode functionArn) {
         ObjectNode sub = objectMapper.createObjectNode();
         ArrayNode args = objectMapper.createArrayNode();
-        args.add("arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${AuthorizerArn}/invocations");
+        args.add("arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${AuthorizerArn}/invocations");
         ObjectNode vars = objectMapper.createObjectNode();
         vars.set("AuthorizerArn", functionArn.deepCopy());
         args.add(vars);
@@ -838,7 +838,7 @@ class SamTransformProcessor {
     private ObjectNode lambdaInvokeUri(String functionLogicalId) {
         ObjectNode sub = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
-        arr.add("arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FnArn}/invocations");
+        arr.add("arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FnArn}/invocations");
         ObjectNode vars = objectMapper.createObjectNode();
         vars.set("FnArn", getAtt(functionLogicalId, "Arn"));
         arr.add(vars);
@@ -1015,7 +1015,9 @@ class SamTransformProcessor {
         roleProps.set("AssumeRolePolicyDocument", assumePolicy);
 
         ArrayNode managedPolicies = objectMapper.createArrayNode();
-        managedPolicies.add("arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole");
+        ObjectNode basicExecutionRole = objectMapper.createObjectNode();
+        basicExecutionRole.put("Fn::Sub", "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole");
+        managedPolicies.add(basicExecutionRole);
 
         JsonNode userPolicies = properties.path("Policies");
         if (userPolicies.isArray()) {

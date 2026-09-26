@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.codepipeline;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -16,6 +17,9 @@ import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
@@ -23,6 +27,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -47,6 +52,81 @@ class CodePipelineServiceTest {
             mock(CodeDeployService.class),
             mock(LambdaService.class),
             mock(S3Service.class));
+
+    /**
+     * The configured interval reaches {@code scheduleWithFixedDelay}, which rejects a non-positive
+     * delay. That schedule happens in {@code @PostConstruct}, so an IllegalArgumentException there
+     * would leave CodePipeline unavailable rather than merely mis-scheduled.
+     */
+    @Test
+    void nonPositiveConfiguredPollInterval_doesNotPreventStartup() {
+        for (long interval : new long[] {0L, -1L, Long.MIN_VALUE}) {
+            CodePipelineService configured = new CodePipelineService(
+                    new InMemoryStorageFactory(),
+                    mapper,
+                    mock(CodeBuildService.class),
+                    mock(CodeDeployService.class),
+                    mock(LambdaService.class),
+                    mock(S3Service.class),
+                    configWithPollInterval(interval));
+            try {
+                assertDoesNotThrow(configured::resumePersistedExecutions,
+                        "interval " + interval + " must not abort startup");
+            } finally {
+                configured.shutdown();
+            }
+        }
+    }
+
+    /**
+     * The guard above is unreachable while the constructor reads only the one key, so this is what
+     * keeps the message it produces from rotting. {@code enabled()} returns a primitive and is not
+     * in the answers map, which is exactly the shape that used to fail as "not an interface".
+     */
+    @Test
+    void configStubNamesAnAccessorItCannotAnswer() {
+        EmulatorConfig stub = configWithPollInterval(500L);
+
+        IllegalStateException thrown = assertThrows(IllegalStateException.class,
+                () -> stub.services().codepipeline().enabled());
+
+        assertTrue(thrown.getMessage().contains("enabled()"), thrown.getMessage());
+        assertTrue(thrown.getMessage().contains("answers map"), thrown.getMessage());
+    }
+
+    /**
+     * Minimal {@link EmulatorConfig} view: the constructor reads only the source poll interval, so
+     * a proxy answering that avoids standing up the Quarkus config container.
+     *
+     * <p>Anything not in the answers map is assumed to be a further config view and is proxied in
+     * turn. That assumption holds only while the constructor reads exactly one key. If a second read
+     * lands and it returns a {@code String} or a primitive there is no interface to proxy, so the
+     * handler says which method it could not answer instead of letting the JDK fail further down
+     * with "not an interface".
+     */
+    private static EmulatorConfig configWithPollInterval(long intervalMs) {
+        Map<String, Object> answers = Map.of("sourcePollIntervalMs", intervalMs);
+
+        InvocationHandler handler = new InvocationHandler() {
+            @Override
+            public Object invoke(Object proxy, Method method, Object[] args) {
+                Object answer = answers.get(method.getName());
+                if (answer != null) {
+                    return answer;
+                }
+                if (!method.getReturnType().isInterface()) {
+                    throw new IllegalStateException("cannot stub " + method.getName() + "(), which returns "
+                            + method.getReturnType().getSimpleName()
+                            + ": add it to the answers map in configWithPollInterval");
+                }
+                // services() and codepipeline() return further config views; proxy those too.
+                return Proxy.newProxyInstance(method.getReturnType().getClassLoader(),
+                        new Class<?>[] {method.getReturnType()}, this);
+            }
+        };
+        return (EmulatorConfig) Proxy.newProxyInstance(EmulatorConfig.class.getClassLoader(),
+                new Class<?>[] {EmulatorConfig.class}, handler);
+    }
 
     @Test
     void getPipelineTreatsMissingStoredVersionAsVersionOne() throws Exception {

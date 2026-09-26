@@ -14,6 +14,8 @@ import io.github.hectorvent.floci.services.sns.model.Topic;
 import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.nio.charset.StandardCharsets;
@@ -147,6 +149,74 @@ class SnsServiceTest {
             assertTrue(ex.getMessage().contains("SubscriptionRoleArn"));
         }
         assertTrue(snsService.listSubscriptions(REGION).isEmpty());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "http://169.254.169.254/latest/meta-data/",
+            "http://169.254.170.2/v2/credentials",
+            "https://[fe80::1]/",
+            "http://[fd00:ec2::254]/latest/meta-data/"
+    })
+    void subscribe_rejectsAnEndpointOnALinkLocalOrMetadataAddress(String endpoint) {
+        Topic topic = snsService.createTopic("ssrf-topic", null, null, REGION);
+        String protocol = endpoint.startsWith("https://") ? "https" : "http";
+
+        AwsException ex = assertThrows(AwsException.class, () -> snsService.subscribe(
+                topic.getTopicArn(), protocol, endpoint, REGION, Map.of()), endpoint);
+
+        assertEquals("InvalidParameter", ex.getErrorCode());
+        assertTrue(snsService.listSubscriptions(REGION).isEmpty(), endpoint);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "http://127.0.0.1:8080/hook",
+            "http://172.17.0.2:9000/hook",
+            "http://10.0.0.5/hook",
+            "https://example.test/hook"
+    })
+    void subscribe_stillAcceptsLoopbackPrivateAndOrdinaryEndpoints(String endpoint) {
+        Topic topic = snsService.createTopic("ok-topic", null, null, REGION);
+        String protocol = endpoint.startsWith("https://") ? "https" : "http";
+
+        Subscription sub = snsService.subscribe(topic.getTopicArn(), protocol, endpoint, REGION, Map.of());
+
+        assertEquals(endpoint, sub.getEndpoint());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "http://169.254.169.254/latest/meta-data/",
+            "http://[fd00:ec2::254]/",
+            "http://169.254.170.2/v2/credentials"
+    })
+    void delivery_refusesAnEndpointThatNamesTheAddressOutright(String endpoint) {
+        // Reaches a subscription stored before Subscribe began refusing these, and costs no lookup.
+        assertFalse(SnsService.deliverable(endpoint), endpoint);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"http://127.0.0.1:8080/hook", "http://10.0.0.5/hook", "https://example.test/x"})
+    void delivery_stillAllowsLoopbackPrivateAndOrdinaryEndpoints(String endpoint) {
+        assertTrue(SnsService.deliverable(endpoint), endpoint);
+    }
+
+    @Test
+    void delivery_doesNotResolveANameAndSoAllowsOne() {
+        // Names are screened at Subscribe. Resolving again here could not decide anything, because
+        // HttpClient resolves once more when it connects, so this deliberately does not try.
+        assertTrue(SnsService.deliverable("http://sns-endpoint-that-does-not-resolve.invalid/hook"));
+    }
+
+    @Test
+    void subscribe_rejectsAnEndpointWithNoHost() {
+        Topic topic = snsService.createTopic("nohost-topic", null, null, REGION);
+
+        AwsException ex = assertThrows(AwsException.class, () -> snsService.subscribe(
+                topic.getTopicArn(), "http", "http:///no-host", REGION, Map.of()));
+
+        assertEquals("InvalidParameter", ex.getErrorCode());
     }
 
     @Test

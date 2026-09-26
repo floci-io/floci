@@ -1,5 +1,46 @@
 package io.github.hectorvent.floci.services.apigateway;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.TlsCertificateManager;
+import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.ReservedTags;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.apigateway.model.Account;
+import io.github.hectorvent.floci.services.apigateway.model.ApiGatewayResource;
+import io.github.hectorvent.floci.services.apigateway.model.ApiKey;
+import io.github.hectorvent.floci.services.apigateway.model.Authorizer;
+import io.github.hectorvent.floci.services.apigateway.model.BasePathMapping;
+import io.github.hectorvent.floci.services.apigateway.model.CustomDomain;
+import io.github.hectorvent.floci.services.apigateway.model.Deployment;
+import io.github.hectorvent.floci.services.apigateway.model.EndpointConfiguration;
+import io.github.hectorvent.floci.services.apigateway.model.EndpointType;
+import io.github.hectorvent.floci.services.apigateway.model.GatewayResponse;
+import io.github.hectorvent.floci.services.apigateway.model.GatewayResponseType;
+import io.github.hectorvent.floci.services.apigateway.model.Integration;
+import io.github.hectorvent.floci.services.apigateway.model.IntegrationResponse;
+import io.github.hectorvent.floci.services.apigateway.model.MethodConfig;
+import io.github.hectorvent.floci.services.apigateway.model.MethodResponse;
+import io.github.hectorvent.floci.services.apigateway.model.MethodSetting;
+import io.github.hectorvent.floci.services.apigateway.model.Model;
+import io.github.hectorvent.floci.services.apigateway.model.RequestValidator;
+import io.github.hectorvent.floci.services.apigateway.model.RestApi;
+import io.github.hectorvent.floci.services.apigateway.model.Stage;
+import io.github.hectorvent.floci.services.apigateway.model.UsagePlan;
+import io.github.hectorvent.floci.services.apigateway.model.UsagePlanKey;
+import io.github.hectorvent.floci.services.apigateway.model.VpcLink;
+import io.swagger.v3.oas.models.OpenAPI;
+import io.swagger.v3.oas.models.Operation;
+import io.swagger.v3.oas.models.PathItem;
+import io.swagger.v3.oas.models.security.SecurityRequirement;
+import io.swagger.v3.oas.models.security.SecurityScheme;
+import io.swagger.v3.parser.core.models.SwaggerParseResult;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
+
 import java.time.LocalDate;
 import java.time.format.DateTimeParseException;
 import java.time.temporal.ChronoUnit;
@@ -16,50 +57,10 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
-import io.github.hectorvent.floci.services.apigateway.model.EndpointConfiguration;
-import io.github.hectorvent.floci.services.apigateway.model.EndpointType;
-import org.jboss.logging.Logger;
-
-import com.fasterxml.jackson.core.type.TypeReference;
-
-import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.config.TlsCertificateManager;
-import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.common.ReservedTags;
-import io.github.hectorvent.floci.core.storage.StorageBackend;
-import io.github.hectorvent.floci.core.storage.StorageFactory;
-import io.github.hectorvent.floci.services.apigateway.model.Account;
-import io.github.hectorvent.floci.services.apigateway.model.ApiGatewayResource;
-import io.github.hectorvent.floci.services.apigateway.model.ApiKey;
-import io.github.hectorvent.floci.services.apigateway.model.Authorizer;
-import io.github.hectorvent.floci.services.apigateway.model.BasePathMapping;
-import io.github.hectorvent.floci.services.apigateway.model.MethodSetting;
-import io.github.hectorvent.floci.services.apigateway.model.VpcLink;
-import io.github.hectorvent.floci.services.apigateway.model.CustomDomain;
-import io.github.hectorvent.floci.services.apigateway.model.Deployment;
-import io.github.hectorvent.floci.services.apigateway.model.GatewayResponse;
-import io.github.hectorvent.floci.services.apigateway.model.GatewayResponseType;
-import io.github.hectorvent.floci.services.apigateway.model.Integration;
-import io.github.hectorvent.floci.services.apigateway.model.IntegrationResponse;
-import io.github.hectorvent.floci.services.apigateway.model.MethodConfig;
-import io.github.hectorvent.floci.services.apigateway.model.MethodResponse;
-import io.github.hectorvent.floci.services.apigateway.model.Model;
-import io.github.hectorvent.floci.services.apigateway.model.RequestValidator;
-import io.github.hectorvent.floci.services.apigateway.model.RestApi;
-import io.github.hectorvent.floci.services.apigateway.model.Stage;
-import io.github.hectorvent.floci.services.apigateway.model.UsagePlan;
-import io.github.hectorvent.floci.services.apigateway.model.UsagePlanKey;
-import io.swagger.v3.oas.models.OpenAPI;
-import io.swagger.v3.oas.models.Operation;
-import io.swagger.v3.oas.models.PathItem;
-import io.swagger.v3.oas.models.security.SecurityRequirement;
-import io.swagger.v3.oas.models.security.SecurityScheme;
-import io.swagger.v3.parser.core.models.SwaggerParseResult;
-import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.inject.Inject;
-
 @ApplicationScoped
 public class ApiGatewayService {
+
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     /** Documented default page size for GetUsage. */
     private static final int DEFAULT_USAGE_LIMIT = 25;
@@ -463,6 +464,10 @@ public class ApiGatewayService {
         method.setHttpMethod(httpMethod.toUpperCase());
         method.setAuthorizationType((String) request.getOrDefault("authorizationType", "NONE"));
         method.setAuthorizerId((String) request.get("authorizerId"));
+        Object authorizationScopes = request.get("authorizationScopes");
+        if (authorizationScopes instanceof List<?> scopes) {
+            method.setAuthorizationScopes(scopes.stream().map(String::valueOf).toList());
+        }
         method.setRequestValidatorId((String) request.get("requestValidatorId"));
         method.setApiKeyRequired(Boolean.TRUE.equals(request.get("apiKeyRequired")));
 
@@ -2485,6 +2490,14 @@ public class ApiGatewayService {
                 if (!"replace".equals(opType)) continue;
                 if ("/authorizationType".equals(path)) method.setAuthorizationType(value);
                 else if ("/authorizerId".equals(path)) method.setAuthorizerId(value);
+                else if ("/authorizationScopes".equals(path)) {
+                    try {
+                        method.setAuthorizationScopes(value == null || value.isBlank()
+                                ? List.of() : JSON.readValue(value, new TypeReference<List<String>>() {}));
+                    } catch (Exception e) {
+                        throw new AwsException("BadRequestException", "Invalid authorizationScopes", 400);
+                    }
+                }
                 else if ("/apiKeyRequired".equals(path)) method.setApiKeyRequired(Boolean.parseBoolean(value));
                 else if ("/requestValidatorId".equals(path)) {
                     method.setRequestValidatorId(value == null || value.isEmpty() ? null : value);
@@ -3032,6 +3045,7 @@ public class ApiGatewayService {
                 ? operation.getSecurity() : openAPI.getSecurity();
         String authType = "NONE";
         String authorizerId = null;
+        List<String> authorizationScopes = List.of();
         if (secReqs != null) {
             // AWS resolves the OR-list of security requirements to the first declared
             // authorizer scheme (a method has exactly one authorizer), so stop at the first match.
@@ -3044,6 +3058,10 @@ public class ApiGatewayService {
                     }
                     authType = mapped;
                     authorizerId = schemeToAuthorizerId.get(schemeName);
+                    List<String> requestedScopes = secReq.get(schemeName);
+                    if (requestedScopes != null) {
+                        authorizationScopes = requestedScopes;
+                    }
                     break resolveAuth;
                 }
             }
@@ -3051,6 +3069,9 @@ public class ApiGatewayService {
         methodRequest.put("authorizationType", authType);
         if (authorizerId != null) {
             methodRequest.put("authorizerId", authorizerId);
+        }
+        if (!authorizationScopes.isEmpty()) {
+            methodRequest.put("authorizationScopes", authorizationScopes);
         }
 
         // Link request models from operation requestBody

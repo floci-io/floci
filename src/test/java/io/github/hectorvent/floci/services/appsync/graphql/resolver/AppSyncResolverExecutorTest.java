@@ -1,7 +1,10 @@
 package io.github.hectorvent.floci.services.appsync.graphql.resolver;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.appsync.AppSyncService;
+import io.github.hectorvent.floci.services.appsync.graphql.AppSyncVtlEngine;
 import io.github.hectorvent.floci.services.appsync.graphql.datasource.AppSyncDataSourceInvoker;
 import io.github.hectorvent.floci.services.appsync.graphql.datasource.AppSyncDataSourceInvokers;
 import io.github.hectorvent.floci.services.appsync.graphql.js.AppSyncJsRuntime;
@@ -26,6 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -39,9 +43,19 @@ class AppSyncResolverExecutorTest {
 
     private final AppSyncService appSync = mock(AppSyncService.class);
     private final ScriptedJsRuntime jsRuntime = new ScriptedJsRuntime();
-    private final RecordingInvoker invoker = new RecordingInvoker();
+    private final RecordingInvoker invoker = new RecordingInvoker(DataSourceType.RELATIONAL_DATABASE);
+    private final RecordingInvoker noneInvoker = new RecordingInvoker(DataSourceType.NONE);
+    private final ObjectMapper objectMapper = new ObjectMapper();
     private final AppSyncResolverExecutor executor = new AppSyncResolverExecutor(appSync, jsRuntime,
-            new AppSyncDataSourceInvokers(List.of(invoker)));
+            new AppSyncDataSourceInvokers(List.of(invoker, noneInvoker)), vtlEngine(), objectMapper);
+
+    private static AppSyncVtlEngine vtlEngine() {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().appsync().vtlMaxLoops()).thenReturn(10_000);
+        when(config.services().appsync().vtlMaxOutputChars()).thenReturn(1_048_576);
+        when(config.services().appsync().vtlTimeoutMillis()).thenReturn(5_000L);
+        return new AppSyncVtlEngine(config);
+    }
 
     /** A JS runtime whose answers are supplied per (code, handler) by the test. */
     private static final class ScriptedJsRuntime implements AppSyncJsRuntime {
@@ -76,13 +90,18 @@ class AppSyncResolverExecutorTest {
 
     /** Records what reached the data source and answers with whatever the test set. */
     private static final class RecordingInvoker implements AppSyncDataSourceInvoker {
+        private final DataSourceType type;
         private final List<Object> requests = new ArrayList<>();
         private Object answer = Map.of();
         private AwsException failure;
 
+        private RecordingInvoker(DataSourceType type) {
+            this.type = type;
+        }
+
         @Override
         public DataSourceType type() {
-            return DataSourceType.RELATIONAL_DATABASE;
+            return type;
         }
 
         @Override
@@ -90,6 +109,12 @@ class AppSyncResolverExecutorTest {
             requests.add(request);
             if (failure != null) {
                 throw failure;
+            }
+            if (type == DataSourceType.NONE) {
+                if (request instanceof Map<?, ?> map && map.containsKey("payload")) {
+                    return map.get("payload");
+                }
+                return request;
             }
             return answer;
         }
@@ -104,9 +129,13 @@ class AppSyncResolverExecutorTest {
     }
 
     private DataSource dataSource(String name) {
+        return dataSource(name, DataSourceType.RELATIONAL_DATABASE);
+    }
+
+    private DataSource dataSource(String name, DataSourceType type) {
         DataSource ds = new DataSource();
         ds.setName(name);
-        ds.setType(DataSourceType.RELATIONAL_DATABASE);
+        ds.setType(type);
         ds.setDataSourceArn("arn:aws:appsync:eu-west-1:000000000000:apis/" + API_ID + "/datasources/" + name);
         return ds;
     }
@@ -131,7 +160,12 @@ class AppSyncResolverExecutorTest {
     }
 
     private ResolverInvocation invocation(Map<String, Object> arguments) {
-        return new ResolverInvocation(API_ID, "Query", "getThing", arguments, null, null, null, null, null, null);
+        return invocation(arguments, null);
+    }
+
+    private ResolverInvocation invocation(Map<String, Object> arguments, Object source) {
+        return new ResolverInvocation(API_ID, "Query", "getThing", arguments, source,
+                null, null, null, null, null);
     }
 
     @Test
@@ -204,7 +238,7 @@ class AppSyncResolverExecutorTest {
     @Test
     void earlyReturnInTheBeforeStepSkipsTheFunctionsAndTheAfterStep() {
         Resolver resolver = resolver(ResolverKind.PIPELINE, "pipeline-code");
-        resolver.setPipelineConfig(Map.of("functions", List.of("fn1")));
+        resolver.setPipelineConfig(Map.of("functions", List.of("missing")));
         jsRuntime.script("pipeline-code", "request", (h, ctx) ->
                 new JsEvaluation(Map.of("cached", true), Map.of(), true, List.of(), null, false));
 
@@ -413,42 +447,224 @@ class AppSyncResolverExecutorTest {
         assertFalse(jsRuntime.contexts.get(1).containsKey("error"));
     }
 
-    // ── VTL is refused, not silently skipped ─────────────────────────────────
+    // ── VTL UNIT resolvers over NONE ─────────────────────────────────────────
 
     @Test
-    void aResolverWithMappingTemplatesAndNoCodeIsRefused() {
+    void jsNoneRequestWithVtlVersionMemberRemainsTheRequestObject() {
+        when(appSync.getDataSource(API_ID, "local")).thenReturn(dataSource("local", DataSourceType.NONE));
+        Resolver resolver = resolver(ResolverKind.UNIT, "unit-code");
+        resolver.setDataSourceName("local");
+        Map<String, Object> request = Map.of("version", "2018-05-29");
+        jsRuntime.script("unit-code", "request", (h, ctx) -> ok(request));
+        jsRuntime.script("unit-code", "response", (h, ctx) -> ok(ctx.get("result")));
+
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
+
+        assertTrue(result.errors().isEmpty());
+        assertEquals(request, result.data());
+        assertEquals(List.of(request), noneInvoker.requests);
+    }
+
+    @Test
+    void vtlUnitResolverUsesArgumentsSourceStashAndResult() {
+        when(appSync.getDataSource(API_ID, "local")).thenReturn(dataSource("local", DataSourceType.NONE));
         Resolver resolver = resolver(ResolverKind.UNIT, null);
-        resolver.setDataSourceName("accountDB");
+        resolver.setDataSourceName("local");
+        resolver.setRequestMappingTemplate("""
+                #set($discard = $ctx.stash.put("prefix", $ctx.source.prefix))
+                {"version":"2018-05-29","payload":{
+                  "id":$util.toJson($ctx.args.id),
+                  "source":$util.toJson($ctx.source.prefix)
+                }}
+                """);
+        resolver.setResponseMappingTemplate("""
+                {"id":$util.toJson($ctx.result.id),
+                 "source":$util.toJson($ctx.result.source),
+                 "stash":$util.toJson($ctx.stash.prefix)}
+                """);
+
+        ResolverOutcome result = executor.execute(resolver,
+                invocation(Map.of("id", "42"), Map.of("prefix", "parent")));
+
+        assertTrue(result.errors().isEmpty());
+        assertEquals(Map.of("id", "42", "source", "parent", "stash", "parent"), result.data());
+        assertEquals(1, noneInvoker.requests.size());
+        assertEquals("2018-05-29", ((Map<?, ?>) noneInvoker.requests.get(0)).get("version"));
+    }
+
+    @Test
+    void vtlReturnHandsTheValueDirectlyToTheField() {
+        when(appSync.getDataSource(API_ID, "local")).thenReturn(dataSource("local", DataSourceType.NONE));
+        Resolver resolver = resolver(ResolverKind.UNIT, null);
+        resolver.setDataSourceName("local");
+        resolver.setRequestMappingTemplate("""
+                {"version":"2018-05-29","payload":{"id":$util.toJson($ctx.args.id)}}
+                """);
+        resolver.setResponseMappingTemplate("#return($ctx.result)");
+
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of("id", "42")));
+
+        assertEquals(Map.of("id", "42"), result.data());
+        assertTrue(result.errors().isEmpty());
+    }
+
+    @Test
+    void vtlReturnFromRequestSkipsTheDataSourceAndResponseTemplate() {
+        when(appSync.getDataSource(API_ID, "local")).thenReturn(dataSource("local", DataSourceType.NONE));
+        Resolver resolver = resolver(ResolverKind.UNIT, null);
+        resolver.setDataSourceName("local");
+        resolver.setRequestMappingTemplate("#return({\"short\":\"circuit\"})");
+        resolver.setResponseMappingTemplate("$util.error(\"response should not run\")");
+
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
+
+        assertEquals(Map.of("short", "circuit"), result.data());
+        assertTrue(result.errors().isEmpty());
+        assertTrue(noneInvoker.requests.isEmpty());
+    }
+
+    @Test
+    void vtlNoneRequestWithoutPayloadProducesNullResult() {
+        when(appSync.getDataSource(API_ID, "local")).thenReturn(dataSource("local", DataSourceType.NONE));
+        Resolver resolver = resolver(ResolverKind.UNIT, null);
+        resolver.setDataSourceName("local");
         resolver.setRequestMappingTemplate("{\"version\":\"2018-05-29\"}");
         resolver.setResponseMappingTemplate("$util.toJson($ctx.result)");
 
         ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
 
-        // AppSync leaves Runtime unset on a VTL resolver, so "no runtime" must not read as
-        // APPSYNC_JS: that made this fall through to the pass-through arm and resolve to null,
-        // which is indistinguishable from an empty result.
-        assertEquals(1, result.errors().size());
-        assertTrue(result.errors().get(0).message().contains("VTL"),
-                result.errors().get(0).message());
-        assertTrue(invoker.requests.isEmpty(), "a VTL resolver must not reach the data source");
+        assertNull(result.data());
+        assertTrue(result.errors().isEmpty());
     }
 
     @Test
-    void aFunctionWithMappingTemplatesAndNoCodeIsRefused() {
-        when(appSync.getFunction(API_ID, "fn1")).thenReturn(vtlFunction("fn1"));
+    void vtlNoneRequestRejectsUnsupportedMembers() {
+        when(appSync.getDataSource(API_ID, "local")).thenReturn(dataSource("local", DataSourceType.NONE));
+        Resolver resolver = resolver(ResolverKind.UNIT, null);
+        resolver.setDataSourceName("local");
+        resolver.setRequestMappingTemplate("{\"version\":\"2018-05-29\",\"operation\":\"GetItem\"}");
+        resolver.setResponseMappingTemplate("$util.toJson($ctx.result)");
+
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
+
+        assertNull(result.data());
+        assertEquals(1, result.errors().size());
+        assertEquals("MappingTemplate", result.errors().get(0).errorType());
+        assertTrue(noneInvoker.requests.isEmpty());
+    }
+
+    @Test
+    void vtlAppendErrorKeepsTheResponseData() {
+        when(appSync.getDataSource(API_ID, "local")).thenReturn(dataSource("local", DataSourceType.NONE));
+        Resolver resolver = resolver(ResolverKind.UNIT, null);
+        resolver.setDataSourceName("local");
+        resolver.setRequestMappingTemplate("""
+                {"version":"2018-05-29","payload":{"id":"1"}}
+                """);
+        resolver.setResponseMappingTemplate("""
+                $util.appendError("partial", "Partial", {"id":"1"})
+                $util.toJson($ctx.result)
+                """);
+
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
+
+        assertEquals(Map.of("id", "1"), result.data());
+        assertEquals(1, result.appendedErrors().size());
+        assertEquals("partial", result.appendedErrors().get(0).message());
+        assertEquals("Partial", result.appendedErrors().get(0).errorType());
+        assertEquals(Map.of("id", "1"), result.appendedErrors().get(0).data());
+    }
+
+    @Test
+    void vtlUtilErrorFailsTheFieldWithTheChosenDetails() {
+        when(appSync.getDataSource(API_ID, "local")).thenReturn(dataSource("local", DataSourceType.NONE));
+        Resolver resolver = resolver(ResolverKind.UNIT, null);
+        resolver.setDataSourceName("local");
+        resolver.setRequestMappingTemplate("""
+                {"version":"2018-05-29","payload":{"id":"1"}}
+                """);
+        resolver.setResponseMappingTemplate(
+                "$util.error(\"denied\", \"Denied\", {\"id\":\"1\"}, {\"retry\":false})");
+
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
+
+        assertNull(result.data());
+        assertEquals(1, result.errors().size());
+        assertEquals("denied", result.errors().get(0).message());
+        assertEquals("Denied", result.errors().get(0).errorType());
+        assertEquals(Map.of("id", "1"), result.errors().get(0).data());
+        assertEquals(Map.of("retry", false), result.errors().get(0).errorInfo());
+    }
+
+    @Test
+    void vtlResponseCanInspectAndSuppressADataSourceError() {
+        when(appSync.getDataSource(API_ID, "local")).thenReturn(dataSource("local", DataSourceType.NONE));
+        noneInvoker.failure = new AwsException("LocalFailure", "none failed", 500);
+        Resolver resolver = resolver(ResolverKind.UNIT, null);
+        resolver.setDataSourceName("local");
+        resolver.setRequestMappingTemplate("{\"version\":\"2018-05-29\"}");
+        resolver.setResponseMappingTemplate("$util.toJson({\"handled\":$ctx.error.type})");
+
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
+
+        assertEquals(Map.of("handled", "LocalFailure"), result.data());
+        assertTrue(result.errors().isEmpty());
+        noneInvoker.failure = null;
+    }
+
+    @Test
+    void vtlRequestReturnCannotBypassNonNoneDataSourceValidation() {
+        when(appSync.getDataSource(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
+        Resolver resolver = resolver(ResolverKind.UNIT, null);
+        resolver.setDataSourceName("accountDB");
+        resolver.setRequestMappingTemplate("#return({\"short\":\"circuit\"})");
+        resolver.setResponseMappingTemplate("$util.toJson($ctx.result)");
+
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
+
+        assertEquals(1, result.errors().size());
+        assertEquals("UnsupportedOperation", result.errors().get(0).errorType());
+        assertTrue(result.errors().get(0).message().contains("VTL"));
+        assertTrue(invoker.requests.isEmpty());
+    }
+
+    @Test
+    void vtlRequestReturnCannotBypassMissingDataSourceValidation() {
+        Resolver resolver = resolver(ResolverKind.UNIT, null);
+        resolver.setRequestMappingTemplate("#return({\"short\":\"circuit\"})");
+        resolver.setResponseMappingTemplate("$util.toJson($ctx.result)");
+
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
+
+        assertNull(result.data());
+        assertEquals(1, result.errors().size());
+        assertEquals("UnsupportedOperation", result.errors().get(0).errorType());
+        assertTrue(noneInvoker.requests.isEmpty());
+    }
+
+    @Test
+    void aLaterVtlFunctionIsRejectedBeforeAnyPipelineStageRuns() {
+        when(appSync.getFunction(API_ID, "fn1"))
+                .thenReturn(function("fn1", "one", "accountDB", "fn1-code"));
+        when(appSync.getFunction(API_ID, "fn2")).thenReturn(vtlFunction("fn2"));
         Resolver resolver = resolver(ResolverKind.PIPELINE, "pipeline-code");
-        resolver.setPipelineConfig(Map.of("functions", List.of("fn1")));
+        resolver.setPipelineConfig(Map.of("functions", List.of("fn1", "fn2")));
         jsRuntime.script("pipeline-code", "request", (h, ctx) -> ok(null));
+        jsRuntime.script("fn1-code", "request", (h, ctx) -> ok(Map.of()));
 
         ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
 
         assertEquals(1, result.errors().size());
         assertTrue(result.errors().get(0).message().contains("VTL"),
                 result.errors().get(0).message());
+        assertEquals("UnsupportedOperation", result.errors().get(0).errorType());
+        assertEquals(List.of("pipeline-code#request"), jsRuntime.calls);
+        assertTrue(invoker.requests.isEmpty());
     }
 
     @Test
     void anExplicitVtlRuntimeIsRefusedEvenWithCode() {
+        when(appSync.getDataSource(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
         Resolver resolver = resolver(ResolverKind.UNIT, "$util.toJson($ctx.args)");
         resolver.setDataSourceName("accountDB");
         Resolver.ResolverRuntime runtime = new Resolver.ResolverRuntime();

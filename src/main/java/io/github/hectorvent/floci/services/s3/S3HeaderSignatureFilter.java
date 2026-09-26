@@ -51,7 +51,8 @@ import java.util.Optional;
  * <h2>Deliberate deviations from real AWS</h2>
  * <ul>
  *   <li>The credential scope's region is not checked against the bucket's region. Floci resolves
- *       a request's region <em>from</em> that scope, so pinning it would be circular.</li>
+ *       a request's region <em>from</em> that scope, so pinning it would be circular. Whether the
+ *       label is a region at all is checked upstream, in {@code AccountContextFilter}.</li>
  *   <li>The per-chunk signatures of an {@code aws-chunked} upload are not verified; only the seed
  *       signature over the headers is. The controller strips the chunk framing itself.</li>
  *   <li>The well-known local-dev {@code test}/{@code test} credential pair is honoured, mirroring

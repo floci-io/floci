@@ -35,7 +35,7 @@ class ApiGatewayExecuteControllerTest {
         RegionResolver regionResolver = mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn("000000000000");
         return new ApiGatewayExecuteController(
-                null, null, null,
+                null, null, null, null,
                 regionResolver, objectMapper, null,
                 null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null, null);
     }
@@ -352,7 +352,7 @@ class ApiGatewayExecuteControllerTest {
                 .thenReturn(null);
 
         ApiGatewayExecuteController controller = new ApiGatewayExecuteController(
-                apiGatewayService, apiGatewayV2Service, null,
+                apiGatewayService, null, apiGatewayV2Service, null,
                 regionResolver, new ObjectMapper(), null,
                 null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null, null);
 
@@ -382,7 +382,7 @@ class ApiGatewayExecuteControllerTest {
                 .thenReturn(null);
 
         ApiGatewayExecuteController controller = new ApiGatewayExecuteController(
-                apiGatewayService, apiGatewayV2Service, null,
+                apiGatewayService, null, apiGatewayV2Service, null,
                 regionResolver, new ObjectMapper(), null,
                 null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null, null);
 
@@ -416,7 +416,7 @@ class ApiGatewayExecuteControllerTest {
                 new AwsException("NotFoundException", "Invalid API id specified", 404));
 
         ApiGatewayExecuteController controller = new ApiGatewayExecuteController(
-                apiGatewayService, apiGatewayV2Service, null,
+                apiGatewayService, null, apiGatewayV2Service, null,
                 regionResolver, new ObjectMapper(), null,
                 null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null, null);
 

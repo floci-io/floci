@@ -33,6 +33,8 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `DescribeEventSubscriptions` | List subscriptions, or the one the request names |
 | `ModifyEventSubscription` | Update the members the request names |
 | `DeleteEventSubscription` | Delete a subscription |
+| `AddSourceIdentifierToSubscription` | Add a source id to a subscription |
+| `RemoveSourceIdentifierFromSubscription` | Remove a source id from a subscription |
 | `CreateDBSubnetGroup` | Create a DB subnet group; tags given here are readable through `ListTagsForResource` |
 | `DescribeDBSubnetGroups` | List DB subnet groups |
 | `ModifyDBSubnetGroup` | Update DB subnet group description and subnet list |
@@ -145,6 +147,10 @@ The four subscription actions manage the resource itself. **Nothing is published
 A subscription is stored and reported back so a client can manage it. No RDS event reaches SNS
 through it, so an SNS subscriber sees nothing.
 
+`SourceIds` is set at create and changed only through `AddSourceIdentifierToSubscription` and
+`RemoveSourceIdentifierFromSubscription`, since `ModifyEventSubscription` carries no `SourceIds`
+member. Adding an id twice is a no-op, because the model declares no fault that fits a duplicate.
+
 `SnsTopicArn` is required and is not resolved against the SNS service. `SourceType` is checked
 against the model's valid values, and a request naming `SourceIds` must also name the `SourceType`
 they belong to, as the model requires. An omitted `Enabled` activates the subscription.
@@ -172,6 +178,15 @@ they belong to, as the model requires. An omitted `Enabled` activates the subscr
 ### Docker Compose
 
 RDS requires the Docker socket and port range exposure. For private registry authentication and other Docker settings see [Docker Configuration](../configuration/docker.md).
+
+`CreateDBInstance`, `CreateDBCluster`, `RestoreDBInstanceFromDBSnapshot`, and
+`RestoreDBClusterFromSnapshot` honor a requested `Port` only within the configured
+RDS proxy range. A port outside that range causes Floci to assign the next free port
+and return it in the endpoint. A port inside the range that is already in use is
+rejected. This differs from AWS because Floci's local proxy must use a published
+host port; for example, requesting `5432` with the default
+`7001`-`7099` range returns a port in that range. Ports outside AWS's valid
+`1150`-`65535` interval are rejected.
 
 When Docker publishes RDS proxy ports dynamically, set `FLOCI_SERVICES_RDS_ENDPOINT_HOST` to the
 hostname used by clients. Floci inspects its own container through the Docker socket and returns the

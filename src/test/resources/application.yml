@@ -21,6 +21,8 @@ floci:
       helper-image: floci/network-helper:local
   default-region: us-east-1
   default-account-id: "000000000000"
+  partitions:
+    allow-unknown-regions: false
   ai-mock-config-file: ${AI_MOCK_CONFIG:src/test/resources/fixtures/ai-mock-config.json}
   storage:
     mode: memory

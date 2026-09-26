@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.redshift.RedshiftService;
@@ -174,7 +175,7 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
     private String namespaceArn(ProvisionContext ctx, String clusterId) {
         UUID ns = UUID.nameUUIDFromBytes(
                 (ctx.accountId() + ":" + clusterId).getBytes(StandardCharsets.UTF_8));
-        return "arn:aws:redshift:" + ctx.region() + ":" + ctx.accountId() + ":namespace:" + ns;
+        return AwsArnUtils.Arn.of("redshift", ctx.region(), ctx.accountId(), "namespace:" + ns).toString();
     }
 
     private void warnUnsupported(JsonNode props, ProvisionContext ctx, String id) {

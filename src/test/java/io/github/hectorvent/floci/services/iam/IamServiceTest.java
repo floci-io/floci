@@ -89,6 +89,27 @@ class IamServiceTest {
     }
 
     @Test
+    void assumedRoleSessionIdentitySurvivesPersistence() throws Exception {
+        String accessKeyId = "ASIAASSUMEDROLESESSION";
+        InMemoryStorage<String, SessionCredential> sessions = new InMemoryStorage<>();
+        IamService service = iamService(false, new InMemoryStorage<>(), sessions);
+        service.registerSession(accessKeyId, "secret", "token",
+                "arn:aws:iam::123456789012:role/TestRole", Instant.now().plusSeconds(3600),
+                null, "123456789012", "my-custom-session-name",
+                "AROATESTROLEID:my-custom-session-name");
+
+        SessionCredential stored = sessions.get(accessKeyId).orElseThrow();
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        SessionCredential restored = mapper.readValue(mapper.writeValueAsBytes(stored), SessionCredential.class);
+        assertEquals("my-custom-session-name", restored.getRoleSessionName());
+        assertEquals("AROATESTROLEID:my-custom-session-name", restored.getAssumedRoleId());
+        sessions.put(accessKeyId, restored);
+        assertEquals("arn:aws:sts::123456789012:assumed-role/TestRole/my-custom-session-name",
+                service.resolveCallerArn(accessKeyId).orElseThrow());
+        assertEquals(restored.getAssumedRoleId(), service.resolveCallerUserId(accessKeyId).orElseThrow());
+    }
+
+    @Test
     void ec2SessionMarkerSurvivesPersistenceAndExpiredCredentialsCannotAuthenticate() throws Exception {
         SessionCredential expired = new SessionCredential("ASIAEXPIREDEC2", "secret", "token",
                 "arn:aws:iam::123456789012:role/worker", Instant.now().minusSeconds(1), null, "123456789012");

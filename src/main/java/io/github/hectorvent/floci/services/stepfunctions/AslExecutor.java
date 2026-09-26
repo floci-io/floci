@@ -10,10 +10,13 @@ import io.github.hectorvent.floci.core.common.CsvParser;
 import io.github.hectorvent.floci.core.common.CustomResourceLiveness;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHandler;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
-import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbItemAccess;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations.Scope;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeHandler;
 import io.github.hectorvent.floci.services.ecs.EcsJsonHandler;
@@ -68,9 +71,6 @@ import io.vertx.mutiny.core.Vertx;
 import io.vertx.mutiny.ext.web.client.HttpRequest;
 import io.vertx.mutiny.ext.web.client.HttpResponse;
 import io.vertx.mutiny.ext.web.client.WebClient;
-import io.quarkus.arc.Arc;
-import io.quarkus.arc.ArcContainer;
-import io.quarkus.arc.ManagedContext;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
@@ -125,6 +125,7 @@ public class AslExecutor {
 
     /** AWS starts no child execution with an input over 256 KiB, batched or not. */
     private static final int MAX_BATCH_INPUT_BYTES = 256 * 1024;
+    private static final int ITEM_READER_MAX_ITEMS = 100_000_000;
 
     private enum MapItemsSource {
         DEFAULT,
@@ -234,7 +235,7 @@ public class AslExecutor {
 
     private final LambdaExecutorService lambdaExecutor;
     private final LambdaTargetResolver targetResolver;
-    private final DynamoDbService dynamoDbService;
+    private final DynamoDbFacade dynamoDb;
     private final DynamoDbJsonHandler dynamoDbJsonHandler;
     private final SqsJsonHandler sqsJsonHandler;
     private final SnsJsonHandler snsJsonHandler;
@@ -267,7 +268,7 @@ public class AslExecutor {
 
     @Inject
     public AslExecutor(LambdaExecutorService lambdaExecutor, LambdaTargetResolver targetResolver,
-                       DynamoDbService dynamoDbService, DynamoDbJsonHandler dynamoDbJsonHandler,
+                       DynamoDbFacade dynamoDb, DynamoDbJsonHandler dynamoDbJsonHandler,
                        SqsJsonHandler sqsJsonHandler, SnsJsonHandler snsJsonHandler,
                        CloudFormationQueryHandler cloudFormationHandler,
                        Ec2Service ec2Service, S3Service s3Service,
@@ -277,7 +278,7 @@ public class AslExecutor {
                        ObjectMapper objectMapper, JsonataEvaluator jsonataEvaluator,
                        Instance<StepFunctionsService> sfnService, EmulatorConfig config, Vertx vertx,
                        CustomResourceLiveness customResourceLiveness) {
-        this(lambdaExecutor, targetResolver, dynamoDbService, dynamoDbJsonHandler,
+        this(lambdaExecutor, targetResolver, dynamoDb, dynamoDbJsonHandler,
                 sqsJsonHandler, snsJsonHandler, cloudFormationHandler,
                 ec2Service, s3Service, ecsService, ecsJsonHandler,
                 eventBridgeHandler, schedulerService, schedulerController, rdsDataService,
@@ -286,7 +287,7 @@ public class AslExecutor {
     }
 
     AslExecutor(LambdaExecutorService lambdaExecutor, LambdaTargetResolver targetResolver,
-                DynamoDbService dynamoDbService, DynamoDbJsonHandler dynamoDbJsonHandler,
+                DynamoDbFacade dynamoDb, DynamoDbJsonHandler dynamoDbJsonHandler,
                 SqsJsonHandler sqsJsonHandler, SnsJsonHandler snsJsonHandler,
                 CloudFormationQueryHandler cloudFormationHandler,
                 Ec2Service ec2Service, S3Service s3Service,
@@ -300,7 +301,7 @@ public class AslExecutor {
         this.customResourceLiveness = customResourceLiveness;
         this.lambdaExecutor = lambdaExecutor;
         this.targetResolver = targetResolver;
-        this.dynamoDbService = dynamoDbService;
+        this.dynamoDb = dynamoDb;
         this.dynamoDbJsonHandler = dynamoDbJsonHandler;
         this.sqsJsonHandler = sqsJsonHandler;
         this.snsJsonHandler = snsJsonHandler;
@@ -336,7 +337,7 @@ public class AslExecutor {
     }
 
     AslExecutor(LambdaExecutorService lambdaExecutor, LambdaFunctionStore functionStore,
-                DynamoDbService dynamoDbService, DynamoDbJsonHandler dynamoDbJsonHandler,
+                DynamoDbFacade dynamoDb, DynamoDbJsonHandler dynamoDbJsonHandler,
                 SqsJsonHandler sqsJsonHandler, SnsJsonHandler snsJsonHandler,
                 CloudFormationQueryHandler cloudFormationHandler,
                 Ec2Service ec2Service, S3Service s3Service,
@@ -347,7 +348,7 @@ public class AslExecutor {
                 Instance<StepFunctionsService> sfnService, EmulatorConfig config, Vertx vertx,
                 CustomResourceLiveness customResourceLiveness,
                 Clock clock, Sleeper sleeper, Integer maxWaitSecondsOverride) {
-        this(lambdaExecutor, new LambdaTargetResolver(functionStore, null), dynamoDbService, dynamoDbJsonHandler,
+        this(lambdaExecutor, new LambdaTargetResolver(functionStore, null), dynamoDb, dynamoDbJsonHandler,
                 sqsJsonHandler, snsJsonHandler, cloudFormationHandler, ec2Service, s3Service,
                 ecsService, ecsJsonHandler, eventBridgeHandler, schedulerService,
                 schedulerController, null, objectMapper, jsonataEvaluator, sfnService, config,
@@ -361,7 +362,7 @@ public class AslExecutor {
     }
 
     AslExecutor(LambdaExecutorService lambdaExecutor, LambdaFunctionStore functionStore,
-                DynamoDbService dynamoDbService, DynamoDbJsonHandler dynamoDbJsonHandler,
+                DynamoDbFacade dynamoDb, DynamoDbJsonHandler dynamoDbJsonHandler,
                 SqsJsonHandler sqsJsonHandler, SnsJsonHandler snsJsonHandler,
                 CloudFormationQueryHandler cloudFormationHandler,
                 Ec2Service ec2Service, S3Service s3Service,
@@ -371,7 +372,7 @@ public class AslExecutor {
                 ObjectMapper objectMapper, JsonataEvaluator jsonataEvaluator,
                 Instance<StepFunctionsService> sfnService, EmulatorConfig config, Vertx vertx,
                 CustomResourceLiveness customResourceLiveness) {
-        this(lambdaExecutor, new LambdaTargetResolver(functionStore, null), dynamoDbService, dynamoDbJsonHandler,
+        this(lambdaExecutor, new LambdaTargetResolver(functionStore, null), dynamoDb, dynamoDbJsonHandler,
                 sqsJsonHandler, snsJsonHandler, cloudFormationHandler, ec2Service, s3Service,
                 ecsService, ecsJsonHandler, eventBridgeHandler, schedulerService,
                 schedulerController, null, objectMapper, jsonataEvaluator, sfnService, config,
@@ -474,33 +475,12 @@ public class AslExecutor {
      * pool would otherwise run with no active scope and resolve its Task integrations against the
      * default account instead of the execution's. Each branch thread therefore activates its own
      * scope here, mirroring how {@link #executeAsync}/{@link #executeSync} wrap {@code doExecute}.
+     * Delegates to {@link RequestScopes#callAsChecked}, which restores a previously active scope's
+     * account so a reused thread does not keep the execution's account.
      */
     private <T> T callUnderExecutionAccount(StateMachine sm, Callable<T> body) throws Exception {
         String accountId = AwsArnUtils.accountOrDefault(sm.getStateMachineArn(), null);
-        ArcContainer container = Arc.container();
-        if (accountId == null || accountId.isBlank() || container == null || !container.isRunning()) {
-            return body.call();
-        }
-        ManagedContext requestContext = container.requestContext();
-        boolean alreadyActive = requestContext.isActive();
-        if (!alreadyActive) {
-            requestContext.activate();
-        }
-        // Execution runs on a background worker that normally has no active scope. If it did run
-        // inside an already-active scope, restore its previous account afterwards so we don't leave
-        // the execution's account behind on a reused thread.
-        RequestContext ctx = container.instance(RequestContext.class).get();
-        String previousAccountId = alreadyActive ? ctx.getAccountId() : null;
-        try {
-            ctx.setAccountId(accountId);
-            return body.call();
-        } finally {
-            if (!alreadyActive) {
-                requestContext.terminate();
-            } else {
-                ctx.setAccountId(previousAccountId);
-            }
-        }
+        return RequestScopes.callAsChecked(accountId == null || accountId.isBlank() ? null : accountId, body);
     }
 
     private void doExecute(StateMachine sm, Execution exec, List<HistoryEvent> history,
@@ -760,7 +740,7 @@ public class AslExecutor {
             return new StateResult(output, stateDef.path("Next").asText(null));
         }
 
-        JsonNode effectiveInput = applyInputPath(stateDef, input);
+        JsonNode effectiveInput = applyInputPath(stateDef, input, context);
 
         // Pass states transform their input through Parameters (with intrinsics), then a static
         // Result overrides if present.
@@ -773,7 +753,7 @@ public class AslExecutor {
         }
 
         JsonNode output = mergeResult(stateDef, input, result);
-        output = applyOutputPath(stateDef, input, output);
+        output = applyOutputPath(stateDef, output, context);
         return new StateResult(output, stateDef.path("Next").asText(null));
     }
 
@@ -807,7 +787,7 @@ public class AslExecutor {
                         stateDef.get("Arguments"), "Arguments", statesVar, variables);
             }
         } else {
-            effectiveInput = applyInputPath(stateDef, input);
+            effectiveInput = applyInputPath(stateDef, input, context);
             if (stateDef.has("Parameters")) {
                 effectiveInput = resolveParameters(stateDef.get("Parameters"), effectiveInput, context);
             }
@@ -869,7 +849,7 @@ public class AslExecutor {
                 taskResult = resolveParameters(stateDef.get("ResultSelector"), taskResult, context);
             }
             JsonNode output = mergeResult(stateDef, input, taskResult);
-            output = applyOutputPath(stateDef, input, output);
+            output = applyOutputPath(stateDef, output, context);
             return new StateResult(output, stateDef.path("Next").asText(null));
         }
     }
@@ -1974,6 +1954,7 @@ public class AslExecutor {
 
     private JsonNode invokeDynamoDb(String operation, JsonNode input, String region) {
         String tableName = input.path("TableName").asText();
+        Scope scope = dynamoDb.scope(region);
         switch (operation) {
             case "putItem" -> {
                 JsonNode item = input.path("Item");
@@ -1983,12 +1964,12 @@ public class AslExecutor {
                         ? input.get("ExpressionAttributeNames") : null;
                 JsonNode exprAttrValues = input.has("ExpressionAttributeValues")
                         ? input.get("ExpressionAttributeValues") : null;
-                dynamoDbService.putItem(tableName, item, conditionExpr, exprAttrNames, exprAttrValues, region, "NONE");
+                dynamoDb.items().putItem(scope, tableName, item, conditionExpr, exprAttrNames, exprAttrValues);
                 return objectMapper.createObjectNode();
             }
             case "getItem" -> {
                 JsonNode key = input.path("Key");
-                JsonNode item = dynamoDbService.getItem(tableName, key, region);
+                JsonNode item = dynamoDb.items().getItem(scope, tableName, key);
                 ObjectNode result = objectMapper.createObjectNode();
                 if (item != null) {
                     result.set("Item", item);
@@ -2003,7 +1984,7 @@ public class AslExecutor {
                         ? input.get("ExpressionAttributeNames") : null;
                 JsonNode exprAttrValues = input.has("ExpressionAttributeValues")
                         ? input.get("ExpressionAttributeValues") : null;
-                dynamoDbService.deleteItem(tableName, key, conditionExpr, exprAttrNames, exprAttrValues, region, "NONE");
+                dynamoDb.items().deleteItem(scope, tableName, key, conditionExpr, exprAttrNames, exprAttrValues);
                 return objectMapper.createObjectNode();
             }
             case "scan" -> {
@@ -2015,10 +1996,10 @@ public class AslExecutor {
                         ? input.get("ExpressionAttributeValues") : null;
                 Integer limit = input.has("Limit") ? input.get("Limit").asInt() : null;
                 JsonNode scanFilter = input.has("ScanFilter") ? input.get("ScanFilter") : null;
-                DynamoDbService.ScanResult scanResult = dynamoDbService.scan(
-                        tableName, filterExpression, exprAttrNames, exprAttrValues, scanFilter, limit, null, null, region);
+                DynamoDbItemAccess.ScanPage scanResult = dynamoDb.items().scan(
+                        scope, tableName, filterExpression, exprAttrNames, exprAttrValues, scanFilter, limit, null);
                 ObjectNode response = objectMapper.createObjectNode();
-                com.fasterxml.jackson.databind.node.ArrayNode items = objectMapper.createArrayNode();
+                ArrayNode items = objectMapper.createArrayNode();
                 scanResult.items().forEach(items::add);
                 response.set("Items", items);
                 response.put("Count", scanResult.items().size());
@@ -2039,16 +2020,13 @@ public class AslExecutor {
                         ? input.get("ConditionExpression").asText() : null;
                 String returnValues = input.path("ReturnValues").asText("NONE");
 
-                DynamoDbService.UpdateResult result = dynamoDbService.updateItem(
-                        tableName, key, attributeUpdates, updateExpression,
-                        exprAttrNames, exprAttrValues, returnValues,
-                        conditionExpression, region, "NONE");
+                JsonNode attributes = dynamoDb.items().updateItem(
+                        scope, tableName, key, attributeUpdates, updateExpression,
+                        exprAttrNames, exprAttrValues, returnValues, conditionExpression);
 
                 ObjectNode response = objectMapper.createObjectNode();
-                if ("ALL_NEW".equals(returnValues) && result.newItem() != null) {
-                    response.set("Attributes", result.newItem());
-                } else if ("ALL_OLD".equals(returnValues) && result.oldItem() != null) {
-                    response.set("Attributes", result.oldItem());
+                if (attributes != null) {
+                    response.set("Attributes", attributes);
                 }
                 return response;
             }
@@ -2075,9 +2053,6 @@ public class AslExecutor {
         int status = response.getStatus();
 
         if (status >= 400) {
-            if (entity instanceof AwsErrorResponse err) {
-                throw new FailStateException("DynamoDb." + err.type(), err.message());
-            }
             if (entity instanceof JsonNode errorNode) {
                 String errorName = errorNode.path("__type").asText("UnknownError");
                 String errorMessage = errorNode.path("message").asText(
@@ -2266,18 +2241,18 @@ public class AslExecutor {
             throw new FailStateException("States.Runtime", NO_NEXT_STATE_CAUSE);
         }
 
-        JsonNode effectiveInput = applyInputPath(stateDef, input);
+        JsonNode effectiveInput = applyInputPath(stateDef, input, context);
         JsonNode choices = stateDef.path("Choices");
         for (JsonNode choice : choices) {
             if (evaluateCondition(choice, effectiveInput, context)) {
-                JsonNode output = applyOutputPath(stateDef, input, effectiveInput);
+                JsonNode output = applyOutputPath(stateDef, effectiveInput, context);
                 return new StateResult(output, choice.path("Next").asText());
             }
         }
         // Default branch
         String defaultState = stateDef.path("Default").asText(null);
         if (defaultState != null) {
-            JsonNode output = applyOutputPath(stateDef, input, effectiveInput);
+            JsonNode output = applyOutputPath(stateDef, effectiveInput, context);
             return new StateResult(output, defaultState);
         }
         throw new FailStateException("States.Runtime", NO_NEXT_STATE_CAUSE);
@@ -2323,16 +2298,16 @@ public class AslExecutor {
                 }
             }
         } else {
-            effectiveInput = applyInputPath(stateDef, input);
+            effectiveInput = applyInputPath(stateDef, input, context);
             if (stateDef.has("Seconds")) {
                 waitNanos = secondsToNanos(stateDef.get("Seconds").asLong());
             } else if (stateDef.has("SecondsPath")) {
-                JsonNode val = resolvePath(stateDef.get("SecondsPath").asText(), effectiveInput);
+                JsonNode val = resolvePath(stateDef.get("SecondsPath").asText(), effectiveInput, context);
                 waitNanos = secondsToNanos(val.asLong());
             } else if (stateDef.has("Timestamp")) {
                 waitNanos = nanosUntil(stateDef.get("Timestamp").asText());
             } else if (stateDef.has("TimestampPath")) {
-                JsonNode val = resolvePath(stateDef.get("TimestampPath").asText(), effectiveInput);
+                JsonNode val = resolvePath(stateDef.get("TimestampPath").asText(), effectiveInput, context);
                 waitNanos = nanosUntil(val.asText());
             }
         }
@@ -2343,7 +2318,7 @@ public class AslExecutor {
             JsonNode output = applyJsonataOutput(stateDef, input, null, context, variables);
             return new StateResult(output, stateDef.path("Next").asText(null));
         }
-        JsonNode output = applyOutputPath(stateDef, input, effectiveInput);
+        JsonNode output = applyOutputPath(stateDef, effectiveInput, context);
         return new StateResult(output, stateDef.path("Next").asText(null));
     }
 
@@ -2403,8 +2378,8 @@ public class AslExecutor {
             JsonNode output = applyJsonataOutput(stateDef, input, input, context, variables);
             return new StateResult(output, null);
         }
-        JsonNode effectiveInput = applyInputPath(stateDef, input);
-        return new StateResult(applyOutputPath(stateDef, input, effectiveInput), null);
+        JsonNode effectiveInput = applyInputPath(stateDef, input, context);
+        return new StateResult(applyOutputPath(stateDef, effectiveInput, context), null);
     }
 
     private StateResult executeFail(JsonNode stateDef, JsonNode input, boolean jsonata, JsonNode context,
@@ -2453,7 +2428,7 @@ public class AslExecutor {
                                               String topLevelQueryLanguage, JsonNode context,
                                               ObjectNode variables, long executionDeadlineNanos)
             throws Exception {
-        JsonNode effectiveInput = jsonata ? input : applyInputPath(stateDef, input);
+        JsonNode effectiveInput = jsonata ? input : applyInputPath(stateDef, input, context);
         JsonNode branches = stateDef.path("Branches");
         chain.publish("ParallelStateStarted", null);
         var branchChains = new ArrayList<HistoryChain>();
@@ -2544,7 +2519,7 @@ public class AslExecutor {
                 ? resolveParameters(stateDef.get("ResultSelector"), results, context)
                 : results;
         JsonNode output = mergeResult(stateDef, input, selected);
-        output = applyOutputPath(stateDef, input, output);
+        output = applyOutputPath(stateDef, output, context);
         return new StateResult(output, stateDef.path("Next").asText(null));
     }
 
@@ -2584,7 +2559,7 @@ public class AslExecutor {
 
         // Map input-processing fields, including ItemsPath and MaxConcurrencyPath, resolve against
         // the effective state input after InputPath has been applied.
-        JsonNode mapInput = applyInputPath(stateDef, input);
+        JsonNode mapInput = applyInputPath(stateDef, input, context);
         ResolvedMapItems resolvedItems = resolveMapItems(stateDef, mapInput, jsonata, context, variables);
         JsonNode items = resolvedItems.items();
 
@@ -2792,7 +2767,7 @@ public class AslExecutor {
                 ? resolveParameters(stateDef.get("ResultSelector"), mapResult, context)
                 : mapResult;
         JsonNode output = mergeResult(stateDef, input, selected);
-        output = applyOutputPath(stateDef, input, output);
+        output = applyOutputPath(stateDef, output, context);
         return new StateResult(output, stateDef.path("Next").asText(null));
     }
 
@@ -2800,14 +2775,16 @@ public class AslExecutor {
      * Resolves an integer Map field from its literal, {@code <field>Path} or JSONata expression form,
      * as MaxConcurrency and the ItemBatcher limits all take. An absent field is 0. {@code minimum} is
      * the smallest accepted value, which is what separates MaxConcurrency, where 0 means the service
-     * ceiling, from a batch limit, where it is meaningless.
+     * ceiling, from a batch limit, where it is meaningless. The {@code <field>Path} form is a
+     * Reference Path, so it reads the Context Object as readily as the state input and the resolver
+     * is given both.
      */
     private int resolveMapIntegerField(JsonNode container, String field, int minimum, JsonNode mapInput,
                                        boolean jsonata, JsonNode context, ObjectNode variables) {
         JsonNode value;
         boolean jsonataExpression = false;
         if (container.has(field + "Path")) {
-            value = resolvePath(container.get(field + "Path").asText(), mapInput);
+            value = resolvePath(container.get(field + "Path").asText(), mapInput, context);
         } else if (container.has(field)) {
             value = container.get(field);
             if (jsonata && value.isTextual() && JsonataEvaluator.isExpression(value.asText())) {
@@ -3062,8 +3039,8 @@ public class AslExecutor {
             label = UUID.randomUUID().toString();
         }
         var id = UUID.randomUUID().toString();
-        return new MapRunIdentity(label, id, "arn:aws:states:" + region + ":" + account + ":mapRun:"
-                + smName + "/" + label + ":" + id);
+        return new MapRunIdentity(label, id, AwsArnUtils.Arn.of("states", region, account,
+                "mapRun:" + smName + "/" + label + ":" + id).toString());
     }
 
     private JsonNode applyResultWriter(String mapStateName, JsonNode stateDef, JsonNode input,
@@ -3214,15 +3191,15 @@ public class AslExecutor {
         }
         // NONE: emit an execution record per child, mirroring the AWS export format. The child
         // executions run under a derived state machine "<parentName>/<mapRunLabel>".
-        String childSmArn = "arn:aws:states:" + region + ":" + account + ":stateMachine:"
-                + smName + "/" + mapRunLabel;
+        String childSmArn = AwsArnUtils.Arn.of("states", region, account,
+                "stateMachine:" + smName + "/" + mapRunLabel).toString();
         for (int i = 0; i < results.size(); i++) {
             String childId = UUID.randomUUID().toString();
             long start = childTimings != null && i < childTimings.size() ? childTimings.get(i)[0] : 0L;
             long stop = childTimings != null && i < childTimings.size() ? childTimings.get(i)[1] : 0L;
             ObjectNode record = out.addObject();
-            record.put("ExecutionArn", "arn:aws:states:" + region + ":" + account + ":execution:"
-                    + smName + "/" + mapRunLabel + ":" + childId);
+            record.put("ExecutionArn", AwsArnUtils.Arn.of("states", region, account,
+                    "execution:" + smName + "/" + mapRunLabel + ":" + childId).toString());
             record.put("Input", stringifyResult(childInputs != null && i < childInputs.size()
                     ? childInputs.get(i) : NullNode.getInstance()));
             record.putObject("InputDetails").put("Included", true);
@@ -3248,13 +3225,13 @@ public class AslExecutor {
     private ArrayNode formatFailedChildren(List<FailedChild> failedChildren, String region, String account,
                                            String smName, String mapRunLabel) {
         ArrayNode out = objectMapper.createArrayNode();
-        String childSmArn = "arn:aws:states:" + region + ":" + account + ":stateMachine:"
-                + smName + "/" + mapRunLabel;
+        String childSmArn = AwsArnUtils.Arn.of("states", region, account,
+                "stateMachine:" + smName + "/" + mapRunLabel).toString();
         for (FailedChild child : failedChildren) {
             String childId = UUID.randomUUID().toString();
             ObjectNode record = out.addObject();
-            record.put("ExecutionArn", "arn:aws:states:" + region + ":" + account + ":execution:"
-                    + smName + "/" + mapRunLabel + ":" + childId);
+            record.put("ExecutionArn", AwsArnUtils.Arn.of("states", region, account,
+                    "execution:" + smName + "/" + mapRunLabel + ":" + childId).toString());
             record.put("Input", stringifyResult(child.input()));
             record.putObject("InputDetails").put("Included", true);
             record.put("Name", childId);
@@ -3318,11 +3295,15 @@ public class AslExecutor {
                                                     ObjectNode variables) throws Exception {
         String resource = itemReader.path("Resource").asText(null);
         StatesIntegration integration = StatesIntegration.parse(resource).orElse(null);
-        if (integration != null && integration.is("s3", "listObjectsV2")) {
-            return resolveListObjectsItems(itemReader, input, context, jsonata, variables);
-        }
-        if (integration == null || !integration.is("s3", "getObject")) {
+        boolean listObjects = integration != null && integration.is("s3", "listObjectsV2");
+        boolean getObject = integration != null && integration.is("s3", "getObject");
+        if (!listObjects && !getObject) {
             throw new FailStateException("States.Runtime", "Unsupported ItemReader resource: " + resource);
+        }
+
+        int maxItems = resolveItemReaderMaxItems(itemReader, input, jsonata, context, variables);
+        if (listObjects) {
+            return resolveListObjectsItems(itemReader, input, context, jsonata, variables, maxItems);
         }
 
         String inputType = itemReader.path("ReaderConfig").path("InputType").asText(null);
@@ -3341,24 +3322,24 @@ public class AslExecutor {
         try {
             S3Object object = s3Service.getObject(bucket, key);
             if ("JSONL".equals(inputType)) {
-                return new ResolvedMapItems(applyMaxItems(itemReader, readJsonLines(object.getData())),
+                return new ResolvedMapItems(applyMaxItems(maxItems, readJsonLines(object.getData())),
                         MapItemsSource.ITEM_READER_ARRAY);
             }
             if ("CSV".equals(inputType)) {
-                return new ResolvedMapItems(applyMaxItems(itemReader, readCsvRows(itemReader, object.getData())),
+                return new ResolvedMapItems(applyMaxItems(maxItems, readCsvRows(itemReader, object.getData())),
                         MapItemsSource.ITEM_READER_ARRAY);
             }
             JsonNode items = objectMapper.readTree(object.getData());
             items = applyItemsPointer(itemReader, items);
             if (items.isObject()) {
-                return new ResolvedMapItems(applyMaxItems(itemReader, normalizeObjectItems(items)),
+                return new ResolvedMapItems(applyMaxItems(maxItems, normalizeObjectItems(items)),
                         MapItemsSource.ITEM_READER_OBJECT);
             }
             if (!items.isArray()) {
                 throw new FailStateException("States.ItemReaderFailed",
                         "Attempting to map over non-iterable node.");
             }
-            return new ResolvedMapItems(applyMaxItems(itemReader, items), MapItemsSource.ITEM_READER_ARRAY);
+            return new ResolvedMapItems(applyMaxItems(maxItems, items), MapItemsSource.ITEM_READER_ARRAY);
         } catch (AwsException e) {
             throw new FailStateException("States.ItemReaderFailed", e.getMessage());
         } catch (FailStateException e) {
@@ -3433,6 +3414,54 @@ public class AslExecutor {
         };
     }
 
+    private int resolveItemReaderMaxItems(JsonNode itemReader, JsonNode mapInput, boolean jsonata,
+                                          JsonNode context, ObjectNode variables) {
+        JsonNode readerConfig = itemReader.path("ReaderConfig");
+        boolean hasMaxItems = readerConfig.has("MaxItems");
+        boolean hasMaxItemsPath = readerConfig.has("MaxItemsPath");
+        if (hasMaxItems && hasMaxItemsPath) {
+            throw new FailStateException("States.Runtime",
+                    "ReaderConfig cannot specify both MaxItems and MaxItemsPath", "MaxItems");
+        }
+        if (jsonata && hasMaxItemsPath) {
+            throw new FailStateException("States.Runtime",
+                    "ReaderConfig.MaxItemsPath is not supported by JSONata state machines", "MaxItemsPath");
+        }
+
+        boolean jsonataExpression = hasMaxItems
+                && jsonata
+                && readerConfig.get("MaxItems").isTextual()
+                && JsonataEvaluator.isExpression(readerConfig.get("MaxItems").asText());
+        if (hasMaxItemsPath) {
+            JsonNode value = resolvePath(readerConfig.get("MaxItemsPath").asText(), mapInput, context);
+            long maxItems;
+            try {
+                maxItems = Long.parseLong(value.asText());
+            } catch (NumberFormatException e) {
+                throw new FailStateException("States.Runtime",
+                        "MaxItems must resolve to an integer of 0 or more", "MaxItems");
+            }
+            if (maxItems < 0) {
+                throw new FailStateException(
+                        "States.ItemReaderFailed", "field MaxItems must be positive", true);
+            }
+            return (int) Math.min(maxItems, ITEM_READER_MAX_ITEMS);
+        }
+
+        int maxItems = resolveMapIntegerField(
+                readerConfig, "MaxItems", 0, mapInput, jsonata, context, variables);
+        if (maxItems > ITEM_READER_MAX_ITEMS) {
+            if (jsonataExpression) {
+                return ITEM_READER_MAX_ITEMS;
+            }
+            throw new FailStateException(
+                    "States.Runtime",
+                    "MaxItems must resolve to an integer of " + ITEM_READER_MAX_ITEMS + " or less",
+                    "MaxItems");
+        }
+        return maxItems;
+    }
+
     private JsonNode resolveItemReaderParameters(JsonNode itemReader, JsonNode input, JsonNode context,
                                                  boolean jsonata, ObjectNode variables) throws Exception {
         if (jsonata && itemReader.has("Arguments")) {
@@ -3444,7 +3473,8 @@ public class AslExecutor {
     }
 
     private ResolvedMapItems resolveListObjectsItems(JsonNode itemReader, JsonNode input, JsonNode context,
-                                                     boolean jsonata, ObjectNode variables) throws Exception {
+                                                     boolean jsonata, ObjectNode variables,
+                                                     int maxItems) throws Exception {
         JsonNode parameters = resolveItemReaderParameters(itemReader, input, context, jsonata, variables);
         String bucket = parameters.path("Bucket").asText(null);
         if (bucket == null) {
@@ -3453,7 +3483,6 @@ public class AslExecutor {
         String prefix = parameters.path("Prefix").asText(null);
 
         ArrayNode items = objectMapper.createArrayNode();
-        int maxItems = maxItems(itemReader);
         try {
             // MaxItems keeps the first keys in order, so the listing itself is capped.
             for (S3Object object : s3Service.listObjects(bucket, prefix, null,
@@ -3508,12 +3537,7 @@ public class AslExecutor {
         return pointedItems;
     }
 
-    private int maxItems(JsonNode itemReader) {
-        return itemReader.path("ReaderConfig").path("MaxItems").asInt(0);
-    }
-
-    private JsonNode applyMaxItems(JsonNode itemReader, JsonNode items) {
-        int maxItems = maxItems(itemReader);
+    private JsonNode applyMaxItems(int maxItems, JsonNode items) {
         if (maxItems <= 0 || !items.isArray() || items.size() <= maxItems) {
             return items;
         }
@@ -3688,7 +3712,12 @@ public class AslExecutor {
 
     // ──────────────────────────── Path resolution ────────────────────────────
 
-    private JsonNode applyInputPath(JsonNode stateDef, JsonNode input) {
+    /**
+     * {@code InputPath} is a Reference Path, so it may be rooted at the Context Object as well as
+     * at the state input; {@code context} is what makes a {@code $$} path resolve instead of
+     * narrowing the input to null.
+     */
+    private JsonNode applyInputPath(JsonNode stateDef, JsonNode input, JsonNode context) {
         if (!stateDef.has("InputPath")) {
             return input;
         }
@@ -3696,7 +3725,7 @@ public class AslExecutor {
         if (path == null || path.equals("null")) {
             return objectMapper.createObjectNode();
         }
-        return resolvePath(path, input);
+        return resolvePath(path, input, context);
     }
 
     private JsonNode mergeResult(JsonNode stateDef, JsonNode input, JsonNode result) throws Exception {
@@ -3713,7 +3742,8 @@ public class AslExecutor {
         }
     }
 
-    private JsonNode applyOutputPath(JsonNode stateDef, JsonNode input, JsonNode output) {
+    /** {@code OutputPath} is a Reference Path, so it reads the Context Object as InputPath does. */
+    private JsonNode applyOutputPath(JsonNode stateDef, JsonNode output, JsonNode context) {
         if (!stateDef.has("OutputPath")) {
             return output;
         }
@@ -3721,7 +3751,7 @@ public class AslExecutor {
         if (path == null || path.equals("null")) {
             return objectMapper.createObjectNode();
         }
-        return resolvePath(path, output);
+        return resolvePath(path, output, context);
     }
 
     JsonNode resolveParameters(JsonNode parameters, JsonNode input, JsonNode context) throws Exception {

@@ -28,17 +28,17 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-class DynamoDbJsonHandlerTest {
+class NativeDynamoDbJsonHandlerTest {
 
     private DynamoDbService service;
     private ObjectMapper mapper;
-    private DynamoDbJsonHandler handler;
+    private NativeDynamoDbJsonHandler handler;
 
     @BeforeEach
     void setUp() {
         service = new DynamoDbService(new InMemoryStorage<>());
         mapper = new ObjectMapper();
-        handler = new DynamoDbJsonHandler(service, null, null, mapper);
+        handler = new NativeDynamoDbJsonHandler(service, null, null, mapper);
     }
 
     private TableDefinition createUsersTable(String region) {
@@ -368,7 +368,7 @@ class DynamoDbJsonHandlerTest {
         TypeReference<Map<String, TableDefinition>> typeReference = new TypeReference<>() {};
 
         DynamoDbService persistentService = new DynamoDbService(new PersistentStorage<>(tableFile, typeReference));
-        DynamoDbJsonHandler persistentHandler = new DynamoDbJsonHandler(persistentService, null, null, mapper);
+        NativeDynamoDbJsonHandler persistentHandler = new NativeDynamoDbJsonHandler(persistentService, null, null, mapper);
 
         ObjectNode createRequest = mapper.createObjectNode();
         createRequest.put("TableName", "PersistedSseTable");

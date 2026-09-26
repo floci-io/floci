@@ -2181,14 +2181,14 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     /**
      * Stores an assumed-role session so the enforcement filter can resolve its policies.
      */
-    public void registerSession(String sessionAccessKeyId, String roleArn, java.time.Instant expiration) {
+    public void registerSession(String sessionAccessKeyId, String roleArn, Instant expiration) {
         sessions.put(sessionAccessKeyId, new SessionCredential(sessionAccessKeyId, roleArn, expiration));
     }
 
     /**
      * Stores an assumed-role session with an optional inline session policy document.
      */
-    public void registerSession(String sessionAccessKeyId, String roleArn, java.time.Instant expiration,
+    public void registerSession(String sessionAccessKeyId, String roleArn, Instant expiration,
                                 String sessionPolicyDocument) {
         sessions.put(sessionAccessKeyId,
                 new SessionCredential(sessionAccessKeyId, roleArn, expiration, sessionPolicyDocument));
@@ -2199,13 +2199,13 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * authentication paths use the overload that also records the session token.
      */
     public void registerSession(String sessionAccessKeyId, String secretAccessKey, String roleArn,
-                                java.time.Instant expiration, String sessionPolicyDocument) {
+                                Instant expiration, String sessionPolicyDocument) {
         registerSession(sessionAccessKeyId, secretAccessKey, null, roleArn, expiration, sessionPolicyDocument);
     }
 
     /** Stores a temporary credential including the session token required for authentication. */
     public void registerSession(String sessionAccessKeyId, String secretAccessKey, String sessionToken,
-                                String roleArn, java.time.Instant expiration, String sessionPolicyDocument) {
+                                String roleArn, Instant expiration, String sessionPolicyDocument) {
         sessions.put(sessionAccessKeyId,
                 new SessionCredential(sessionAccessKeyId, secretAccessKey, sessionToken, roleArn,
                         expiration, sessionPolicyDocument));
@@ -2217,7 +2217,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * credentials that carry no role ARN (e.g. GetSessionToken) back to the caller's account.
      */
     public void registerSession(String sessionAccessKeyId, String secretAccessKey, String roleArn,
-                                java.time.Instant expiration, String sessionPolicyDocument,
+                                Instant expiration, String sessionPolicyDocument,
                                 String originAccountId) {
         registerSession(sessionAccessKeyId, secretAccessKey, null, roleArn, expiration, sessionPolicyDocument,
                 originAccountId);
@@ -2225,16 +2225,26 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     /** Stores a temporary credential and its origin account. */
     public void registerSession(String sessionAccessKeyId, String secretAccessKey, String sessionToken,
-                                String roleArn, java.time.Instant expiration, String sessionPolicyDocument,
+                                String roleArn, Instant expiration, String sessionPolicyDocument,
                                 String originAccountId) {
-        sessions.put(sessionAccessKeyId,
-                new SessionCredential(sessionAccessKeyId, secretAccessKey, sessionToken, roleArn, expiration,
-                        sessionPolicyDocument, originAccountId));
+        registerSession(sessionAccessKeyId, secretAccessKey, sessionToken, roleArn, expiration,
+                sessionPolicyDocument, originAccountId, null, null);
+    }
+
+    /** Stores the identity returned to the caller when STS creates an assumed-role session. */
+    public void registerSession(String sessionAccessKeyId, String secretAccessKey, String sessionToken,
+                                String roleArn, Instant expiration, String sessionPolicyDocument,
+                                String originAccountId, String roleSessionName, String assumedRoleId) {
+        SessionCredential session = new SessionCredential(sessionAccessKeyId, secretAccessKey, sessionToken,
+                roleArn, expiration, sessionPolicyDocument, originAccountId);
+        session.setRoleSessionName(roleSessionName);
+        session.setAssumedRoleId(assumedRoleId);
+        sessions.put(sessionAccessKeyId, session);
     }
 
     /** Stores a temporary session in an explicit account namespace. */
     public void registerSessionForAccount(String accountId, String sessionAccessKeyId, String secretAccessKey,
-                                          String roleArn, java.time.Instant expiration,
+                                          String roleArn, Instant expiration,
                                           String sessionPolicyDocument) {
         registerSessionForAccount(accountId, sessionAccessKeyId, secretAccessKey, null, roleArn, expiration,
                 sessionPolicyDocument);
@@ -2242,7 +2252,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     /** Stores a temporary credential in an explicit account namespace. */
     public void registerSessionForAccount(String accountId, String sessionAccessKeyId, String secretAccessKey,
-                                          String sessionToken, String roleArn, java.time.Instant expiration,
+                                          String sessionToken, String roleArn, Instant expiration,
                                           String sessionPolicyDocument) {
         if (accountId == null || accountId.isBlank()) {
             throw new IllegalArgumentException("Session account ID must not be blank");
@@ -2439,7 +2449,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         Optional<SessionCredential> sessionOpt = findSessionForCallerContext(accessKeyId);
         if (sessionOpt.isPresent()) {
             SessionCredential session = sessionOpt.get();
-            if (session.getExpiration() != null && session.getExpiration().isBefore(java.time.Instant.now())) {
+            if (session.getExpiration() != null && session.getExpiration().isBefore(Instant.now())) {
                 deleteSession(accessKeyId, session);
                 return null; // expired — unknown key → bypass
             }
@@ -2522,7 +2532,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         Optional<SessionCredential> sessionOpt = findSessionForCallerContext(accessKeyId);
         if (sessionOpt.isPresent()) {
             SessionCredential session = sessionOpt.get();
-            if (session.getExpiration() != null && session.getExpiration().isBefore(java.time.Instant.now())) {
+            if (session.getExpiration() != null && session.getExpiration().isBefore(Instant.now())) {
                 deleteSession(accessKeyId, session);
                 return Optional.empty();
             }
@@ -2532,11 +2542,29 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             }
             String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : "UnknownRole";
             String accountId = AwsArnUtils.accountOrDefault(roleArn, regionResolver.getAccountId());
+            String sessionName = session.getRoleSessionName();
+            if (sessionName == null) {
+                sessionName = session.getEc2InstanceId() != null
+                        ? session.getEc2InstanceId() : "floci-session";
+            }
             return Optional.of(AwsArnUtils.Arn.of("sts", "", accountId, "assumed-role/" + roleName + "/"
-                    + (session.getEc2InstanceId() != null ? session.getEc2InstanceId() : "floci-session")).toString());
+                    + sessionName).toString());
         }
 
         return Optional.empty();
+    }
+
+    public Optional<String> resolveCallerUserId(String accessKeyId) {
+        Optional<SessionCredential> sessionOpt = findSessionForCallerContext(accessKeyId);
+        if (sessionOpt.isEmpty()) {
+            return Optional.empty();
+        }
+        SessionCredential session = sessionOpt.get();
+        if (session.getExpiration() != null && session.getExpiration().isBefore(Instant.now())) {
+            deleteSession(accessKeyId, session);
+            return Optional.empty();
+        }
+        return Optional.ofNullable(session.getAssumedRoleId());
     }
 
     /** Temporary credentials are the ones STS mints, distinguished by the {@code ASIA} prefix. */

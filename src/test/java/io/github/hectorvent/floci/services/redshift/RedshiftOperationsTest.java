@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerM
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -46,6 +47,9 @@ public class RedshiftOperationsTest {
 
     @InjectMock
     RedshiftContainerManager containerManager;
+
+    @Inject
+    RedshiftService service;
 
     @Test
     @Order(1)
@@ -210,7 +214,154 @@ public class RedshiftOperationsTest {
             .statusCode(200)
             .body(not(containsString("redshift-copy")));
 
-        // 1e. Static discovery APIs
+        // 1e. Logging: EnableLogging with s3table destination preserves its publishing status
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "EnableLogging")
+            .formParam("ClusterIdentifier", "cluster-src")
+            .formParam("LogDestinationType", "s3table")
+            .formParam("S3TableGranularity", "cluster")
+            .formParam("S3TableKmsKeyId", "test-kms-key")
+            .formParam("LogExports.member.1", "sys_query_history")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body(containsString("<LoggingEnabled>true</LoggingEnabled>"))
+            .body(containsString("<LogDestinationType>s3table</LogDestinationType>"))
+            .body(containsString("<S3Tables><S3Tables><member>sys_query_history</member></S3Tables>"))
+            .body(containsString("<S3TableGranularity>cluster</S3TableGranularity>"))
+            .body(containsString("<EnabledAll>false</EnabledAll>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DescribeLoggingStatus")
+            .formParam("ClusterIdentifier", "cluster-src")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body(containsString("<LoggingEnabled>true</LoggingEnabled>"))
+            .body(containsString("<LogDestinationType>s3table</LogDestinationType>"))
+            .body(containsString("<S3Tables><S3Tables><member>sys_query_history</member></S3Tables>"))
+            .body(containsString("<S3TableGranularity>cluster</S3TableGranularity>"))
+            .body(containsString("<EnabledAll>false</EnabledAll>"))
+            .body(not(containsString("<S3TableKmsKeyId>")));
+
+        assertEquals("test-kms-key", service.describeLoggingStatus("cluster-src").getLoggingS3TableKmsKeyId());
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "EnableLogging")
+            .formParam("ClusterIdentifier", "cluster-src")
+            .formParam("LogDestinationType", "s3table")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<S3Tables><EnabledAll>true</EnabledAll></S3Tables>"))
+            .body(not(containsString("<S3Tables></S3Tables>")))
+            .body(not(containsString("<S3TableGranularity>")));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DisableLogging")
+            .formParam("ClusterIdentifier", "cluster-src")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body(containsString("<LoggingEnabled>false</LoggingEnabled>"))
+            .body(not(containsString("<S3Tables>")));
+
+        // 1e.1 S3-table settings are invalid for a non-table destination
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "EnableLogging")
+            .formParam("ClusterIdentifier", "cluster-src")
+            .formParam("LogDestinationType", "cloudwatch")
+            .formParam("S3TableGranularity", "cluster")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .contentType("application/xml")
+            .body(containsString("<Code>InvalidParameterCombination</Code>"));
+
+        // 1e.1.1 Only AWS-supported S3-table granularity values are accepted
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "EnableLogging")
+            .formParam("ClusterIdentifier", "cluster-src")
+            .formParam("LogDestinationType", "s3table")
+            .formParam("S3TableGranularity", "daily")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .contentType("application/xml")
+            .body(containsString("<Code>InvalidParameterValue</Code>"));
+
+        // 1e.2 Non-table logging status must omit the S3-table status block
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "EnableLogging")
+            .formParam("ClusterIdentifier", "cluster-src")
+            .formParam("LogDestinationType", "cloudwatch")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<LogDestinationType>cloudwatch</LogDestinationType>"))
+            .body(not(containsString("<S3Tables>")));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DisableLogging")
+            .formParam("ClusterIdentifier", "cluster-src")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<LoggingEnabled>false</LoggingEnabled>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DescribeLoggingStatus")
+            .formParam("ClusterIdentifier", "cluster-src")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<LoggingEnabled>false</LoggingEnabled>"))
+            .body(not(containsString("<S3Tables>")));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DescribeLoggingStatus")
+            .formParam("ClusterIdentifier", "cluster-src")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body(containsString("<LoggingEnabled>false</LoggingEnabled>"))
+            .body(not(containsString("<S3Tables>")));
+
+        // 1f. Static discovery APIs
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", AUTH_HEADER)
@@ -273,6 +424,21 @@ public class RedshiftOperationsTest {
             .contentType("application/xml")
             .body(containsString("<ClusterIdentifier>cluster-src</ClusterIdentifier>"))
             .body(containsString("<ClusterStatus>deleting</ClusterStatus>"));
+
+        // 4b. RestoreFromClusterSnapshot rejects carrying both SnapshotIdentifier and SnapshotArn
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "RestoreFromClusterSnapshot")
+            .formParam("ClusterIdentifier", "cluster-restored-invalid")
+            .formParam("SnapshotIdentifier", "snap-test-1")
+            .formParam("SnapshotArn", "arn:aws:redshift:us-east-1:000000000000:snapshot:cluster-src/snap-test-1")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .contentType("application/xml")
+            .body(containsString("<Code>InvalidParameterCombination</Code>"));
 
         // 5. RestoreFromClusterSnapshot
         given()

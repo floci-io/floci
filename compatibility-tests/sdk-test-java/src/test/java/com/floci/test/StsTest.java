@@ -16,6 +16,7 @@ import software.amazon.awssdk.services.sts.model.*;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
 
+import javax.xml.crypto.dsig.CanonicalizationMethod;
 import javax.xml.crypto.dsig.DigestMethod;
 import javax.xml.crypto.dsig.Reference;
 import javax.xml.crypto.dsig.SignatureMethod;
@@ -23,6 +24,10 @@ import javax.xml.crypto.dsig.SignedInfo;
 import javax.xml.crypto.dsig.Transform;
 import javax.xml.crypto.dsig.XMLSignatureFactory;
 import javax.xml.crypto.dsig.dom.DOMSignContext;
+import javax.xml.crypto.dsig.spec.TransformParameterSpec;
+import javax.xml.crypto.dsig.spec.XPathFilter2ParameterSpec;
+import javax.xml.crypto.dsig.spec.XPathFilterParameterSpec;
+import javax.xml.crypto.dsig.spec.XPathType;
 import javax.xml.transform.OutputKeys;
 import javax.xml.transform.TransformerFactory;
 import javax.xml.transform.dom.DOMSource;
@@ -40,6 +45,7 @@ import java.util.Base64;
 import java.util.Date;
 import java.util.List;
 import java.util.UUID;
+import java.util.function.Function;
 
 import static org.assertj.core.api.Assertions.*;
 
@@ -225,6 +231,21 @@ class StsTest {
     }
 
     @Test
+    void assumeRoleWithSamlRejectsXPathTransform() {
+        assertSamlSignatureInvalid(factory -> List.of(transform(factory, Transform.ENVELOPED, null),
+                transform(factory, Transform.XPATH, new XPathFilterParameterSpec("true()")),
+                transform(factory, CanonicalizationMethod.EXCLUSIVE, null)));
+    }
+
+    @Test
+    void assumeRoleWithSamlRejectsXPathFilter2Transform() {
+        assertSamlSignatureInvalid(factory -> List.of(transform(factory, Transform.ENVELOPED, null),
+                transform(factory, Transform.XPATH2,
+                        new XPathFilter2ParameterSpec(List.of(new XPathType("/", XPathType.Filter.UNION)))),
+                transform(factory, CanonicalizationMethod.EXCLUSIVE, null)));
+    }
+
+    @Test
     void assumeRoleWithWebIdentityMissingTokenThrows400() {
         assertThatThrownBy(() -> sts.assumeRoleWithWebIdentity(
                 AssumeRoleWithWebIdentityRequest.builder()
@@ -295,6 +316,30 @@ class StsTest {
                 .build());
     }
 
+    private static void assertSamlSignatureInvalid(Function<XMLSignatureFactory, List<Transform>> transforms) {
+        String issuer = "https://sdk-test.example.test/saml";
+        AssumeRoleWithSamlRequest request = AssumeRoleWithSamlRequest.builder()
+                .roleArn(allowedRoleArn)
+                .principalArn(providerArn)
+                .samlAssertion(signedAssertion(allowedRoleArn, providerArn, issuer, transforms))
+                .build();
+
+        assertThatThrownBy(() -> sts.assumeRoleWithSAML(request))
+                .isInstanceOfSatisfying(StsException.class, e -> {
+                    assertThat(e.statusCode()).isEqualTo(400);
+                    assertThat(e.awsErrorDetails().errorCode()).isEqualTo("InvalidIdentityToken");
+                    assertThat(e.awsErrorDetails().errorMessage()).isEqualTo("Response signature invalid");
+                });
+    }
+
+    private static Transform transform(XMLSignatureFactory factory, String algorithm, TransformParameterSpec spec) {
+        try {
+            return factory.newTransform(algorithm, spec);
+        } catch (Exception e) {
+            throw new IllegalStateException("Could not create transform " + algorithm, e);
+        }
+    }
+
     private static KeyPair createSigningKeys() throws Exception {
         Security.addProvider(new BouncyCastleProvider());
         KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
@@ -316,6 +361,12 @@ class StsTest {
 
 
     private static String signedAssertion(String roleArn, String principalArn, String issuer) {
+        return signedAssertion(roleArn, principalArn, issuer,
+                factory -> List.of(transform(factory, Transform.ENVELOPED, null)));
+    }
+
+    private static String signedAssertion(String roleArn, String principalArn, String issuer,
+                                          Function<XMLSignatureFactory, List<Transform>> transforms) {
         String id = "_" + UUID.randomUUID();
         Instant expiry = Instant.now().plusSeconds(300);
         String xml = "<saml:Assertion xmlns:saml=\"urn:oasis:names:tc:SAML:2.0:assertion\" ID=\"" + id
@@ -334,8 +385,7 @@ class StsTest {
             XMLSignatureFactory factory = XMLSignatureFactory.getInstance("DOM");
             Reference reference = factory.newReference("#" + id,
                     factory.newDigestMethod(DigestMethod.SHA256, null),
-                    List.of(factory.newTransform(Transform.ENVELOPED,
-                                                (javax.xml.crypto.dsig.spec.TransformParameterSpec) null)), null, null);
+                    transforms.apply(factory), null, null);
             SignedInfo signedInfo = factory.newSignedInfo(
                     factory.newCanonicalizationMethod("http://www.w3.org/2001/10/xml-exc-c14n#",
                                                 (javax.xml.crypto.dsig.spec.C14NMethodParameterSpec) null),

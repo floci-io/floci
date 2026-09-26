@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ses;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -107,7 +108,7 @@ public class SesTenantService {
                 validateSuppressionAttributesPair(suppressedReasons, suppressionScope);
         String key = tenantKey(region, tenantName);
         String tenantId = generateTenantId();
-        String tenantArn = "arn:aws:ses:" + region + ":" + accountId + ":tenant/" + tenantName + "/" + tenantId;
+        String tenantArn = AwsArnUtils.Arn.of("ses", region, accountId, "tenant/" + tenantName + "/" + tenantId).toString();
         Tenant tenant = new Tenant(tenantName, tenantId, tenantArn, Instant.now(clock), tags,
                 "ENABLED", attrs);
         // Only the check-then-put needs to be atomic, so two concurrent creates for the same name can't

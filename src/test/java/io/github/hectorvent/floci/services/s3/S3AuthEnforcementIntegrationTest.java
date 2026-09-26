@@ -2096,6 +2096,62 @@ class S3AuthEnforcementIntegrationTest {
         }
     }
 
+    @Test
+    @Order(55)
+    void bucketPolicyDenyHoldsForARequestSignedInAnotherPartition() {
+        String bucket = "auth-partition-deny-" + Long.toUnsignedString(System.nanoTime(), 36);
+        String key = "guarded.txt";
+
+        given().filter(LOCAL_SIGNER).when().put("/" + bucket).then().statusCode(200);
+        given()
+            .filter(LOCAL_SIGNER)
+            .body("original")
+        .when()
+            .put("/" + bucket + "/" + key)
+        .then()
+            .statusCode(200);
+        given()
+            .filter(LOCAL_SIGNER)
+            .contentType("application/json")
+            .body("""
+                {
+                  "Version": "2012-10-17",
+                  "Statement": [
+                    {
+                      "Effect": "Deny",
+                      "Principal": "*",
+                      "Action": ["s3:GetObject", "s3:PutObject"],
+                      "Resource": "arn:aws:s3:::%s/*"
+                    }
+                  ]
+                }
+                """.formatted(bucket))
+        .when()
+            .put("/" + bucket + "?policy")
+        .then()
+            .statusCode(200);
+
+        // The bucket lives in us-east-1, so its policy names it arn:aws: even when a same-account
+        // caller signs for a China region, and the deny has to match as written.
+        S3RequestSigner chinaSigner = LOCAL_SIGNER.inRegion("cn-north-1");
+        given()
+            .filter(chinaSigner)
+            .body("overwritten")
+        .when()
+            .put("/" + bucket + "/" + key)
+        .then()
+            .statusCode(403)
+            .body(containsString("AccessDenied"));
+
+        given()
+            .filter(chinaSigner)
+        .when()
+            .get("/" + bucket + "/" + key)
+        .then()
+            .statusCode(403)
+            .body(containsString("AccessDenied"));
+    }
+
     private static RequestSpecification presignedRequest(String signature) {
         return given()
                 .queryParam("X-Amz-Algorithm", "AWS4-HMAC-SHA256")

@@ -1,11 +1,18 @@
 package io.github.hectorvent.floci.services.appsync.graphql.resolver;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.appsync.AppSyncService;
+import io.github.hectorvent.floci.services.appsync.graphql.AppSyncVtlContext;
+import io.github.hectorvent.floci.services.appsync.graphql.AppSyncVtlEngine;
+import io.github.hectorvent.floci.services.appsync.graphql.AppSyncVtlResult;
 import io.github.hectorvent.floci.services.appsync.graphql.datasource.AppSyncDataSourceInvokers;
 import io.github.hectorvent.floci.services.appsync.graphql.js.AppSyncJsRuntime;
 import io.github.hectorvent.floci.services.appsync.graphql.js.JsEvaluation;
+import io.github.hectorvent.floci.services.appsync.graphql.util.VtlErrorSignal;
 import io.github.hectorvent.floci.services.appsync.model.DataSource;
+import io.github.hectorvent.floci.services.appsync.model.DataSourceType;
 import io.github.hectorvent.floci.services.appsync.model.FunctionConfiguration;
 import io.github.hectorvent.floci.services.appsync.model.Resolver;
 import io.github.hectorvent.floci.services.appsync.model.ResolverKind;
@@ -38,11 +45,11 @@ import java.util.Map;
  * returned. A stage with no {@code response()} handler at all has nothing to make that decision, so
  * there the error fails the field.
  *
- * <p>Two things stop a pipeline early. {@code runtime.earlyReturn(value)} makes {@code value} the
- * field's result immediately, skipping everything left including the after step, and
- * {@code util.error()} fails the field. {@code util.appendError} does neither: it collects errors
- * that are returned <em>alongside</em> the data, which is why a {@link ResolverOutcome} carries
- * both rather than being a bare value.
+ * <p>Two things stop resolver execution early. {@code runtime.earlyReturn(value)} or VTL
+ * {@code #return(value)} makes {@code value} the field's result immediately, skipping everything
+ * left including the after step, and {@code util.error()} fails the field.
+ * {@code util.appendError} does neither: it collects errors that are returned <em>alongside</em>
+ * the data, which is why a {@link ResolverOutcome} carries both rather than being a bare value.
  */
 @ApplicationScoped
 public class AppSyncResolverExecutor {
@@ -54,14 +61,20 @@ public class AppSyncResolverExecutor {
     private final AppSyncService appSyncService;
     private final AppSyncJsRuntime jsRuntime;
     private final AppSyncDataSourceInvokers dataSourceInvokers;
+    private final AppSyncVtlEngine vtlEngine;
+    private final ObjectMapper objectMapper;
 
     @Inject
     public AppSyncResolverExecutor(AppSyncService appSyncService,
                                    AppSyncJsRuntime jsRuntime,
-                                   AppSyncDataSourceInvokers dataSourceInvokers) {
+                                   AppSyncDataSourceInvokers dataSourceInvokers,
+                                   AppSyncVtlEngine vtlEngine,
+                                   ObjectMapper objectMapper) {
         this.appSyncService = appSyncService;
         this.jsRuntime = jsRuntime;
         this.dataSourceInvokers = dataSourceInvokers;
+        this.vtlEngine = vtlEngine;
+        this.objectMapper = objectMapper;
     }
 
     /**
@@ -107,14 +120,16 @@ public class AppSyncResolverExecutor {
      * the VTL check below unreachable and a VTL stage fell through to the pass-through arm: it ran
      * as if it had no handler instead of saying it is unsupported.
      */
-    private record Stage(String code, ResolverRuntimeName runtime, boolean vtl) {
+    private record Stage(String code, ResolverRuntimeName runtime, boolean vtl,
+                         String requestTemplate, String responseTemplate) {
 
         static Stage of(Resolver resolver) {
             return new Stage(resolver.getCode(), resolver.getRuntime() == null
                     ? null : resolver.getRuntime().getName(),
                     isVtl(resolver.getCode(), resolver.getRuntime() == null
                                     ? null : resolver.getRuntime().getName(),
-                            resolver.getRequestMappingTemplate(), resolver.getResponseMappingTemplate()));
+                            resolver.getRequestMappingTemplate(), resolver.getResponseMappingTemplate()),
+                    resolver.getRequestMappingTemplate(), resolver.getResponseMappingTemplate());
         }
 
         static Stage of(FunctionConfiguration function) {
@@ -122,7 +137,8 @@ public class AppSyncResolverExecutor {
                     ? null : function.getRuntime().getName(),
                     isVtl(function.getCode(), function.getRuntime() == null
                                     ? null : function.getRuntime().getName(),
-                            function.getRequestMappingTemplate(), function.getResponseMappingTemplate()));
+                            function.getRequestMappingTemplate(), function.getResponseMappingTemplate()),
+                    function.getRequestMappingTemplate(), function.getResponseMappingTemplate());
         }
 
         private static boolean isVtl(String code, ResolverRuntimeName runtime, String requestTemplate,
@@ -168,11 +184,15 @@ public class AppSyncResolverExecutor {
 
         private ResolverOutcome runUnit() {
             Stage stage = Stage.of(resolver);
+            DataSource vtlDataSource = stage.vtl()
+                    ? requireVtlNoneDataSource(resolver.getDataSourceName()) : null;
             Object request = callHandler(stage, REQUEST, null, null, null);
             if (returned) {
                 return result(earlyReturnValue);
             }
-            Invocation invocation = invokeDataSource(resolver.getDataSourceName(), request);
+            Invocation invocation = stage.vtl()
+                    ? invokeDataSource(vtlDataSource, normalizeVtlNoneRequest(request))
+                    : invokeDataSource(resolver.getDataSourceName(), request);
             Object response = callHandler(stage, RESPONSE,
                     invocation.result(), invocation.error(), invocation.result());
             return result(returned ? earlyReturnValue : response);
@@ -182,14 +202,15 @@ public class AppSyncResolverExecutor {
             // The before step's job is usually to fill ctx.stash for the functions; its return value
             // is not the field's result, but it is what the first function sees as ctx.prev.result.
             Stage resolverStage = Stage.of(resolver);
+            rejectVtlPipelineStage(resolverStage, "resolver");
             Object before = callHandler(resolverStage, REQUEST, null, null, null);
             if (returned) {
                 return result(earlyReturnValue);
             }
+            List<FunctionConfiguration> functions = pipelineFunctions();
             previousResult = before;
 
-            for (String functionId : pipelineFunctionIds()) {
-                FunctionConfiguration function = function(functionId);
+            for (FunctionConfiguration function : functions) {
                 Stage functionStage = Stage.of(function);
                 Object request = callHandler(functionStage, REQUEST, null, null, null);
                 if (returned) {
@@ -237,12 +258,47 @@ public class AppSyncResolverExecutor {
             }
         }
 
+        private List<FunctionConfiguration> pipelineFunctions() {
+            List<FunctionConfiguration> functions = new ArrayList<>();
+            for (String functionId : pipelineFunctionIds()) {
+                FunctionConfiguration function = function(functionId);
+                rejectVtlPipelineStage(Stage.of(function), "function " + function.getName());
+                functions.add(function);
+            }
+            return functions;
+        }
+
+        private void rejectVtlPipelineStage(Stage stage, String stageName) {
+            if (stage.vtl()) {
+                throw new AwsException("UnsupportedOperation",
+                        "Floci does not yet execute VTL " + stageName + " stages in PIPELINE resolvers", 400);
+            }
+        }
+
+        private DataSource requireVtlNoneDataSource(String dataSourceName) {
+            if (dataSourceName == null || dataSourceName.isBlank()) {
+                throw new AwsException("UnsupportedOperation",
+                        "Floci currently executes VTL UNIT resolvers only with NONE data sources", 400);
+            }
+            DataSource dataSource = dataSource(dataSourceName);
+            if (dataSource.getType() != DataSourceType.NONE) {
+                throw new AwsException("UnsupportedOperation",
+                        "Floci currently executes VTL UNIT resolvers only with NONE data sources; "
+                                + dataSourceName + " uses " + dataSource.getType(), 400);
+            }
+            return dataSource;
+        }
+
         private Invocation invokeDataSource(String dataSourceName, Object request) {
             if (dataSourceName == null || dataSourceName.isBlank()) {
                 // A pipeline resolver's own before/after steps have no data source, and neither do
                 // the local functions AppSync allows: the request is the result.
                 return new Invocation(request, null);
             }
+            return invokeDataSource(dataSource(dataSourceName), request);
+        }
+
+        private DataSource dataSource(String dataSourceName) {
             DataSource dataSource;
             try {
                 dataSource = appSyncService.getDataSource(apiId, dataSourceName);
@@ -252,6 +308,14 @@ public class AppSyncResolverExecutor {
                 throw new AwsException("InternalFailureException",
                         "Data source " + dataSourceName + " does not exist on API " + apiId, 500);
             }
+            if (dataSource == null) {
+                throw new AwsException("InternalFailureException",
+                        "Data source " + dataSourceName + " does not exist on API " + apiId, 500);
+            }
+            return dataSource;
+        }
+
+        private Invocation invokeDataSource(DataSource dataSource, Object request) {
             try {
                 return new Invocation(dataSourceInvokers.invoke(dataSource, request, regionOf(dataSource)),
                         null);
@@ -259,11 +323,18 @@ public class AppSyncResolverExecutor {
                 // What the store or function answered: the resolver sees it as ctx.error and decides.
                 // Deliberately only AwsException: an unexpected RuntimeException is a defect in the
                 // emulator, and routing it somewhere a resolver can swallow it would hide it.
-                LOG.debugv("Data source {0} failed for {1}.{2}: {3}", dataSourceName,
+                LOG.debugv("Data source {0} failed for {1}.{2}: {3}", dataSource.getName(),
                         resolver.getTypeName(), resolver.getFieldName(), e.getMessage());
                 return new Invocation(null,
                         new JsEvaluation.JsError(e.getMessage(), e.getErrorCode(), null, null));
             }
+        }
+
+        private Object normalizeVtlNoneRequest(Object request) {
+            if (request instanceof Map<?, ?> map && !map.containsKey("payload")) {
+                return null;
+            }
+            return request;
         }
 
         /**
@@ -289,13 +360,9 @@ public class AppSyncResolverExecutor {
          * {@code passThrough} here.
          */
         private Object callHandler(Stage stage, String handler, Object result,
-                                  JsEvaluation.JsError error, Object passThrough) {
+            JsEvaluation.JsError error, Object passThrough) {
             if (stage.vtl()) {
-                // Said out loud rather than resolved to null: a null that means "not implemented"
-                // is indistinguishable from a null that means "no rows".
-                throw new AwsException("InternalFailureException",
-                        "Floci runs APPSYNC_JS resolvers only; " + resolver.getTypeName() + "."
-                                + resolver.getFieldName() + " uses VTL mapping templates", 500);
+                return callVtlHandler(stage, handler, result, error);
             }
             String code = stage.code();
             if (code == null || code.isBlank()) {
@@ -334,6 +401,130 @@ public class AppSyncResolverExecutor {
                 this.earlyReturnValue = evaluation.result();
             }
             return evaluation.result();
+        }
+
+        private Object callVtlHandler(Stage stage, String handler, Object result,
+                                      JsEvaluation.JsError error) {
+            String template = REQUEST.equals(handler) ? stage.requestTemplate() : stage.responseTemplate();
+            if (template == null || template.isBlank()) {
+                throw mappingTemplateError("VTL " + handler + " mapping template is required");
+            }
+
+            Map<String, Object> previous = new LinkedHashMap<>();
+            previous.put("result", previousResult);
+            AppSyncVtlContext context = AppSyncVtlContext.builder(objectMapper)
+                    .arguments(invocation.arguments())
+                    .source(invocation.source())
+                    .identity(identityMap())
+                    .request(requestContext())
+                    .info(info())
+                    .stash(stash)
+                    .prev(previous)
+                    .result(result)
+                    .error(errorMap(error))
+                    .authType(invocation.authType())
+                    .build();
+            AppSyncVtlResult evaluation;
+            try {
+                evaluation = vtlEngine.evaluate(template, context);
+            } catch (RuntimeException e) {
+                throw mappingTemplateError("VTL mapping template evaluation failed: " + rootMessage(e));
+            }
+            collectVtl(evaluation.appendedErrors());
+            if (evaluation.hasError()) {
+                VtlErrorSignal raised = evaluation.error();
+                throw resolverError(raised.getMessage(), raised.getErrorType(),
+                        raised.getData(), raised.getErrorInfo());
+            }
+
+            if (evaluation.returned()) {
+                this.returned = true;
+                this.earlyReturnValue = evaluation.output();
+                return evaluation.output();
+            }
+
+            Object value = parseRenderedJson(evaluation.output(), handler);
+            if (REQUEST.equals(handler)) {
+                validateVtlRequest(value);
+            }
+            return value;
+        }
+
+        private Map<String, Object> identityMap() {
+            if (invocation.identity() instanceof Map<?, ?> values) {
+                Map<String, Object> identity = new LinkedHashMap<>();
+                values.forEach((key, value) -> identity.put(String.valueOf(key), value));
+                return identity;
+            }
+            return null;
+        }
+
+        private Map<String, Object> errorMap(JsEvaluation.JsError error) {
+            if (error == null) {
+                return null;
+            }
+            Map<String, Object> value = new LinkedHashMap<>();
+            value.put("message", error.message());
+            value.put("type", error.type());
+            return value;
+        }
+
+        private Object parseRenderedJson(Object output, String handler) {
+            if (!(output instanceof CharSequence rendered)) {
+                return output;
+            }
+            String text = rendered.toString().trim();
+            if (text.isEmpty()) {
+                return null;
+            }
+            try {
+                return objectMapper.readValue(text, Object.class);
+            } catch (JsonProcessingException e) {
+                throw mappingTemplateError("VTL " + handler + " mapping template did not render valid JSON");
+            }
+        }
+
+        private void validateVtlRequest(Object request) {
+            if (!(request instanceof Map<?, ?> map)) {
+                throw mappingTemplateError("VTL request mapping template must render a JSON object");
+            }
+            Object version = map.get("version");
+            if (!"2018-05-29".equals(version)) {
+                throw mappingTemplateError("VTL request mapping template must use version 2018-05-29");
+            }
+            for (Object key : map.keySet()) {
+                if (!"version".equals(key) && !"payload".equals(key)) {
+                    throw mappingTemplateError("VTL NONE request mapping template supports only version and payload");
+                }
+            }
+        }
+
+        private ResolverRaisedException mappingTemplateError(String message) {
+            return resolverError(message, "MappingTemplate", null, null);
+        }
+
+        private ResolverRaisedException resolverError(String message, String type,
+                                                      Object data, Object errorInfo) {
+            return new ResolverRaisedException(new AppSyncResolverError(message, type, data,
+                    errorInfo, path));
+        }
+
+        private String rootMessage(RuntimeException failure) {
+            Throwable cause = failure;
+            while (cause.getCause() != null) {
+                cause = cause.getCause();
+            }
+            return cause.getMessage() == null ? cause.getClass().getSimpleName() : cause.getMessage();
+        }
+
+        private void collectVtl(List<Map<String, Object>> appended) {
+            if (appended == null) {
+                return;
+            }
+            appended.forEach(error -> errors.add(new AppSyncResolverError(
+                    String.valueOf(error.get("message")),
+                    String.valueOf(error.getOrDefault("type", "Unknown")),
+                    error.get("data"), error.get("errorInfo"), path)));
         }
 
         private void collect(List<JsEvaluation.JsError> appended) {

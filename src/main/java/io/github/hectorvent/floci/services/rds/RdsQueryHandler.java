@@ -95,6 +95,10 @@ public class RdsQueryHandler {
                 case "DescribeEventSubscriptions" -> handleDescribeEventSubscriptions(params, region);
                 case "ModifyEventSubscription" -> handleModifyEventSubscription(params, region);
                 case "DeleteEventSubscription" -> handleDeleteEventSubscription(params, region);
+                case "AddSourceIdentifierToSubscription" ->
+                        handleAddSourceIdentifierToSubscription(params, region);
+                case "RemoveSourceIdentifierFromSubscription" ->
+                        handleRemoveSourceIdentifierFromSubscription(params, region);
                 case "CreateDBSubnetGroup" -> handleCreateDbSubnetGroup(params, region);
                 case "DescribeDBSubnetGroups" -> handleDescribeDbSubnetGroups(params, region);
                 case "ModifyDBSubnetGroup" -> handleModifyDbSubnetGroup(params, region);
@@ -216,11 +220,19 @@ public class RdsQueryHandler {
         try {
             DbInstanceSettings settings = instanceSettings(params);
             List<String> vpcSecurityGroupIds = vpcSecurityGroupIds(params);
-            DbInstance instance = service.createDbInstance(id, engine, engineVersion, masterUsername,
-                    masterPassword, dbName, dbInstanceClass, allocatedStorage, iamEnabled,
-                    paramGroupName, dbSubnetGroupName, dbClusterIdentifier, availabilityZone, multiAz,
-                    manageMasterUserPassword, masterUserSecretKmsKeyId, tags, vpcSecurityGroupIds,
-                    optionGroupName, region, autoMinorVersionUpgrade, settings, publiclyAccessible);
+            Integer requestedPort = parseIntegerParam(params, "Port");
+            DbInstance instance = requestedPort == null
+                    ? service.createDbInstance(id, engine, engineVersion, masterUsername,
+                            masterPassword, dbName, dbInstanceClass, allocatedStorage, iamEnabled,
+                            paramGroupName, dbSubnetGroupName, dbClusterIdentifier, availabilityZone, multiAz,
+                            manageMasterUserPassword, masterUserSecretKmsKeyId, tags, vpcSecurityGroupIds,
+                            optionGroupName, region, autoMinorVersionUpgrade, settings, publiclyAccessible)
+                    : service.createDbInstance(id, engine, engineVersion, masterUsername,
+                            masterPassword, dbName, dbInstanceClass, allocatedStorage, iamEnabled,
+                            paramGroupName, dbSubnetGroupName, dbClusterIdentifier, availabilityZone, multiAz,
+                            manageMasterUserPassword, masterUserSecretKmsKeyId, tags, vpcSecurityGroupIds,
+                            optionGroupName, region, autoMinorVersionUpgrade, settings, publiclyAccessible,
+                            requestedPort);
             String result = dbInstanceXml(instance);
             return Response.ok(AwsQueryResponse.envelope("CreateDBInstance", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -306,6 +318,22 @@ public class RdsQueryHandler {
                 optionalBoolean(params.getFirst("Enabled")));
         return Response.ok(AwsQueryResponse.envelope("ModifyEventSubscription", AwsNamespaces.RDS,
                 new XmlBuilder().raw(eventSubscriptionXml(subscription)).build())).build();
+    }
+
+    private Response handleAddSourceIdentifierToSubscription(
+            MultivaluedMap<String, String> params, String region) {
+        EventSubscription subscription = service.addSourceIdentifierToSubscription(region,
+                params.getFirst("SubscriptionName"), params.getFirst("SourceIdentifier"));
+        return Response.ok(AwsQueryResponse.envelope("AddSourceIdentifierToSubscription",
+                AwsNamespaces.RDS, new XmlBuilder().raw(eventSubscriptionXml(subscription)).build())).build();
+    }
+
+    private Response handleRemoveSourceIdentifierFromSubscription(
+            MultivaluedMap<String, String> params, String region) {
+        EventSubscription subscription = service.removeSourceIdentifierFromSubscription(region,
+                params.getFirst("SubscriptionName"), params.getFirst("SourceIdentifier"));
+        return Response.ok(AwsQueryResponse.envelope("RemoveSourceIdentifierFromSubscription",
+                AwsNamespaces.RDS, new XmlBuilder().raw(eventSubscriptionXml(subscription)).build())).build();
     }
 
     private Response handleDeleteEventSubscription(MultivaluedMap<String, String> params, String region) {
@@ -881,18 +909,36 @@ public class RdsQueryHandler {
             Double serverlessV2Max = parseDoubleParam(params, "ServerlessV2ScalingConfiguration.MaxCapacity");
             Integer serverlessV2SecondsUntilAutoPause = parseIntegerParam(
                     params, "ServerlessV2ScalingConfiguration.SecondsUntilAutoPause");
+            Integer requestedPort = parseIntegerParam(params, "Port");
             String globalClusterIdentifier = params.getFirst("GlobalClusterIdentifier");
-            DbCluster cluster = globalClusterIdentifier != null && !globalClusterIdentifier.isBlank()
+            DbCluster cluster;
+            if (globalClusterIdentifier != null && !globalClusterIdentifier.isBlank()) {
+                cluster = requestedPort == null
                     ? service.createDbClusterInGlobalCluster(globalClusterIdentifier, id, engine,
                             params.getFirst("EngineVersion"), masterUsername, masterPassword, databaseName,
                             iamEnabled, paramGroupName, dbSubnetGroupName, availabilityZone, multiAz, region,
+                            serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause,
+                            manageMasterUserPassword, masterUserSecretKmsKeyId, engineMode, storageEncrypted)
+                    : service.createDbClusterInGlobalCluster(globalClusterIdentifier, id, engine,
+                            params.getFirst("EngineVersion"), masterUsername, masterPassword, databaseName,
+                            iamEnabled, paramGroupName, dbSubnetGroupName, availabilityZone, multiAz, region,
+                            serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause,
+                            manageMasterUserPassword, masterUserSecretKmsKeyId, engineMode, storageEncrypted,
+                            requestedPort);
+            } else {
+                cluster = requestedPort == null
+                    ? service.createDbCluster(id, engine, engineVersion, masterUsername,
+                            masterPassword, databaseName, iamEnabled, paramGroupName,
+                            dbSubnetGroupName, availabilityZone, multiAz, region,
                             serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause,
                             manageMasterUserPassword, masterUserSecretKmsKeyId, engineMode, storageEncrypted)
                     : service.createDbCluster(id, engine, engineVersion, masterUsername,
                             masterPassword, databaseName, iamEnabled, paramGroupName,
                             dbSubnetGroupName, availabilityZone, multiAz, region,
                             serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause,
-                            manageMasterUserPassword, masterUserSecretKmsKeyId, engineMode, storageEncrypted);
+                            manageMasterUserPassword, masterUserSecretKmsKeyId, engineMode, storageEncrypted,
+                            requestedPort);
+            }
             String result = dbClusterXml(cluster);
             return Response.ok(AwsQueryResponse.envelope("CreateDBCluster", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -1554,17 +1600,24 @@ public class RdsQueryHandler {
         boolean multiAz = multiAzStr != null && Boolean.parseBoolean(multiAzStr);
         String dbSubnetGroupName = params.getFirst("DBSubnetGroupName");
 
-        java.util.List<String> vpcSecurityGroupIds = new java.util.ArrayList<>();
+        List<String> vpcSecurityGroupIds = new ArrayList<>();
         for (int i = 1; ; i++) {
             String sg = params.getFirst("VpcSecurityGroupIds.VpcSecurityGroupId." + i);
             if (sg == null) break;
             vpcSecurityGroupIds.add(sg);
         }
 
-        java.util.Map<String, String> tags = parseTags(params);
+        Map<String, String> tags = parseTags(params);
 
         try {
-            DbInstance instance = service.restoreDbInstanceFromDbSnapshot(instanceId, snapshotId, dbInstanceClass, availabilityZone, multiAz, dbSubnetGroupName, vpcSecurityGroupIds, tags, region);
+            Integer requestedPort = parseIntegerParam(params, "Port");
+            DbInstance instance = requestedPort == null
+                    ? service.restoreDbInstanceFromDbSnapshot(instanceId, snapshotId,
+                            dbInstanceClass, availabilityZone, multiAz, dbSubnetGroupName,
+                            vpcSecurityGroupIds, tags, region)
+                    : service.restoreDbInstanceFromDbSnapshot(instanceId, snapshotId,
+                            dbInstanceClass, availabilityZone, multiAz, dbSubnetGroupName,
+                            vpcSecurityGroupIds, tags, region, requestedPort);
             String result = dbInstanceXml(instance);
             return Response.ok(AwsQueryResponse.envelope("RestoreDBInstanceFromDBSnapshot", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -2218,6 +2271,7 @@ public class RdsQueryHandler {
         if (s.getKmsKeyId() != null && !s.getKmsKeyId().isBlank()) {
             xml.elem("KmsKeyId", s.getKmsKeyId());
         }
+        xml.elem("Encrypted", s.isStorageEncrypted());
         if (s.getAvailabilityZone() != null) xml.elem("AvailabilityZone", s.getAvailabilityZone());
         if (s.getVpcId() != null) xml.elem("VpcId", s.getVpcId());
         xml.elem("InstanceCreateTime", s.getInstanceCreateTime() != null ? s.getInstanceCreateTime().toString() : "")

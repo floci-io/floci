@@ -71,11 +71,9 @@ import java.util.stream.Collectors;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
-import io.github.hectorvent.floci.core.resource.ResourceProvider;
-import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 
 @ApplicationScoped
-public class DynamoDbService implements ResourceProvider {
+public class DynamoDbService {
 
     private static final String LOCAL_REPLICA_UPDATE_ERROR =
             "Cannot add, delete, or update the local region through ReplicaUpdates. "
@@ -87,12 +85,12 @@ public class DynamoDbService implements ResourceProvider {
      * View type applied when a stream is requested without an explicit StreamViewType.
      *
      * <p>Not an AWS default: the CloudFormation schema marks StreamViewType required inside
-     * StreamSpecification, and the DynamoDB API documents no default either. This mirrors the
-     * lenient handling {@code DynamoDbJsonHandler} already applies on CreateTable/UpdateTable
-     * ({@code path("StreamViewType").asText("NEW_AND_OLD_IMAGES")}), so an under-specified
-     * template gets a working stream instead of a rejection, and every entry point agrees.
+     * StreamSpecification, and the DynamoDB API documents no default either.
+     * {@link NativeDynamoDbTableService} applies the same fallback on CreateTable/UpdateTable, so
+     * an under-specified template gets a working stream instead of a rejection, and every entry
+     * point agrees.
      */
-    private static final String DEFAULT_STREAM_VIEW_TYPE = "NEW_AND_OLD_IMAGES";
+    static final String DEFAULT_STREAM_VIEW_TYPE = "NEW_AND_OLD_IMAGES";
 
     private final StorageBackend<String, TableDefinition> tableStore;
     private final StorageBackend<String, Map<String, JsonNode>> itemStore;
@@ -757,11 +755,11 @@ public class DynamoDbService implements ResourceProvider {
      * Turns on the table's stream and persists the result, so DescribeTable reports
      * StreamSpecification / LatestStreamArn and event source mappings can find the stream.
      *
-     * <p>Callers that reach DynamoDB through the service rather than the JSON handler — notably
-     * CloudFormation provisioning — need this: the handler enables the stream inline on
+     * <p>Callers that reach DynamoDB through this service directly, notably CloudFormation
+     * provisioning, need this: {@link NativeDynamoDbTableService} enables the stream inline on
      * CreateTable/UpdateTable, and without an equivalent entry point a table created by any other
      * path is left streamless. A null {@code viewType} falls back to
-     * {@link #DEFAULT_STREAM_VIEW_TYPE}, matching the leniency the JSON handler already applies
+     * {@link #DEFAULT_STREAM_VIEW_TYPE}, matching the leniency CreateTable/UpdateTable already apply
      * rather than any documented AWS default.
      *
      * @return the updated table, or the unchanged table when no stream service is wired.
@@ -797,7 +795,7 @@ public class DynamoDbService implements ResourceProvider {
         if (streamService == null) {
             return table;
         }
-        streamService.disableStream(table.getTableName(), region);
+        streamService.disableStream(table.getTableArn());
         table.setStreamEnabled(false);
         persistTable(tableName, table, region);
         return table;
@@ -822,7 +820,7 @@ public class DynamoDbService implements ResourceProvider {
             itemStore.delete(storageKey);
         }
         if (streamService != null) {
-            streamService.deleteStream(canonicalTableName, region);
+            streamService.deleteStream(table.getTableArn());
         }
         if (kinesisForwarder != null) {
             // Discard any buffered CDC records and stop draining: the destination stream is gone.
@@ -950,7 +948,7 @@ public class DynamoDbService implements ResourceProvider {
             String ownerAccountId = regionResolver.getAccountId();
             Runnable streamEvent = () -> {
                 if (streamService != null) {
-                    streamService.captureEvent(canonicalTableName, eventName, existing, item, table, region);
+                    streamService.captureEvent(eventName, existing, item, table, region);
                 }
                 if (kinesisForwarder != null) {
                     kinesisForwarder.forward(eventName, existing, item, table, region, ownerAccountId);
@@ -1052,7 +1050,7 @@ public class DynamoDbService implements ResourceProvider {
                 String ownerAccountId = regionResolver.getAccountId();
                 Runnable streamEvent = () -> {
                     if (streamService != null) {
-                        streamService.captureEvent(canonicalTableName, "REMOVE", removed, null, table, region);
+                        streamService.captureEvent("REMOVE", removed, null, table, region);
                     }
                     if (kinesisForwarder != null) {
                         kinesisForwarder.forward("REMOVE", removed, null, table, region, ownerAccountId);
@@ -1267,7 +1265,7 @@ public class DynamoDbService implements ResourceProvider {
             String ownerAccountId = regionResolver.getAccountId();
             Runnable streamEvent = () -> {
                 if (streamService != null) {
-                    streamService.captureEvent(canonicalTableName, "MODIFY", existing, item, table, region);
+                    streamService.captureEvent("MODIFY", existing, item, table, region);
                 }
                 if (kinesisForwarder != null) {
                     kinesisForwarder.forward("MODIFY", existing, item, table, region, ownerAccountId);
@@ -1697,7 +1695,7 @@ public class DynamoDbService implements ResourceProvider {
 
     /**
      * Backward-compatible overload for callers that do not pass a ClientRequestToken.
-     * The 4-arg variant is what {@link DynamoDbJsonHandler#handleTransactWriteItems}
+     * The 4-arg variant is what {@link NativeDynamoDbJsonHandler#handleTransactWriteItems}
      * uses so the caller's ClientRequestToken is honoured.
      */
     public void transactWriteItems(List<JsonNode> transactItems, String region) {
@@ -2755,8 +2753,7 @@ public class DynamoDbService implements ResourceProvider {
                 }
                 deletedForTable++;
                 if (streamService != null) {
-                    streamService.captureEvent(scan.table().getTableName(), "REMOVE", removed, null,
-                            scan.table(), scan.region());
+                    streamService.captureEvent("REMOVE", removed, null, scan.table(), scan.region());
                 }
                 if (kinesisForwarder != null) {
                     // Out of request scope here: pass the table owner's account explicitly so the CDC
@@ -5017,7 +5014,6 @@ public class DynamoDbService implements ResourceProvider {
         return new ListImportsResult(page.items().stream().map(ImportSummary::new).toList(), page.nextToken());
     }
 
-    @Override
     public List<ExplorerResource> getResources() {
         List<ExplorerResource> resources = new ArrayList<>();
         for (TableDefinition table : tableStore.scan(k -> true)) {
@@ -5032,10 +5028,5 @@ public class DynamoDbService implements ResourceProvider {
                     table.getTags() != null ? table.getTags() : Map.of()));
         }
         return resources;
-    }
-
-    @Override
-    public Set<SupportedResourceType> getSupportedResourceTypes() {
-        return Set.of(new SupportedResourceType("dynamodb:table", "dynamodb", true));
     }
 }

@@ -106,6 +106,25 @@ class ReposiliteSidecarManagerTest {
         verifyNoInteractions(containerBuilder, lifecycleManager);
     }
 
+    @Test
+    void stopManagedContainersStopsAndForgetsTheManagedContainer() throws Exception {
+        ReposiliteSidecarManager manager = manager();
+        setField(manager, "containerId", "running-reposilite");
+
+        manager.stopManagedContainers();
+
+        verify(lifecycleManager).stopAndRemove("running-reposilite", null);
+    }
+
+    @Test
+    void stopManagedContainersIsANoOpWhenNothingWasEverStarted() {
+        ReposiliteSidecarManager manager = manager();
+
+        manager.stopManagedContainers();
+
+        verifyNoInteractions(lifecycleManager);
+    }
+
     private ReposiliteSidecarManager manager() {
         return new ReposiliteSidecarManager(containerBuilder, lifecycleManager, config, "unused-managed-secret");
     }

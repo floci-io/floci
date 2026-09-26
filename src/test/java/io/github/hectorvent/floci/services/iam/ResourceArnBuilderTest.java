@@ -325,6 +325,15 @@ class ResourceArnBuilderTest {
     }
 
     @Test
+    void s3BuildsArnsInTheRequestRegionsPartition() {
+        when(uriInfo.getPath()).thenReturn("/my-bucket/key.txt");
+        assertEquals("arn:aws-cn:s3:::my-bucket/key.txt",
+                builder.build("s3", ctx, "cn-north-1", "000000000000"));
+        when(uriInfo.getPath()).thenReturn("/");
+        assertEquals("arn:aws-us-gov:s3:::*", builder.build("s3", ctx, "us-gov-west-1", "000000000000"));
+    }
+
+    @Test
     void s3BuildsObjectArn() {
         when(uriInfo.getPath()).thenReturn("/my-bucket/folder/file.json");
         String arn = builder.build("s3", ctx, "us-east-1", "000000000000");

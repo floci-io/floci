@@ -47,7 +47,7 @@ For running SQL without a PostgreSQL wire connection (the way Lambda and Step Fu
 | `DescribeOrderableClusterOptions` | Return the static node types and cluster types, optionally filtered by `NodeType` or `ClusterVersion` |
 | `ModifyClusterIamRoles` | Add or remove the IAM roles associated with a cluster; COPY and UNLOAD see the change on new connections. `DefaultIamRoleArn` is ignored |
 | `DescribeLoggingStatus` | Return a cluster's stored audit-logging configuration |
-| `EnableLogging` | Store audit-logging configuration (S3 bucket, or CloudWatch via `LogDestinationType`); no logs are delivered |
+| `EnableLogging` | Store audit-logging configuration (S3 bucket, CloudWatch, or S3 table via `LogDestinationType`); no logs are delivered |
 | `DisableLogging` | Clear a cluster's audit-logging configuration |
 | `RebootCluster` | Restart a cluster's container |
 | `GetClusterCredentials` | Issue a short-lived DbUser / DbPassword pair the auth proxy and Data API accept for a non-master user |
@@ -79,8 +79,11 @@ Each stream record is written to a stable landing table named `floci_zetl_<integ
 The landing table stores the event id, event name, source, region, sequence number, creation time,
 and DynamoDB keys and images as JSON text. Record event ids are unique, so retries are idempotent.
 
-The integration consumer has its own stream checkpoint and does not share Lambda event source
-mapping state. Deleting an integration stops its consumer while retaining the landing table.
+The integration consumer keeps its own checkpoint for each stream shard and does not share Lambda
+event source mapping state. A batch is checkpointed only once it is written, so a failed write is
+retried with the same records. After a Floci restart the consumer resumes from the trim horizon,
+because native stream records are volatile. Deleting an integration stops its consumer while
+retaining the landing table.
 
 Items already present in the source table when `CreateIntegration` runs are backfilled into the
 landing table with a paginated `Scan`, one page per poll tick, and the scan resumes after a Floci

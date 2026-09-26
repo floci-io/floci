@@ -1863,7 +1863,7 @@ public class EksClusterManager implements ClusterNodeInstanceProvider {
         // never from the cluster control-plane role (cluster.getRoleArn()). Synthesize a distinct
         // node instance profile identity so /latest/meta-data/iam/info returns a valid profile ARN.
         String nodeProfileName = safeClusterName + "-node-profile";
-        inst.setIamInstanceProfileArn("arn:aws:iam::" + safeAccountId + ":instance-profile/" + nodeProfileName);
+        inst.setIamInstanceProfileArn(regionResolver.buildGlobalArn("iam", safeAccountId, "instance-profile/" + nodeProfileName));
 
         if (cluster.getResourcesVpcConfig() != null) {
             inst.setVpcId(cluster.getResourcesVpcConfig().getVpcId());

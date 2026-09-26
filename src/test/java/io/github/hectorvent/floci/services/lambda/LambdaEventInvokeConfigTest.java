@@ -145,4 +145,26 @@ class LambdaEventInvokeConfigTest {
         assertEquals("arn:aws:sqs:us-east-1:000000000000:dlq",
                 cfg.getDestinationConfig().getOnFailure().getDestination());
     }
+
+    @Test
+    void invokedAliasConfigTakesPrecedenceAndFallsBackToExecutedVersion() {
+        String versionDestination = "arn:aws:sqs:us-east-1:000000000000:version-queue";
+        String aliasDestination = "arn:aws:sqs:us-east-1:000000000000:alias-queue";
+        service.putEventInvokeConfig(REGION, "test-fn", "1", Map.of(
+                "DestinationConfig", Map.of("OnSuccess", Map.of("Destination", versionDestination))));
+        service.putEventInvokeConfig(REGION, "test-fn", "prod", Map.of(
+                "DestinationConfig", Map.of("OnSuccess", Map.of("Destination", aliasDestination))));
+
+        LambdaFunction executedVersion = new LambdaFunction();
+        executedVersion.setFunctionArn("arn:aws:lambda:us-east-1:000000000000:function:test-fn:1");
+        executedVersion.setAccountId("000000000000");
+        executedVersion.setVersion("1");
+
+        assertEquals(aliasDestination, service.findEventInvokeConfig(executedVersion, "prod")
+                .orElseThrow().getDestinationConfig().getOnSuccess().getDestination());
+        assertEquals(versionDestination, service.findEventInvokeConfig(executedVersion, "other")
+                .orElseThrow().getDestinationConfig().getOnSuccess().getDestination());
+        assertEquals(versionDestination, service.findEventInvokeConfig(executedVersion)
+                .orElseThrow().getDestinationConfig().getOnSuccess().getDestination());
+    }
 }

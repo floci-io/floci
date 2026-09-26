@@ -4,6 +4,8 @@ import io.github.hectorvent.floci.services.appsync.model.DataSource;
 import io.github.hectorvent.floci.services.appsync.model.DataSourceType;
 import jakarta.enterprise.context.ApplicationScoped;
 
+import java.util.Map;
+
 /**
  * The {@code NONE} data source: no backing store, the request is the result.
  *
@@ -21,7 +23,7 @@ public class NoneDataSourceInvoker implements AppSyncDataSourceInvoker {
 
     @Override
     public Object invoke(DataSource dataSource, Object request, String region) {
-        if (request instanceof java.util.Map<?, ?> map && map.containsKey("payload")) {
+        if (request instanceof Map<?, ?> map && map.containsKey("payload")) {
             return map.get("payload");
         }
         return request;

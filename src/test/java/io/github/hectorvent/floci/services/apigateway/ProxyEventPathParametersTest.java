@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.mock;
@@ -47,7 +48,7 @@ class ProxyEventPathParametersTest {
                 new URI("http://localhost:4566/execute-api/api1/v1/datasets/abc123"));
 
         controller = new ApiGatewayExecuteController(
-                null, null, null,
+                null, null, null, null,
                 regionResolver, MAPPER, null,
                 null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null, null);
     }
@@ -64,6 +65,18 @@ class ProxyEventPathParametersTest {
         node.fieldNames().forEachRemaining(keys::add);
         java.util.Collections.sort(keys);
         return keys;
+    }
+
+    @Test
+    void cognitoClaimsRemainNestedInProxyRequestContext() throws Exception {
+        JsonNode event = MAPPER.readTree(controller.buildProxyEvent(
+                "us-east-1", "api1", "GET", "/datasets/abc123", "/datasets/{datasetId}",
+                "res1", "v1", null, headers, uriInfo, null, "req-1", "subject-1",
+                Map.of("claims", Map.of("sub", "subject-1", "token_use", "access")), null, null));
+
+        JsonNode authorizer = event.path("requestContext").path("authorizer");
+        assertEquals("subject-1", authorizer.path("claims").path("sub").asText());
+        assertEquals("access", authorizer.path("claims").path("token_use").asText());
     }
 
     @Test

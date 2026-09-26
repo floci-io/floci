@@ -35,8 +35,10 @@ import java.util.regex.Pattern;
 @ApplicationScoped
 public class SigninService {
 
-    static final String SAME_DEVICE_CLIENT = "arn:aws:signin:::devtools/same-device";
-    static final String CROSS_DEVICE_CLIENT = "arn:aws:signin:::devtools/cross-device";
+    // The console device-auth client ids as the commercial console spells them; no source says
+    // how the China or GovCloud consoles spell theirs, so they stay literal (see docs/configuration/partitions.md).
+    static final String SAME_DEVICE_CLIENT = "arn:aws:signin:::devtools/same-device"; // partition-literal: console client id, non-commercial spelling unknown
+    static final String CROSS_DEVICE_CLIENT = "arn:aws:signin:::devtools/cross-device"; // partition-literal: console client id, non-commercial spelling unknown
     static final int ACCESS_TOKEN_TTL_SECONDS = 900;
     private static final long AUTHORIZATION_CODE_TTL_SECONDS = 300;
     private static final long REFRESH_TOKEN_TTL_SECONDS = 12 * 60 * 60;
@@ -251,7 +253,7 @@ public class SigninService {
         String secretAccessKey = randomAlphaNumeric(40);
         String sessionToken = randomAlphaNumeric(200);
         Instant expiration = issuedAt.plusSeconds(ACCESS_TOKEN_TTL_SECONDS);
-        String principalArn = "arn:aws:iam::" + accountId + ":root";
+        String principalArn = regionResolver.buildGlobalArn("iam", accountId, "root");
         iamService.registerSessionForAccount(
                 accountId, accessKeyId, secretAccessKey, sessionToken, principalArn, expiration, null);
 

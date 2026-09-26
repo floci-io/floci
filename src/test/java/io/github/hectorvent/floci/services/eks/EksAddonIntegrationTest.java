@@ -187,8 +187,8 @@ class EksAddonIntegrationTest {
                 .then()
                 .statusCode(200)
                 .contentType(containsString("application/json"))
-                .body("addons", hasSize(greaterThanOrEqualTo(4)))
-                .body("addons.addonName", hasItems("vpc-cni", "coredns", "kube-proxy", "eks-pod-identity-agent"));
+                .body("addons", hasSize(greaterThanOrEqualTo(5)))
+                .body("addons.addonName", hasItems("vpc-cni", "coredns", "kube-proxy", "eks-pod-identity-agent", "aws-ebs-csi-driver"));
 
         // Query with addonName filter
         given().header("Authorization", auth(account, "eks"))
@@ -384,6 +384,77 @@ class EksAddonIntegrationTest {
         }
     }
 
+    @Test
+    void ebsCsiDriverLifecycleIntegration() {
+        String account = "123456789012";
+        String name = "addon-ebs-" + UUID.randomUUID().toString().substring(0, 8);
+        String roleName = "role-" + name;
+        String roleArn = "arn:aws:iam::" + account + ":role/" + roleName;
+        String basePath = "/clusters/" + name + "/addons";
+
+        createRole(account, roleName);
+        createCluster(account, name, "1.30");
+
+        try {
+            // 1. Create aws-ebs-csi-driver addon without specifying version (resolves default v1.31.0-eksbuild.1)
+            Map<String, Object> createReq = Map.of(
+                    "addonName", "aws-ebs-csi-driver",
+                    "serviceAccountRoleArn", roleArn
+            );
+
+            given().header("Authorization", auth(account, "eks"))
+                    .contentType("application/json")
+                    .body(createReq)
+                    .post(basePath)
+                    .then()
+                    .statusCode(200)
+                    .contentType(containsString("application/json"))
+                    .body("addon.clusterName", equalTo(name))
+                    .body("addon.addonName", equalTo("aws-ebs-csi-driver"))
+                    .body("addon.addonVersion", equalTo("v1.31.0-eksbuild.1"))
+                    .body("addon.status", equalTo("ACTIVE"))
+                    .body("addon.owner", equalTo("aws"))
+                    .body("addon.publisher", equalTo("eks"))
+                    .body("addon.serviceAccountRoleArn", equalTo(roleArn));
+
+            // 2. Describe addon returns it
+            given().header("Authorization", auth(account, "eks"))
+                    .get(basePath + "/aws-ebs-csi-driver")
+                    .then()
+                    .statusCode(200)
+                    .contentType(containsString("application/json"))
+                    .body("addon.addonName", equalTo("aws-ebs-csi-driver"))
+                    .body("addon.addonVersion", equalTo("v1.31.0-eksbuild.1"))
+                    .body("addon.status", equalTo("ACTIVE"));
+
+            // 3. Filter describe-addon-versions by addonName
+            given().header("Authorization", auth(account, "eks"))
+                    .queryParam("addonName", "aws-ebs-csi-driver")
+                    .get("/addons/supported-versions")
+                    .then()
+                    .statusCode(200)
+                    .body("addons", hasSize(1))
+                    .body("addons[0].addonName", equalTo("aws-ebs-csi-driver"))
+                    .body("addons[0].type", equalTo("storage"))
+                    .body("addons[0].owner", equalTo("aws"))
+                    .body("addons[0].publisher", equalTo("eks"));
+
+            // 4. Filter describe-addon-versions by addonName and kubernetesVersion
+            given().header("Authorization", auth(account, "eks"))
+                    .queryParam("addonName", "aws-ebs-csi-driver")
+                    .queryParam("kubernetesVersion", "1.32")
+                    .get("/addons/supported-versions")
+                    .then()
+                    .statusCode(200)
+                    .body("addons", hasSize(1))
+                    .body("addons[0].addonName", equalTo("aws-ebs-csi-driver"))
+                    .body("addons[0].addonVersions.addonVersion", hasItem("v1.38.1-eksbuild.1"));
+        } finally {
+            deleteCluster(account, name);
+            deleteRole(account, roleName);
+        }
+    }
+
     private static String auth(String account, String service) {
         return "AWS4-HMAC-SHA256 Credential=" + account
                 + "/20260920/us-east-1/" + service + "/aws4_request, SignedHeaders=host, Signature=fake";
@@ -396,6 +467,16 @@ class EksAddonIntegrationTest {
                 .formParam("RoleName", roleName)
                 .formParam("Path", "/")
                 .formParam("AssumeRolePolicyDocument", "{}")
+                .post("/")
+                .then()
+                .statusCode(200);
+    }
+
+    private static void deleteRole(String account, String roleName) {
+        given().header("Authorization", auth(account, "iam"))
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DeleteRole")
+                .formParam("RoleName", roleName)
                 .post("/")
                 .then()
                 .statusCode(200);

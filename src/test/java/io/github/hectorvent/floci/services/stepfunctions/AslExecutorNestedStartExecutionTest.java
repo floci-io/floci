@@ -3,8 +3,8 @@ package io.github.hectorvent.floci.services.stepfunctions;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHandler;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
-import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ecs.EcsJsonHandler;
 import io.github.hectorvent.floci.services.ecs.EcsService;
@@ -72,7 +72,7 @@ class AslExecutorNestedStartExecutionTest {
         executor = new AslExecutor(
                 mock(LambdaExecutorService.class),
                 mock(LambdaFunctionStore.class),
-                mock(DynamoDbService.class),
+                mock(DynamoDbFacade.class),
                 mock(DynamoDbJsonHandler.class),
                 mock(SqsJsonHandler.class), mock(SnsJsonHandler.class),
                 mock(CloudFormationQueryHandler.class),

@@ -47,6 +47,17 @@ resources: China IAM always signs `cn-north-1` even from Ningxia, GovCloud IAM s
 `<partition>-global` pseudo-regions the SDKs accept (`aws-global`, `aws-cn-global`, ...)
 resolve to their partition as well; `aws-eusc` publishes none.
 
+A scope region that no partition publishes or admits by its region pattern, such as
+`polygondwanaland-west-1`, is refused with a 400: an S3-signed request gets S3's
+`AuthorizationHeaderMalformed` ("the region '...' is wrong"), every other service gets
+`InvalidSignatureException`. On AWS such a request never resolves a host; moto
+(`MOTO_ALLOW_NONEXISTENT_REGION`) and LocalStack (`ALLOW_NONSTANDARD_REGIONS`) refuse it too.
+The pattern rule is the AWS SDKs' own, so a region AWS launches after the vendored data was
+refreshed (`eu-south-9`, say) is still served; it is looser than S3's `LocationConstraint` enum,
+which stays published-only. Set `FLOCI_PARTITIONS_ALLOW_UNKNOWN_REGIONS=true`
+(`floci.partitions.allow-unknown-regions`) to serve any label with its own namespace, as Floci
+did before.
+
 ## What changes per partition
 
 - **ARNs**: regional resources carry the partition of their region (`arn:aws-cn:sqs:cn-north-1:...`);
@@ -79,6 +90,8 @@ These values have no published source Floci can cite, so it does not guess them;
 the commercial value or Floci's own base host until sourced:
 
 - the China CloudFront distribution domain suffix (only the API host is published);
+- the console device-authorization client ids (`arn:aws:signin:::devtools/...`) outside the
+  commercial partition;
 - the STS web-identity audience outside the commercial partition;
 - the Lambda function-URL host outside the commercial partition;
 - whether AWS managed policy documents differ in content in China or GovCloud;

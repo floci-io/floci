@@ -108,12 +108,17 @@ public class AwsProtocolClaimFilter implements ContainerRequestFilter {
     }
 
     static Response unknownOperationResponse(int status, String message) {
+        return errorResponse(status, "UnknownOperationException", message);
+    }
+
+    /** A JSON error every SDK maps to its typed or generic service exception by {@code code}. */
+    static Response errorResponse(int status, String code, String message) {
         return Response.status(status)
                 .type(MediaType.APPLICATION_JSON)
-                .header("x-amzn-query-error", "UnknownOperationException;Sender")
+                .header("x-amzn-query-error", code + ";Sender")
                 // rest-json SDKs resolve the error code from this header before the body __type
-                .header("X-Amzn-Errortype", "UnknownOperationException")
-                .entity(new AwsErrorResponse("UnknownOperationException", message))
+                .header("X-Amzn-Errortype", code)
+                .entity(new AwsErrorResponse(code, message))
                 .build();
     }
 }

@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.emrserverless;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
@@ -206,8 +207,7 @@ public class EmrServerlessService {
     private String buildArn(String id) {
         String region = requestContext != null && requestContext.getRegion() != null ? requestContext.getRegion() : config.defaultRegion();
         String accountId = requestContext != null && requestContext.getAccountId() != null ? requestContext.getAccountId() : config.defaultAccountId();
-        return String.format("arn:aws:emr-serverless:%s:%s:/applications/%s",
-                region, accountId, id);
+        return AwsArnUtils.Arn.of("emr-serverless", region, accountId, "/applications/" + id).toString();
     }
 
     private ApplicationSummary toSummary(Application app) {

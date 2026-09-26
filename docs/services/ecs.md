@@ -460,6 +460,37 @@ Known differences from AWS:
 - `SubmitTaskStateChange` / `SubmitContainerStateChange` remain ACK-only; Floci drives
   the task lifecycle itself rather than via agent submissions.
 
+#### Service discovery
+
+A service that declares `serviceRegistries` has each of its running tasks registered as a
+Cloud Map instance of the named service, and deregistered when the task stops. The instance
+carries `AWS_INSTANCE_IPV4` (the task's ENI address on an awsvpc task, otherwise the
+container's address on the Docker network) and `AWS_INSTANCE_PORT` (the entry's `port`, or
+the host port its `containerPort` was published on), alongside the metadata attributes AWS
+records: `AVAILABILITY_ZONE`, `REGION`, `ECS_SERVICE_NAME`, `ECS_CLUSTER_NAME` and
+`ECS_TASK_DEFINITION_FAMILY`. The task id is the instance id, as on AWS, so a replacement
+task supersedes its predecessor.
+
+Combined with [Cloud Map answering DNS](cloudmap.md#dns-resolution) for its namespaces, that
+is what makes `<cloud-map-service>.<namespace>` resolve to a running task from another
+container. Registration is best effort: a registry entry Floci cannot place is logged and
+skipped rather than failing the task. `UpdateService` moves running task registrations to
+replacement registries; stopping a task removes the registrations it actually created.
+
+Known differences from AWS:
+
+- AWS supports only `SRV` records for a `bridge` or `host` network mode task, since the
+  reachable port is the published host port rather than the container port. Floci serves
+  only A records, so such a task registers its address and its published host port and
+  resolves by address; the port is readable through `DiscoverInstances` rather than DNS.
+- `EC2_INSTANCE_ID` is not recorded. Every Floci task runs as a container rather than on a
+  registered EC2 host, which is the Fargate case on AWS, where the attribute is also absent.
+- An instance's health status never moves. AWS registers a task `UNHEALTHY` and promotes it to
+  `HEALTHY` once the container health check passes, for a service discovery service that
+  declares `HealthCheckCustomConfig`. Floci feeds no container health into Cloud Map, so a task
+  registers `HEALTHY`, which is Cloud Map's own default for a `RegisterInstance` that names no
+  `AWS_INIT_HEALTH_STATUS`, and stays there until it is deregistered.
+
 #### Unknown services
 
 A service reference that does not resolve is returned in `failures` with

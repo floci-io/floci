@@ -11,8 +11,9 @@ import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
-import io.github.hectorvent.floci.services.dynamodb.DynamoDbStreamService;
-import io.github.hectorvent.floci.services.dynamodb.model.DynamoDbStreamRecord;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbStreamReader;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbStreamReader.CheckpointLifetime;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbStreamReader.Position;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.lambda.model.EventSourceMapping;
@@ -45,8 +46,12 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -61,11 +66,15 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeast;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -84,9 +93,11 @@ class DynamoDbStreamsEventSourcePollerTest {
     private static final String STREAM_ARN =
             "arn:aws:dynamodb:us-east-1:000000000000:table/t/stream/2026-08-01T00:00:00.000";
     private static final String STALE_CHECKPOINT = "000000000000000000634";
+    private static final String SHARD_ID = "shardId-0000000001-00000000001";
 
     private DynamoDbStreamsEventSourcePoller poller;
-    private DynamoDbStreamService streamService;
+    private FakeStreamReader reader;
+    private List<DynamoDbStreamReader.Record> shard;
     private LambdaExecutorService executorService;
     private LambdaFunctionStore functionStore;
     private LambdaAliasStore aliasStore;
@@ -97,6 +108,7 @@ class DynamoDbStreamsEventSourcePollerTest {
     private io.github.hectorvent.floci.services.sns.SnsService snsService;
     private io.github.hectorvent.floci.services.s3.S3Service s3Service;
     private final AtomicLong clock = new AtomicLong();
+    private final AtomicLong sequence = new AtomicLong();
 
     @Inject
     Instance<RequestContext> requestContextInstance;
@@ -112,7 +124,9 @@ class DynamoDbStreamsEventSourcePollerTest {
         when(lambdaConfig.pollIntervalMs()).thenReturn(1000L);
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
 
-        streamService = mock(DynamoDbStreamService.class);
+        FakeStreamReader streams = new FakeStreamReader(CheckpointLifetime.PROCESS);
+        shard = streams.shard(SHARD_ID, null);
+        reader = spy(streams);
         executorService = mock(LambdaExecutorService.class);
         functionStore = mock(LambdaFunctionStore.class);
         aliasStore = mock(LambdaAliasStore.class);
@@ -122,11 +136,75 @@ class DynamoDbStreamsEventSourcePollerTest {
         snsService = mock(io.github.hectorvent.floci.services.sns.SnsService.class);
         s3Service = mock(io.github.hectorvent.floci.services.s3.S3Service.class);
 
-        // A mocked Vertx makes setPeriodic a no-op, so startPolling registers no live timer and
-        // the tests drive pollAndInvoke deterministically.
-        poller = new DynamoDbStreamsEventSourcePoller(
-                mock(Vertx.class), streamService, executorService, new LambdaTargetResolver(functionStore, aliasStore),
-                esmStore, OBJECT_MAPPER, config, filterMatcher, sqsService, snsService, s3Service, clock::get);
+        poller = pollerOver(reader, esmStore);
+    }
+
+    /** A mocked Vertx makes setPeriodic a no-op, so startPolling registers no live timer and tests drive the polls. */
+    private DynamoDbStreamsEventSourcePoller pollerOver(DynamoDbStreamReader streamReader, EsmStore store) {
+        return new DynamoDbStreamsEventSourcePoller(
+                mock(Vertx.class), streamReader, executorService, new LambdaTargetResolver(functionStore, aliasStore),
+                store, OBJECT_MAPPER, config, filterMatcher, sqsService, snsService, s3Service, clock::get);
+    }
+
+    /**
+     * Serves shards from memory the way the native engine does. A cursor is the sequence to read
+     * after, or empty for the trim horizon, and a sequence older than the oldest retained record is
+     * trimmed. A closed shard read to its end answers without a next cursor, and a read returns at
+     * most {@link DynamoDbStreamReader#MAX_RECORDS_PER_READ} records, as GetRecords does.
+     */
+    static class FakeStreamReader implements DynamoDbStreamReader {
+
+        private final List<Shard> shards = new CopyOnWriteArrayList<>();
+        private final Map<String, List<Record>> records = new ConcurrentHashMap<>();
+        private final Set<String> closed = ConcurrentHashMap.newKeySet();
+        private final CheckpointLifetime lifetime;
+
+        FakeStreamReader(CheckpointLifetime lifetime) {
+            this.lifetime = lifetime;
+        }
+
+        List<Record> shard(String shardId, String parentShardId) {
+            shards.add(new Shard(shardId, parentShardId, null, null));
+            return records.computeIfAbsent(shardId, ignored -> new CopyOnWriteArrayList<>());
+        }
+
+        void close(String shardId) {
+            closed.add(shardId);
+        }
+
+        @Override
+        public ShardsPage describeStream(Stream stream, String exclusiveStartShardId, Integer limit) {
+            return new ShardsPage(stream, List.copyOf(shards), null);
+        }
+
+        @Override
+        public Cursor getShardIterator(Stream stream, String shardId, Position position, String sequenceNumber) {
+            return new Cursor(stream, shardId, position == Position.TRIM_HORIZON ? "" : sequenceNumber);
+        }
+
+        @Override
+        public RecordsPage getRecords(Cursor cursor, int limit) {
+            List<Record> held = new ArrayList<>(records.get(cursor.shardId()));
+            String after = cursor.token();
+            if (!after.isEmpty() && !held.isEmpty() && after.compareTo(held.get(0).sequenceNumber()) < 0) {
+                throw new AwsException("TrimmedDataAccessException",
+                        "The requested sequence number has been trimmed", 400);
+            }
+            List<Record> page = held.stream()
+                    .filter(record -> record.sequenceNumber().compareTo(after) > 0)
+                    .limit(Math.min(limit, MAX_RECORDS_PER_READ))
+                    .toList();
+            if (page.isEmpty()) {
+                return new RecordsPage(page, closed.contains(cursor.shardId()) ? null : cursor);
+            }
+            return new RecordsPage(page,
+                    new Cursor(cursor.stream(), cursor.shardId(), page.get(page.size() - 1).sequenceNumber()));
+        }
+
+        @Override
+        public CheckpointLifetime checkpointLifetime() {
+            return lifetime;
+        }
     }
 
     private EventSourceMapping persistedStreamsEsmWithStaleCheckpoint() {
@@ -138,7 +216,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         esm.setEventSourceArn(STREAM_ARN);
         esm.setBatchSize(10);
         esm.setEnabled(true);
-        esm.getShardSequenceNumbers().put(DynamoDbStreamService.SHARD_ID, STALE_CHECKPOINT);
+        esm.getShardSequenceNumbers().put(SHARD_ID, STALE_CHECKPOINT);
         esmStore.saveForAccount(ACCOUNT_ID, esm);
         return esm;
     }
@@ -152,43 +230,69 @@ class DynamoDbStreamsEventSourcePollerTest {
         EventSourceMapping reloaded = esmStore.getForAccount(ACCOUNT_ID, "esm-1").orElseThrow();
         assertTrue(reloaded.getShardSequenceNumbers().isEmpty(),
                 "a checkpoint persisted before restart must be discarded at startup, since the "
-                        + "stream's sequence numbers reset to 1 — otherwise every new record is skipped");
+                        + "stream's sequence numbers reset to 1, otherwise every new record is skipped");
+    }
+
+    @Test
+    void startPersistedPollersDiscardsDisabledMappingCheckpointsWithoutPolling() {
+        EventSourceMapping esm = persistedStreamsEsmWithStaleCheckpoint();
+        esm.setEnabled(false);
+        esmStore.saveForAccount(ACCOUNT_ID, esm);
+        Vertx vertx = mock(Vertx.class);
+        DynamoDbStreamsEventSourcePoller p = new DynamoDbStreamsEventSourcePoller(
+                vertx, reader, executorService, new LambdaTargetResolver(functionStore, aliasStore),
+                esmStore, OBJECT_MAPPER, config, filterMatcher, sqsService, snsService, s3Service, clock::get);
+
+        p.startPersistedPollers();
+
+        EventSourceMapping reloaded = esmStore.getForAccount(ACCOUNT_ID, "esm-1").orElseThrow();
+        assertTrue(reloaded.getShardSequenceNumbers().isEmpty(),
+                "a disabled mapping's checkpoint is just as stale after restart, and enabling it later "
+                        + "would otherwise skip every new record");
+        verifyNoInteractions(vertx);
+    }
+
+    @Test
+    void startPersistedPollersKeepsTheCheckpointsOfAStreamLifetimeEngine() {
+        persistedStreamsEsmWithStaleCheckpoint();
+
+        pollerOver(new FakeStreamReader(CheckpointLifetime.STREAM), esmStore).startPersistedPollers();
+
+        assertEquals(Map.of(SHARD_ID, STALE_CHECKPOINT),
+                esmStore.getForAccount(ACCOUNT_ID, "esm-1").orElseThrow().getShardSequenceNumbers(),
+                "an engine that keeps stream history across restarts keeps the progress committed against it");
+    }
+
+    @Test
+    void startPersistedPollersSkipsADisabledMappingWithoutAnEventSourceArn() {
+        EventSourceMapping kafka = new EventSourceMapping();
+        kafka.setUuid("esm-kafka");
+        kafka.setAccountId(ACCOUNT_ID);
+        kafka.setEnabled(false);
+        esmStore.saveForAccount(ACCOUNT_ID, kafka);
+
+        poller.startPersistedPollers();
+
+        assertTrue(esmStore.getForAccount(ACCOUNT_ID, "esm-kafka").isPresent());
     }
 
     @Test
     void pollerDeliversPostRestartRecordAfterStartupCheckpointReset() {
         persistedStreamsEsmWithStaleCheckpoint();
 
-        // The new stream epoch has a single record at sequence 1.
-        DynamoDbStreamRecord record = new DynamoDbStreamRecord();
-        record.setEventName("INSERT");
-        record.setEventSource("aws:dynamodb");
-        record.setAwsRegion("us-east-1");
-        record.setSequenceNumber("000000000000000000001");
-
-        // Resuming from the stale checkpoint (AFTER_SEQUENCE_NUMBER 634) sees nothing — the bug: the
-        // record's sequence (1) is far below the stale checkpoint, so it is silently skipped.
-        when(streamService.getShardIterator(STREAM_ARN, DynamoDbStreamService.SHARD_ID,
-                "AFTER_SEQUENCE_NUMBER", STALE_CHECKPOINT)).thenReturn("iterator-stale");
-        when(streamService.getRecords("iterator-stale", 10))
-                .thenReturn(new DynamoDbStreamService.GetRecordsResult(List.of(), "iterator-stale"));
-        // Resuming from TRIM_HORIZON — where the fix makes the poller restart — delivers the record.
-        when(streamService.getShardIterator(STREAM_ARN, DynamoDbStreamService.SHARD_ID,
-                "TRIM_HORIZON", null)).thenReturn("iterator-trim");
-        when(streamService.getRecords("iterator-trim", 10))
-                .thenReturn(new DynamoDbStreamService.GetRecordsResult(List.of(record), "iterator-trim"));
-
-        LambdaFunction fn = new LambdaFunction();
-        fn.setFunctionName("fn");
-        when(functionStore.getForAccount(ACCOUNT_ID, "us-east-1", "fn")).thenReturn(Optional.of(fn));
+        // The new stream epoch has a single record at sequence 1. Resuming from the stale checkpoint
+        // (AFTER_SEQUENCE_NUMBER 634) sees nothing, the bug: the record's sequence (1) is far below the
+        // stale checkpoint, so it is silently skipped. Resuming from TRIM_HORIZON, where the fix makes
+        // the poller restart, delivers the record.
+        LambdaFunction fn = stubTrimHorizon(List.of(ddbRecord("000000000000000000001", "INSERT", "{}")));
         when(executorService.invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse)))
-                .thenReturn(new InvokeResult()); // success — no functionError
+                .thenReturn(new InvokeResult()); // success, no functionError
 
         // Startup invalidates the stale checkpoint...
         poller.startPersistedPollers();
         // ...so the poll resumes from TRIM_HORIZON and delivers the record instead of dropping it.
         // (Were the checkpoint not cleared, the poll would take the AFTER_SEQUENCE_NUMBER branch,
-        // find nothing, and invoke would never be called — this verify would then fail.)
+        // find nothing, and invoke would never be called, so this verify would then fail.)
         poller.pollAndInvoke(esmStore.getForAccount(ACCOUNT_ID, "esm-1").orElseThrow());
 
         verify(executorService, timeout(2000))
@@ -198,9 +302,10 @@ class DynamoDbStreamsEventSourcePollerTest {
     // ──────────────────────────── FilterCriteria ────────────────────────────
 
     private DynamoDbStreamsEventSourcePoller pollerWith(EsmStore store) {
-        return new DynamoDbStreamsEventSourcePoller(
-                mock(Vertx.class), streamService, executorService, new LambdaTargetResolver(functionStore, aliasStore),
-                store, OBJECT_MAPPER, config, filterMatcher, sqsService, snsService, s3Service, clock::get);
+        // The mock records writes for verification; reads see what filterEsm stored, as a real store would.
+        when(store.getForAccount(anyString(), anyString()))
+                .thenAnswer(inv -> esmStore.getForAccount(inv.getArgument(0), inv.getArgument(1)));
+        return pollerOver(reader, store);
     }
 
     private void advancePastRetry(DynamoDbStreamsEventSourcePoller poller) {
@@ -216,7 +321,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         while (true) {
             p.pollAndInvoke(esm);
             try {
-                verify(streamService, atLeast(2)).getRecords("it", 10);
+                verify(reader, atLeast(2)).getRecords(any(), eq(10));
                 return;
             } catch (AssertionError retry) {
                 if (System.currentTimeMillis() > deadline) {
@@ -252,34 +357,44 @@ class DynamoDbStreamsEventSourcePollerTest {
             fc.setFilters(filters);
             esm.setFilterCriteria(fc);
         }
+        esmStore.saveForAccount(ACCOUNT_ID, esm);
         return esm;
     }
 
-    private DynamoDbStreamRecord ddbRecord(String seq, String eventName, String newImageJson) {
-        DynamoDbStreamRecord rec = new DynamoDbStreamRecord();
-        rec.setSequenceNumber(seq);
-        rec.setEventName(eventName);
-        rec.setEventSource("aws:dynamodb");
-        rec.setAwsRegion("us-east-1");
-        rec.setStreamViewType("NEW_AND_OLD_IMAGES");
+    /** A GetRecords {@code Records[]} element as the native engine returns it. */
+    private DynamoDbStreamReader.Record ddbRecord(String seq, String eventName, String newImageJson) {
+        ObjectNode awsRecord = OBJECT_MAPPER.createObjectNode()
+                .put("eventID", "event-" + seq)
+                .put("eventName", eventName)
+                .put("eventVersion", "1.1")
+                .put("eventSource", "aws:dynamodb")
+                .put("awsRegion", "us-east-1");
+        ObjectNode dynamodb = awsRecord.putObject("dynamodb").put("ApproximateCreationDateTime", 0L);
         try {
-            rec.setNewImage(OBJECT_MAPPER.readTree(newImageJson));
+            dynamodb.set("NewImage", OBJECT_MAPPER.readTree(newImageJson));
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
-        return rec;
+        dynamodb.put("SequenceNumber", seq).put("SizeBytes", 100).put("StreamViewType", "NEW_AND_OLD_IMAGES");
+        return new DynamoDbStreamReader.Record(seq, awsRecord);
     }
 
-    private void stubTrimHorizon(List<DynamoDbStreamRecord> records) {
-        // Match any iterator type/seq so a re-kicked poll after a checkpoint advance (AFTER_SEQUENCE_NUMBER)
-        // still resolves an iterator: the second-fetch barrier depends on poll N+1 fetching.
-        when(streamService.getShardIterator(eq(STREAM_ARN), eq(DynamoDbStreamService.SHARD_ID), anyString(), any()))
-                .thenReturn("it");
-        when(streamService.getRecords("it", 10))
-                .thenReturn(new DynamoDbStreamService.GetRecordsResult(records, "it"));
+    private static DynamoDbStreamReader.Record createdAt(DynamoDbStreamReader.Record record, long epochSeconds) {
+        ((ObjectNode) record.awsRecord().path("dynamodb")).put("ApproximateCreationDateTime", epochSeconds);
+        return record;
+    }
+
+    private LambdaFunction stubFunction() {
         LambdaFunction fn = new LambdaFunction();
         fn.setFunctionName("fn");
         when(functionStore.getForAccount(ACCOUNT_ID, "us-east-1", "fn")).thenReturn(Optional.of(fn));
+        return fn;
+    }
+
+    /** The mapping's shard holds {@code records} from its trim horizon, and its function resolves. */
+    private LambdaFunction stubTrimHorizon(List<DynamoDbStreamReader.Record> records) {
+        shard.addAll(records);
+        return stubFunction();
     }
 
     private static final String PATTERN =
@@ -344,7 +459,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         assertEquals(1, records.size());
         assertEquals("s1", records.get(0).path("dynamodb").path("SequenceNumber").asText());
         verify(store, timeout(2000)).saveForAccount(eq(ACCOUNT_ID), any());
-        assertEquals("s2", esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+        assertEquals("s2", esm.getShardSequenceNumbers().get(SHARD_ID));
     }
 
     @Test
@@ -360,7 +475,7 @@ class DynamoDbStreamsEventSourcePollerTest {
 
         verify(store, timeout(2000)).saveForAccount(eq(ACCOUNT_ID), any());
         awaitPollCompletedViaSecondFetch(p, esm);
-        assertEquals("s2", esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+        assertEquals("s2", esm.getShardSequenceNumbers().get(SHARD_ID));
         verify(executorService, never()).invoke(any(), any(byte[].class), any());
     }
 
@@ -381,7 +496,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         awaitPollCompletedViaSecondFetch(p, esm);
 
         verify(store, never()).saveForAccount(anyString(), any());
-        assertNull(esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+        assertNull(esm.getShardSequenceNumbers().get(SHARD_ID));
         // retry-from-old-checkpoint: both polls re-derive TRIM_HORIZON and deliver the same window.
         ArgumentCaptor<byte[]> cap = ArgumentCaptor.forClass(byte[].class);
         verify(executorService, timeout(2000).atLeast(2)).invoke(any(), cap.capture(), eq(InvocationType.RequestResponse));
@@ -404,7 +519,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         verify(executorService, timeout(2000)).invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse));
         awaitPollCompletedViaSecondFetch(p, esm);
         verify(store, never()).saveForAccount(anyString(), any());
-        assertNull(esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+        assertNull(esm.getShardSequenceNumbers().get(SHARD_ID));
     }
 
     @Test
@@ -423,7 +538,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         verify(executorService, timeout(2000)).invoke(any(), payload.capture(), eq(InvocationType.RequestResponse));
         assertEquals(2, readRecords(payload.getValue()).size());
         verify(store, timeout(2000)).saveForAccount(eq(ACCOUNT_ID), any());
-        assertEquals("s2", esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+        assertEquals("s2", esm.getShardSequenceNumbers().get(SHARD_ID));
     }
 
     @Test
@@ -443,12 +558,13 @@ class DynamoDbStreamsEventSourcePollerTest {
         pollerWith(store).pollAndInvoke(esm);
 
         verify(store, timeout(2000)).saveForAccount(eq(ACCOUNT_ID), any());
-        assertEquals("s1", esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+        assertEquals("s1", esm.getShardSequenceNumbers().get(SHARD_ID));
     }
 
     @Test
     void partialBatchFailureAtFirstRecordKeepsPriorCheckpoint() {
         stubTrimHorizon(List.of(
+                ddbRecord("s0", "INSERT", "{}"),
                 ddbRecord("s1", "INSERT", "{}"),
                 ddbRecord("s2", "INSERT", "{}")));
         InvokeResult result = new InvokeResult();
@@ -458,7 +574,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         EsmStore store = mock(EsmStore.class);
         EventSourceMapping esm = filterEsm();
         esm.setFunctionResponseTypes(List.of("ReportBatchItemFailures"));
-        esm.getShardSequenceNumbers().put(DynamoDbStreamService.SHARD_ID, "s0");
+        esm.getShardSequenceNumbers().put(SHARD_ID, "s0");
         DynamoDbStreamsEventSourcePoller p = pollerWith(store);
 
         p.pollAndInvoke(esm);
@@ -467,7 +583,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         awaitPollCompletedViaSecondFetch(p, esm);
 
         verify(store, never()).saveForAccount(anyString(), any());
-        assertEquals("s0", esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+        assertEquals("s0", esm.getShardSequenceNumbers().get(SHARD_ID));
     }
 
     @Test
@@ -490,7 +606,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         awaitPollCompletedViaSecondFetch(p, esm);
 
         verify(store, never()).saveForAccount(anyString(), any());
-        assertNull(esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+        assertNull(esm.getShardSequenceNumbers().get(SHARD_ID));
     }
 
     @Test
@@ -508,7 +624,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         pollerWith(store).pollAndInvoke(esm);
 
         verify(store, timeout(2000)).saveForAccount(eq(ACCOUNT_ID), any());
-        assertEquals("s2", esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+        assertEquals("s2", esm.getShardSequenceNumbers().get(SHARD_ID));
     }
 
     // ──────────────────── FilterCriteria + partial batch failure ────────────────────
@@ -546,9 +662,9 @@ class DynamoDbStreamsEventSourcePollerTest {
 
         verify(store, timeout(2000)).saveForAccount(eq(ACCOUNT_ID), any());
         // s2 was never sent to the function, yet it is the record immediately before the lowest
-        // failure (s3) in the fetched batch — so it is the checkpoint: s1 and s2 are consumed and
+        // failure (s3) in the fetched batch, so it is the checkpoint: s1 and s2 are consumed and
         // the next poll resumes AFTER s2, re-delivering s3 and s4.
-        assertEquals("s2", esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+        assertEquals("s2", esm.getShardSequenceNumbers().get(SHARD_ID));
     }
 
     /**
@@ -559,6 +675,7 @@ class DynamoDbStreamsEventSourcePollerTest {
     @Test
     void partialFailureReportingFilteredOutRecordRetriesWholeBatch() {
         stubTrimHorizon(List.of(
+                ddbRecord("s0", "INSERT", "{\"status\":{\"S\":\"active\"}}"),
                 ddbRecord("s1", "INSERT", "{\"status\":{\"S\":\"active\"}}"),
                 ddbRecord("s2", "INSERT", "{\"status\":{\"S\":\"inactive\"}}"), // filtered out
                 ddbRecord("s3", "INSERT", "{\"status\":{\"S\":\"active\"}}")));
@@ -570,7 +687,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         EsmStore store = mock(EsmStore.class);
         EventSourceMapping esm = filterEsm(PATTERN);
         esm.setFunctionResponseTypes(List.of("ReportBatchItemFailures"));
-        esm.getShardSequenceNumbers().put(DynamoDbStreamService.SHARD_ID, "s0");
+        esm.getShardSequenceNumbers().put(SHARD_ID, "s0");
         DynamoDbStreamsEventSourcePoller p = pollerWith(store);
 
         p.pollAndInvoke(esm);
@@ -585,7 +702,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         // Had the identifier been accepted, the checkpoint would have landed on s1 (the record
         // before s2). Instead the prior checkpoint is kept and the entire window is retried.
         verify(store, never()).saveForAccount(anyString(), any());
-        assertEquals("s0", esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+        assertEquals("s0", esm.getShardSequenceNumbers().get(SHARD_ID));
     }
 
     /**
@@ -595,26 +712,14 @@ class DynamoDbStreamsEventSourcePollerTest {
      */
     @Test
     void trimmedCheckpointResumesFromTrimHorizonInsteadOfWedging() {
-        LambdaFunction fn = new LambdaFunction();
-        fn.setFunctionName("fn");
-        when(functionStore.getForAccount(ACCOUNT_ID, "us-east-1", "fn")).thenReturn(Optional.of(fn));
-
-        when(streamService.getShardIterator(eq(STREAM_ARN), eq(DynamoDbStreamService.SHARD_ID),
-                eq("AFTER_SEQUENCE_NUMBER"), any())).thenReturn("it-trimmed");
-        when(streamService.getShardIterator(eq(STREAM_ARN), eq(DynamoDbStreamService.SHARD_ID),
-                eq("TRIM_HORIZON"), any())).thenReturn("it-horizon");
-        when(streamService.getRecords("it-trimmed", 10)).thenThrow(
-                new AwsException("TrimmedDataAccessException",
-                        "The requested sequence number has been trimmed", 400));
-        when(streamService.getRecords("it-horizon", 10)).thenReturn(
-                new DynamoDbStreamService.GetRecordsResult(
-                        List.of(ddbRecord("s9", "INSERT", "{\"status\":{\"S\":\"active\"}}")), "it-horizon"));
+        // The stale checkpoint is older than s9, the oldest record retained, so reading after it is trimmed.
+        stubTrimHorizon(List.of(ddbRecord("s9", "INSERT", "{\"status\":{\"S\":\"active\"}}")));
         when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
                 .thenReturn(new InvokeResult());
 
         EsmStore store = mock(EsmStore.class);
         EventSourceMapping esm = filterEsm();
-        esm.getShardSequenceNumbers().put(DynamoDbStreamService.SHARD_ID, STALE_CHECKPOINT);
+        esm.getShardSequenceNumbers().put(SHARD_ID, STALE_CHECKPOINT);
 
         pollerWith(store).pollAndInvoke(esm);
 
@@ -622,31 +727,26 @@ class DynamoDbStreamsEventSourcePollerTest {
         verify(executorService, timeout(2000)).invoke(any(), payload.capture(), eq(InvocationType.RequestResponse));
         assertEquals(1, readRecords(payload.getValue()).size());
         verify(store, timeout(2000)).saveForAccount(eq(ACCOUNT_ID), any());
-        assertEquals("s9", esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+        assertEquals("s9", esm.getShardSequenceNumbers().get(SHARD_ID));
+        verify(reader).getShardIterator(any(), eq(SHARD_ID), eq(Position.TRIM_HORIZON), any());
     }
 
     /** Only a trimmed checkpoint resets the cursor; any other stream failure retries the same window. */
     @Test
     void nonTrimmedStreamErrorLeavesTheCheckpointAlone() {
-        LambdaFunction fn = new LambdaFunction();
-        fn.setFunctionName("fn");
-        when(functionStore.getForAccount(ACCOUNT_ID, "us-east-1", "fn")).thenReturn(Optional.of(fn));
-
-        when(streamService.getShardIterator(eq(STREAM_ARN), eq(DynamoDbStreamService.SHARD_ID),
-                anyString(), any())).thenReturn("it");
-        when(streamService.getRecords("it", 10)).thenThrow(
-                new AwsException("InternalServerError", "boom", 500));
+        stubFunction();
+        doThrow(new AwsException("InternalServerError", "boom", 500)).when(reader).getRecords(any(), anyInt());
 
         EsmStore store = mock(EsmStore.class);
         EventSourceMapping esm = filterEsm();
-        esm.getShardSequenceNumbers().put(DynamoDbStreamService.SHARD_ID, STALE_CHECKPOINT);
+        esm.getShardSequenceNumbers().put(SHARD_ID, STALE_CHECKPOINT);
 
         pollerWith(store).pollAndInvoke(esm);
         awaitPollCompletedViaSecondFetch(pollerWith(store), esm);
 
         verify(executorService, never()).invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse));
         verify(store, never()).saveForAccount(anyString(), any());
-        assertEquals(STALE_CHECKPOINT, esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+        assertEquals(STALE_CHECKPOINT, esm.getShardSequenceNumbers().get(SHARD_ID));
     }
 
     @Test
@@ -695,7 +795,7 @@ class DynamoDbStreamsEventSourcePollerTest {
 
         // Checkpoint advanced to "s1"
         verify(store, timeout(2000)).saveForAccount(eq(ACCOUNT_ID), any());
-        assertEquals("s1", esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+        assertEquals("s1", esm.getShardSequenceNumbers().get(SHARD_ID));
 
         // SQS delivery invoked
         ArgumentCaptor<String> bodyCaptor = ArgumentCaptor.forClass(String.class);
@@ -708,7 +808,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         assertEquals(2, dlqPayload.path("requestContext").path("approximateInvokeCount").asInt());
         assertEquals("req-123", dlqPayload.path("requestContext").path("requestId").asText());
         assertEquals("Unhandled", dlqPayload.path("responseContext").path("functionError").asText());
-        assertEquals(DynamoDbStreamService.SHARD_ID, dlqPayload.path("DDBStreamBatchInfo").path("shardId").asText());
+        assertEquals(SHARD_ID, dlqPayload.path("DDBStreamBatchInfo").path("shardId").asText());
         assertEquals("s1", dlqPayload.path("DDBStreamBatchInfo").path("startSequenceNumber").asText());
         assertEquals("s1", dlqPayload.path("DDBStreamBatchInfo").path("endSequenceNumber").asText());
         assertEquals(1, dlqPayload.path("DDBStreamBatchInfo").path("batchSize").asInt());
@@ -805,7 +905,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         pollerWith(store).pollAndInvoke(esm);
 
         verify(store, timeout(2000)).saveForAccount(eq(ACCOUNT_ID), any());
-        assertEquals("s1", esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+        assertEquals("s1", esm.getShardSequenceNumbers().get(SHARD_ID));
 
         return new S3OnFailureDelivery(s3Service, objects);
     }
@@ -858,9 +958,8 @@ class DynamoDbStreamsEventSourcePollerTest {
         // Chosen so the seconds/millis interpretations land 46+ years apart: a millis bug cannot
         // accidentally parse back to this epoch-seconds value.
         long knownEpochSeconds = 1_700_000_000L;
-        DynamoDbStreamRecord rec = ddbRecord("s1", "INSERT", "{\"status\":{\"S\":\"active\"}}");
-        rec.setApproximateCreationDateTime(knownEpochSeconds);
-        stubTrimHorizon(List.of(rec));
+        stubTrimHorizon(List.of(createdAt(ddbRecord("s1", "INSERT", "{\"status\":{\"S\":\"active\"}}"),
+                knownEpochSeconds)));
 
         InvokeResult err = new InvokeResult();
         err.setFunctionError("Unhandled");
@@ -917,30 +1016,19 @@ class DynamoDbStreamsEventSourcePollerTest {
         p.pollAndInvoke(esm);
 
         verify(store, timeout(2000)).saveForAccount(eq(ACCOUNT_ID), any());
-        assertEquals("s1", esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+        assertEquals("s1", esm.getShardSequenceNumbers().get(SHARD_ID));
 
         verify(snsService, timeout(2000)).publish(eq(snsArn), any(), anyString(), eq("ESM OnFailure"), eq("us-east-1"));
     }
 
     @Test
     void maxRetryAttemptsExhaustedTracksRetriesAcrossExpandingBatchWindow() throws Exception {
-        when(streamService.getShardIterator(eq(STREAM_ARN), eq(DynamoDbStreamService.SHARD_ID),
-                eq("TRIM_HORIZON"), any())).thenReturn("it-1", "it-2");
-        when(streamService.getRecords(eq("it-1"), anyInt())).thenReturn(
-                new DynamoDbStreamService.GetRecordsResult(
-                        List.of(ddbRecord("s1", "INSERT", "{\"status\":{\"S\":\"active\"}}")), "it-1"));
-        when(streamService.getRecords(eq("it-2"), anyInt())).thenReturn(
-                new DynamoDbStreamService.GetRecordsResult(
-                        List.of(ddbRecord("s1", "INSERT", "{\"status\":{\"S\":\"active\"}}"),
-                                ddbRecord("s2", "INSERT", "{\"status\":{\"S\":\"active\"}}")), "it-2"));
+        stubTrimHorizon(List.of(ddbRecord("s1", "INSERT", "{\"status\":{\"S\":\"active\"}}")));
 
         InvokeResult err = new InvokeResult();
         err.setFunctionError("Unhandled");
         when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
                 .thenReturn(err);
-        LambdaFunction fn = new LambdaFunction();
-        fn.setFunctionName("fn");
-        when(functionStore.getForAccount(ACCOUNT_ID, "us-east-1", "fn")).thenReturn(Optional.of(fn));
 
         EsmStore store = mock(EsmStore.class);
         EventSourceMapping esm = filterEsm();
@@ -966,11 +1054,12 @@ class DynamoDbStreamsEventSourcePollerTest {
             Thread.sleep(25);
         }
 
+        shard.add(ddbRecord("s2", "INSERT", "{\"status\":{\"S\":\"active\"}}"));
         advancePastRetry(p);
         p.pollAndInvoke(esm);
 
         verify(store, timeout(2000)).saveForAccount(eq(ACCOUNT_ID), any());
-        assertEquals("s2", esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+        assertEquals("s2", esm.getShardSequenceNumbers().get(SHARD_ID));
 
         ArgumentCaptor<String> bodyCaptor = ArgumentCaptor.forClass(String.class);
         String expectedQueueUrl = "http://localhost:4566/000000000000/my-dlq";
@@ -1031,7 +1120,7 @@ class DynamoDbStreamsEventSourcePollerTest {
 
         // Checkpoint advanced to "s1"
         verify(store, timeout(2000)).saveForAccount(eq(ACCOUNT_ID), any());
-        assertEquals("s1", esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+        assertEquals("s1", esm.getShardSequenceNumbers().get(SHARD_ID));
 
         // SQS delivery invoked
         ArgumentCaptor<String> bodyCaptor = ArgumentCaptor.forClass(String.class);
@@ -1045,7 +1134,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         assertEquals("req-batch-fail", dlqPayload.path("requestContext").path("requestId").asText());
         assertEquals(200, dlqPayload.path("responseContext").path("statusCode").asInt());
         assertFalse(dlqPayload.path("responseContext").has("functionError"));
-        assertEquals(DynamoDbStreamService.SHARD_ID, dlqPayload.path("DDBStreamBatchInfo").path("shardId").asText());
+        assertEquals(SHARD_ID, dlqPayload.path("DDBStreamBatchInfo").path("shardId").asText());
         assertEquals("s1", dlqPayload.path("DDBStreamBatchInfo").path("startSequenceNumber").asText());
         assertEquals("s1", dlqPayload.path("DDBStreamBatchInfo").path("endSequenceNumber").asText());
         assertEquals(1, dlqPayload.path("DDBStreamBatchInfo").path("batchSize").asInt());
@@ -1055,22 +1144,14 @@ class DynamoDbStreamsEventSourcePollerTest {
 
     @Test
     void reportBatchItemFailuresPartialSuccessWithZeroRetriesExhaustsImmediately() throws Exception {
-        when(streamService.getShardIterator(eq(STREAM_ARN), eq(DynamoDbStreamService.SHARD_ID),
-                eq("TRIM_HORIZON"), any())).thenReturn("it-1");
-        when(streamService.getRecords(eq("it-1"), anyInt())).thenReturn(
-                new DynamoDbStreamService.GetRecordsResult(
-                        List.of(ddbRecord("s1", "INSERT", "{\"status\":{\"S\":\"active\"}}"),
-                                ddbRecord("s2", "INSERT", "{\"status\":{\"S\":\"active\"}}")), "it-1"));
+        stubTrimHorizon(List.of(ddbRecord("s1", "INSERT", "{\"status\":{\"S\":\"active\"}}"),
+                ddbRecord("s2", "INSERT", "{\"status\":{\"S\":\"active\"}}")));
 
         InvokeResult partialFailure = new InvokeResult();
         partialFailure.setStatusCode(200);
         partialFailure.setPayload("{\"batchItemFailures\":[{\"itemIdentifier\":\"s2\"}]}".getBytes());
         when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
                 .thenReturn(partialFailure);
-
-        LambdaFunction fn = new LambdaFunction();
-        fn.setFunctionName("fn");
-        when(functionStore.getForAccount(ACCOUNT_ID, "us-east-1", "fn")).thenReturn(Optional.of(fn));
 
         EsmStore store = mock(EsmStore.class);
         EventSourceMapping esm = filterEsm();
@@ -1091,7 +1172,7 @@ class DynamoDbStreamsEventSourcePollerTest {
 
         // Checkpoint advanced to "s2"
         verify(store, timeout(2000)).saveForAccount(eq(ACCOUNT_ID), any());
-        assertEquals("s2", esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+        assertEquals("s2", esm.getShardSequenceNumbers().get(SHARD_ID));
 
         ArgumentCaptor<String> bodyCaptor = ArgumentCaptor.forClass(String.class);
         String expectedQueueUrl = "http://localhost:4566/000000000000/my-dlq";
@@ -1111,27 +1192,14 @@ class DynamoDbStreamsEventSourcePollerTest {
 
     @Test
     void reportBatchItemFailuresPartialSuccessAllowsOneRetryBeforeExhaustion() throws Exception {
-        when(streamService.getShardIterator(eq(STREAM_ARN), eq(DynamoDbStreamService.SHARD_ID),
-                eq("TRIM_HORIZON"), any())).thenReturn("it-1");
-        when(streamService.getShardIterator(eq(STREAM_ARN), eq(DynamoDbStreamService.SHARD_ID),
-                eq("AFTER_SEQUENCE_NUMBER"), eq("s1"))).thenReturn("it-2");
-        when(streamService.getRecords(eq("it-1"), anyInt())).thenReturn(
-                new DynamoDbStreamService.GetRecordsResult(
-                        List.of(ddbRecord("s1", "INSERT", "{\"status\":{\"S\":\"active\"}}"),
-                                ddbRecord("s2", "INSERT", "{\"status\":{\"S\":\"active\"}}")), "it-1"));
-        when(streamService.getRecords(eq("it-2"), anyInt())).thenReturn(
-                new DynamoDbStreamService.GetRecordsResult(
-                        List.of(ddbRecord("s2", "INSERT", "{\"status\":{\"S\":\"active\"}}")), "it-2"));
+        stubTrimHorizon(List.of(ddbRecord("s1", "INSERT", "{\"status\":{\"S\":\"active\"}}"),
+                ddbRecord("s2", "INSERT", "{\"status\":{\"S\":\"active\"}}")));
 
         InvokeResult partialFailure = new InvokeResult();
         partialFailure.setStatusCode(200);
         partialFailure.setPayload("{\"batchItemFailures\":[{\"itemIdentifier\":\"s2\"}]}".getBytes());
         when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
                 .thenReturn(partialFailure);
-
-        LambdaFunction fn = new LambdaFunction();
-        fn.setFunctionName("fn");
-        when(functionStore.getForAccount(ACCOUNT_ID, "us-east-1", "fn")).thenReturn(Optional.of(fn));
 
         EsmStore store = mock(EsmStore.class);
         EventSourceMapping esm = filterEsm();
@@ -1150,7 +1218,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         // First poll: s1 succeeds, s2 fails -> checkpoint advances to s1, retry count carried over, no DLQ delivery
         p.pollAndInvoke(esm);
         verify(store, timeout(2000)).saveForAccount(eq(ACCOUNT_ID), any());
-        assertEquals("s1", esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+        assertEquals("s1", esm.getShardSequenceNumbers().get(SHARD_ID));
         verify(sqsService, never()).sendMessage(anyString(), anyString(), anyInt(), anyString());
 
         long deadline = System.currentTimeMillis() + 3000;
@@ -1166,7 +1234,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         p.pollAndInvoke(esm);
 
         verify(store, timeout(2000).times(2)).saveForAccount(eq(ACCOUNT_ID), any());
-        assertEquals("s2", esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+        assertEquals("s2", esm.getShardSequenceNumbers().get(SHARD_ID));
 
         ArgumentCaptor<String> bodyCaptor = ArgumentCaptor.forClass(String.class);
         String expectedQueueUrl = "http://localhost:4566/000000000000/my-dlq";
@@ -1228,9 +1296,8 @@ class DynamoDbStreamsEventSourcePollerTest {
     }
 
     private void assertOldBatchIsRetriedWithoutAnAgeCutoff(EventSourceMapping esm) throws Exception {
-        DynamoDbStreamRecord record = ddbRecord("s1", "INSERT", "{\"status\":{\"S\":\"active\"}}");
-        record.setApproximateCreationDateTime(clock.get() / 1_000 - 86_401);
-        stubTrimHorizon(List.of(record));
+        stubTrimHorizon(List.of(createdAt(ddbRecord("s1", "INSERT", "{\"status\":{\"S\":\"active\"}}"),
+                clock.get() / 1_000 - 86_401)));
         InvokeResult error = new InvokeResult();
         error.setFunctionError("Unhandled");
         when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
@@ -1259,9 +1326,8 @@ class DynamoDbStreamsEventSourcePollerTest {
 
     @Test
     void batchOlderThanMaximumRecordAgeIsDiscardedAndDeliveredToOnFailure() throws Exception {
-        DynamoDbStreamRecord record = ddbRecord("s1", "INSERT", "{\"status\":{\"S\":\"active\"}}");
-        record.setApproximateCreationDateTime(clock.get() / 1_000 - 61);
-        stubTrimHorizon(List.of(record));
+        stubTrimHorizon(List.of(createdAt(ddbRecord("s1", "INSERT", "{\"status\":{\"S\":\"active\"}}"),
+                clock.get() / 1_000 - 61)));
         InvokeResult error = new InvokeResult();
         error.setFunctionError("Unhandled");
         when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
@@ -1279,7 +1345,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         pollerWith(store).pollAndInvoke(esm);
 
         verify(store, timeout(2000)).saveForAccount(eq(ACCOUNT_ID), any());
-        assertEquals("s1", esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+        assertEquals("s1", esm.getShardSequenceNumbers().get(SHARD_ID));
         ArgumentCaptor<String> bodyCaptor = ArgumentCaptor.forClass(String.class);
         verify(sqsService, timeout(2000)).sendMessage(anyString(), bodyCaptor.capture(), anyInt(), anyString());
         JsonNode payload = OBJECT_MAPPER.readTree(bodyCaptor.getValue());
@@ -1288,34 +1354,13 @@ class DynamoDbStreamsEventSourcePollerTest {
 
     // ──────────────────── BisectBatchOnFunctionError and refused destinations ────────────────────
 
-    /**
-     * Serves the listed sequences as the stream and returns it for trimming or appending. The iterator
-     * is the sequence to read after, or empty for the trim horizon; a checkpoint missing from the stream
-     * behaves as trimmed.
-     */
-    private List<DynamoDbStreamRecord> stubStream(String... sequences) {
-        List<DynamoDbStreamRecord> stream = new CopyOnWriteArrayList<>();
+    /** Serves the listed sequences as the mapping's shard and returns it for trimming or appending. */
+    private List<DynamoDbStreamReader.Record> stubStream(String... sequences) {
         for (String seq : sequences) {
-            stream.add(ddbRecord(seq, "INSERT", "{}"));
+            shard.add(ddbRecord(seq, "INSERT", "{}"));
         }
-        when(streamService.getShardIterator(eq(STREAM_ARN), eq(DynamoDbStreamService.SHARD_ID), anyString(), any()))
-                .thenAnswer(inv -> "TRIM_HORIZON".equals(inv.getArgument(2)) ? "" : inv.getArgument(3));
-        when(streamService.getRecords(anyString(), anyInt())).thenAnswer(inv -> {
-            String after = inv.getArgument(0);
-            List<DynamoDbStreamRecord> snapshot = new ArrayList<>(stream);
-            int from = after.isEmpty() ? 0
-                    : snapshot.stream().map(DynamoDbStreamRecord::getSequenceNumber).toList().indexOf(after) + 1;
-            if (!after.isEmpty() && from == 0) {
-                throw new AwsException("TrimmedDataAccessException", "trimmed", 400);
-            }
-            int limit = inv.getArgument(1);
-            return new DynamoDbStreamService.GetRecordsResult(
-                    new ArrayList<>(snapshot.subList(from, Math.min(from + limit, snapshot.size()))), "unused");
-        });
-        LambdaFunction fn = new LambdaFunction();
-        fn.setFunctionName("fn");
-        when(functionStore.getForAccount(ACCOUNT_ID, "us-east-1", "fn")).thenReturn(Optional.of(fn));
-        return stream;
+        stubFunction();
+        return shard;
     }
 
     /** Records the sequences of every delivered batch and answers each with {@code respond}. */
@@ -1377,7 +1422,7 @@ class DynamoDbStreamsEventSourcePollerTest {
     }
 
     private String checkpoint(EventSourceMapping esm) {
-        return esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID);
+        return esm.getShardSequenceNumbers().get(SHARD_ID);
     }
 
     private JsonNode batchInfo(String body) throws Exception {
@@ -1390,11 +1435,20 @@ class DynamoDbStreamsEventSourcePollerTest {
     @ValueSource(strings = STALE_CHECKPOINT)
     void bisectIsolatesThePoisonRecordAndDeliversTheRest(String startingCheckpoint) throws Exception {
         stubStream("s1", "s2", "s3", "s4");
-        List<List<String>> invocations = failInvocationsContaining("s3");
+        List<String> successfullyProcessedSequences = new CopyOnWriteArrayList<>();
+        List<List<String>> invocations = recordInvocations(sequences -> {
+            InvokeResult result = new InvokeResult();
+            if (sequences.contains("s3")) {
+                result.setFunctionError("Unhandled");
+            } else {
+                successfullyProcessedSequences.addAll(sequences);
+            }
+            return result;
+        });
         EventSourceMapping esm = esmWithDlq(0);
         esm.setBisectBatchOnFunctionError(true);
         if (startingCheckpoint != null) {
-            esm.getShardSequenceNumbers().put(DynamoDbStreamService.SHARD_ID, startingCheckpoint);
+            esm.getShardSequenceNumbers().put(SHARD_ID, startingCheckpoint);
         }
         DynamoDbStreamsEventSourcePoller p = pollerWith(mock(EsmStore.class));
 
@@ -1410,6 +1464,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         assertEquals("s3", batchInfo(body.getValue()).path("endSequenceNumber").asText());
         assertEquals(1, batchInfo(body.getValue()).path("batchSize").asInt());
         assertEquals("s4", checkpoint(esm));
+        assertEquals(List.of("s1", "s2", "s4"), successfullyProcessedSequences);
     }
 
     @Test
@@ -1439,8 +1494,8 @@ class DynamoDbStreamsEventSourcePollerTest {
 
     @Test
     void halvedWindowFullyFilteredOutDoesNotLeakItsLimitIntoALaterHorizonRefetch() throws Exception {
-        List<DynamoDbStreamRecord> stream = stubStream("s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8");
-        stream.subList(0, 4).forEach(r -> r.setEventName("MODIFY"));
+        List<DynamoDbStreamReader.Record> stream = stubStream("s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8");
+        stream.subList(0, 4).forEach(r -> ((ObjectNode) r.awsRecord()).put("eventName", "MODIFY"));
         List<List<String>> invocations = failInvocationsContaining("s5");
         EventSourceMapping esm = filterEsm("{\"eventName\":[\"INSERT\"]}");
         esm.setBisectBatchOnFunctionError(true);
@@ -1449,7 +1504,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         pollOnce(p, esm);
         pollOnce(p, esm);
         assertEquals("s4", checkpoint(esm), "the halved window [s1..s4] is fully filtered out");
-        stream.removeIf(r -> "MODIFY".equals(r.getEventName()));
+        stream.removeIf(r -> "MODIFY".equals(r.awsRecord().path("eventName").asText()));
         stream.add(ddbRecord("s9", "INSERT", "{}"));
         pollOnce(p, esm);
 
@@ -1544,7 +1599,7 @@ class DynamoDbStreamsEventSourcePollerTest {
     }
 
     @Test
-    void refusedOnFailureDestinationKeepsTheBatchAndRetriesTheSend() throws Exception {
+    void refusedOnFailureDestinationDiscardsTheBatchAndAdvancesCheckpoint() throws Exception {
         stubStream("s1");
         List<List<String>> invocations = failInvocationsContaining("s1");
         List<String> delivered = refuseSqsSends(1);
@@ -1552,40 +1607,56 @@ class DynamoDbStreamsEventSourcePollerTest {
         DynamoDbStreamsEventSourcePoller p = pollerWith(mock(EsmStore.class));
 
         pollOnce(p, esm);
-        assertNull(checkpoint(esm), "a refused send must not checkpoint the discarded batch");
-        pollOnce(p, esm);
+        assertEquals("s1", checkpoint(esm));
+        assertTrue(delivered.isEmpty());
         verify(sqsService, times(1)).sendMessage(anyString(), anyString(), anyInt(), anyString());
-
-        advancePastRetry(p);
         pollOnce(p, esm);
-
-        assertEquals(List.of(List.of("s1")), invocations, "the parked batch is re-sent, not re-invoked");
-        assertEquals(1, delivered.size());
-        assertEquals("s1", batchInfo(delivered.get(0)).path("startSequenceNumber").asText());
-        assertEquals("s1", batchInfo(delivered.get(0)).path("endSequenceNumber").asText());
+        assertEquals(1, invocations.size());
+        verify(sqsService, times(1)).sendMessage(anyString(), anyString(), anyInt(), anyString());
         assertEquals("s1", checkpoint(esm));
     }
 
     @Test
-    void parkedFailureIsResentAfterTheFunctionStopsResolving() throws Exception {
-        stubStream("s1");
-        failInvocationsContaining("s1");
+    void failedOnFailureDeliveryAllowsNextRecordsToBeProcessed() throws Exception {
+        List<DynamoDbStreamReader.Record> stream = stubStream("s1");
+        List<List<String>> invocations = failInvocationsContaining("s1");
         List<String> delivered = refuseSqsSends(1);
         EventSourceMapping esm = esmWithDlq(0);
         DynamoDbStreamsEventSourcePoller p = pollerWith(mock(EsmStore.class));
 
         pollOnce(p, esm);
-        assertNull(checkpoint(esm));
-        when(functionStore.getForAccount(ACCOUNT_ID, "us-east-1", "fn")).thenReturn(Optional.empty());
-        advancePastRetry(p);
+        assertEquals("s1", checkpoint(esm));
+        stream.add(ddbRecord("s2", "INSERT", "{}"));
         pollOnce(p, esm);
 
-        assertEquals(1, delivered.size(), "the resend does not need the function");
-        assertEquals("s1", checkpoint(esm));
+        assertEquals(List.of(List.of("s1"), List.of("s2")), invocations);
+        assertTrue(delivered.isEmpty());
+        verify(sqsService, times(1)).sendMessage(anyString(), anyString(), anyInt(), anyString());
+        assertEquals("s2", checkpoint(esm));
     }
 
     @Test
-    void refusedOnFailureDestinationAfterPartialSuccessKeepsTheAcknowledgedPrefix() throws Exception {
+    void unsupportedOnFailureDestinationDiscardsBatchAndAdvancesCheckpoint() throws Exception {
+        stubStream("s1");
+        failInvocationsContaining("s1");
+        EventSourceMapping esm = filterEsm();
+        esm.setMaximumRetryAttempts(0);
+        EventSourceMapping.OnFailure onFailure = new EventSourceMapping.OnFailure();
+        onFailure.setDestination("arn:aws:lambda:us-east-1:000000000000:function:unsupported");
+        EventSourceMapping.DestinationConfig destinationConfig = new EventSourceMapping.DestinationConfig();
+        destinationConfig.setOnFailure(onFailure);
+        esm.setDestinationConfig(destinationConfig);
+
+        DynamoDbStreamsEventSourcePoller p = pollerWith(mock(EsmStore.class));
+        pollOnce(p, esm);
+
+        assertEquals("s1", checkpoint(esm));
+        verify(sqsService, never()).sendMessage(anyString(), anyString(), anyInt(), anyString());
+        verify(snsService, never()).publish(anyString(), any(), anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void refusedOnFailureDestinationDiscardsFailedSuffixAfterPartialSuccess() throws Exception {
         stubStream("s1", "s2", "s3");
         List<List<String>> invocations = recordInvocations(seqs -> partialFailure("s2"));
         List<String> delivered = refuseSqsSends(1);
@@ -1594,15 +1665,14 @@ class DynamoDbStreamsEventSourcePollerTest {
         DynamoDbStreamsEventSourcePoller p = pollerWith(mock(EsmStore.class));
 
         pollOnce(p, esm);
-        assertEquals("s1", checkpoint(esm));
+        assertEquals("s3", checkpoint(esm));
 
         advancePastRetry(p);
         pollOnce(p, esm);
 
         assertEquals(1, invocations.size());
-        assertEquals(1, delivered.size());
-        assertEquals("s2", batchInfo(delivered.get(0)).path("startSequenceNumber").asText());
-        assertEquals("s3", batchInfo(delivered.get(0)).path("endSequenceNumber").asText());
+        assertTrue(delivered.isEmpty());
+        verify(sqsService, times(1)).sendMessage(anyString(), anyString(), anyInt(), anyString());
         assertEquals("s3", checkpoint(esm));
     }
 
@@ -1617,6 +1687,486 @@ class DynamoDbStreamsEventSourcePollerTest {
         pollOnce(p, esm);
 
         assertEquals("s1", checkpoint(esm));
+    }
+
+    // ──────────────────── StartingPosition and mapping lifecycle (#4311) ────────────────────
+
+    /** Appends an INSERT of item {@code pk} to the mapping's shard, numbered like native sequence numbers. */
+    private void write(String pk) {
+        DynamoDbStreamReader.Record record =
+                ddbRecord(String.format("%021d", sequence.incrementAndGet()), "INSERT", "{}");
+        ((ObjectNode) record.awsRecord().path("dynamodb")).putObject("Keys").putObject("pk").put("S", pk);
+        shard.add(record);
+    }
+
+    private EventSourceMapping streamsEsm(String uuid, String startingPosition) {
+        EventSourceMapping esm = new EventSourceMapping();
+        esm.setUuid(uuid);
+        esm.setAccountId(ACCOUNT_ID);
+        esm.setRegion("us-east-1");
+        esm.setFunctionName("fn");
+        esm.setEventSourceArn(STREAM_ARN);
+        esm.setBatchSize(10);
+        esm.setEnabled(true);
+        esm.setStartingPosition(startingPosition);
+        return esm;
+    }
+
+    private void stubFunctionSucceeds() {
+        stubFunction();
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(new InvokeResult());
+    }
+
+    private List<String> deliveredKeys(byte[] payload) {
+        List<String> keys = new ArrayList<>();
+        for (JsonNode rec : readRecords(payload)) {
+            keys.add(rec.path("dynamodb").path("Keys").path("pk").path("S").asText());
+        }
+        return keys;
+    }
+
+    /** One-record read that signals {@code reading} and then holds until {@code release} opens. */
+    private void stubBlockingRead(CountDownLatch reading, CountDownLatch release) {
+        stubStream("s1");
+        doAnswer(inv -> {
+            reading.countDown();
+            release.await(5, TimeUnit.SECONDS);
+            return inv.callRealMethod();
+        }).when(reader).getRecords(any(), anyInt());
+    }
+
+    /** Invocation that signals {@code invoking} and then holds until {@code release} opens. */
+    private void stubBlockingInvoke(CountDownLatch invoking, CountDownLatch release, InvokeResult result) {
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenAnswer(inv -> {
+                    invoking.countDown();
+                    release.await(5, TimeUnit.SECONDS);
+                    return result;
+                });
+    }
+
+    @Test
+    void latestMappingDeliversOnlyRecordsWrittenAfterItWasCreated() {
+        write("old-1");
+        write("old-2");
+        stubFunctionSucceeds();
+        EventSourceMapping esm = streamsEsm("esm-latest", "LATEST");
+        poller.initializeStartingPosition(esm);
+        esmStore.saveForAccount(ACCOUNT_ID, esm);
+
+        write("new");
+        poller.pollAndInvoke(esm);
+
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(executorService, timeout(2000)).invoke(any(), payload.capture(), eq(InvocationType.RequestResponse));
+        assertEquals(List.of("new"), deliveredKeys(payload.getValue()));
+    }
+
+    @Test
+    void latestMappingOnAnEmptyStreamDeliversEveryLaterRecord() throws Exception {
+        stubFunctionSucceeds();
+        EventSourceMapping esm = streamsEsm("esm-latest", "LATEST");
+        poller.initializeStartingPosition(esm);
+        esmStore.saveForAccount(ACCOUNT_ID, esm);
+        assertTrue(esm.getShardSequenceNumbers().isEmpty(), "an empty stream has no record to start after");
+
+        poller.pollAndInvoke(esm);
+        awaitPollCompleted(poller);
+        assertTrue(esm.getShardSequenceNumbers().isEmpty(), "an empty poll must not pin the cursor");
+        verify(executorService, never()).invoke(any(), any(byte[].class), any());
+
+        write("first");
+        poller.pollAndInvoke(esm);
+
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(executorService, timeout(2000)).invoke(any(), payload.capture(), eq(InvocationType.RequestResponse));
+        assertEquals(List.of("first"), deliveredKeys(payload.getValue()));
+    }
+
+    @Test
+    void trimHorizonMappingIsNotPinnedAtCreation() {
+        write("old");
+        EventSourceMapping esm = streamsEsm("esm-trim", "TRIM_HORIZON");
+
+        poller.initializeStartingPosition(esm);
+
+        assertTrue(esm.getShardSequenceNumbers().isEmpty());
+    }
+
+    @Test
+    void reEnabledMappingResumesAfterItsLastProcessedRecord() throws Exception {
+        write("old");
+        stubFunctionSucceeds();
+        EventSourceMapping esm = streamsEsm("esm-latest", "LATEST");
+        poller.initializeStartingPosition(esm);
+        esmStore.saveForAccount(ACCOUNT_ID, esm);
+        write("a");
+        poller.pollAndInvoke(esm);
+        verify(executorService, timeout(2000)).invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse));
+        awaitPollCompleted(poller);
+
+        esm.setEnabled(false);
+        esmStore.saveForAccount(ACCOUNT_ID, esm);
+        poller.stopPolling(esm.getUuid());
+        write("b");
+        esm.setEnabled(true);
+        esmStore.saveForAccount(ACCOUNT_ID, esm);
+        poller.startPolling(esm);
+        poller.pollAndInvoke(esm);
+
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(executorService, timeout(2000).times(2))
+                .invoke(any(), payload.capture(), eq(InvocationType.RequestResponse));
+        assertEquals(List.of("a"), deliveredKeys(payload.getAllValues().get(0)));
+        assertEquals(List.of("b"), deliveredKeys(payload.getAllValues().get(1)),
+                "re-enabling resumes after the last processed record, neither from the trim horizon nor LATEST");
+    }
+
+    @Test
+    void mappingDeletedDuringABlockedReadIsNotInvokedOrResurrected() throws Exception {
+        CountDownLatch reading = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        stubBlockingRead(reading, release);
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(new InvokeResult());
+        EventSourceMapping esm = streamsEsm("esm-live", null);
+        esmStore.saveForAccount(ACCOUNT_ID, esm);
+
+        poller.pollAndInvoke(esm);
+        assertTrue(reading.await(2, TimeUnit.SECONDS));
+        poller.stopPolling(esm.getUuid());
+        esmStore.delete(esm.getUuid());
+        release.countDown();
+        awaitPollCompleted(poller);
+
+        verify(executorService, never()).invoke(any(), any(byte[].class), any());
+        assertTrue(esmStore.getForAccount(ACCOUNT_ID, esm.getUuid()).isEmpty(),
+                "a deleted mapping must not reappear in List/Get");
+    }
+
+    @Test
+    void mappingDisabledDuringABlockedReadIsNotInvoked() throws Exception {
+        CountDownLatch reading = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        stubBlockingRead(reading, release);
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(new InvokeResult());
+        EventSourceMapping esm = streamsEsm("esm-live", null);
+        esmStore.saveForAccount(ACCOUNT_ID, esm);
+
+        poller.pollAndInvoke(esm);
+        assertTrue(reading.await(2, TimeUnit.SECONDS));
+        esm.setEnabled(false);
+        esmStore.saveForAccount(ACCOUNT_ID, esm);
+        poller.stopPolling(esm.getUuid());
+        release.countDown();
+        awaitPollCompleted(poller);
+
+        verify(executorService, never()).invoke(any(), any(byte[].class), any());
+    }
+
+    @Test
+    void mappingDeletedDuringASuccessfulInvokeDropsTheResult() throws Exception {
+        assertDeletionDuringInvokeDropsTheResult(new InvokeResult());
+    }
+
+    @Test
+    void mappingDeletedDuringAFailedInvokeSendsNothingToItsDestination() throws Exception {
+        InvokeResult error = new InvokeResult();
+        error.setFunctionError("Unhandled");
+        assertDeletionDuringInvokeDropsTheResult(error);
+    }
+
+    private void assertDeletionDuringInvokeDropsTheResult(InvokeResult result) throws Exception {
+        stubTrimHorizon(List.of(ddbRecord("s1", "INSERT", "{}")));
+        CountDownLatch invoking = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        stubBlockingInvoke(invoking, release, result);
+        EventSourceMapping esm = streamsEsm("esm-live", null);
+        esm.setMaximumRetryAttempts(0);
+        EventSourceMapping.OnFailure onFailure = new EventSourceMapping.OnFailure();
+        onFailure.setDestination("arn:aws:sqs:us-east-1:000000000000:my-dlq");
+        EventSourceMapping.DestinationConfig destinationConfig = new EventSourceMapping.DestinationConfig();
+        destinationConfig.setOnFailure(onFailure);
+        esm.setDestinationConfig(destinationConfig);
+        esmStore.saveForAccount(ACCOUNT_ID, esm);
+
+        poller.pollAndInvoke(esm);
+        assertTrue(invoking.await(2, TimeUnit.SECONDS));
+        poller.stopPolling(esm.getUuid());
+        esmStore.delete(esm.getUuid());
+        release.countDown();
+        awaitPollCompleted(poller);
+
+        assertTrue(esmStore.getForAccount(ACCOUNT_ID, esm.getUuid()).isEmpty(),
+                "a deleted mapping must not reappear in List/Get");
+        assertTrue(esm.getShardSequenceNumbers().isEmpty(), "no checkpoint is written for a deleted mapping");
+        verify(sqsService, never()).sendMessage(anyString(), anyString(), anyInt(), anyString());
+    }
+
+    @Test
+    void mappingDeletedDuringABisectingFailedInvokeLeavesNoBisectStateOrDestinationSend() throws Exception {
+        stubStream("s1", "s2", "s3", "s4");
+        EventSourceMapping esm = esmWithDlq(0);
+        esm.setBisectBatchOnFunctionError(true);
+        DynamoDbStreamsEventSourcePoller p = pollerWith(mock(EsmStore.class));
+        List<List<String>> invocations = recordInvocations(seqs -> {
+            p.stopPolling(esm.getUuid());
+            esmStore.delete(esm.getUuid());
+            InvokeResult error = new InvokeResult();
+            error.setFunctionError("Unhandled");
+            return error;
+        });
+
+        pollOnce(p, esm);
+        pollOnce(p, esm);
+
+        assertEquals(List.of(List.of("s1", "s2", "s3", "s4")), invocations);
+        // A recorded bisect would halve the next fetch; both fetches must still use the full batch size.
+        verify(reader, times(2)).getRecords(any(), eq(10));
+        assertNull(checkpoint(esm));
+        verify(sqsService, never()).sendMessage(anyString(), anyString(), anyInt(), anyString());
+    }
+
+    @Test
+    void checkpointIsNotSavedWhileAResetIsInProgress() throws Exception {
+        stubStream("s1");
+        EventSourceMapping esm = filterEsm();
+        EsmStore store = mock(EsmStore.class);
+        DynamoDbStreamsEventSourcePoller p = pollerWith(store);
+        AtomicBoolean resetDuringInvoke = new AtomicBoolean(true);
+        List<List<String>> invocations = recordInvocations(seqs -> {
+            if (resetDuringInvoke.getAndSet(false)) {
+                p.beforeReset();
+            }
+            return new InvokeResult();
+        });
+
+        pollOnce(p, esm);
+        assertNull(checkpoint(esm));
+        verify(store, never()).saveForAccount(anyString(), any());
+
+        p.afterReset();
+        pollOnce(p, esm);
+
+        assertEquals(List.of(List.of("s1"), List.of("s1")), invocations);
+        assertEquals("s1", checkpoint(esm));
+        verify(store).saveForAccount(eq(ACCOUNT_ID), any());
+    }
+
+    @Test
+    void pollDuringAResetDoesNotInvokeUntilTheResetEnds() throws Exception {
+        stubStream("s1");
+        List<List<String>> invocations = recordInvocations(seqs -> new InvokeResult());
+        EventSourceMapping esm = filterEsm();
+        DynamoDbStreamsEventSourcePoller p = pollerWith(mock(EsmStore.class));
+
+        p.beforeReset();
+        pollOnce(p, esm);
+        assertTrue(invocations.isEmpty(), "a poll during a reset must not invoke the function");
+
+        p.afterReset();
+        pollOnce(p, esm);
+
+        assertEquals(List.of(List.of("s1")), invocations);
+        assertEquals("s1", checkpoint(esm));
+    }
+
+    @Test
+    void stopPollingDuringAnInvocationBlocksItsCheckpointWrite() throws Exception {
+        stubTrimHorizon(List.of(ddbRecord("s1", "INSERT", "{}")));
+        EsmStore store = mock(EsmStore.class);
+        EventSourceMapping esm = filterEsm();
+        DynamoDbStreamsEventSourcePoller p = pollerWith(store);
+        // A delete has stopped the poller but has not reached the store yet, so the mapping still exists.
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenAnswer(inv -> {
+                    p.stopPolling(esm.getUuid());
+                    return new InvokeResult();
+                });
+
+        p.pollAndInvoke(esm);
+        verify(executorService, timeout(2000)).invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse));
+        awaitPollCompleted(p);
+
+        verify(store, never()).saveForAccount(anyString(), any());
+    }
+
+    @Test
+    void startPollingAfterStopPollingLetsTheCheckpointAdvanceAgain() {
+        stubTrimHorizon(List.of(ddbRecord("s1", "INSERT", "{}")));
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(new InvokeResult());
+        EsmStore store = mock(EsmStore.class);
+        EventSourceMapping esm = filterEsm();
+        DynamoDbStreamsEventSourcePoller p = pollerWith(store);
+
+        p.stopPolling(esm.getUuid());
+        p.startPolling(esm);
+        p.pollAndInvoke(esm);
+
+        verify(store, timeout(2000)).saveForAccount(eq(ACCOUNT_ID), any());
+        assertEquals("s1", esm.getShardSequenceNumbers().get(SHARD_ID));
+    }
+
+    @Test
+    void mappingDeletedReleasesItsStopTombstone() {
+        poller.stopPolling("esm-gone");
+
+        poller.mappingDeleted("esm-gone");
+
+        assertTrue(poller.stopped.isEmpty());
+    }
+
+    @Test
+    void resetMappingsInFlightInvokeDoesNotResurrectIt() throws Exception {
+        stubTrimHorizon(List.of(ddbRecord("s1", "INSERT", "{}")));
+        CountDownLatch invoking = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        stubBlockingInvoke(invoking, release, new InvokeResult());
+        EventSourceMapping old = streamsEsm("esm-old", null);
+        esmStore.saveForAccount(ACCOUNT_ID, old);
+
+        poller.pollAndInvoke(old);
+        assertTrue(invoking.await(2, TimeUnit.SECONDS));
+        esmStore.delete(old.getUuid());
+        poller.clear();
+        EventSourceMapping recreated = streamsEsm("esm-new", null);
+        esmStore.saveForAccount(ACCOUNT_ID, recreated);
+        // clear() forgot the in-flight poll; re-mark it so awaitPollCompleted waits for the old worker.
+        poller.activePolls.put(old.getUuid(), Boolean.TRUE);
+        release.countDown();
+        awaitPollCompleted(poller);
+
+        assertTrue(esmStore.getForAccount(ACCOUNT_ID, old.getUuid()).isEmpty(),
+                "a mapping wiped by a reset must not be written back by its in-flight poll");
+    }
+
+    // ──────────────────── Shards and the Lambda event ────────────────────
+
+    /** A closed parent shard holding p1 and its child holding c1. */
+    private FakeStreamReader parentAndChild() {
+        FakeStreamReader streams = new FakeStreamReader(CheckpointLifetime.PROCESS);
+        streams.shard("parent", null).add(ddbRecord("p1", "INSERT", "{}"));
+        streams.close("parent");
+        streams.shard("child", "parent").add(ddbRecord("c1", "INSERT", "{}"));
+        return spy(streams);
+    }
+
+    @Test
+    void childShardIsReadOnlyAfterItsParentWasReadToItsEnd() throws Exception {
+        stubFunction();
+        List<List<String>> invocations = recordInvocations(seqs -> new InvokeResult());
+        EventSourceMapping esm = filterEsm();
+        DynamoDbStreamsEventSourcePoller p = pollerOver(parentAndChild(), esmStore);
+
+        pollOnce(p, esm);
+        pollOnce(p, esm);
+        assertEquals(List.of(List.of("p1")), invocations,
+                "the parent stays open to the mapping until a read finds no records and no next cursor");
+        pollOnce(p, esm);
+
+        assertEquals(List.of(List.of("p1"), List.of("c1")), invocations);
+        assertEquals(Map.of("parent", "p1", "child", "c1"), esm.getShardSequenceNumbers());
+    }
+
+    @Test
+    void stopPollingForgetsWhichShardsTheMappingFinished() throws Exception {
+        stubFunction();
+        recordInvocations(seqs -> new InvokeResult());
+        EventSourceMapping esm = filterEsm();
+        FakeStreamReader streams = parentAndChild();
+        DynamoDbStreamsEventSourcePoller p = pollerOver(streams, esmStore);
+        pollOnce(p, esm);
+        pollOnce(p, esm);
+
+        p.stopPolling(esm.getUuid());
+        p.startPolling(esm);
+        pollOnce(p, esm);
+
+        verify(streams, times(3)).getShardIterator(any(), eq("parent"), any(), any());
+        verify(streams, never()).getShardIterator(any(), eq("child"), any(), any());
+    }
+
+    @Test
+    void latestMappingPinsEveryShardAfterItsNewestRecord() {
+        FakeStreamReader streams = new FakeStreamReader(CheckpointLifetime.PROCESS);
+        streams.shard("a", null).addAll(List.of(ddbRecord("a1", "INSERT", "{}"), ddbRecord("a2", "INSERT", "{}")));
+        streams.shard("b", null).add(ddbRecord("b1", "INSERT", "{}"));
+        streams.shard("empty", null);
+        EventSourceMapping esm = streamsEsm("esm-latest", "LATEST");
+
+        pollerOver(streams, esmStore).initializeStartingPosition(esm);
+
+        assertEquals(Map.of("a", "a2", "b", "b1"), esm.getShardSequenceNumbers());
+    }
+
+    @Test
+    void latestMappingOnAnUnknownStreamIsNotPinned() {
+        doThrow(new AwsException("ResourceNotFoundException", "Stream not found", 400))
+                .when(reader).describeStream(any(), any(), any());
+        EventSourceMapping esm = streamsEsm("esm-latest", "LATEST");
+
+        poller.initializeStartingPosition(esm);
+
+        assertTrue(esm.getShardSequenceNumbers().isEmpty(),
+                "a stream that does not exist yet delivers everything written to it once it does");
+    }
+
+    @Test
+    void lambdaEventIsACopyOfTheAwsRecordWithTheEventSourceArn() throws Exception {
+        JsonNode awsRecord = OBJECT_MAPPER.readTree("""
+                {"eventID": "e-1", "eventName": "MODIFY", "eventVersion": "1.1", "eventSource": "aws:dynamodb",
+                 "awsRegion": "us-east-1", "dynamodb": {"ApproximateCreationDateTime": 1700000000,
+                 "Keys": {"pk": {"S": "k"}}, "NewImage": {"pk": {"S": "k"}, "n": {"N": "2"}},
+                 "OldImage": {"pk": {"S": "k"}, "n": {"N": "1"}}, "SequenceNumber": "s1", "SizeBytes": 42,
+                 "StreamViewType": "NEW_AND_OLD_IMAGES"}}""");
+        JsonNode original = awsRecord.deepCopy();
+        stubTrimHorizon(List.of(new DynamoDbStreamReader.Record("s1", awsRecord)));
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(new InvokeResult());
+
+        pollOnce(poller, filterEsm());
+
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(executorService).invoke(any(), payload.capture(), eq(InvocationType.RequestResponse));
+        ObjectNode expected = original.deepCopy();
+        expected.put("eventSourceARN", STREAM_ARN);
+        ((ObjectNode) expected.get("dynamodb")).put("ApproximateCreationDateTime", 1_700_000_000d);
+        JsonNode delivered = readRecords(payload.getValue()).get(0);
+        assertEquals(expected, delivered);
+        assertTrue(delivered.path("dynamodb").path("ApproximateCreationDateTime").isDouble());
+        assertEquals(original, awsRecord, "the reader's record is never mutated");
+    }
+
+    @Test
+    void missingFunctionSkipsTheTickBeforeReadingTheStream() throws Exception {
+        shard.add(ddbRecord("s1", "INSERT", "{}"));
+        EventSourceMapping esm = filterEsm();
+
+        pollOnce(poller, esm);
+
+        verify(reader, never()).describeStream(any(), any(), any());
+        verifyNoInteractions(executorService);
+        assertNull(checkpoint(esm));
+    }
+
+    @Test
+    void batchSizeAboveTheReadMaximumIsDeliveredInOneInvocation() throws Exception {
+        List<String> sequences = new ArrayList<>();
+        for (int i = 1; i <= 1500; i++) {
+            sequences.add(String.format("s%04d", i));
+        }
+        stubStream(sequences.toArray(String[]::new));
+        List<List<String>> invocations = recordInvocations(seqs -> new InvokeResult());
+        EventSourceMapping esm = filterEsm();
+        esm.setBatchSize(1500);
+
+        pollOnce(pollerWith(mock(EsmStore.class)), esm);
+
+        assertEquals(List.of(sequences), invocations);
+        assertEquals("s1500", checkpoint(esm));
     }
 
     private void awaitPollCompleted(DynamoDbStreamsEventSourcePoller poller) throws InterruptedException {

@@ -353,7 +353,7 @@ public class S3ControlController {
 
         throw new AwsException("InvalidRequest",
                 "Unsupported resource type. Only S3 bucket ARNs are supported " +
-                "(arn:aws:s3:<region>:<account>:bucket/<name> or arn:aws:s3:::<name>).", 400);
+                "(arn:aws:s3:<region>:<account>:bucket/<name> or arn:aws:s3:::<name>).", 400); // partition-literal: AWS's message text
     }
 
     /**

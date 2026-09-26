@@ -65,6 +65,19 @@ class VtlTemplateEngineTest {
     }
 
     @Test
+    void parsedMapAndCollectionMethodsInResponseTemplate() {
+        String template = "#set($parsed = $util.parseJson($input.body))"
+                + "#if($parsed.headers)$parsed.headers.isEmpty()|$parsed.headers.size()|"
+                + "#foreach($entry in $parsed.headers.entrySet())$entry.getKey()=$entry.getValue()#end|"
+                + "$parsed.items.isEmpty()|$parsed.items.size()|#foreach($item in $parsed.items)$item#end#end";
+
+        String result = engine.evaluate(template, ctx("{\"headers\":{\"x-test\":\"yes\"},\"items\":[\"a\",\"b\"]}"))
+                .body().trim();
+
+        assertEquals("false|1|x-test=yes|false|2|ab", result);
+    }
+
+    @Test
     void inputPath() {
         String result = engine.evaluate("$input.path('$.name')", ctx("{\"name\":\"Carol\"}")).body();
         assertEquals("Carol", result);

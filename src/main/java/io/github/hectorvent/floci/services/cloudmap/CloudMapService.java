@@ -19,6 +19,7 @@ import org.jboss.logging.Logger;
 import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -39,6 +40,8 @@ public class CloudMapService {
 
     private static final Logger LOG = Logger.getLogger(CloudMapService.class);
     private static final String ALNUM = "abcdefghijklmnopqrstuvwxyz0123456789";
+    /** Route 53 answers a service discovery query with at most eight records. */
+    private static final int MAX_DNS_ANSWERS = 8;
 
     private final SecureRandom random = new SecureRandom();
 
@@ -349,6 +352,117 @@ public class CloudMapService {
             }
             default -> instances;
         };
+    }
+
+    /**
+     * Resolves {@code <service>.<namespace>} to the IPv4 addresses registered under it, so the
+     * embedded DNS server can answer for a DNS namespace. The DNS server forwards names outside
+     * every DNS namespace upstream, while a name inside a namespace remains owned even when no
+     * usable A records exist.
+     *
+     * <p>Only DNS namespaces answer. An HTTP namespace is discoverable through DiscoverInstances
+     * and has no DNS records on AWS, so giving it any here would invent behaviour callers cannot
+     * rely on outside Floci.
+     *
+     * <p>Unlike {@link #discoverInstances}, this takes no region: a DNS query carries none. The
+     * longest matching namespace name wins, and a namespace name registered in more than one
+     * region resolves through whichever copy holds instances.
+     *
+     * <p>A DNS query carries no credential either, so this reads the default account's
+     * partition. A namespace registered under a non-default account is discoverable through
+     * the API but does not resolve by name.
+     *
+     * <p>Health and answer size follow Route 53: healthy instances answer while any exist, all
+     * of them answer when none is healthy, and at most {@link #MAX_DNS_ANSWERS} records go back
+     * either way.
+     */
+    public List<String> resolveDnsName(String queryName) {
+        return resolveDnsNameIfOwned(queryName).orElse(List.of());
+    }
+
+    /** Keeps zone ownership distinct from the list of A records. */
+    public Optional<List<String>> resolveDnsNameIfOwned(String queryName) {
+        if (queryName == null || queryName.isBlank()) {
+            return Optional.empty();
+        }
+        String name = queryName.toLowerCase();
+        if (name.endsWith(".")) {
+            name = name.substring(0, name.length() - 1);
+        }
+
+        List<String> addresses = new ArrayList<>();
+        String matchedNamespaceName = null;
+        for (Namespace namespace : dnsNamespacesByLongestName()) {
+            String namespaceName = namespace.getName().toLowerCase();
+            String suffix = "." + namespaceName;
+            boolean apex = name.equals(namespaceName);
+            if (!apex && !name.endsWith(suffix)) {
+                continue;
+            }
+            if (matchedNamespaceName != null && !matchedNamespaceName.equals(namespaceName)) {
+                break;
+            }
+            matchedNamespaceName = namespaceName;
+            if (apex) {
+                continue;
+            }
+            String serviceName = name.substring(0, name.length() - suffix.length());
+            for (Service service : scan(serviceStore)) {
+                if (!namespace.getId().equals(service.getNamespaceId())
+                        || !serviceName.equalsIgnoreCase(service.getName())) {
+                    continue;
+                }
+                for (Instance instance : applyHealthFilter(scanInstances(service.getId()), "HEALTHY_OR_ELSE_ALL")) {
+                    String ipv4 = instance.getAttributes().get("AWS_INSTANCE_IPV4");
+                    if (isIpv4(ipv4)) {
+                        addresses.add(ipv4);
+                    }
+                }
+            }
+            if (!addresses.isEmpty()) {
+                return Optional.of(addresses.size() > MAX_DNS_ANSWERS
+                        ? addresses.subList(0, MAX_DNS_ANSWERS) : addresses);
+            }
+        }
+        return matchedNamespaceName != null ? Optional.of(List.of()) : Optional.empty();
+    }
+
+    /**
+     * Whether the attribute is a dotted-quad the DNS server can put in an A record's rdata.
+     * AWS rejects anything else at {@code RegisterInstance}; Floci stores it, so a name whose
+     * only instance carries a bad value receives a negative response rather than an invalid A
+     * record or an answer from an unrelated upstream resolver.
+     */
+    private static boolean isIpv4(String value) {
+        if (value == null || value.isBlank()) {
+            return false;
+        }
+        String[] octets = value.split("\\.", -1);
+        if (octets.length != 4) {
+            return false;
+        }
+        for (String octet : octets) {
+            if (octet.isEmpty() || octet.length() > 3) {
+                return false;
+            }
+            for (int i = 0; i < octet.length(); i++) {
+                if (!Character.isDigit(octet.charAt(i))) {
+                    return false;
+                }
+            }
+            if (Integer.parseInt(octet) > 255) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private List<Namespace> dnsNamespacesByLongestName() {
+        return scan(namespaceStore).stream()
+                .filter(n -> n.getName() != null && !n.getName().isBlank())
+                .filter(n -> "DNS_PRIVATE".equals(n.getType()) || "DNS_PUBLIC".equals(n.getType()))
+                .sorted(Comparator.comparingInt((Namespace n) -> n.getName().length()).reversed())
+                .toList();
     }
 
     private Service resolveService(String namespaceName, String serviceName, String region) {

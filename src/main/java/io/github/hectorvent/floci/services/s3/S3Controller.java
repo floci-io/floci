@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.s3;
 
 import static io.github.hectorvent.floci.services.s3.S3RequestParser.hasQueryParam;
 
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AccountResolver;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -97,6 +98,7 @@ public class S3Controller {
     private final RequestContext requestContext;
     private final IamService iamService;
     private final IamEnforcementFilter iamEnforcementFilter;
+    private final EmulatorConfig config;
 
     @Inject
     public S3Controller(S3Service s3Service, S3SelectService s3SelectService,
@@ -108,7 +110,8 @@ public class S3Controller {
                         AccountResolver accountResolver,
                         RequestContext requestContext,
                         IamService iamService,
-                        IamEnforcementFilter iamEnforcementFilter) {
+                        IamEnforcementFilter iamEnforcementFilter,
+                        EmulatorConfig config) {
         this.s3Service = s3Service;
         this.s3SelectService = s3SelectService;
         this.regionResolver = regionResolver;
@@ -120,6 +123,7 @@ public class S3Controller {
         this.requestContext = requestContext;
         this.iamService = iamService;
         this.iamEnforcementFilter = iamEnforcementFilter;
+        this.config = config;
     }
 
     private void emitCloudTrailEvent(String eventName, String bucket, String key,
@@ -3354,9 +3358,11 @@ public class S3Controller {
          * itself no-ops when IAM enforcement is disabled.
          */
         String credential = lcFields.get("x-amz-credential");
+        rejectUnknownPostRegion(credential);
         if (credential != null && !credential.isEmpty()) {
             iamEnforcementFilter.authorizeAdditionalResource(
-                    "Credential=" + credential, "s3:PutObject", S3PublicAccessEvaluator.objectArn(bucket, key));
+                    "Credential=" + credential, "s3:PutObject",
+                    S3PublicAccessEvaluator.objectArn(s3Service.bucketPartition(bucket), bucket, key));
         }
 
         if (s3Service.isAuthEnforced()) {
@@ -3409,6 +3415,23 @@ public class S3Controller {
             response.header("x-amz-version-id", obj.getVersionId());
         }
         return response.build();
+    }
+
+    /**
+     * The presigned-POST counterpart of {@code AccountContextFilter}'s unknown-region refusal: the
+     * form's {@code x-amz-credential} never reaches that filter. minio runs this credential through
+     * the same scope parser as a signed header and answers a wrong region with
+     * {@code AuthorizationHeaderMalformed}.
+     */
+    private void rejectUnknownPostRegion(String credential) {
+        if (credential == null || credential.isEmpty() || config.partitions().allowUnknownRegions()) {
+            return;
+        }
+        String region = regionResolver.resolveRegionFromPresignedCredential(credential);
+        if (!RegionResolver.isKnownRegion(region)) {
+            throw new AwsException("AuthorizationHeaderMalformed", "The authorization header is malformed; "
+                    + "the region '" + region + "' is wrong; expecting a region AWS publishes.", 400);
+        }
     }
 
     /**
@@ -3919,7 +3942,8 @@ public class S3Controller {
     private void authorizeCopySourceRead(HttpHeaders httpHeaders, CopySourceRef source,
                                          S3Service.RequestAuthorization authorization) {
         String action = source.versionId() == null ? "s3:GetObject" : "s3:GetObjectVersion";
-        String resource = S3PublicAccessEvaluator.objectArn(source.bucket(), source.objectKey());
+        String resource = S3PublicAccessEvaluator.objectArn(
+                s3Service.bucketPartition(source.bucket()), source.bucket(), source.objectKey());
         S3Service.SignedPrincipalResourcePolicyEvaluation resourcePolicyEvaluation =
                 s3Service.signedPrincipalResourcePolicyDecision(
                         source.bucket(), action, resource, authorization);

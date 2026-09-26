@@ -40,11 +40,16 @@ class CodePipelineIntegrationTest {
     EmulatorConfig config;
 
     /**
-     * Blocks until the S3 source poller has had {@code cycles} chances to run. The assertions that
-     * follow these waits are all negative ("no execution was started"), so what matters is that the
-     * poller really did get its turns and declined, not that a fixed number of milliseconds passed.
-     * Deriving the wait from the configured interval keeps that guarantee whatever the interval is
-     * set to.
+     * Sleeps for {@code cycles} times the configured source poll interval. The assertions that
+     * follow these waits check that no execution, or no additional execution, was started, and they
+     * are only meaningful if the poller actually ran and declined, so the wait scales with the
+     * interval instead of hard-coding milliseconds that stop covering enough cycles when the
+     * interval changes.
+     *
+     * <p>This is wall clock, not a handshake with the scheduler. The poller runs on a fixed delay,
+     * so its period is the interval plus however long a pass takes, and fewer than {@code cycles}
+     * passes may complete within the sleep. Several cycles are requested to leave margin for that,
+     * not to guarantee a number of completed passes.
      */
     private void awaitSourcePollCycles(int cycles) throws InterruptedException {
         Thread.sleep(config.services().codepipeline().sourcePollIntervalMs() * cycles);

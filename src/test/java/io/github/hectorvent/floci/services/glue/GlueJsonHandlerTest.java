@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.glue.schemaregistry.GlueSchemaRegistryService;
 import io.github.hectorvent.floci.services.kms.KmsService;
@@ -16,6 +17,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import java.time.Clock;
 import java.util.List;
 import java.util.Map;
 
@@ -44,7 +46,14 @@ class GlueJsonHandlerTest {
         GlueService glueService = new GlueService(
                 storageFactory, schemaRegistryService, regionResolver, new ResourceGroupsTaggingService(storageFactory),
                 new KmsService(storageFactory, regionResolver));
-        handler = new GlueJsonHandler(glueService, schemaRegistryService, mapper);
+        GlueJobRunService jobRunService =
+                new GlueJobRunService(new InMemoryStorage<>(), new InMemoryStorage<>(), glueService, 0, Clock.systemUTC());
+        GlueCrawlerRunService crawlerRunService =
+                new GlueCrawlerRunService(new InMemoryStorage<>(), glueService, 0, Clock.systemUTC());
+        handler = new GlueJsonHandler(glueService, jobRunService, crawlerRunService,
+                new GlueTriggerService(new InMemoryStorage<>(), glueService,
+                        jobRunService, crawlerRunService),
+                schemaRegistryService, mapper);
     }
 
     private void createDatabaseAndTable(String dbName, String tableName) throws Exception {
@@ -792,5 +801,224 @@ class GlueJsonHandlerTest {
         assertTrue(after.get("ConnectionPasswordEncryption").get("ReturnConnectionPasswordEncrypted").asBoolean());
         assertEquals("alias/glue", after.get("ConnectionPasswordEncryption").get("AwsKmsKeyId").asText());
         assertEquals("DISABLED", after.get("EncryptionAtRest").get("CatalogEncryptionMode").asText());
+    }
+
+    private void createJobWithTags(String name, Map<String, String> tags) throws Exception {
+        ObjectNode create = mapper.createObjectNode();
+        create.put("Name", name);
+        create.put("Role", "arn:aws:iam::000000000000:role/glue");
+        create.putObject("Command").put("Name", "glueetl");
+        ObjectNode tagNode = create.putObject("Tags");
+        tags.forEach(tagNode::put);
+        assertEquals(200, handler.handle("CreateJob", create, REGION).getStatus());
+    }
+
+    /**
+     * The wire shape a job run client reads: StartJobRun answers with the run id alone, GetJobRun
+     * nests the run under "JobRun" with numeric timestamps, and stopping a finished run is an entry
+     * in Errors rather than a failed request.
+     */
+    @Test
+    void jobRunOperationsAnswerWithTheDocumentedBodies() throws Exception {
+        createJobWithTags("nightly", Map.of());
+
+        ObjectNode start = mapper.createObjectNode();
+        start.put("JobName", "nightly");
+        start.putObject("Arguments").put("--day", "2026-09-25");
+        JsonNode started = mapper.valueToTree(handler.handle("StartJobRun", start, REGION).getEntity());
+        assertEquals(1, started.size());
+        String runId = started.get("JobRunId").asText();
+
+        ObjectNode get = mapper.createObjectNode().put("JobName", "nightly").put("RunId", runId);
+        JsonNode run = mapper.valueToTree(handler.handle("GetJobRun", get, REGION).getEntity()).get("JobRun");
+        assertEquals(runId, run.get("Id").asText());
+        assertEquals("nightly", run.get("JobName").asText());
+        assertEquals("SUCCEEDED", run.get("JobRunState").asText());
+        assertEquals("2026-09-25", run.get("Arguments").get("--day").asText());
+        assertTrue(run.get("StartedOn").isNumber());
+        assertTrue(run.get("CompletedOn").isNumber());
+        assertFalse(run.has("ErrorMessage"));
+
+        JsonNode runs = mapper.valueToTree(handler.handle(
+                "GetJobRuns", mapper.createObjectNode().put("JobName", "nightly"), REGION).getEntity());
+        assertEquals(1, runs.get("JobRuns").size());
+        assertFalse(runs.has("NextToken"));
+
+        ObjectNode stop = mapper.createObjectNode().put("JobName", "nightly");
+        stop.putArray("JobRunIds").add(runId);
+        JsonNode stopped = mapper.valueToTree(handler.handle("BatchStopJobRun", stop, REGION).getEntity());
+        assertEquals(0, stopped.get("SuccessfulSubmissions").size());
+        JsonNode error = stopped.get("Errors").get(0);
+        assertEquals("nightly", error.get("JobName").asText());
+        assertEquals(runId, error.get("JobRunId").asText());
+        assertEquals("InvalidInputException", error.get("ErrorDetail").get("ErrorCode").asText());
+
+        handler.handle("DeleteJob", mapper.createObjectNode().put("JobName", "nightly"), REGION);
+        AwsException gone = assertThrows(AwsException.class, () -> handler.handle(
+                "GetJobRuns", mapper.createObjectNode().put("JobName", "nightly"), REGION));
+        assertEquals("EntityNotFoundException", gone.getErrorCode());
+    }
+
+    @Test
+    void listJobsFiltersOnTagsAndBatchGetJobsReportsMissingNames() throws Exception {
+        createJobWithTags("tagged", Map.of("team", "data"));
+        createJobWithTags("plain", Map.of());
+
+        JsonNode all = mapper.valueToTree(handler.handle("ListJobs", mapper.createObjectNode(), REGION).getEntity());
+        assertEquals(List.of("plain", "tagged"), mapper.convertValue(all.get("JobNames"), List.class));
+        assertFalse(all.has("NextToken"));
+
+        ObjectNode filtered = mapper.createObjectNode();
+        filtered.putObject("Tags").put("team", "data");
+        JsonNode byTag = mapper.valueToTree(handler.handle("ListJobs", filtered, REGION).getEntity());
+        assertEquals(List.of("tagged"), mapper.convertValue(byTag.get("JobNames"), List.class));
+
+        ObjectNode batch = mapper.createObjectNode();
+        batch.putArray("JobNames").add("tagged").add("absent");
+        JsonNode got = mapper.valueToTree(handler.handle("BatchGetJobs", batch, REGION).getEntity());
+        assertEquals(1, got.get("Jobs").size());
+        assertEquals("tagged", got.get("Jobs").get(0).get("Name").asText());
+        assertEquals("absent", got.get("JobsNotFound").get(0).asText());
+    }
+
+    private void createCrawlerWithTags(String name, Map<String, String> tags) throws Exception {
+        ObjectNode create = mapper.createObjectNode();
+        create.put("Name", name);
+        create.put("Role", "arn:aws:iam::000000000000:role/glue");
+        create.putObject("Targets").putArray("S3Targets").addObject().put("Path", "s3://raw/" + name);
+        create.put("Schedule", "cron(0 2 * * ? *)");
+        ObjectNode tagNode = create.putObject("Tags");
+        tags.forEach(tagNode::put);
+        assertEquals(200, handler.handle("CreateCrawler", create, REGION).getStatus());
+    }
+
+    /**
+     * The crawl lifecycle as a client polls it: StartCrawler and StopCrawler answer with empty
+     * bodies, GetCrawler carries State and a LastCrawl with a numeric StartTime, and
+     * GetCrawlerMetrics reports numbers, never nulls.
+     */
+    @Test
+    void crawlerRunOperationsAnswerWithTheDocumentedBodies() throws Exception {
+        createCrawlerWithTags("raw", Map.of());
+        ObjectNode byName = mapper.createObjectNode().put("Name", "raw");
+
+        JsonNode before = mapper.valueToTree(handler.handle("GetCrawler", byName, REGION).getEntity()).get("Crawler");
+        assertEquals("READY", before.get("State").asText());
+
+        Response started = handler.handle("StartCrawler", byName, REGION);
+        assertEquals(0, mapper.valueToTree(started.getEntity()).size());
+
+        JsonNode crawler = mapper.valueToTree(handler.handle("GetCrawler", byName, REGION).getEntity()).get("Crawler");
+        assertEquals("READY", crawler.get("State").asText());
+        assertEquals("SUCCEEDED", crawler.get("LastCrawl").get("Status").asText());
+        assertTrue(crawler.get("LastCrawl").get("StartTime").isNumber());
+
+        AwsException idle = assertThrows(AwsException.class, () -> handler.handle("StopCrawler", byName, REGION));
+        assertEquals("CrawlerNotRunningException", idle.getErrorCode());
+
+        ObjectNode metricsRequest = mapper.createObjectNode();
+        metricsRequest.putArray("CrawlerNameList").add("raw");
+        JsonNode metrics = mapper.valueToTree(handler.handle("GetCrawlerMetrics", metricsRequest, REGION).getEntity())
+                .get("CrawlerMetricsList").get(0);
+        assertEquals("raw", metrics.get("CrawlerName").asText());
+        assertTrue(metrics.get("TimeLeftSeconds").isNumber());
+        assertTrue(metrics.get("MedianRuntimeSeconds").isNumber());
+        assertFalse(metrics.get("StillEstimating").asBoolean());
+
+        ObjectNode schedule = mapper.createObjectNode().put("CrawlerName", "raw");
+        assertEquals(0, mapper.valueToTree(handler.handle("StopCrawlerSchedule", schedule, REGION).getEntity()).size());
+        JsonNode stopped = mapper.valueToTree(handler.handle("GetCrawler", byName, REGION).getEntity()).get("Crawler");
+        assertEquals("NOT_SCHEDULED", stopped.get("Schedule").get("State").asText());
+    }
+
+    @Test
+    void listCrawlersFiltersOnTagsAndBatchGetCrawlersReportsMissingNames() throws Exception {
+        createCrawlerWithTags("tagged", Map.of("team", "data"));
+        createCrawlerWithTags("plain", Map.of());
+
+        JsonNode all = mapper.valueToTree(handler.handle("ListCrawlers", mapper.createObjectNode(), REGION).getEntity());
+        assertEquals(List.of("plain", "tagged"), mapper.convertValue(all.get("CrawlerNames"), List.class));
+
+        ObjectNode filtered = mapper.createObjectNode();
+        filtered.putObject("Tags").put("team", "data");
+        JsonNode byTag = mapper.valueToTree(handler.handle("ListCrawlers", filtered, REGION).getEntity());
+        assertEquals(List.of("tagged"), mapper.convertValue(byTag.get("CrawlerNames"), List.class));
+
+        ObjectNode batch = mapper.createObjectNode();
+        batch.putArray("CrawlerNames").add("tagged").add("absent");
+        JsonNode got = mapper.valueToTree(handler.handle("BatchGetCrawlers", batch, REGION).getEntity());
+        assertEquals("tagged", got.get("Crawlers").get(0).get("Name").asText());
+        assertEquals("READY", got.get("Crawlers").get(0).get("State").asText());
+        assertEquals("absent", got.get("CrawlersNotFound").get(0).asText());
+    }
+
+    /**
+     * Trigger CRUD on the wire: Create, Start, Stop and Delete answer with the name, Get and
+     * UpdateTrigger with the trigger, and the definition round trips with its predicate.
+     */
+    @Test
+    void triggerOperationsAnswerWithTheDocumentedBodies() throws Exception {
+        createJobWithTags("extract", Map.of());
+        createJobWithTags("load", Map.of());
+        ObjectNode create = mapper.createObjectNode();
+        create.put("Name", "after-extract");
+        create.put("Type", "CONDITIONAL");
+        create.put("StartOnCreation", true);
+        create.putArray("Actions").addObject().put("JobName", "load");
+        ObjectNode predicate = create.putObject("Predicate");
+        predicate.put("Logical", "AND");
+        predicate.putArray("Conditions").addObject()
+                .put("LogicalOperator", "EQUALS").put("JobName", "extract").put("State", "SUCCEEDED");
+        create.putObject("Tags").put("team", "data");
+
+        JsonNode created = mapper.valueToTree(handler.handle("CreateTrigger", create, REGION).getEntity());
+        assertEquals("after-extract", created.get("Name").asText());
+
+        ObjectNode byName = mapper.createObjectNode().put("Name", "after-extract");
+        JsonNode trigger = mapper.valueToTree(handler.handle("GetTrigger", byName, REGION).getEntity()).get("Trigger");
+        assertEquals("CONDITIONAL", trigger.get("Type").asText());
+        assertEquals("ACTIVATED", trigger.get("State").asText());
+        assertEquals("load", trigger.get("Actions").get(0).get("JobName").asText());
+        assertEquals("SUCCEEDED", trigger.get("Predicate").get("Conditions").get(0).get("State").asText());
+        assertFalse(trigger.has("Schedule"));
+
+        ObjectNode tags = mapper.createObjectNode();
+        tags.put("ResourceArn", "arn:aws:glue:" + REGION + ":" + ACCOUNT_ID + ":trigger/after-extract");
+        assertEquals("data", mapper.valueToTree(handler.handle("GetTags", tags, REGION).getEntity())
+                .get("Tags").get("team").asText());
+
+        ObjectNode update = mapper.createObjectNode().put("Name", "after-extract");
+        update.putObject("TriggerUpdate").put("Description", "load after extract");
+        JsonNode updated = mapper.valueToTree(handler.handle("UpdateTrigger", update, REGION).getEntity());
+        assertEquals("load after extract", updated.get("Trigger").get("Description").asText());
+
+        assertEquals("after-extract", mapper.valueToTree(
+                handler.handle("StopTrigger", byName, REGION).getEntity()).get("Name").asText());
+        assertEquals("after-extract", mapper.valueToTree(
+                handler.handle("DeleteTrigger", byName, REGION).getEntity()).get("Name").asText());
+        JsonNode names = mapper.valueToTree(handler.handle("ListTriggers", mapper.createObjectNode(), REGION).getEntity());
+        assertEquals(0, names.get("TriggerNames").size());
+    }
+
+    /** A conditional trigger fires within the request that finishes the run it watches. */
+    @Test
+    void conditionalTriggerFiresAfterTheRequestThatFinishesTheWatchedRun() throws Exception {
+        createJobWithTags("extract", Map.of());
+        createJobWithTags("load", Map.of());
+        ObjectNode create = mapper.createObjectNode();
+        create.put("Name", "after-extract");
+        create.put("Type", "CONDITIONAL");
+        create.put("StartOnCreation", true);
+        create.putArray("Actions").addObject().put("JobName", "load");
+        create.putObject("Predicate").putArray("Conditions").addObject()
+                .put("LogicalOperator", "EQUALS").put("JobName", "extract").put("State", "SUCCEEDED");
+        handler.handle("CreateTrigger", create, REGION);
+
+        handler.handle("StartJobRun", mapper.createObjectNode().put("JobName", "extract"), REGION);
+
+        JsonNode runs = mapper.valueToTree(handler.handle(
+                "GetJobRuns", mapper.createObjectNode().put("JobName", "load"), REGION).getEntity()).get("JobRuns");
+        assertEquals(1, runs.size());
+        assertEquals("after-extract", runs.get(0).get("TriggerName").asText());
     }
 }

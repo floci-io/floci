@@ -238,6 +238,21 @@ class CodeArtifactIntegrationTest {
                 .then().statusCode(400).body("__type", equalTo("ValidationException"));
     }
 
+    /**
+     * Proves the npm route is genuinely wired into the running instance ({@code @Observes
+     * Router} registration, the {@code ServiceConfigAccess} enablement check, and the token
+     * check), the one thing {@code CodeArtifactNpmDataPlaneTest} cannot: it builds the class by
+     * hand rather than through CDI, so it proves nothing about whether the observer actually
+     * registers. A missing token is rejected before the named domain or repository is looked up,
+     * so this needs neither to exist, and needs no Docker.
+     */
+    @Test
+    void npmEndpointRejectsAMissingTokenWithoutADomainOrRepositoryExisting() {
+        given().get("/codeartifact/npm/no-such-domain/no-such-repo/lodash")
+                .then().statusCode(401)
+                .header("WWW-Authenticate", equalTo("Bearer"));
+    }
+
     private static String sha256Hex(byte[] content) {
         try {
             return SigV4RequestValidator.sha256Hex(content);

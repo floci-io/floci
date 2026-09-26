@@ -4,7 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
-import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations.Scope;
 import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
@@ -49,11 +50,11 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
     private static final String REPLICA_SKIP_DELETION_ATTR = "__FlociDynamoDbReplicaSkipDeletion";
     private static final int TABLE_NAME_MAX_LENGTH = 255;
 
-    private final DynamoDbService dynamoDbService;
+    private final DynamoDbFacade dynamoDb;
 
     @Inject
-    public DynamoDbCfnProvisioner(DynamoDbService dynamoDbService) {
-        this.dynamoDbService = dynamoDbService;
+    public DynamoDbCfnProvisioner(DynamoDbFacade dynamoDb) {
+        this.dynamoDb = dynamoDb;
     }
 
     @Override
@@ -88,7 +89,8 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
         switch (resourceType) {
             case "AWS::DynamoDB::Table", "AWS::DynamoDB::GlobalTable" -> CfnDeletes.safeDelete(
                     "DynamoDB table", physicalId,
-                    () -> dynamoDbService.deleteTable(physicalId, region),
+                    // Deletes get no ProvisionContext; the engine and Cloud Control run them as the stack account.
+                    () -> dynamoDb.tables().deleteTable(dynamoDb.scope(region), physicalId),
                     "ResourceNotFoundException");
             // Nothing to derive from the id alone once the attributes are gone; the replica stays.
             case "Custom::DynamoDBReplica" -> LOG.warnv(
@@ -180,24 +182,25 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
             attrDefs.add(new AttributeDefinition("id", "S"));
         }
 
+        Scope scope = new Scope(ctx.accountId(), region);
         TableDefinition table;
         try {
-            table = dynamoDbService.createTable(tableName, keySchema, attrDefs, null, null, gsis, lsis, region);
+            table = dynamoDb.tables().createTable(scope, tableName, keySchema, attrDefs, null, null, gsis, lsis);
         } catch (AwsException e) {
             if (!"ResourceInUseException".equals(e.getErrorCode())) {
                 throw e;
             }
-            table = dynamoDbService.describeTable(tableName, region);
+            table = dynamoDb.tables().describeTable(scope, tableName);
         }
 
         Map<String, String> tags = parseCfnTags(props != null ? props.get("Tags") : null, engine);
         List<String> staleTags = ProvisionContext.staleTagKeys(
-                dynamoDbService.listTagsOfResource(table.getTableArn(), region), tags);
+                dynamoDb.tables().listTagsOfResource(scope, table.getTableArn()), tags);
         if (!staleTags.isEmpty()) {
-            dynamoDbService.untagResource(table.getTableArn(), staleTags, region);
+            dynamoDb.tables().untagResource(scope, table.getTableArn(), staleTags);
         }
         if (!tags.isEmpty()) {
-            dynamoDbService.tagResource(table.getTableArn(), tags, region);
+            dynamoDb.tables().tagResource(scope, table.getTableArn(), tags);
         }
 
         // A template that declares StreamSpecification wants a stream. Unlike the DynamoDB API,
@@ -213,9 +216,9 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
             String viewType = streamSpec.has("StreamViewType")
                     ? engine.resolve(streamSpec.get("StreamViewType"))
                     : null;
-            table = dynamoDbService.enableStream(tableName, viewType, region);
+            table = dynamoDb.tables().enableStream(scope, tableName, viewType);
         } else if (table.isStreamEnabled()) {
-            table = dynamoDbService.disableStream(tableName, region);
+            table = dynamoDb.tables().disableStream(scope, tableName);
         }
 
         r.setPhysicalId(tableName);
@@ -263,11 +266,12 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
             }
         }
 
-        TableDefinition table = dynamoDbService.describeTable(tableName, localRegion);
+        Scope scope = new Scope(ctx.accountId(), localRegion);
+        TableDefinition table = dynamoDb.tables().describeTable(scope, tableName);
         // This resource is a global table, so mark it homed in the deployment region even when it
         // declares no other replica: DescribeTable then lists the home region as an ACTIVE replica,
         // the single-region global table AWS reports (and CDK TableV2 emits by default).
-        dynamoDbService.ensureGlobalTable(tableName, localRegion);
+        dynamoDb.tables().ensureGlobalTable(scope, tableName);
         List<String> existing = table.getReplicaRegions();
         List<String> toAdd = new ArrayList<>();
         for (String replicaRegion : declared) {
@@ -284,7 +288,7 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
         if (toAdd.isEmpty() && toRemove.isEmpty()) {
             return;
         }
-        dynamoDbService.applyReplicaUpdates(tableName, toAdd, toRemove, localRegion);
+        dynamoDb.tables().applyReplicaUpdates(scope, tableName, toAdd, toRemove);
     }
 
     private void provisionReplica(StackResource r, JsonNode props, ProvisionContext ctx) {
@@ -311,8 +315,8 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
                 : List.of();
         // Validate and persist replacement as one operation so an old-replica removal failure
         // cannot leave the new replica applied while the resource still points at the old region.
-        dynamoDbService.applyReplicaUpdates(
-                tableName, List.of(replicaRegion), removeRegions, ctx.region());
+        dynamoDb.tables().applyReplicaUpdates(
+                new Scope(ctx.accountId(), ctx.region()), tableName, List.of(replicaRegion), removeRegions);
         r.setPhysicalId(tableName + "-" + replicaRegion);
         r.getAttributes().put(REPLICA_TABLE_NAME_ATTR, tableName);
         r.getAttributes().put(REPLICA_REGION_ATTR, replicaRegion);
@@ -340,8 +344,9 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
         String removedTableName = tableName;
         String removedRegion = replicaRegion;
         CfnDeletes.safeDelete("DynamoDB replica", removedTableName + "-" + removedRegion,
-                () -> dynamoDbService.applyReplicaUpdates(
-                        removedTableName, List.of(), List.of(removedRegion), region),
+                () -> dynamoDb.tables().applyReplicaUpdates(
+                        // Ambient stack account, as in delete(String, String, String).
+                        dynamoDb.scope(region), removedTableName, List.of(), List.of(removedRegion)),
                 "ResourceNotFoundException");
     }
 

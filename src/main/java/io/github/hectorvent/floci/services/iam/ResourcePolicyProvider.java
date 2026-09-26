@@ -22,4 +22,18 @@ public interface ResourcePolicyProvider {
      * @return policy documents and owning account applying to the resource, or an empty list
      */
     List<ResourcePolicy> getResourcePolicies(String credentialScope, String resourceArn);
+
+    /**
+     * The ARN the resource is actually named by, which policies are matched against. A request's
+     * resource ARN is built in the request's partition; a provider whose resources outlive that
+     * (an S3 bucket reachable from any partition) returns it in the partition the resource lives
+     * in. The default is the ARN unchanged.
+     *
+     * @param credentialScope the signing credential scope, e.g. "s3"
+     * @param resourceArn the resource ARN built from the request
+     * @return the resource ARN policies should see
+     */
+    default String resolveResourceArn(String credentialScope, String resourceArn) {
+        return resourceArn;
+    }
 }

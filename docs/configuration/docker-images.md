@@ -64,6 +64,47 @@ image: floci/floci:nightly
 
 Standard and compat images are published as multi-arch manifests supporting `linux/amd64` and `linux/arm64`. Baseline images are intentionally `linux/arm64` only.
 
+## Verifying Image Signatures
+
+Release images are signed with [cosign](https://docs.sigstore.dev/) in keyless mode: the release workflow trades its GitHub Actions OIDC token for a short-lived Fulcio certificate and records the signature in the Rekor transparency log. There is no public key to distribute: you verify *who* produced the image instead of *which key* signed it.
+
+```sh
+cosign verify \
+  --certificate-identity-regexp '^https://github\.com/floci-io/floci/\.github/workflows/release\.yml@refs/tags/' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  floci/floci:x.y.z
+```
+
+The signing identity is the release workflow's own ref, so the regexp above accepts any release tag. To accept exactly one release, drop the regexp and pin the identity:
+
+```sh
+--certificate-identity 'https://github.com/floci-io/floci/.github/workflows/release.yml@refs/tags/x.y.z'
+```
+
+Both registries carry the same signatures: substitute `public.ecr.aws/floci/floci:x.y.z` and the command is otherwise identical. Tags are mutable, so for a check you can rely on, verify a digest (`floci/floci@sha256:...`) rather than a tag.
+
+Only release images are signed. Nightly images are not.
+
+!!! note "Requires cosign v2.6.3 or later"
+    These signatures use the standardized Sigstore bundle format. cosign v2.6.3 and later (including v3) read it automatically. Older versions cannot verify these signatures.
+
+### Provenance and SBOM Attestations
+
+Release images carry BuildKit provenance (SLSA) and SPDX SBOM attestations, attached to the manifest index as separate manifests. Signing is recursive, so the index, every per-platform image, and every attestation manifest are each signed individually. Tampering with an attestation changes its digest, which changes the index descriptor pointing at it, which changes the signed index digest.
+
+List the attached manifests and verify one by its own digest:
+
+```sh
+docker buildx imagetools inspect floci/floci:x.y.z --format '{{json .Manifest}}'
+
+cosign verify \
+  --certificate-identity-regexp '^https://github\.com/floci-io/floci/\.github/workflows/release\.yml@refs/tags/' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  floci/floci@sha256:<attestation-manifest-digest>
+```
+
+Use `cosign verify`, not `cosign verify-attestation`. The latter targets cosign's own DSSE-wrapped attestations; BuildKit's attestations are plain in-toto manifests with no signature envelope of their own, so they are signed, and verified, by digest.
+
 ## Raspberry Pi 4 and older ARM64 CPUs
 
 If the standard ARM64 image exits with `CPU features [FP, ASIMD, CRC32, LSE] not supported`, use the `-baseline` release tag. The baseline image is compiled with GraalVM `-march=armv8-a`, so it does not require LSE. For example, use `floci/floci:latest-baseline` or pin `floci/floci:x.y.z-baseline`.

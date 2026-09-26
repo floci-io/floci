@@ -106,7 +106,7 @@ public class CfnResourceDispatcher {
                 resource.setStatusReason(unsupportedResourceTypeMessage(resourceType)
                         + " It was stubbed and nothing was created for it.");
                 resource.setPhysicalId(logicalId + "-" + UUID.randomUUID().toString().substring(0, 8));
-                resource.getAttributes().put("Arn", "arn:aws:stub:::" + logicalId);
+                resource.getAttributes().put("Arn", "arn:aws:stub:::" + logicalId); // partition-literal: stub marker for an unowned type, asserted by tests
             }
             resource.setStatus("CREATE_COMPLETE");
         } catch (Exception e) {

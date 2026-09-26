@@ -31,6 +31,7 @@ import io.github.hectorvent.floci.services.glue.model.PartitionIndexDescriptor;
 import io.github.hectorvent.floci.services.glue.model.S3Target;
 import io.github.hectorvent.floci.services.glue.model.SchemaReference;
 import io.github.hectorvent.floci.services.glue.model.SecurityConfiguration;
+import io.github.hectorvent.floci.services.glue.model.Trigger;
 import io.github.hectorvent.floci.services.glue.model.StorageDescriptor;
 import io.github.hectorvent.floci.services.glue.model.Table;
 import io.github.hectorvent.floci.services.glue.model.UserDefinedFunction;
@@ -110,6 +111,7 @@ class GlueServiceTest {
                 new InMemoryStorage<String, GluePolicy>(),
                 new InMemoryStorage<String, DataCatalogEncryptionSettings>(),
                 new InMemoryStorage<String, SecurityConfiguration>(),
+                new InMemoryStorage<String, Trigger>(),
                 schemaRegistryService, regionResolver, new ResourceGroupsTaggingService(null), kmsService);
         glueService.createDatabase(new Database("db1"));
     }

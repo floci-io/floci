@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
+import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
@@ -29,7 +30,8 @@ import java.util.Map;
 
 /**
  * Delivers the result of an asynchronous Lambda invocation to the {@code OnSuccess} or
- * {@code OnFailure} destination of the function's event invoke configuration.
+ * {@code OnFailure} destination of the function's event invoke configuration, or its configured
+ * dead-letter queue when no failure destination is set.
  *
  * <p>Every destination carries the same asynchronous invocation record AWS sends, the envelope
  * around the event and the response that real CDK applications write EventBridge rules against
@@ -43,8 +45,8 @@ import java.util.Map;
  * services into the executor eagerly would close a CDI cycle. The lookup happens per delivery,
  * which is also when a destination is first known to exist.
  *
- * <p>Retries and event age are not applied, so a failed invocation reaches {@code OnFailure}
- * once and its record's {@code approximateInvokeCount} is always 1.
+ * <p>Retries and event age are applied before delivery to {@code OnFailure}, so its record's
+ * {@code approximateInvokeCount} reflects the attempts executed.
  */
 @ApplicationScoped
 public class AsyncInvokeDestinationRouter {
@@ -66,9 +68,11 @@ public class AsyncInvokeDestinationRouter {
     private static final String SUCCESS_DETAIL_TYPE = "Lambda Function Invocation Result - Success";
     private static final String FAILURE_DETAIL_TYPE = "Lambda Function Invocation Result - Failure";
     private static final String SUCCESS_CONDITION = "Success";
+    // AWS documents RetriesExhausted in its example, but does not establish a distinct condition
+    // for maximum-age expiration, so Floci keeps the documented condition for both failures.
     private static final String FAILURE_CONDITION = "RetriesExhausted";
     private static final String DEFAULT_VERSION = "$LATEST";
-    /** Floci does not retry a failed asynchronous invocation, so every record is the first attempt. */
+    /** Default fallback invoke count when not explicitly provided by the caller. */
     private static final int APPROXIMATE_INVOKE_COUNT = 1;
 
     private final Instance<LambdaService> lambdaService;
@@ -108,12 +112,27 @@ public class AsyncInvokeDestinationRouter {
      *                   {@link LambdaInvocationChain} instead of running forever
      */
     public void route(LambdaFunction fn, byte[] requestPayload, InvokeResult result, int chainDepth) {
+        route(fn, requestPayload, result, APPROXIMATE_INVOKE_COUNT, chainDepth, null);
+    }
+
+    public void route(LambdaFunction fn, byte[] requestPayload, InvokeResult result, int chainDepth,
+                      String invokedQualifier) {
+        route(fn, requestPayload, result, APPROXIMATE_INVOKE_COUNT, chainDepth, invokedQualifier);
+    }
+
+    public void route(LambdaFunction fn, byte[] requestPayload, InvokeResult result,
+                      int approximateInvokeCount, int chainDepth) {
+        route(fn, requestPayload, result, approximateInvokeCount, chainDepth, null);
+    }
+
+    public void route(LambdaFunction fn, byte[] requestPayload, InvokeResult result,
+                      int approximateInvokeCount, int chainDepth, String invokedQualifier) {
         // A runtime that never started, timed out, or crashed is reported as a function error by
         // the executor, so this one test covers a handler error and a failed runtime alike.
         boolean failed = result.getFunctionError() != null;
         FunctionEventInvokeConfig.Destination destination;
         try {
-            destination = destinationFor(fn, failed);
+            destination = destinationFor(fn, failed, invokedQualifier);
         } catch (Exception e) {
             LOG.warnv("Could not read the event invoke configuration of {0}: {1}",
                     fn.getFunctionArn(), e.getMessage());
@@ -121,20 +140,96 @@ public class AsyncInvokeDestinationRouter {
         }
         if (destination == null || destination.getDestination() == null
                 || destination.getDestination().isBlank()) {
+            if (failed && fn.getDeadLetterTargetArn() != null && !fn.getDeadLetterTargetArn().isBlank()) {
+                deliverToDeadLetterQueue(fn, requestPayload, result);
+            }
             return;
         }
 
         String arn = destination.getDestination();
         try {
-            deliver(arn, fn, buildRecord(fn, requestPayload, result, failed), failed, chainDepth);
+            deliver(arn, fn, buildRecord(fn, requestPayload, result, failed, approximateInvokeCount),
+                    failed, chainDepth);
         } catch (Exception e) {
             LOG.warnv("Failed to deliver the Lambda {0} destination record for {1} to {2}: {3}",
                     side(failed), fn.getFunctionArn(), arn, e.getMessage());
         }
     }
 
-    private FunctionEventInvokeConfig.Destination destinationFor(LambdaFunction fn, boolean failed) {
-        FunctionEventInvokeConfig config = lambdaService.get().findEventInvokeConfig(fn).orElse(null);
+    private void deliverToDeadLetterQueue(LambdaFunction fn, byte[] requestPayload, InvokeResult result) {
+        String arn = fn.getDeadLetterTargetArn();
+        if (!AwsArnUtils.isArn(arn)) {
+            LOG.warnv("Invalid DeadLetterConfig TargetArn: {0}", arn);
+            return;
+        }
+
+        String destinationAccount = AwsArnUtils.accountOrDefault(arn, fn.getAccountId());
+        String region = AwsArnUtils.regionOrDefault(arn,
+                AwsArnUtils.regionOrDefault(fn.getFunctionArn(), null));
+        String body = requestPayload != null ? new String(requestPayload, StandardCharsets.UTF_8) : "";
+        String requestId = result.getRequestId() != null ? result.getRequestId() : "";
+        String errorCode = String.valueOf(result.getStatusCode());
+        String errorMessage = extractErrorMessage(result);
+
+        Map<String, MessageAttributeValue> attributes = new LinkedHashMap<>();
+        attributes.put("RequestID", new MessageAttributeValue(requestId, "String"));
+        attributes.put("ErrorCode", new MessageAttributeValue(errorCode, "Number"));
+        attributes.put("ErrorMessage", new MessageAttributeValue(errorMessage, "String"));
+
+        try {
+            boolean delivered = switch (AwsArnUtils.parse(arn).service()) {
+                case "sqs" -> {
+                    RequestScopes.runAs(destinationAccount, () ->
+                            sqsService.get().sendMessage(AwsArnUtils.arnToQueueUrl(arn, baseUrl),
+                                    body, 0, null, null, attributes, region));
+                    yield true;
+                }
+                case "sns" -> {
+                    RequestScopes.runAs(destinationAccount, () ->
+                            snsService.get().publish(arn, null, null, body, "Lambda", attributes, region));
+                    yield true;
+                }
+                default -> {
+                    LOG.warnv("Unsupported DeadLetterConfig service, dropping the record: {0}", arn);
+                    yield false;
+                }
+            };
+            if (delivered) {
+                LOG.debugv("Lambda DeadLetterConfig delivered to {0}", arn);
+            }
+        } catch (Exception e) {
+            LOG.warnv("Failed to deliver the Lambda DeadLetterConfig for {0} to {1}: {2}",
+                    fn.getFunctionArn(), arn, e.getMessage());
+        }
+    }
+
+    private String extractErrorMessage(InvokeResult result) {
+        String message = null;
+        if (result.getPayload() != null && result.getPayload().length > 0) {
+            try {
+                JsonNode node = objectMapper.readTree(result.getPayload());
+                if (node.hasNonNull("errorMessage")) {
+                    message = node.get("errorMessage").asText();
+                }
+            } catch (Exception ignored) {
+                // Non-JSON payloads fall back to the function error below.
+            }
+        }
+        if (message == null) {
+            message = result.getFunctionError() != null ? result.getFunctionError() : "Unknown error";
+        }
+        byte[] bytes = message.getBytes(StandardCharsets.UTF_8);
+        if (bytes.length > 1024) {
+            message = new String(bytes, 0, 1024, StandardCharsets.UTF_8);
+        }
+        return message;
+    }
+
+    private FunctionEventInvokeConfig.Destination destinationFor(LambdaFunction fn, boolean failed,
+                                                                  String invokedQualifier) {
+        FunctionEventInvokeConfig config = (invokedQualifier == null
+                ? lambdaService.get().findEventInvokeConfig(fn)
+                : lambdaService.get().findEventInvokeConfig(fn, invokedQualifier)).orElse(null);
         if (config == null || config.getDestinationConfig() == null) {
             return null;
         }
@@ -160,7 +255,7 @@ public class AsyncInvokeDestinationRouter {
      * function ARN carries the executed version, as it does in a real record.
      */
     private ObjectNode buildRecord(LambdaFunction fn, byte[] requestPayload,
-                                   InvokeResult result, boolean failed) {
+                                   InvokeResult result, boolean failed, int approximateInvokeCount) {
         String version = executedVersion(fn);
         ObjectNode record = objectMapper.createObjectNode();
         record.put("version", RECORD_VERSION);
@@ -170,7 +265,7 @@ public class AsyncInvokeDestinationRouter {
         requestContext.put("requestId", result.getRequestId());
         requestContext.put("functionArn", qualifiedFunctionArn(fn, version));
         requestContext.put("condition", failed ? FAILURE_CONDITION : SUCCESS_CONDITION);
-        requestContext.put("approximateInvokeCount", APPROXIMATE_INVOKE_COUNT);
+        requestContext.put("approximateInvokeCount", approximateInvokeCount);
 
         record.set("requestPayload", payloadNode(requestPayload));
 

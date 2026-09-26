@@ -219,7 +219,7 @@ Supported rule behavior:
 - `sqs` action sends to an SQS queue through Floci's SQS service boundary.
 - `sns` action publishes to an SNS topic through Floci's SNS service boundary.
 - `s3` action writes to the configured bucket/key through Floci's S3 service boundary.
-- `dynamoDBv2` action writes JSON object fields as DynamoDB attribute values through Floci's DynamoDB service boundary.
+- `dynamoDBv2` action writes JSON object fields as DynamoDB attribute values through Floci's DynamoDB service boundary, as the account that owns the rule.
 - `kinesis` action puts the document into a Kinesis stream through Floci's Kinesis service boundary.
 - `lambda` action invokes the configured function ARN through Floci's Lambda service boundary.
 - `firehose` action puts the document into a Kinesis Data Firehose delivery stream through Floci's Firehose service boundary, with `separator` appended to each record; the separator must be `\n`, `\t`, `\r\n` or `,`, as the API model requires, or the rule is rejected with `InvalidRequestException`. With `batchMode`, a JSON array document becomes one record per element.
@@ -282,6 +282,8 @@ Semantics:
   one (`'10' > 9` is true); any other operand makes the comparison undefined.
 - Payload numbers are read exactly, never through a double, so `9007199254740993.0`, `1e-400` and
   `0.30000000000000004` compare as written, at any size or precision, as AWS's Decimal does.
+- Number literals may carry an exponent (`1e5`, `1E-3`, `-2.411E247`), and an integer beyond 64
+  bits (`99999999999999999999`) is kept exact as a decimal.
 - `AND`, `OR` and `NOT` take booleans or the strings `'true'` and `'false'` in any case. Any other
   operand makes the result undefined.
 - `startswith` and `endswith` convert numbers, booleans, arrays and objects to their string form

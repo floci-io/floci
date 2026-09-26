@@ -14,22 +14,27 @@ import io.github.hectorvent.floci.services.glue.model.Column;
 import io.github.hectorvent.floci.services.glue.model.Connection;
 import io.github.hectorvent.floci.services.glue.model.ConnectionInput;
 import io.github.hectorvent.floci.services.glue.model.ConnectionPasswordEncryption;
-import io.github.hectorvent.floci.services.glue.model.DataCatalogEncryptionSettings;
-import io.github.hectorvent.floci.services.glue.model.EncryptionAtRest;
-import io.github.hectorvent.floci.services.glue.model.GluePolicy;
 import io.github.hectorvent.floci.services.glue.model.Crawler;
 import io.github.hectorvent.floci.services.glue.model.CrawlerTargets;
+import io.github.hectorvent.floci.services.glue.model.DataCatalogEncryptionSettings;
 import io.github.hectorvent.floci.services.glue.model.Database;
+import io.github.hectorvent.floci.services.glue.model.EncryptionAtRest;
+import io.github.hectorvent.floci.services.glue.model.GluePolicy;
 import io.github.hectorvent.floci.services.glue.model.Job;
 import io.github.hectorvent.floci.services.glue.model.JobUpdate;
 import io.github.hectorvent.floci.services.glue.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.glue.model.Partition;
 import io.github.hectorvent.floci.services.glue.model.PartitionIndex;
 import io.github.hectorvent.floci.services.glue.model.PartitionIndexDescriptor;
+import io.github.hectorvent.floci.services.glue.model.Predicate;
+import io.github.hectorvent.floci.services.glue.model.Schedule;
 import io.github.hectorvent.floci.services.glue.model.SchemaReference;
 import io.github.hectorvent.floci.services.glue.model.SecurityConfiguration;
 import io.github.hectorvent.floci.services.glue.model.StorageDescriptor;
 import io.github.hectorvent.floci.services.glue.model.Table;
+import io.github.hectorvent.floci.services.glue.model.Trigger;
+import io.github.hectorvent.floci.services.glue.model.TriggerAction;
+import io.github.hectorvent.floci.services.glue.model.TriggerCondition;
 import io.github.hectorvent.floci.services.glue.model.UserDefinedFunction;
 import io.github.hectorvent.floci.services.glue.schemaregistry.GlueSchemaRegistryService;
 import io.github.hectorvent.floci.services.glue.schemaregistry.SchemaToColumnsConverter;
@@ -54,6 +59,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Matcher;
@@ -148,6 +154,18 @@ public class GlueService {
     private static final String INDEX_STATUS_ACTIVE = "ACTIVE";
     private static final String INDEX_STATUS_DELETING = "DELETING";
 
+    private static final String SCHEDULE_SCHEDULED = "SCHEDULED";
+    private static final String SCHEDULE_NOT_SCHEDULED = "NOT_SCHEDULED";
+    private static final Pattern CRON_FIELD = Pattern.compile("[0-9A-Za-z*?/,#-]+");
+    private static final Set<String> TRIGGER_TYPES = Set.of("SCHEDULED", "CONDITIONAL", "ON_DEMAND", "EVENT");
+    // The job run and crawl states a trigger condition may name (JobRunState / CrawlState in the model
+    // allow more, but only final states are meaningful as conditions).
+    private static final Set<String> CONDITION_JOB_STATES = Set.of("SUCCEEDED", "STOPPED", "FAILED", "TIMEOUT");
+    private static final Set<String> CONDITION_CRAWL_STATES = Set.of("SUCCEEDED", "CANCELLED", "FAILED");
+    private static final int MAX_TRIGGERS_PAGE_SIZE = 200;
+    // BatchGetCrawlers takes a CrawlerNameList, which the API model caps at 100 names.
+    private static final int MAX_BATCH_GET_CRAWLERS = 100;
+
     private final StorageBackend<String, Database> databaseStore;
     private final StorageBackend<String, Table> tableStore;
     private final StorageBackend<String, Table> tableVersionStore;
@@ -163,6 +181,7 @@ public class GlueService {
     private final StorageBackend<String, GluePolicy> resourcePolicyStore;
     private final StorageBackend<String, DataCatalogEncryptionSettings> encryptionSettingsStore;
     private final StorageBackend<String, SecurityConfiguration> securityConfigurationStore;
+    private final StorageBackend<String, Trigger> triggerStore;
     private final GlueSchemaRegistryService schemaRegistryService;
     private final RegionResolver regionResolver;
     private final ResourceGroupsTaggingService resourceGroupsTaggingService;
@@ -193,6 +212,7 @@ public class GlueService {
                 "glue", "catalog_encryption_settings.json", new TypeReference<>() {});
         this.securityConfigurationStore = storageFactory.create(
             "glue", "security_configurations.json", new TypeReference<>() {});
+        this.triggerStore = storageFactory.create("glue", "triggers.json", new TypeReference<>() {});
         this.schemaRegistryService = schemaRegistryService;
         this.regionResolver = regionResolver;
         this.resourceGroupsTaggingService = resourceGroupsTaggingService;
@@ -214,6 +234,7 @@ public class GlueService {
                 StorageBackend<String, GluePolicy> resourcePolicyStore,
                 StorageBackend<String, DataCatalogEncryptionSettings> encryptionSettingsStore,
                 StorageBackend<String, SecurityConfiguration> securityConfigurationStore,
+                StorageBackend<String, Trigger> triggerStore,
                 GlueSchemaRegistryService schemaRegistryService,
                 RegionResolver regionResolver,
                 ResourceGroupsTaggingService resourceGroupsTaggingService,
@@ -233,6 +254,7 @@ public class GlueService {
         this.resourcePolicyStore = resourcePolicyStore;
         this.encryptionSettingsStore = encryptionSettingsStore;
         this.securityConfigurationStore = securityConfigurationStore;
+        this.triggerStore = triggerStore;
         this.schemaRegistryService = schemaRegistryService;
         this.regionResolver = regionResolver;
         this.resourceGroupsTaggingService = resourceGroupsTaggingService;
@@ -1493,6 +1515,10 @@ public class GlueService {
         return regionResolver.buildArn("glue", region, "crawler/" + crawlerName);
     }
 
+    private String triggerArn(String region, String triggerName) {
+        return regionResolver.buildArn("glue", region, "trigger/" + triggerName);
+    }
+
     private static Pattern compileFunctionPattern(String pattern) {
         if (pattern == null) {
             return Pattern.compile(".*");
@@ -1726,6 +1752,46 @@ public class GlueService {
         List<Job> all = jobStore.scan(k -> true);
         all.sort(Comparator.comparing(Job::getName));
         return paginate(all, maxResults, nextToken);
+    }
+
+    public Page<String> listJobs(Integer maxResults, String nextToken, Map<String, String> tags, String region) {
+        List<String> names = new ArrayList<>();
+        for (Job job : jobStore.scan(k -> true)) {
+            if (tags == null || tags.isEmpty() || hasTags(jobArn(region, job.getName()), tags, region)) {
+                names.add(job.getName());
+            }
+        }
+        names.sort(Comparator.naturalOrder());
+        return paginate(names, maxResults, nextToken);
+    }
+
+    public BatchGetJobsResult batchGetJobs(List<String> names) {
+        if (names == null || names.isEmpty()) {
+            throw new AwsException("InvalidInputException", "JobNames is required.", 400);
+        }
+        List<Job> jobs = new ArrayList<>();
+        List<String> notFound = new ArrayList<>();
+        for (String name : names) {
+            Optional<Job> job = name == null ? Optional.empty() : jobStore.get(name);
+            if (job.isPresent()) {
+                jobs.add(job.get());
+            } else {
+                notFound.add(name);
+            }
+        }
+        return new BatchGetJobsResult(jobs, notFound);
+    }
+
+    public record BatchGetJobsResult(List<Job> jobs, List<String> jobsNotFound) {}
+
+    private boolean hasTags(String arn, Map<String, String> wanted, String region) {
+        Map<String, String> actual = resourceGroupsTaggingService.getTagsForResource(region, arn);
+        for (Map.Entry<String, String> tag : wanted.entrySet()) {
+            if (!Objects.equals(actual.get(tag.getKey()), tag.getValue())) {
+                return false;
+            }
+        }
+        return true;
     }
 
     public void updateJob(String name, JobUpdate update) {
@@ -1994,6 +2060,316 @@ public class GlueService {
         List<Crawler> all = crawlerStore.scan(k -> true);
         all.sort(Comparator.comparing(Crawler::getName));
         return paginate(all, maxResults, nextToken);
+    }
+
+    public Page<String> listCrawlers(Integer maxResults, String nextToken, Map<String, String> tags,
+                                     String region) {
+        List<String> names = new ArrayList<>();
+        for (Crawler crawler : crawlerStore.scan(k -> true)) {
+            if (tags == null || tags.isEmpty() || hasTags(crawlerArn(region, crawler.getName()), tags, region)) {
+                names.add(crawler.getName());
+            }
+        }
+        names.sort(Comparator.naturalOrder());
+        return paginate(names, maxResults, nextToken);
+    }
+
+    public BatchGetCrawlersResult batchGetCrawlers(List<String> names) {
+        if (names == null) {
+            throw new AwsException("InvalidInputException", "CrawlerNames is required.", 400);
+        }
+        if (names.size() > MAX_BATCH_GET_CRAWLERS) {
+            throw new AwsException("InvalidInputException",
+                    "CrawlerNames must contain at most " + MAX_BATCH_GET_CRAWLERS + " names.", 400);
+        }
+        List<Crawler> crawlers = new ArrayList<>();
+        List<String> notFound = new ArrayList<>();
+        for (String name : names) {
+            Optional<Crawler> crawler = name == null ? Optional.empty() : crawlerStore.get(name);
+            if (crawler.isPresent()) {
+                crawlers.add(crawler.get());
+            } else {
+                notFound.add(name);
+            }
+        }
+        return new BatchGetCrawlersResult(crawlers, notFound);
+    }
+
+    public record BatchGetCrawlersResult(List<Crawler> crawlers, List<String> crawlersNotFound) {}
+
+    public void updateCrawlerSchedule(String name, String expression) {
+        validateRequired(name, "CrawlerName");
+        Crawler crawler = getCrawler(name);
+        if (expression == null || expression.isBlank()) {
+            crawler.setSchedule(null);
+        } else {
+            validateCronExpression(expression);
+            Schedule schedule = crawler.getSchedule() != null ? crawler.getSchedule() : new Schedule();
+            schedule.setScheduleExpression(expression);
+            if (schedule.getState() == null) {
+                schedule.setState(SCHEDULE_SCHEDULED);
+            }
+            crawler.setSchedule(schedule);
+        }
+        crawler.setLastUpdated(Instant.now());
+        crawlerStore.put(name, crawler);
+    }
+
+    /**
+     * Glue schedules are AWS cron expressions: cron(Minutes Hours Day-of-month Month Day-of-week Year),
+     * with {@code ?} in exactly one of the two day fields.
+     */
+    static void validateCronExpression(String expression) {
+        String message = "Schedule must be a cron expression, for example cron(15 12 * * ? *).";
+        if (expression == null || !expression.startsWith("cron(") || !expression.endsWith(")")) {
+            throw new AwsException("InvalidInputException", message, 400);
+        }
+        String[] fields = expression.substring(5, expression.length() - 1).trim().split("\\s+");
+        if (fields.length != 6) {
+            throw new AwsException("InvalidInputException", message, 400);
+        }
+        for (String field : fields) {
+            if (!CRON_FIELD.matcher(field).matches()) {
+                throw new AwsException("InvalidInputException", message, 400);
+            }
+        }
+        if ("?".equals(fields[2]) == "?".equals(fields[4])) {
+            throw new AwsException("InvalidInputException",
+                    "Exactly one of day-of-month and day-of-week must be '?' in " + expression, 400);
+        }
+    }
+
+    public void startCrawlerSchedule(String name) {
+        validateRequired(name, "CrawlerName");
+        Crawler crawler = getCrawler(name);
+        Schedule schedule = crawler.getSchedule();
+        if (schedule == null || schedule.getScheduleExpression() == null) {
+            throw new AwsException("NoScheduleException", "Crawler " + name + " has no schedule.", 400);
+        }
+        if (SCHEDULE_SCHEDULED.equals(schedule.getState())) {
+            throw new AwsException("SchedulerRunningException",
+                    "The schedule of crawler " + name + " is already running.", 400);
+        }
+        schedule.setState(SCHEDULE_SCHEDULED);
+        crawlerStore.put(name, crawler);
+    }
+
+    public void stopCrawlerSchedule(String name) {
+        validateRequired(name, "CrawlerName");
+        Crawler crawler = getCrawler(name);
+        Schedule schedule = crawler.getSchedule();
+        if (schedule == null || !SCHEDULE_SCHEDULED.equals(schedule.getState())) {
+            throw new AwsException("SchedulerNotRunningException",
+                    "The schedule of crawler " + name + " is not running.", 400);
+        }
+        schedule.setState(SCHEDULE_NOT_SCHEDULED);
+        crawlerStore.put(name, crawler);
+    }
+
+    // ---- Triggers ---------------------------------------------------------------------------
+
+    public void createTrigger(Trigger trigger, Map<String, String> tags, String region) {
+        validateRequired(trigger.getName(), "Name");
+        validateRequired(trigger.getType(), "Type");
+        if (!TRIGGER_TYPES.contains(trigger.getType())) {
+            throw new AwsException("InvalidInputException", "Invalid trigger type: " + trigger.getType(), 400);
+        }
+        if (trigger.getWorkflowName() != null) {
+            throw new AwsException("EntityNotFoundException",
+                    "Workflow " + trigger.getWorkflowName() + " not found.", 400);
+        }
+        if ("EVENT".equals(trigger.getType())) {
+            throw new AwsException("InvalidInputException", "An EVENT trigger must belong to a workflow.", 400);
+        }
+        validateTriggerDefinition(trigger);
+        String name = trigger.getName();
+        if (triggerStore.get(name).isPresent()) {
+            throw new AwsException("AlreadyExistsException", "Trigger " + name + " already exists.", 400);
+        }
+        triggerStore.put(name, trigger);
+        if (tags != null && !tags.isEmpty()) {
+            resourceGroupsTaggingService.tagResources(List.of(triggerArn(region, name)), tags, region);
+        }
+        LOG.infov("Created Glue trigger {0}", name);
+    }
+
+    public Trigger getTrigger(String name) {
+        validateRequired(name, "Name");
+        return triggerStore.get(name)
+                .orElseThrow(() -> new AwsException("EntityNotFoundException", "Trigger " + name + " not found.", 400));
+    }
+
+    public List<Trigger> allTriggers() {
+        List<Trigger> triggers = triggerStore.scan(k -> true);
+        triggers.sort(Comparator.comparing(Trigger::getName));
+        return triggers;
+    }
+
+    public void putTrigger(Trigger trigger) {
+        triggerStore.put(trigger.getName(), trigger);
+    }
+
+    /**
+     * GetTriggers. With DependentJobName, the triggers that can start that job; AWS documents that
+     * all triggers are returned when none can.
+     */
+    public Page<Trigger> getTriggers(String dependentJobName, Integer maxResults, String nextToken) {
+        if (maxResults != null && (maxResults < 1 || maxResults > MAX_TRIGGERS_PAGE_SIZE)) {
+            throw new AwsException("InvalidInputException",
+                    "MaxResults must be between 1 and " + MAX_TRIGGERS_PAGE_SIZE, 400);
+        }
+        return paginate(triggersStarting(dependentJobName), maxResults, nextToken);
+    }
+
+    public Page<String> listTriggers(String dependentJobName, Integer maxResults, String nextToken,
+                                     Map<String, String> tags, String region) {
+        List<String> names = new ArrayList<>();
+        for (Trigger trigger : triggersStarting(dependentJobName)) {
+            if (tags == null || tags.isEmpty() || hasTags(triggerArn(region, trigger.getName()), tags, region)) {
+                names.add(trigger.getName());
+            }
+        }
+        return paginate(names, maxResults, nextToken);
+    }
+
+    public BatchGetTriggersResult batchGetTriggers(List<String> names) {
+        if (names == null || names.isEmpty()) {
+            throw new AwsException("InvalidInputException", "TriggerNames is required.", 400);
+        }
+        List<Trigger> triggers = new ArrayList<>();
+        List<String> notFound = new ArrayList<>();
+        for (String name : names) {
+            Optional<Trigger> trigger = name == null ? Optional.empty() : triggerStore.get(name);
+            if (trigger.isPresent()) {
+                triggers.add(trigger.get());
+            } else {
+                notFound.add(name);
+            }
+        }
+        return new BatchGetTriggersResult(triggers, notFound);
+    }
+
+    public record BatchGetTriggersResult(List<Trigger> triggers, List<String> triggersNotFound) {}
+
+    /**
+     * Applies the members a TriggerUpdate sets; the rest of the trigger is kept. The update is built
+     * and validated on a copy, so a rejected update leaves the stored trigger as it was.
+     */
+    public Trigger updateTrigger(String name, Trigger update) {
+        validateRequired(update, "TriggerUpdate");
+        Trigger stored = getTrigger(name);
+        Trigger trigger = new Trigger();
+        trigger.setName(stored.getName());
+        trigger.setWorkflowName(stored.getWorkflowName());
+        trigger.setType(stored.getType());
+        trigger.setState(stored.getState());
+        trigger.setDescription(stored.getDescription());
+        trigger.setSchedule(stored.getSchedule());
+        trigger.setActions(stored.getActions());
+        trigger.setPredicate(stored.getPredicate());
+        trigger.setEventBatchingCondition(stored.getEventBatchingCondition());
+        if (update.getDescription() != null) {
+            trigger.setDescription(update.getDescription());
+        }
+        if (update.getSchedule() != null) {
+            trigger.setSchedule(update.getSchedule());
+        }
+        if (update.getActions() != null) {
+            trigger.setActions(update.getActions());
+        }
+        if (update.getPredicate() != null) {
+            trigger.setPredicate(update.getPredicate());
+        }
+        if (update.getEventBatchingCondition() != null) {
+            trigger.setEventBatchingCondition(update.getEventBatchingCondition());
+        }
+        validateTriggerDefinition(trigger);
+        triggerStore.put(name, trigger);
+        return trigger;
+    }
+
+    /** DeleteTrigger declares no EntityNotFoundException: deleting a missing trigger succeeds. */
+    public void deleteTrigger(String name, String region) {
+        validateRequired(name, "Name");
+        triggerStore.delete(name);
+        resourceGroupsTaggingService.deleteResources(List.of(triggerArn(region, name)), region);
+    }
+
+    private List<Trigger> triggersStarting(String dependentJobName) {
+        List<Trigger> all = allTriggers();
+        if (dependentJobName == null) {
+            return all;
+        }
+        getJob(dependentJobName);
+        List<Trigger> starting = new ArrayList<>();
+        for (Trigger trigger : all) {
+            for (TriggerAction action : trigger.getActions()) {
+                if (dependentJobName.equals(action.getJobName())) {
+                    starting.add(trigger);
+                    break;
+                }
+            }
+        }
+        return starting.isEmpty() ? all : starting;
+    }
+
+    private void validateTriggerDefinition(Trigger trigger) {
+        List<TriggerAction> actions = trigger.getActions();
+        if (actions == null || actions.isEmpty()) {
+            throw new AwsException("InvalidInputException", "Actions must contain at least one action.", 400);
+        }
+        for (TriggerAction action : actions) {
+            boolean hasJob = action.getJobName() != null;
+            boolean hasCrawler = action.getCrawlerName() != null;
+            if (hasJob == hasCrawler) {
+                throw new AwsException("InvalidInputException",
+                        "Each action must name exactly one of JobName and CrawlerName.", 400);
+            }
+            if (hasJob) {
+                getJob(action.getJobName());
+            } else {
+                getCrawler(action.getCrawlerName());
+            }
+            if (action.getTimeout() != null && action.getTimeout() < 1) {
+                throw new AwsException("InvalidInputException", "Timeout must be at least 1 minute.", 400);
+            }
+        }
+        if ("SCHEDULED".equals(trigger.getType())) {
+            validateCronExpression(trigger.getSchedule());
+        }
+        if ("CONDITIONAL".equals(trigger.getType())) {
+            validatePredicate(trigger.getPredicate());
+        }
+    }
+
+    private void validatePredicate(Predicate predicate) {
+        if (predicate == null || predicate.getConditions() == null || predicate.getConditions().isEmpty()) {
+            throw new AwsException("InvalidInputException", "A CONDITIONAL trigger needs a predicate.", 400);
+        }
+        if (predicate.getLogical() != null && !Set.of("AND", "ANY").contains(predicate.getLogical())) {
+            throw new AwsException("InvalidInputException", "Logical must be AND or ANY.", 400);
+        }
+        for (TriggerCondition condition : predicate.getConditions()) {
+            if (condition.getLogicalOperator() != null && !"EQUALS".equals(condition.getLogicalOperator())) {
+                throw new AwsException("InvalidInputException", "LogicalOperator must be EQUALS.", 400);
+            }
+            if (condition.getJobName() != null) {
+                if (condition.getState() == null || !CONDITION_JOB_STATES.contains(condition.getState())) {
+                    throw new AwsException("InvalidInputException",
+                            "A job condition's State must be one of " + CONDITION_JOB_STATES, 400);
+                }
+                getJob(condition.getJobName());
+            } else if (condition.getCrawlerName() != null) {
+                if (condition.getCrawlState() == null || !CONDITION_CRAWL_STATES.contains(condition.getCrawlState())) {
+                    throw new AwsException("InvalidInputException",
+                            "A crawler condition's CrawlState must be one of " + CONDITION_CRAWL_STATES, 400);
+                }
+                getCrawler(condition.getCrawlerName());
+            } else {
+                throw new AwsException("InvalidInputException",
+                        "Each condition must name a JobName or a CrawlerName.", 400);
+            }
+        }
     }
 
     public void updateCrawler(Crawler update) {
@@ -2451,6 +2827,9 @@ public class GlueService {
             } else if (resource.startsWith("crawler/")) {
                 getCrawler(resource.substring(8));
                 return;
+            } else if (resource.startsWith("trigger/")) {
+                getTrigger(resource.substring(8));
+                return;
             } else if (resource.startsWith("connection/")) {
                 getConnection(resource.substring(11), false);
                 return;
@@ -2476,7 +2855,7 @@ public class GlueService {
 
     public record Page<T>(List<T> items, String nextToken) {}
 
-    private <T> Page<T> paginate(List<T> all, Integer maxResults, String nextToken) {
+    <T> Page<T> paginate(List<T> all, Integer maxResults, String nextToken) {
         if (maxResults != null && (maxResults < 1 || maxResults > 1000)) {
             throw new AwsException("InvalidInputException", "MaxResults must be between 1 and 1000", 400);
         }

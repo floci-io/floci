@@ -309,4 +309,85 @@ class S3ObjectLockIntegrationTest {
             .statusCode(404)
             .body(containsString("NoSuchBucket"));
     }
+
+    // --- locks protect versions, not keys ---
+
+    @Test
+    @Order(20)
+    void simpleDeleteOfLegalHoldObjectCreatesDeleteMarker() {
+        String versionId = given()
+            .header("x-amz-object-lock-legal-hold", "ON")
+            .body("held")
+        .when()
+            .put("/" + LOCK_BUCKET + "/held-object.txt")
+        .then()
+            .statusCode(200)
+            .extract().header("x-amz-version-id");
+
+        given()
+        .when()
+            .delete("/" + LOCK_BUCKET + "/held-object.txt")
+        .then()
+            .statusCode(204)
+            .header("x-amz-delete-marker", "true");
+
+        given()
+        .when()
+            .get("/" + LOCK_BUCKET + "/held-object.txt?legal-hold&versionId=" + versionId)
+        .then()
+            .statusCode(200)
+            .body(containsString("<Status>ON</Status>"));
+
+        given()
+            .header("x-amz-bypass-governance-retention", "true")
+        .when()
+            .delete("/" + LOCK_BUCKET + "/held-object.txt?versionId=" + versionId)
+        .then()
+            .statusCode(403)
+            .body(containsString("AccessDenied"));
+    }
+
+    @Test
+    @Order(21)
+    void putAndCopyOverGovernanceObjectCreateNewVersions() {
+        String versionId = given()
+            .header("x-amz-object-lock-mode", "GOVERNANCE")
+            .header("x-amz-object-lock-retain-until-date", "2099-01-01T00:00:00Z")
+            .body("v1")
+        .when()
+            .put("/" + LOCK_BUCKET + "/governed-object.txt")
+        .then()
+            .statusCode(200)
+            .extract().header("x-amz-version-id");
+
+        given()
+            .body("v2")
+        .when()
+            .put("/" + LOCK_BUCKET + "/governed-object.txt")
+        .then()
+            .statusCode(200)
+            .header("x-amz-version-id", not(equalTo(versionId)));
+
+        given()
+            .header("x-amz-copy-source", "/" + LOCK_BUCKET + "/governed-object.txt?versionId=" + versionId)
+        .when()
+            .put("/" + LOCK_BUCKET + "/governed-object.txt")
+        .then()
+            .statusCode(200)
+            .header("x-amz-version-id", not(equalTo(versionId)));
+
+        given()
+        .when()
+            .get("/" + LOCK_BUCKET + "/governed-object.txt?retention&versionId=" + versionId)
+        .then()
+            .statusCode(200)
+            .body(containsString("<Mode>GOVERNANCE</Mode>"));
+
+        given()
+        .when()
+            .delete("/" + LOCK_BUCKET + "/governed-object.txt?versionId=" + versionId)
+        .then()
+            .statusCode(403)
+            .body(containsString("AccessDenied"));
+    }
 }

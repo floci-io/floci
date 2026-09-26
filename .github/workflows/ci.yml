@@ -42,7 +42,10 @@ jobs:
   test:
     name: Build and Test (shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Shards run 10m49s to 13m47s, so 15 left the slowest about a minute of margin and a slow
+    # runner spent it. This is a runaway-job kill switch, not a budget: Actions bills the minutes a
+    # job actually uses, so a higher ceiling costs nothing until something hangs.
+    timeout-minutes: 20
     needs: draft-gate
     strategy:
       fail-fast: false
@@ -71,7 +74,8 @@ jobs:
       # Derived from test sources, not target/test-classes, so shard.txt exists
       # before Compile and the image prefetch below overlaps the compile instead
       # of starting moments before the tests that need the images. Every test is
-      # a top-level class in src/test/java, so the file name is the class name.
+      # a top-level class in src/test/java, so the file name is the class name;
+      # the step after Compile fails the shard if that ever stops being true.
       - name: Compute shard include list
         run: |
           cd src/test/java
@@ -91,6 +95,22 @@ jobs:
 
       - name: Compile
         run: ./mvnw test-compile -B
+
+      # all-classes.txt is derived from file names, so a test class whose name
+      # differs from its file would drop out of both it and the shard union
+      # without the completeness check noticing. The compiled classes are the
+      # ground truth; fail here if the two lists ever disagree.
+      - name: Verify shard list matches compiled test classes
+        run: |
+          cd target/test-classes
+          find . \( -name '*Test.class' -o -name 'Test*.class' \
+                    -o -name '*Tests.class' -o -name '*TestCase.class' \) \
+                  ! -name '*$*' \
+            | sed 's|^\./||; s|\.class$||' | LC_ALL=C sort \
+            > "$RUNNER_TEMP/compiled-classes.txt"
+          cd "$GITHUB_WORKSPACE"
+          cmp -s all-classes.txt "$RUNNER_TEMP/compiled-classes.txt" \
+            || { echo "::error::test class list from src/test/java differs from target/test-classes:"; diff all-classes.txt "$RUNNER_TEMP/compiled-classes.txt" | head -50; exit 1; }
 
       - name: Run tests
         run: >

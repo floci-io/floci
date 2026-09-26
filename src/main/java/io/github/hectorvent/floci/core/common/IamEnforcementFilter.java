@@ -167,7 +167,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         // Normalise signing aliases (s3express → s3) before anything keyed by scope runs:
         // action rules, ARN building and condition keys all match the canonical name, so an
         // alias would resolve to no action and be allowed through without any policy check.
-        String credentialScope = catalog.canonicalCredentialScope(rawScope);
+        String credentialScope = servingCredentialScope(catalog.canonicalCredentialScope(rawScope), ctx);
 
         String action = actionRegistry.resolve(credentialScope, ctx);
         if (action == null) {
@@ -222,7 +222,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             caller = caller.withScpLevels(scpLevels);
         }
 
-        List<String> resources = arnBuilder.buildResources(credentialScope, ctx, region, accountId);
+        List<String> resources = resolveResourceArns(credentialScope,
+                arnBuilder.buildResources(credentialScope, ctx, region, accountId));
 
         Map<String, List<String>> conditionContext = conditionContextResolver.resolve(credentialScope, action, ctx);
         // A request naming several resources is authorized once per resource, as on AWS, so a
@@ -237,7 +238,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         // stand-in the same way it enforces SCPs against it (the account-root SCP change above);
         // leaving it absent here would have made the two forms of root enforcement inconsistent.
         Optional<String> principalArn = accountRootPrincipal
-                ? Optional.of("arn:aws:iam::" + accountId + ":root")
+                ? Optional.of(AwsArnUtils.Arn.global(requestPartition(), "iam", accountId, "root").toString())
                 : iamService.resolveCallerArn(akid);
         if (principalArn.isPresent()) {
             caller = caller.withPrincipalArn(principalArn.get());
@@ -302,8 +303,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                     continue;
                 }
                 LOG.infov("IAM enforcement DENY: akid={0} action={1} resource={2}", akid, action, resource);
-                String denyMessage = "User: arn:aws:iam::" + accountId
-                        + ":user/" + akid + " is not authorized to perform: " + action
+                String denyMessage = "User: " + AwsArnUtils.Arn.global(requestPartition(), "iam", accountId, "user/" + akid)
+                        + " is not authorized to perform: " + action
                         + " on resource: \"" + resource + "\""
                         + " because no identity-based policy allows the " + action + " action";
                 emitS3DenialIfApplicable(akid, action, resource, ctx, region, denyMessage);
@@ -312,6 +313,51 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             }
         }
         return false;
+    }
+
+    /**
+     * The scope of the service that will actually serve this request, which is not always the one
+     * the caller signed for. Everything keyed by scope (the action, its ARNs, its condition keys)
+     * has to describe the service that runs, or a policy naming that service never matches.
+     *
+     * <p>Only the claim decides this, never {@code X-Amz-Target} read directly: the target routes
+     * a request solely under the conditions {@link ProtocolClaimer} applies, and reading it here
+     * would let a header attached to, say, an S3 request move the authorization to another
+     * service while S3 still served it.
+     *
+     * <p>{@link WireProtocol#AWS_QUERY} is out of scope for this method, not solved by it. A Query
+     * claim carries the credential-scope service, which restates the caller whenever that service
+     * serves Query at all; when it does not, {@code AwsQueryController} falls through to inferring
+     * the service from the action name and can dispatch somewhere else entirely. Closing that needs
+     * the controller's inference shared rather than duplicated here, and is tracked in
+     * <a href="https://github.com/floci-io/floci/issues/4296">#4296</a>.
+     */
+    private String servingCredentialScope(String claimedScope, ContainerRequestContext ctx) {
+        if (ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY) instanceof ProtocolClaim claim
+                && claim.service() != null
+                && claim.protocol() != WireProtocol.AWS_QUERY) {
+            return iamServiceScope(claim.service(), claimedScope);
+        }
+        return claimedScope;
+    }
+
+    /** The descriptor's own scope, keeping {@code claimedScope} when the descriptor accepts it. */
+    private String iamServiceScope(ServiceDescriptor descriptor, String claimedScope) {
+        if (descriptor.credentialScopes().contains(claimedScope)) {
+            return claimedScope;
+        }
+        // The service's own key, not just any scope it signs under: pricing accepts both
+        // "pricing" and "api.pricing", and only the former is the namespace its policies name.
+        // Sorting the rest keeps the choice stable, since credentialScopes is a Set.of whose
+        // iteration order changes per JVM run.
+        if (descriptor.credentialScopes().contains(descriptor.externalKey())) {
+            return descriptor.externalKey();
+        }
+        return descriptor.credentialScopes().stream()
+                .filter(scope -> scope.equals(catalog.canonicalCredentialScope(scope)))
+                .sorted()
+                .findFirst()
+                .orElse(descriptor.externalKey());
     }
 
     /** The same contexts with every object-tag key removed, keeping the principal and global keys. */
@@ -422,7 +468,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
 
             Map<String, List<String>> conditionContext = null;
             Optional<String> principalArn = accountRootPrincipal
-                    ? Optional.of("arn:aws:iam::" + accountId + ":root")
+                    ? Optional.of(AwsArnUtils.Arn.global(requestPartition(), "iam", accountId, "root").toString())
                     : iamService.resolveCallerArn(akid);
             if (principalArn.isPresent()) {
                 caller = caller.withPrincipalArn(principalArn.get());
@@ -442,7 +488,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             }
             LOG.infov("IAM enforcement DENY: akid={0} action={1} resource={2}", akid, action, resource);
             throw new AwsException("AccessDenied",
-                    "User: arn:aws:iam::" + accountId + ":user/" + akid
+                    "User: " + AwsArnUtils.Arn.global(requestPartition(), "iam", accountId, "user/" + akid)
                             + " is not authorized to perform: " + action
                             + " on resource: \"" + resource + "\""
                             + " because no identity-based policy allows the " + action + " action",
@@ -550,6 +596,17 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         };
     }
 
+    /**
+     * The partition the request belongs to, for the principals this filter synthesizes. Set by
+     * {@link AccountContextFilter}; the deployment partition covers a call that reaches here first.
+     */
+    private String requestPartition() {
+        String partition = requestContext.getPartition();
+        return partition != null
+                ? partition
+                : RegionResolver.effectivePartition(config.defaultRegion(), config.partitions().id());
+    }
+
     /** Returns [bucket, key] (key may be null if the resource is a bucket-level ARN). */
     // Package-private for unit testing.
     static String[] parseS3Resource(String resource) {
@@ -599,6 +656,25 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
      *   <li>everything else (JSON 1.x, REST-JSON) → keep the historical JSON shape</li>
      * </ul>
      */
+    /**
+     * The request's resource ARNs as the resources are actually named, so that a policy written
+     * against a resource living in another partition than the request's still matches it.
+     */
+    private List<String> resolveResourceArns(String credentialScope, List<String> resourceArns) {
+        if (resourcePolicyProviders == null || resourcePolicyProviders.isUnsatisfied()) {
+            return resourceArns;
+        }
+        List<String> resolved = new ArrayList<>(resourceArns.size());
+        for (String resourceArn : resourceArns) {
+            String arn = resourceArn;
+            for (ResourcePolicyProvider provider : resourcePolicyProviders) {
+                arn = provider.resolveResourceArn(credentialScope, arn);
+            }
+            resolved.add(arn);
+        }
+        return resolved;
+    }
+
     private List<ResourcePolicyProvider.ResourcePolicy> resolveResourcePolicies(String credentialScope, String resourceArn) {
         if (resourcePolicyProviders == null || resourcePolicyProviders.isUnsatisfied()) {
             return List.of();

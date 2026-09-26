@@ -108,6 +108,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     private final StorageFactory storageFactory;
     private final EcsEventPublisher eventPublisher;
     private final EcsExecSessionRegistry execSessions;
+    // Null for a service assembled without CDI, which then registers nothing in Cloud Map:
+    // what every such caller already expects.
+    private final EcsServiceDiscoveryRegistrar discoveryRegistrar;
     private final boolean dockerMode;
     private final String baseUrl;
     // Replaced by afterReset() after a state reset, whose container teardown shuts this scheduler down.
@@ -191,7 +194,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     public EcsService(RegionResolver regionResolver, EcsContainerManager containerManager,
                       EmulatorConfig config, EcsLoadBalancerRegistrar lbRegistrar,
                       StorageFactory storageFactory, EcsEventPublisher eventPublisher,
-                      EcsExecSessionRegistry execSessions) {
+                      EcsExecSessionRegistry execSessions,
+                      EcsServiceDiscoveryRegistrar discoveryRegistrar) {
         this.regionResolver = regionResolver;
         this.containerManager = containerManager;
         this.dockerMode = !config.services().ecs().mock();
@@ -200,6 +204,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         this.storageFactory = storageFactory;
         this.eventPublisher = eventPublisher;
         this.execSessions = execSessions;
+        this.discoveryRegistrar = discoveryRegistrar;
     }
 
     /** With an exec session registry of its own, for callers that assemble the service without CDI. */
@@ -207,7 +212,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                       EmulatorConfig config, EcsLoadBalancerRegistrar lbRegistrar,
                       StorageFactory storageFactory, EcsEventPublisher eventPublisher) {
         this(regionResolver, containerManager, config, lbRegistrar, storageFactory, eventPublisher,
-                new EcsExecSessionRegistry());
+                new EcsExecSessionRegistry(), null);
     }
 
     @PostConstruct
@@ -1299,6 +1304,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                         stopRequested = TaskStatus.STOPPED.name().equals(task.getDesiredStatus());
                         if (!stopRequested) {
                             registerTaskWithLoadBalancers(task, cluster, region);
+                            registerTaskForServiceDiscovery(task, cluster, region);
                         }
                         if (eventPublisher != null) {
                             eventPublisher.emitTaskLadder(task, TaskStatus.PENDING, TaskStatus.RUNNING, region);
@@ -1685,6 +1691,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             task.setStopCode(stopCode);
             task.bumpVersion();
             deregisterTaskFromLoadBalancers(task, region);
+            deregisterTaskFromServiceDiscovery(task, region);
         }
 
         Map<String, Integer> exitCodes = Map.of();
@@ -1758,6 +1765,17 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
     }
 
+    /** Registers a freshly-started task in Cloud Map if its service declared service registries. */
+    private void registerTaskForServiceDiscovery(EcsTask task, EcsCluster cluster, String region) {
+        if (discoveryRegistrar == null) {
+            return;
+        }
+        EcsServiceModel svc = owningService(task, cluster);
+        if (svc != null && discoveryRegistrar.hasRegistries(svc)) {
+            discoveryRegistrar.registerTask(task, svc, region);
+        }
+    }
+
     /**
      * Resolves the service that actually launched {@code task}, or {@code null} for a
      * caller-driven task. Keyed off the reconciler-stamped {@code owningServiceArn} rather than
@@ -1789,6 +1807,14 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if (svc != null && !svc.getLoadBalancers().isEmpty()) {
             lbRegistrar.deregisterTask(task, svc, region);
         }
+    }
+
+    /** Deregisters a stopping task from the Cloud Map services it actually joined. */
+    private void deregisterTaskFromServiceDiscovery(EcsTask task, String region) {
+        if (discoveryRegistrar == null || !dockerMode || task.getServiceDiscoveryServiceIds().isEmpty()) {
+            return;
+        }
+        discoveryRegistrar.deregisterTask(task, region);
     }
 
     // ── ECS Exec ──────────────────────────────────────────────────────────────
@@ -2342,8 +2368,12 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             svc.setLoadBalancers(request.getLoadBalancers());
         }
         if (request.getServiceRegistries() != null) {
-            rollingChange |= !request.getServiceRegistries().equals(svc.getServiceRegistries());
+            boolean registriesChanged = !request.getServiceRegistries().equals(svc.getServiceRegistries());
+            rollingChange |= registriesChanged;
             svc.setServiceRegistries(request.getServiceRegistries());
+            if (registriesChanged) {
+                reconcileServiceDiscoveryRegistries(svc, cluster, region);
+            }
         }
         if (request.getUnparsed() != null) {
             svc.setUnparsed(mergedUnparsed(svc.getUnparsed(), request.getUnparsed()));
@@ -2384,6 +2414,24 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
         services.put(key, svc);
         return svc;
+    }
+
+    private void reconcileServiceDiscoveryRegistries(EcsServiceModel svc, EcsCluster cluster, String region) {
+        if (!dockerMode || discoveryRegistrar == null) {
+            return;
+        }
+        for (EcsTask task : tasks.values()) {
+            if (!ownedBy(task, svc, cluster)) {
+                continue;
+            }
+            synchronized (task) {
+                if (!TaskStatus.RUNNING.name().equals(task.getLastStatus())) {
+                    continue;
+                }
+                discoveryRegistrar.deregisterTask(task, region);
+                discoveryRegistrar.registerTask(task, svc, region);
+            }
+        }
     }
 
     /**
@@ -2838,7 +2886,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     private String rootPrincipalArn() {
-        return "arn:aws:iam::" + regionResolver.getAccountId() + ":root";
+        return regionResolver.buildGlobalArn("iam", "root");
     }
 
     private static void requireAccountSettingName(String name) {

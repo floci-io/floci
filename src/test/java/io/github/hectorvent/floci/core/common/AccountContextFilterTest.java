@@ -1,17 +1,25 @@
 package io.github.hectorvent.floci.core.common;
 
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import jakarta.ws.rs.container.ContainerRequestContext;
+import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
+import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class AccountContextFilterTest {
@@ -23,6 +31,7 @@ class AccountContextFilterTest {
     private RegionResolver regionResolver;
     private RequestContext requestContext;
     private Map<String, String> sessionAccounts;
+    private boolean allowUnknownRegions;
     private AccountContextFilter filter;
 
     @BeforeEach
@@ -31,8 +40,18 @@ class AccountContextFilterTest {
         regionResolver = new RegionResolver(DEFAULT_REGION, DEFAULT_ACCOUNT);
         requestContext = new RequestContext();
         sessionAccounts = new java.util.HashMap<>();
+        allowUnknownRegions = false;
         SessionAccountLookup sessionLookup = akid -> Optional.ofNullable(sessionAccounts.get(akid));
-        filter = new AccountContextFilter(accountResolver, regionResolver, requestContext, sessionLookup);
+        filter = new AccountContextFilter(accountResolver, regionResolver, requestContext, sessionLookup,
+                this::config);
+    }
+
+    private EmulatorConfig config() {
+        EmulatorConfig.PartitionsConfig partitions = mock(EmulatorConfig.PartitionsConfig.class);
+        when(partitions.allowUnknownRegions()).thenReturn(allowUnknownRegions);
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        when(config.partitions()).thenReturn(partitions);
+        return config;
     }
 
     @Test
@@ -108,10 +127,77 @@ class AccountContextFilterTest {
     void anUnsignedRequestGetsTheDeploymentPartition() {
         RegionResolver china = new RegionResolver("cn-north-1", DEFAULT_ACCOUNT);
         AccountContextFilter chinaFilter = new AccountContextFilter(accountResolver, china, requestContext,
-                akid -> Optional.empty());
+                akid -> Optional.empty(), this::config);
         chinaFilter.filter(mockContext(null, null));
         assertEquals("cn-north-1", requestContext.getRegion());
         assertEquals("aws-cn", requestContext.getPartition());
+    }
+
+    /** A label no partition publishes or admits is refused; the context still names it for the mappers. */
+    @Test
+    void anUnknownScopeRegionIsRefusedWithTheJsonSignatureError() {
+        ContainerRequestContext ctx = mockContext(
+            "AWS4-HMAC-SHA256 Credential=AKID/20260617/polygondwanaland-west-1/sqs/aws4_request, "
+                + "SignedHeaders=host, Signature=abc",
+            null);
+        filter.filter(ctx);
+        ArgumentCaptor<Response> aborted = ArgumentCaptor.forClass(Response.class);
+        verify(ctx).abortWith(aborted.capture());
+        assertEquals(400, aborted.getValue().getStatus());
+        assertEquals("InvalidSignatureException", aborted.getValue().getHeaderString("X-Amzn-Errortype"));
+        assertTrue(aborted.getValue().getEntity().toString().contains("polygondwanaland-west-1"),
+                aborted.getValue().getEntity().toString());
+        assertEquals("polygondwanaland-west-1", requestContext.getRegion());
+        assertEquals("aws", requestContext.getPartition());
+    }
+
+    @Test
+    void anUnknownScopeRegionOnAnS3RequestGetsS3sXmlError() {
+        ContainerRequestContext ctx = mockContext(
+            "AWS4-HMAC-SHA256 Credential=AKID/20260617/polygondwanaland-west-1/s3/aws4_request, "
+                + "SignedHeaders=host, Signature=abc",
+            null);
+        filter.filter(ctx);
+        ArgumentCaptor<Response> aborted = ArgumentCaptor.forClass(Response.class);
+        verify(ctx).abortWith(aborted.capture());
+        assertEquals(400, aborted.getValue().getStatus());
+        String body = aborted.getValue().getEntity().toString();
+        assertTrue(body.contains("<Code>AuthorizationHeaderMalformed</Code>"), body);
+        // XmlBuilder escapes the quotes around the label, as S3's own error document does.
+        assertTrue(body.contains("the region &apos;polygondwanaland-west-1&apos; is wrong"), body);
+    }
+
+    @Test
+    void anUnknownRegionInAPresignedCredentialIsRefusedToo() {
+        ContainerRequestContext ctx = mockContext(null, "AKID/20260617/polygondwanaland-west-1/s3/aws4_request");
+        filter.filter(ctx);
+        ArgumentCaptor<Response> aborted = ArgumentCaptor.forClass(Response.class);
+        verify(ctx).abortWith(aborted.capture());
+        assertEquals(400, aborted.getValue().getStatus());
+    }
+
+    /** The pattern rule is the SDKs' own: an unpublished label of a known shape is served. */
+    @Test
+    void aPatternAdmittedUnpublishedRegionIsServed() {
+        ContainerRequestContext ctx = mockContext(
+            "AWS4-HMAC-SHA256 Credential=AKID/20260617/eu-south-9/sqs/aws4_request, SignedHeaders=host, Signature=abc",
+            null);
+        filter.filter(ctx);
+        verify(ctx, never()).abortWith(any());
+        assertEquals("eu-south-9", requestContext.getRegion());
+        assertEquals("aws", requestContext.getPartition());
+    }
+
+    @Test
+    void allowUnknownRegionsServesTheLabelWithItsOwnNamespace() {
+        allowUnknownRegions = true;
+        ContainerRequestContext ctx = mockContext(
+            "AWS4-HMAC-SHA256 Credential=AKID/20260617/polygondwanaland-west-1/sqs/aws4_request, "
+                + "SignedHeaders=host, Signature=abc",
+            null);
+        filter.filter(ctx);
+        verify(ctx, never()).abortWith(any());
+        assertEquals("polygondwanaland-west-1", requestContext.getRegion());
     }
 
     @Test
@@ -220,6 +306,24 @@ class AccountContextFilterTest {
         assertEquals("111122223333", requestContext.getAccountId());
     }
 
+    /** A Query SDK parses only an XML error body, and this filter runs before the protocol claim. */
+    @Test
+    void anUnknownScopeRegionOnAFormEncodedRequestGetsTheQueryXmlError() {
+        ContainerRequestContext ctx = mockContext(
+            "AWS4-HMAC-SHA256 Credential=AKID/20260617/polygondwanaland-west-1/sts/aws4_request, "
+                + "SignedHeaders=host, Signature=abc",
+            null);
+        when(ctx.getMediaType()).thenReturn(MediaType.APPLICATION_FORM_URLENCODED_TYPE);
+        filter.filter(ctx);
+        ArgumentCaptor<Response> aborted = ArgumentCaptor.forClass(Response.class);
+        verify(ctx).abortWith(aborted.capture());
+        String body = aborted.getValue().getEntity().toString();
+        assertEquals(400, aborted.getValue().getStatus());
+        assertEquals(MediaType.APPLICATION_XML_TYPE, aborted.getValue().getMediaType());
+        assertTrue(body.contains("<Code>InvalidSignatureException</Code>"), body);
+        assertTrue(body.contains("polygondwanaland-west-1"), body);
+    }
+
     private ContainerRequestContext mockContext(String authHeader, String xAmzCredential) {
         ContainerRequestContext ctx = mock(ContainerRequestContext.class);
         when(ctx.getHeaderString("Authorization")).thenReturn(authHeader);
@@ -230,7 +334,9 @@ class AccountContextFilterTest {
             queryParams.add("X-Amz-Credential", xAmzCredential);
         }
         when(uriInfo.getQueryParameters()).thenReturn(queryParams);
+        when(uriInfo.getPath()).thenReturn("/");
         when(ctx.getUriInfo()).thenReturn(uriInfo);
+        when(ctx.getMethod()).thenReturn("POST");
 
         return ctx;
     }

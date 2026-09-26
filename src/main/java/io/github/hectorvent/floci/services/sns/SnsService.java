@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.common.SsrfProtection;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
@@ -32,8 +33,11 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.IOException;
 import java.math.BigDecimal;
+import java.net.InetAddress;
 import java.net.URI;
+import java.net.UnknownHostException;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -440,6 +444,9 @@ public class SnsService implements Resettable, ResourceProvider {
                 || ("https".equals(protocol) && endpoint != null && !endpoint.startsWith("https://"))) {
             throw new AwsException("InvalidParameter",
                     "Invalid parameter: Endpoint scheme does not match protocol '" + protocol + "'.", 400);
+        }
+        if ("http".equals(protocol) || "https".equals(protocol)) {
+            requireDeliverableEndpoint(endpoint);
         }
         if ("firehose".equals(protocol)) {
             requireFirehoseRoleArn(attributes == null ? null : attributes.get(SUBSCRIPTION_ROLE_ARN));
@@ -1734,7 +1741,9 @@ public class SnsService implements Resettable, ResourceProvider {
                     LOG.debugv("Delivered SNS message to Lambda: {0}", sub.getEndpoint());
                 }
                 case "http", "https" -> {
-                    if (httpClient == null) break;
+                    if (httpClient == null) {
+                        break;
+                    }
                     boolean rawDelivery = "true".equalsIgnoreCase(sub.getAttributes().get("RawMessageDelivery"));
                     String body = rawDelivery
                             ? protocolMessage
@@ -1754,9 +1763,9 @@ public class SnsService implements Resettable, ResourceProvider {
                             .POST(HttpRequest.BodyPublishers.ofString(body))
                             .build();
                     String endpoint = sub.getEndpoint();
-                    httpClient.sendAsync(request, HttpResponse.BodyHandlers.discarding())
-                            .thenAccept(response -> logHttpResult("Delivered SNS notification", endpoint, response.statusCode()))
-                            .exceptionally(ex -> { LOG.warnv("Failed to deliver SNS message to {0}: {1}", endpoint, ex.getMessage()); return null; });
+                    // Screened off this thread: Publish fans out to every subscriber here, and a
+                    // slow DNS answer for one endpoint must not hold up the others or the caller.
+                    postScreenedAsync(request, endpoint, "Delivered SNS notification");
                 }
                 case "application" -> {
                     String region = extractRegionFromArn(sub.getEndpoint());
@@ -2004,13 +2013,93 @@ public class SnsService implements Resettable, ResourceProvider {
                     .header("x-amz-sns-subscription-arn", "PendingConfirmation")
                     .POST(HttpRequest.BodyPublishers.ofString(body))
                     .build();
-            String endpoint = subscription.getEndpoint();
-            httpClient.sendAsync(request, HttpResponse.BodyHandlers.discarding())
-                    .thenAccept(response -> logHttpResult("Sent SubscriptionConfirmation", endpoint, response.statusCode()))
-                    .exceptionally(ex -> { LOG.warnv("Failed to send SubscriptionConfirmation to {0}: {1}", endpoint, ex.getMessage()); return null; });
+            postScreenedAsync(request, subscription.getEndpoint(), "Sent SubscriptionConfirmation");
         } catch (Exception e) {
             LOG.warnv("Failed to send SubscriptionConfirmation to {0}: {1}", subscription.getEndpoint(), e.getMessage());
         }
+    }
+
+    /**
+     * Rejects an endpoint that resolves to a link-local or cloud instance-metadata address. Floci
+     * posts to a subscribed endpoint itself, so without this an unauthenticated Subscribe turns the
+     * emulator into a blind request forwarder against addresses only it can reach. Loopback and
+     * private ranges stay allowed: a local topic delivering to a neighbouring container is the
+     * normal case here.
+     */
+    private static void requireDeliverableEndpoint(String endpoint) {
+        if (endpoint == null) {
+            return;
+        }
+        String host;
+        try {
+            host = URI.create(endpoint).getHost();
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("InvalidParameter", "Invalid parameter: Endpoint is not a valid URL.", 400);
+        }
+        if (host == null || host.isBlank()) {
+            throw new AwsException("InvalidParameter", "Invalid parameter: Endpoint is not a valid URL.", 400);
+        }
+        try {
+            SsrfProtection.rejectMetadataAddresses(InetAddress.getAllByName(host), host);
+        } catch (UnknownHostException e) {
+            // Unresolvable now does not mean unresolvable at delivery time, and AWS accepts an
+            // endpoint whose DNS is not yet live, so this is not the place to refuse it.
+            LOG.debugv("SNS endpoint host {0} did not resolve at subscribe time: {1}", host, e.getMessage());
+        } catch (IOException e) {
+            throw new AwsException("InvalidParameter",
+                    "Invalid parameter: Endpoint " + endpoint + " is not a permitted address.", 400);
+        }
+    }
+
+    /** Screens the endpoint, then posts. Nothing here resolves a name, so nothing here blocks. */
+    private void postScreenedAsync(HttpRequest request, String endpoint, String what) {
+        if (!deliverable(endpoint)) {
+            return;
+        }
+        httpClient.sendAsync(request, HttpResponse.BodyHandlers.discarding())
+                .thenAccept(response -> logHttpResult(what, endpoint, response.statusCode()))
+                .exceptionally(ex -> {
+                    LOG.warnv("Failed to reach SNS endpoint {0}: {1}", endpoint, ex.getMessage());
+                    return null;
+                });
+    }
+
+    /**
+     * Whether this endpoint may be posted to, judged without resolving anything. Subscribe is where
+     * a name gets resolved and screened; this catches the endpoint that names an address outright,
+     * including a subscription stored before Subscribe began refusing them.
+     *
+     * <p>Deliberately not a second DNS lookup. {@link HttpClient} resolves the name again when it
+     * connects and cannot be handed the result of a check, so a lookup here could never be the thing
+     * that decides where the request goes: it would cost a resolution per delivery and still leave
+     * the same rebinding residual.
+     */
+    static boolean deliverable(String endpoint) {
+        String host;
+        try {
+            host = URI.create(endpoint).getHost();
+        } catch (IllegalArgumentException e) {
+            LOG.warnv("Refusing to deliver to SNS endpoint {0}: not a valid URL", endpoint);
+            return false;
+        }
+        if (host == null || !isIpLiteral(host)) {
+            return true;
+        }
+        try {
+            SsrfProtection.rejectMetadataAddresses(InetAddress.getAllByName(host), host);
+            return true;
+        } catch (IOException e) {
+            LOG.warnv("Refusing to deliver to SNS endpoint {0}: {1}", endpoint, e.getMessage());
+            return false;
+        }
+    }
+
+    /** True for a bracketed IPv6 literal or a dotted IPv4 one, neither of which needs resolving. */
+    private static boolean isIpLiteral(String host) {
+        String bare = host.startsWith("[") && host.endsWith("]")
+                ? host.substring(1, host.length() - 1)
+                : host;
+        return bare.indexOf(':') >= 0 || bare.matches("[0-9.]+");
     }
 
     private String sqsArnToUrl(String arn) {

@@ -667,7 +667,9 @@ public class RedshiftQueryHandler {
             String clusterIdentifier = requireParam(params, "ClusterIdentifier");
             Cluster cluster = service.enableLogging(clusterIdentifier, params.getFirst("BucketName"),
                     params.getFirst("S3KeyPrefix"), params.getFirst("LogDestinationType"),
-                    memberList(params, "LogExports"));
+                    memberList(params, "LogExports"),
+                    params.getFirst("S3TableKmsKeyId"),
+                    params.getFirst("S3TableGranularity"));
             return loggingStatusResponse(action, cluster);
         }
         case "DisableLogging" -> {
@@ -871,10 +873,16 @@ public class RedshiftQueryHandler {
 
     // RestoreFromClusterSnapshot accepts SnapshotIdentifier or SnapshotArn.
     private String resolveSnapshotIdentifier(String snapshotIdentifier, String snapshotArn, String authorizationHeader) {
-        if (snapshotIdentifier != null && !snapshotIdentifier.isBlank()) {
+        boolean hasIdentifier = snapshotIdentifier != null && !snapshotIdentifier.isBlank();
+        boolean hasArn = snapshotArn != null && !snapshotArn.isBlank();
+        if (hasIdentifier && hasArn) {
+            throw new AwsException("InvalidParameterCombination",
+                    "You must specify either SnapshotIdentifier or SnapshotArn, but not both.", 400);
+        }
+        if (hasIdentifier) {
             return snapshotIdentifier;
         }
-        if (snapshotArn == null || snapshotArn.isBlank()) {
+        if (!hasArn) {
             throw new AwsException("InvalidParameterValue", "SnapshotIdentifier or SnapshotArn is required", 400);
         }
         AwsArnUtils.Arn arn;
@@ -943,6 +951,22 @@ public class RedshiftQueryHandler {
                 builder.elem("member", export);
             }
             builder.end("LogExports");
+        }
+        if ("s3table".equalsIgnoreCase(cluster.getLoggingDestinationType())) {
+            builder.start("S3Tables");
+            List<String> exports = cluster.getLoggingExports();
+            if (exports != null && !exports.isEmpty()) {
+                builder.start("S3Tables");
+                for (String export : exports) {
+                    builder.elem("member", export);
+                }
+                builder.end("S3Tables");
+            }
+            if (cluster.getLoggingS3TableGranularity() != null) {
+                builder.elem("S3TableGranularity", cluster.getLoggingS3TableGranularity());
+            }
+            builder.elem("EnabledAll", exports == null || exports.isEmpty() || exports.contains("all"));
+            builder.end("S3Tables");
         }
         return builder.build();
     }

@@ -230,7 +230,7 @@ Responses are `application/json` with AWS AppSync wire shapes (`data` / `errors[
 
 | Case | HTTP | Notes |
 |---|---|---|
-| Query / introspection / validation / syntax (incl. blank `query`) | 200 | Fields with an `APPSYNC_JS` resolver are resolved (see [Resolver execution](#resolver-execution)). A field with no resolver is `null`; one with a VTL mapping template fails with an error saying so, rather than resolving to `null` |
+| Query / introspection / validation / syntax (incl. blank `query`) | 200 | Fields with an `APPSYNC_JS` resolver or a VTL UNIT resolver over `NONE` are resolved (see [Resolver execution](#resolver-execution)). A field with no resolver is `null` |
 | HTTP subscription operation | 200 | `OperationNotSupported` (realtime WebSocket is a later phase) |
 | Empty body / `{}` / `[]` / unparseable JSON / bad Content-Type | 400 | `MalformedHttpRequestException` |
 | Missing `operationName` with multiple operations | 400 | `BadRequestException` — `Missing operation name.` |
@@ -273,11 +273,10 @@ Duplicate `API_KEY` / `AWS_IAM` / `AWS_LAMBDA` (and the same Cognito pool or OID
 ## Resolver execution
 
 A field with an `APPSYNC_JS` resolver is executed, not stubbed: the resolver's own code runs, its
-data source is called, and the field gets the value the code returned.
-
-`VTL` mapping templates are **not** executed. A resolver declaring the VTL runtime fails its field
-with a message saying so, rather than resolving to `null`: a null that means "not implemented" is
-indistinguishable from a null that means "no rows".
+data source is called, and the field gets the value the code returned. Floci also executes
+`2018-05-29` VTL request and response templates for UNIT resolvers backed by a `NONE` data source.
+VTL pipeline stages and VTL resolvers over other data sources remain explicit unsupported
+operations rather than silently resolving to `null`.
 
 ### How a resolver gets called
 
@@ -338,6 +337,24 @@ determined lexically.
 A rejected resolver fails its field with `errorType: UnsupportedFeature` and the line number, rather
 than running.
 
+### VTL UNIT resolvers
+
+A VTL UNIT resolver over `NONE` evaluates the request mapping template, unwraps the request's
+`payload`, and evaluates the response mapping template with that value in `ctx.result`. Request
+templates must render a JSON object with `version: "2018-05-29"`; invalid JSON and unsupported
+versions fail the field with `errorType: MappingTemplate`.
+
+The VTL context includes `ctx.arguments` / `ctx.args`, `ctx.source`, `ctx.stash`, `ctx.result`,
+`ctx.error`, `ctx.identity`, `ctx.request`, `ctx.info`, and `ctx.prev`. Stash mutations survive from
+the request template to the response template. `#return` returns its value from the resolver,
+skipping the remaining template and data-source work. `$util.error` fails the field with its
+selected type and details, and
+`$util.appendError` reports an error beside the returned data.
+
+The existing VTL loop, output-size, timeout, and reflection-sandbox limits apply. The
+`2017-02-28` template version, VTL pipeline functions, and VTL-backed DynamoDB, Lambda, RDS, and
+other data sources are not included in this first execution slice.
+
 | Setting | Env | Default |
 |---|---|---|
 | `floci.services.appsync.js-runtime.enabled` | `FLOCI_SERVICES_APPSYNC_JS_RUNTIME_ENABLED` | `true` |
@@ -388,7 +405,7 @@ environment variables). `ctx.request.headers` is empty: the GraphQL context does
 
 | Type | Behaviour |
 |---|---|
-| `NONE` | The request is the result; a `payload` member is unwrapped, as on AWS. |
+| `NONE` | The request is the result; a `payload` member is unwrapped, as on AWS. Supports APPSYNC_JS and `2018-05-29` VTL UNIT resolvers. |
 | `AWS_LAMBDA` | `Invoke` and `BatchInvoke`. Only `payload` reaches the function. A function error fails the field rather than resolving to the error object. |
 | `RELATIONAL_DATABASE` | Statements run over the RDS Data API against `rdsHttpEndpointConfig`. Accepts `{statements, variableMap}`, the `{statement, parameters}` the `/rds` helpers build, a list of either, or a bare SQL string. `variableTypeHintMap` is honoured, without it a bound date binds as text and PostgreSQL refuses the comparison (`operator does not exist: timestamp with time zone >= character varying`), so a resolver's date filters need it. The result is wrapped as `{sqlStatementResults: […]}`, which is what `toJsonObject()` reads. |
 | `AMAZON_DYNAMODB` | `GetItem`, `PutItem`, `UpdateItem`, `DeleteItem`, `Query`, `Scan`, through the native DynamoDB path so expressions, conditions and indexes all apply. Items come back as **plain JSON**, not attribute values, as AppSync returns them. `nextToken` is an opaque encoding of `LastEvaluatedKey`. `BatchGetItem`, `TransactWriteItems` and `Sync` are not implemented and say so. |
@@ -440,7 +457,7 @@ This matches AWS behavior where deleting an API removes its entire configuration
 
 These AWS AppSync capabilities are not yet implemented and are tracked in future phases:
 
-- **DataFetcher / resolver dispatch** (Phase 8): resolver mapping templates and field resolution with non-null values
+- **VTL resolver expansion**: pipeline functions, the `2017-02-28` version, and data sources beyond `NONE`
 - **Data source adapters** (Phase 9): DynamoDB, Lambda, HTTP, EventBridge, OpenSearch, RDS connectors
 - **Guardrails** (Phase 10): query depth / complexity limits and related errors
 - **Realtime subscriptions** (Phase 11+): WebSocket real-time subscriptions

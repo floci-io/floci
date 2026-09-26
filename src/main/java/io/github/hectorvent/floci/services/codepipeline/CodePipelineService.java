@@ -103,7 +103,21 @@ public class CodePipelineService {
                                LambdaService lambdaService, S3Service s3Service,
                                EmulatorConfig config) {
         this(storageFactory, mapper, codeBuildService, codeDeployService, lambdaService, s3Service,
-                config.services().codepipeline().sourcePollIntervalMs());
+                resolveSourcePollInterval(config.services().codepipeline().sourcePollIntervalMs()));
+    }
+
+    /**
+     * A zero or negative interval would make {@code scheduleWithFixedDelay} throw from the startup
+     * observer and stop the whole emulator becoming ready. A misconfigured value is not worth
+     * failing every other service for, so it falls back with a warning.
+     */
+    private static long resolveSourcePollInterval(long configured) {
+        if (configured > 0) {
+            return configured;
+        }
+        LOG.warnv("Ignoring CodePipeline source poll interval {0}ms: must be a positive number of "
+                + "milliseconds, falling back to {1}ms", configured, DEFAULT_SOURCE_POLL_INTERVAL_MS);
+        return DEFAULT_SOURCE_POLL_INTERVAL_MS;
     }
 
     @SuppressWarnings("unchecked")
