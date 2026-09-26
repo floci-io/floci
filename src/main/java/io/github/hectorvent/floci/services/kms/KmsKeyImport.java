@@ -73,7 +73,7 @@ final class KmsKeyImport {
      * <p>RSAES_PKCS1_V1_5 stays in the modelled enum but AWS KMS stopped honouring it on
      * October 10, 2023.
      */
-    static void validateWrappingAlgorithm(KmsKeySpec keySpec, String wrappingAlgorithm) {
+    static void validateWrappingAlgorithm(KmsKeySpec keySpec, String wrappingAlgorithm, String wrappingKeySpec) {
         String algorithm = wrappingAlgorithm == null ? "" : wrappingAlgorithm;
         validateWrappingAlgorithmValue(algorithm, wrappingAlgorithm);
 
@@ -90,6 +90,18 @@ final class KmsKeyImport {
                     throw new AwsException("UnsupportedOperationException",
                             "WrappingAlgorithm " + wrappingAlgorithm + " is not supported for " + keySpec + " key. "
                                     + "Supported values are: RSA_AES_KEY_WRAP_SHA_1 and RSA_AES_KEY_WRAP_SHA_256.", 400);
+                }
+            }
+            case ECC -> {
+                // AWS accepts both RSAES_OAEP_* and RSA_AES_KEY_WRAP_* for ECC material, which is
+                // everything validateWrappingAlgorithmValue lets through, except RSAES_OAEP_* under an
+                // RSA_2048 wrapping key for ECC_NIST_P521, whose material is too long for that payload.
+                boolean rsaesOaep = RSAES_OAEP_SHA_1.equals(algorithm) || RSAES_OAEP_SHA_256.equals(algorithm);
+                if (keySpec == KmsKeySpec.ECC_NIST_P521 && rsaesOaep && "RSA_2048".equals(wrappingKeySpec)) {
+                    throw new AwsException("UnsupportedOperationException",
+                            "WrappingAlgorithm " + wrappingAlgorithm + " with WrappingKeySpec RSA_2048 is not "
+                                    + "supported for " + keySpec + " key. Use a larger wrapping key spec or "
+                                    + "RSA_AES_KEY_WRAP_SHA_1 or RSA_AES_KEY_WRAP_SHA_256.", 400);
                 }
             }
             default -> throw new AwsException("UnsupportedOperationException",
