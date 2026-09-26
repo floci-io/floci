@@ -90,6 +90,11 @@ public class CognitoService implements ResourceProvider {
             "^$*.[]{}()?\"!@#%&/\\,><':;|_~`=+-";
     // JVM-local stripes bound lock memory without retaining one lock for every user key.
     private static final int USER_LOCK_STRIPES = 512;
+    /**
+     * The commercial CloudFront suffix for the test constructors; CDI wires
+     * {@code floci.services.cloudfront.domain-suffix}.
+     */
+    private static final String DEFAULT_CLOUDFRONT_DOMAIN_SUFFIX = "cloudfront.net"; // partition-literal: test-shaped constructor default
 
     private static final Logger LOG = Logger.getLogger(CognitoService.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -130,6 +135,7 @@ public class CognitoService implements ResourceProvider {
     private final StorageBackend<String, CognitoGroup> groupStore;
     private final StorageBackend<String, RevokedTokenInfo> revokedTokenStore;
     private final String baseUrl;
+    private final String cloudFrontDomainSuffix;
     private final RegionResolver regionResolver;
     private final LambdaService lambdaService;
     private final AcmService acmService;
@@ -177,6 +183,7 @@ public class CognitoService implements ResourceProvider {
                 storageFactory.create("cognito", "cognito-revoked-tokens.json",
                         new TypeReference<Map<String, RevokedTokenInfo>>() {}),
                 trimTrailingSlash(emulatorConfig.effectiveBaseUrl()),
+                emulatorConfig.services().cloudfront().domainSuffix(),
                 regionResolver,
                 lambdaService,
                 acmService,
@@ -196,9 +203,8 @@ public class CognitoService implements ResourceProvider {
                    RegionResolver regionResolver,
                    LambdaService lambdaService,
                    AcmService acmService) {
-        this(poolStore, clientStore, resourceServerStore, new InMemoryStorage<>(),
-                new InMemoryStorage<>(), userStore, groupStore, revokedTokenStore, baseUrl,
-                regionResolver, lambdaService, acmService, null, null, null);
+        this(poolStore, clientStore, resourceServerStore, userStore, groupStore, revokedTokenStore, baseUrl,
+                DEFAULT_CLOUDFRONT_DOMAIN_SUFFIX, regionResolver, lambdaService, acmService);
     }
 
     CognitoService(StorageBackend<String, UserPool> poolStore,
@@ -214,6 +220,41 @@ public class CognitoService implements ResourceProvider {
             VerificationCodeService verificationCodeService,
             CognitoMessageDispatcher messageDispatcher,
             TlsCertificateManager certificateManager) {
+        this(poolStore, clientStore, resourceServerStore, domainStore, identityProviderStore, userStore,
+                groupStore, revokedTokenStore, baseUrl, DEFAULT_CLOUDFRONT_DOMAIN_SUFFIX, regionResolver,
+                lambdaService, acmService, verificationCodeService, messageDispatcher, certificateManager);
+    }
+
+    CognitoService(StorageBackend<String, UserPool> poolStore,
+                   StorageBackend<String, UserPoolClient> clientStore,
+                   StorageBackend<String, ResourceServer> resourceServerStore,
+                   StorageBackend<String, CognitoUser> userStore,
+                   StorageBackend<String, CognitoGroup> groupStore,
+                   StorageBackend<String, RevokedTokenInfo> revokedTokenStore,
+                   String baseUrl,
+                   String cloudFrontDomainSuffix,
+                   RegionResolver regionResolver,
+                   LambdaService lambdaService,
+                   AcmService acmService) {
+        this(poolStore, clientStore, resourceServerStore, new InMemoryStorage<>(),
+                new InMemoryStorage<>(), userStore, groupStore, revokedTokenStore, baseUrl,
+                cloudFrontDomainSuffix, regionResolver, lambdaService, acmService, null, null, null);
+    }
+
+    CognitoService(StorageBackend<String, UserPool> poolStore,
+            StorageBackend<String, UserPoolClient> clientStore,
+            StorageBackend<String, ResourceServer> resourceServerStore,
+            StorageBackend<String, UserPoolDomain> domainStore,
+            StorageBackend<String, IdentityProvider> identityProviderStore,
+            StorageBackend<String, CognitoUser> userStore,
+            StorageBackend<String, CognitoGroup> groupStore,
+            StorageBackend<String, RevokedTokenInfo> revokedTokenStore,
+            String baseUrl,
+            String cloudFrontDomainSuffix,
+            RegionResolver regionResolver, LambdaService lambdaService, AcmService acmService,
+            VerificationCodeService verificationCodeService,
+            CognitoMessageDispatcher messageDispatcher,
+            TlsCertificateManager certificateManager) {
         this.poolStore = poolStore;
         this.clientStore = clientStore;
         this.resourceServerStore = resourceServerStore;
@@ -223,6 +264,7 @@ public class CognitoService implements ResourceProvider {
         this.groupStore = groupStore;
         this.revokedTokenStore = revokedTokenStore;
         this.baseUrl = baseUrl;
+        this.cloudFrontDomainSuffix = cloudFrontDomainSuffix;
         this.regionResolver = regionResolver;
         this.lambdaService = lambdaService;
         this.acmService = acmService;
@@ -1464,7 +1506,7 @@ public class CognitoService implements ResourceProvider {
     }
 
     private String generateCloudFrontDomain() {
-        return UUID.randomUUID().toString().replace("-", "").substring(0, 14) + ".cloudfront.net";
+        return UUID.randomUUID().toString().replace("-", "").substring(0, 14) + "." + cloudFrontDomainSuffix;
     }
 
     private String generateDomainVersion() {

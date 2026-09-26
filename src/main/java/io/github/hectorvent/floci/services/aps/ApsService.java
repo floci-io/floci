@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.aps;
 
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.AwsEndpoints;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
@@ -58,7 +59,7 @@ public class ApsService implements TagHandler {
         // (Pending CREATING, Target ACTIVE) completes on its first DescribeWorkspace poll.
         workspace.setStatus("ACTIVE");
         workspace.setPrometheusEndpoint(
-                "https://aps-workspaces." + region + ".amazonaws.com/workspaces/" + workspaceId + "/");
+                "https://" + AwsEndpoints.host("aps-workspaces", region) + "/workspaces/" + workspaceId + "/");
         workspace.setCreatedAt(Instant.now());
         workspace.setKmsKeyArn(kmsKeyArn);
         if (tags != null) {

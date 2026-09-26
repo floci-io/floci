@@ -6,7 +6,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.AwsEndpoints;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -808,8 +810,8 @@ public class CloudTrailService {
         ObjectNode reqParams = mapper.createObjectNode();
         if (in.bucketName() != null) reqParams.put("bucketName", in.bucketName());
         reqParams.put("Host", in.bucketName() == null
-                ? "s3.amazonaws.com"
-                : in.bucketName() + ".s3.amazonaws.com");
+                ? "s3." + AwsRegions.dnsSuffixFor(regionResolver.getRegion())
+                : AwsEndpoints.s3Host(in.bucketName(), regionResolver.getRegion()));
         if (in.key() != null) reqParams.put("key", in.key());
         record.set("requestParameters", reqParams);
         record.set("responseElements", mapper.nullNode());
@@ -850,8 +852,8 @@ public class CloudTrailService {
         tls.put("tlsVersion", "TLSv1.3");
         tls.put("cipherSuite", "TLS_AES_128_GCM_SHA256");
         tls.put("clientProvidedHostHeader", in.bucketName() == null
-                ? "s3.amazonaws.com"
-                : in.bucketName() + ".s3.amazonaws.com");
+                ? "s3." + AwsRegions.dnsSuffixFor(regionResolver.getRegion())
+                : AwsEndpoints.s3Host(in.bucketName(), regionResolver.getRegion()));
         record.set("tlsDetails", tls);
 
         return record;

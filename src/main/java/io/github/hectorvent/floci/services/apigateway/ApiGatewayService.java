@@ -96,6 +96,7 @@ public class ApiGatewayService {
      */
     private final Object domainNameLock = new Object();
     private final TlsCertificateManager certificateManager;
+    private final EmulatorConfig config;
 
     // Constants
     private static final String EPC_KEY = "endpointConfiguration";
@@ -106,6 +107,7 @@ public class ApiGatewayService {
     public ApiGatewayService(StorageFactory storageFactory, EmulatorConfig config,
                              TlsCertificateManager certificateManager) {
         this.certificateManager = certificateManager;
+        this.config = config;
         this.apiStore = storageFactory.create("apigateway", "apigateway-apis.json",
                 new TypeReference<>() {
                 });
@@ -1920,14 +1922,15 @@ public class ApiGatewayService {
      * regional domain has none, so a move to {@code REGIONAL} drops the distribution again while a
      * move to {@code EDGE} puts one in front of the domain, as the migration does on AWS.
      */
-    private static void applyEndpointType(CustomDomain domain, String endpointType) {
+    private void applyEndpointType(CustomDomain domain, String endpointType) {
         domain.setEndpointConfigurationType(endpointType);
         if (!"EDGE".equals(endpointType)) {
             domain.setDistributionDomainName(null);
             domain.setDistributionHostedZoneId(null);
         } else if (domain.getDistributionDomainName() == null) {
             domain.setDistributionDomainName(
-                    "d" + UUID.randomUUID().toString().replace("-", "").substring(0, 13) + ".cloudfront.net");
+                    "d" + UUID.randomUUID().toString().replace("-", "").substring(0, 13) + "."
+                            + config.services().cloudfront().domainSuffix());
             domain.setDistributionHostedZoneId("Z2FDTNDATAQYW2");
         }
     }

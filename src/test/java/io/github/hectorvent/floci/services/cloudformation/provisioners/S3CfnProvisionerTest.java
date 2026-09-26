@@ -82,7 +82,9 @@ class S3CfnProvisionerTest {
                 "DomainName", "my-bucket.s3.amazonaws.com",
                 "RegionalDomainName", "my-bucket.s3.us-east-1.amazonaws.com",
                 "DualStackDomainName", "my-bucket.s3.dualstack.us-east-1.amazonaws.com",
-                "WebsiteURL", "http://my-bucket.s3-website.us-east-1.amazonaws.com",
+                // us-east-1 is one of the nine regions that keep the legacy dash form, and AWS's
+                // WebsiteURL ends with a slash (the AWS::S3::Bucket schema example).
+                "WebsiteURL", "http://my-bucket.s3-website-us-east-1.amazonaws.com/",
                 "BucketName", "my-bucket"), r.getAttributes());
     }
 

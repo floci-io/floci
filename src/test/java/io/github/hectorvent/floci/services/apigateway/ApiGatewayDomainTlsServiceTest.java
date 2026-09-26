@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -43,7 +44,9 @@ class ApiGatewayDomainTlsServiceTest {
         StorageFactory storageFactory = mock(StorageFactory.class);
         when(storageFactory.create(anyString(), anyString(), any())).thenAnswer(invocation -> AccountAwareStorageBackend.inMemory("000000000000"));
         certificateManager = mock(TlsCertificateManager.class);
-        service = new ApiGatewayService(storageFactory, mock(EmulatorConfig.class), certificateManager);
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().cloudfront().domainSuffix()).thenReturn("cloudfront.net");
+        service = new ApiGatewayService(storageFactory, config, certificateManager);
     }
 
     private static Map<String, Object> regional(String domain) {

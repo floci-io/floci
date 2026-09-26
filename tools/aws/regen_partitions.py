@@ -12,6 +12,9 @@ from two sources and a rule:
   the `local/aws/botocore` checkout (the reference corpus everything else in this repo is
   grounded on), then the installed `botocore` package, which `requirements.txt` pins to the
   version the vendored file was generated from so CI regenerates the same bytes.
+- `s3DualStackRegions` per partition: the regions whose S3 endpoint publishes a `dualstack`
+  variant in `endpoints.json` (the service defaults cover every region in the commercial, China
+  and GovCloud partitions; the ISO partitions list them per region and the EUSC one has none).
 - The AWS CDK's `region-info/lib/aws-entities.ts` (Apache-2.0), whose ordered region list
   carries two rule markers: regions before `RULE_S3_WEBSITE_REGIONAL_SUBDOMAIN` use the
   legacy `s3-website-<region>` endpoint form, and commercial regions after
@@ -164,6 +167,12 @@ def build(partitions_doc: dict, endpoints_doc: dict, entities: list[str] | None,
                 "s3WebsiteDashForm": dash,
             })
         services = endpoints_partition.get("services", {})
+        s3 = services.get("s3", {})
+        s3_defaults_dualstack = any("dualstack" in v.get("tags", []) for v in s3.get("defaults", {}).get("variants", []))
+        s3_dualstack_regions = sorted(
+            region_id for region_id, endpoint in s3.get("endpoints", {}).items()
+            if region_id in descriptions and (s3_defaults_dualstack
+                                              or any("dualstack" in v.get("tags", []) for v in endpoint.get("variants", []))))
         global_services = {}
         for service_key in sorted(services):
             service = services[service_key]
@@ -195,6 +204,7 @@ def build(partitions_doc: dict, endpoints_doc: dict, entities: list[str] | None,
             "regions": regions,
             "services": sorted(services),
             "globalServices": global_services,
+            "s3DualStackRegions": s3_dualstack_regions,
         })
     result_partitions.sort(key=lambda p: (p["id"] != COMMERCIAL, p["id"]))
     return {

@@ -2239,7 +2239,7 @@ public interface EmulatorConfig {
         @WithDefault("true")
         boolean enabled();
 
-        @WithDefault("cloudfront.net")
+        @WithDefault("cloudfront.net") // partition-literal: configurable; the China CDN suffix has no published source
         String domainSuffix();
 
         /**
@@ -2594,7 +2594,7 @@ public interface EmulatorConfig {
          * {@code floci.ecr-base-uri} (env {@code FLOCI_ECR_BASE_URI}) still works
          * (see {@link FlociConfigRelocationsInterceptor}), but is deprecated.
          */
-        @WithDefault("public.ecr.aws")
+        @WithDefault("public.ecr.aws") // partition-literal: configurable; ECR Public exists only in the commercial partition
         String ecrBaseUri();
 
         @WithDefault("128")

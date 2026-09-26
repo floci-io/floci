@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsEndpoints;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.OidcIssuerKeyLookup;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -67,7 +68,7 @@ public class EksOidcService implements OidcIssuerKeyLookup {
      */
     public String newIssuerUrl(String region) {
         String id = UUID.randomUUID().toString().replace("-", "").toUpperCase();
-        return "https://oidc.eks." + region + ".amazonaws.com/id/" + id;
+        return "https://" + AwsEndpoints.host("oidc.eks", region) + "/id/" + id;
     }
 
     /**

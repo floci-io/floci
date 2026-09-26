@@ -66,8 +66,13 @@ did before.
 - **DescribeRegions**: the request's partition's regions, with the partition's endpoints.
   As on AWS, a commercial deployment lists the 17 regions that need no opt-in by default and
   all 34 with `AllRegions=true`, where opt-in regions report `not-opted-in`.
-- **Hostname recognition**: every published region id, in every partition, is a region label
-  in an S3 virtual-host or execute-api hostname.
+- **Hostnames**: AWS-shaped hosts in responses (an HTTP API's `ApiEndpoint`, a bucket's
+  `RegionalDomainName` and `WebsiteURL`, Cognito and EKS OIDC issuers, EC2 public DNS names)
+  use the DNS suffix of their region's partition, so a `cn-north-1` API answers
+  `<id>.execute-api.cn-north-1.amazonaws.com.cn`. `DualStackDomainName` is only returned where
+  S3 publishes a dual-stack endpoint.
+- **Hostname recognition**: every published region id and DNS suffix, in every partition, is
+  recognised in an S3 virtual-host, execute-api, ECR image or CloudFront origin hostname.
 
 ## What does not change
 
