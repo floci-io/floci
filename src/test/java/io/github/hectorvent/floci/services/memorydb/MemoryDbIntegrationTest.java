@@ -24,6 +24,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItems;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * End-to-end MemoryDB test: JSON 1.1 control plane (CreateCluster/DescribeClusters/
@@ -195,13 +196,25 @@ class MemoryDbIntegrationTest {
 
     @Test
     @Order(9)
+    void aclUserCredentialsWorkWithHelloAuth() throws Exception {
+        try (Socket socket = openSocket(authPort)) {
+            write(socket, respArray("HELLO", "3", "AUTH", AUTH_USER, AUTH_PASSWORD));
+            assertTrue(readRespValue(socket).startsWith("%"));
+
+            write(socket, respArray("PING"));
+            assertEquals("+PONG\r\n", readLine(socket));
+        }
+    }
+
+    @Test
+    @Order(10)
     void wrongPasswordRejected() throws Exception {
         assertEquals("-ERR invalid username-password pair or user is disabled.\r\n",
                 sendCommand(authPort, respArray("AUTH", AUTH_USER, "wrong-password")));
     }
 
     @Test
-    @Order(10)
+    @Order(11)
     void deleteClusterReleasesProxyPortForReuse() {
         deleteCluster(OPEN_CLUSTER)
             .then()
@@ -305,6 +318,52 @@ class MemoryDbIntegrationTest {
             }
         }
         return new String(buffer, 0, offset, StandardCharsets.UTF_8);
+    }
+
+    private static String readRespValue(Socket socket) throws IOException {
+        String header = readLine(socket);
+        if (header.length() < 3) {
+            throw new IOException("Invalid RESP value header: " + header);
+        }
+
+        char type = header.charAt(0);
+        int count;
+        switch (type) {
+            case '$', '!', '=' -> {
+                count = parseRespLength(header);
+                if (count >= 0) {
+                    byte[] payload = socket.getInputStream().readNBytes(count + 2);
+                    if (payload.length != count + 2
+                            || payload[count] != '\r' || payload[count + 1] != '\n') {
+                        throw new IOException("Incomplete RESP bulk payload");
+                    }
+                }
+            }
+            case '*', '~', '>' -> {
+                count = parseRespLength(header);
+                for (int index = 0; index < count; index++) {
+                    readRespValue(socket);
+                }
+            }
+            case '%', '|' -> {
+                count = parseRespLength(header);
+                for (int index = 0; index < count * 2; index++) {
+                    readRespValue(socket);
+                }
+            }
+            default -> {
+                // This value is fully contained in the header line.
+            }
+        }
+        return header;
+    }
+
+    private static int parseRespLength(String header) throws IOException {
+        try {
+            return Integer.parseInt(header.substring(1, header.length() - 2));
+        } catch (NumberFormatException e) {
+            throw new IOException("Invalid RESP length: " + header, e);
+        }
     }
 
     private static String respArray(String... parts) {

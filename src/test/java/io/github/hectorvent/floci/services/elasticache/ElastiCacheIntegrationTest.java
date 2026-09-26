@@ -23,6 +23,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -139,13 +140,25 @@ class ElastiCacheIntegrationTest {
 
     @Test
     @Order(5)
+    void groupAuthTokenWorksWithHelloAuth() throws Exception {
+        try (Socket socket = openSocket(firstProxyPort)) {
+            write(socket, respArray("HELLO", "3", "AUTH", "default", GROUP_AUTH_TOKEN));
+            assertTrue(readRespValue(socket).startsWith("%"));
+
+            write(socket, respArray("PING"));
+            assertEquals("+PONG\r\n", readLine(socket));
+        }
+    }
+
+    @Test
+    @Order(6)
     void wrongPasswordIsRejected() throws Exception {
         String reply = sendCommand(firstProxyPort, respArray("AUTH", "wrong-password"));
         assertEquals("-ERR invalid username-password pair or user is disabled.\r\n", reply);
     }
 
     @Test
-    @Order(6)
+    @Order(7)
     void createUser() {
         given()
             .formParam("Action", "CreateUser")
@@ -166,7 +179,7 @@ class ElastiCacheIntegrationTest {
     }
 
     @Test
-    @Order(7)
+    @Order(8)
     void unassociatedUserIsRejected() throws Exception {
         // Before associating the user with the group, auth should fail
         String reply = sendCommand(firstProxyPort, respArray("AUTH", USER_NAME, INITIAL_PASSWORD));
@@ -174,7 +187,7 @@ class ElastiCacheIntegrationTest {
     }
 
     @Test
-    @Order(8)
+    @Order(9)
     void associateUserWithGroup() {
         given()
             .formParam("Action", "ModifyReplicationGroup")
@@ -189,7 +202,7 @@ class ElastiCacheIntegrationTest {
     }
 
     @Test
-    @Order(9)
+    @Order(10)
     void describeUsersIncludesCreatedUser() {
         given()
             .formParam("Action", "DescribeUsers")
@@ -203,7 +216,7 @@ class ElastiCacheIntegrationTest {
     }
 
     @Test
-    @Order(10)
+    @Order(11)
     void crossGroupAuthIsRejected() throws Exception {
         // Ensure user exists if this test is run in isolation
         try {
@@ -260,7 +273,7 @@ class ElastiCacheIntegrationTest {
     }
 
     @Test
-    @Order(11)
+    @Order(12)
     void userPasswordAuthWorks() throws Exception {
         try (Socket socket = openSocket(firstProxyPort)) {
             write(socket, respArray("AUTH", USER_NAME, INITIAL_PASSWORD));
@@ -272,7 +285,7 @@ class ElastiCacheIntegrationTest {
     }
 
     @Test
-    @Order(12)
+    @Order(13)
     void modifyUserPasswordInvalidatesOldPasswordAndAcceptsNewPassword() throws Exception {
         given()
             .formParam("Action", "ModifyUser")
@@ -299,7 +312,7 @@ class ElastiCacheIntegrationTest {
     }
 
     @Test
-    @Order(13)
+    @Order(14)
     void deleteUserRemovesUserFromDescribeUsers() {
         given()
             .formParam("Action", "DeleteUser")
@@ -322,7 +335,7 @@ class ElastiCacheIntegrationTest {
     }
 
     @Test
-    @Order(14)
+    @Order(15)
     void deleteReplicationGroupReleasesProxyPortForReuse() {
         given()
             .formParam("Action", "DeleteReplicationGroup")
@@ -439,6 +452,52 @@ class ElastiCacheIntegrationTest {
             }
         }
         return new String(buffer, 0, offset, StandardCharsets.UTF_8);
+    }
+
+    private static String readRespValue(Socket socket) throws IOException {
+        String header = readLine(socket);
+        if (header.length() < 3) {
+            throw new IOException("Invalid RESP value header: " + header);
+        }
+
+        char type = header.charAt(0);
+        int count;
+        switch (type) {
+            case '$', '!', '=' -> {
+                count = parseRespLength(header);
+                if (count >= 0) {
+                    byte[] payload = socket.getInputStream().readNBytes(count + 2);
+                    if (payload.length != count + 2
+                            || payload[count] != '\r' || payload[count + 1] != '\n') {
+                        throw new IOException("Incomplete RESP bulk payload");
+                    }
+                }
+            }
+            case '*', '~', '>' -> {
+                count = parseRespLength(header);
+                for (int index = 0; index < count; index++) {
+                    readRespValue(socket);
+                }
+            }
+            case '%', '|' -> {
+                count = parseRespLength(header);
+                for (int index = 0; index < count * 2; index++) {
+                    readRespValue(socket);
+                }
+            }
+            default -> {
+                // This value is fully contained in the header line.
+            }
+        }
+        return header;
+    }
+
+    private static int parseRespLength(String header) throws IOException {
+        try {
+            return Integer.parseInt(header.substring(1, header.length() - 2));
+        } catch (NumberFormatException e) {
+            throw new IOException("Invalid RESP length: " + header, e);
+        }
     }
 
     private static String respArray(String... parts) {

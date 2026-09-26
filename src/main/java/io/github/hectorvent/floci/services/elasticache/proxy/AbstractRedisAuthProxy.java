@@ -8,14 +8,17 @@ import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 
 /**
  * Shared TCP auth-proxy skeleton for the Redis (RESP) wire protocol. Intercepts the
- * {@code AUTH} command, validates credentials through the subclass, then becomes a
- * transparent byte relay to the backend container. Used by both the ElastiCache and
- * MemoryDB proxies, since MemoryDB's real AWS design is explicitly modeled on
- * ElastiCache: same Redis-compatible wire protocol, same IAM-auth mechanism.
+ * {@code AUTH} command or the {@code AUTH} option in {@code HELLO}, validates credentials
+ * through the subclass, then becomes a transparent byte relay to the backend container.
+ * Used by both the ElastiCache and MemoryDB proxies, since MemoryDB's real AWS design is
+ * explicitly modeled on ElastiCache: same Redis-compatible wire protocol, same IAM-auth
+ * mechanism.
  *
  * <p>Uses Java virtual threads to accept connections and run the AUTH handshake.
  */
@@ -28,8 +31,24 @@ public abstract class AbstractRedisAuthProxy {
     private static final byte[] INVALID_AUTH_RESPONSE =
             "-ERR invalid username-password pair or user is disabled.\r\n"
                     .getBytes(StandardCharsets.UTF_8);
+    private static final byte[] WRONGPASS_RESPONSE =
+            "-WRONGPASS invalid username-password pair or user is disabled.\r\n"
+                    .getBytes(StandardCharsets.UTF_8);
     private static final byte[] WRONG_ARGS_RESPONSE =
             "-ERR wrong number of arguments for 'auth' command\r\n"
+                    .getBytes(StandardCharsets.UTF_8);
+    private static final byte[] HELLO_NOAUTH_RESPONSE =
+            ("-NOAUTH HELLO must be called with the client already authenticated, otherwise the "
+                    + "HELLO <proto> AUTH <user> <pass> option can be used to authenticate the client "
+                    + "and select the RESP protocol version at the same time\r\n")
+                    .getBytes(StandardCharsets.UTF_8);
+    private static final byte[] HELLO_PROTOCOL_ERROR_RESPONSE =
+            "-ERR Protocol version is not an integer or out of range\r\n"
+                    .getBytes(StandardCharsets.UTF_8);
+    private static final byte[] HELLO_UNSUPPORTED_PROTOCOL_RESPONSE =
+            "-NOPROTO unsupported protocol version\r\n".getBytes(StandardCharsets.UTF_8);
+    private static final byte[] INVALID_CLIENT_NAME_RESPONSE =
+            "-ERR Client names cannot contain spaces, newlines or special characters.\r\n"
                     .getBytes(StandardCharsets.UTF_8);
 
     private final Logger log;
@@ -98,26 +117,36 @@ public abstract class AbstractRedisAuthProxy {
         try {
             client.setTcpNoDelay(true);
             RespReader reader = new RespReader(client.getInputStream());
-            String[] cmd = reader.readCommand();
+            while (true) {
+                String[] cmd = reader.readCommand();
 
-            if (cmd.length == 0) {
-                closeQuietly(client);
+                if (cmd.length == 0) {
+                    closeQuietly(client);
+                    return;
+                }
+
+                if (cmd[0].equalsIgnoreCase("AUTH")) {
+                    handleAuth(client, cmd);
+                    return;
+                }
+                if (cmd[0].equalsIgnoreCase("HELLO")) {
+                    if (authRequired()) {
+                        if (handleHello(client, cmd)) {
+                            return;
+                        }
+                        continue;
+                    }
+                    bridgeCommand(client, cmd);
+                    return;
+                }
+                if (authRequired()) {
+                    writeResponse(client, NOAUTH_RESPONSE);
+                    closeQuietly(client);
+                    return;
+                }
+
+                bridgeCommand(client, cmd);
                 return;
-            }
-
-            if (cmd[0].equalsIgnoreCase("AUTH")) {
-                handleAuth(client, cmd);
-            } else if (authRequired()) {
-                client.getOutputStream().write(NOAUTH_RESPONSE);
-                client.getOutputStream().flush();
-                closeQuietly(client);
-            } else {
-                // No auth required and no AUTH command: bridge immediately.
-                // First re-send the already-read command to the backend.
-                Socket backend = new Socket(backendHost, backendPort);
-                backend.setTcpNoDelay(true);
-                resendCommand(cmd, backend.getOutputStream());
-                bridge(client, backend);
             }
         } catch (Exception e) {
             log.debugv("Connection error for {0}: {1}", resourceId, e.getMessage());
@@ -146,18 +175,110 @@ public abstract class AbstractRedisAuthProxy {
 
         boolean authenticated = !authRequired() || authenticate(username, password);
         if (!authenticated) {
-            client.getOutputStream().write(INVALID_AUTH_RESPONSE);
-            client.getOutputStream().flush();
+            writeResponse(client, INVALID_AUTH_RESPONSE);
             closeQuietly(client);
             return;
         }
 
-        client.getOutputStream().write(OK_RESPONSE);
-        client.getOutputStream().flush();
+        writeResponse(client, OK_RESPONSE);
+        bridgeCommand(client, null);
+    }
 
+    private boolean handleHello(Socket client, String[] cmd) throws IOException {
+        if (cmd.length > 1) {
+            long protocolVersion;
+            try {
+                protocolVersion = Long.parseLong(cmd[1]);
+            } catch (NumberFormatException e) {
+                writeResponse(client, HELLO_PROTOCOL_ERROR_RESPONSE);
+                return false;
+            }
+            if (protocolVersion < 2 || protocolVersion > 3) {
+                writeResponse(client, HELLO_UNSUPPORTED_PROTOCOL_RESPONSE);
+                return false;
+            }
+        }
+
+        List<String> forwarded = new ArrayList<>();
+        forwarded.add(cmd[0]);
+        if (cmd.length > 1) {
+            forwarded.add(cmd[1]);
+        }
+
+        String username = null;
+        String password = null;
+        String clientName = null;
+        boolean authProvided = false;
+        boolean clientNameProvided = false;
+        int optionIndex = 2;
+        while (optionIndex < cmd.length) {
+            String option = cmd[optionIndex];
+            if (option.equalsIgnoreCase("AUTH") && optionIndex + 2 < cmd.length) {
+                username = cmd[optionIndex + 1];
+                password = cmd[optionIndex + 2];
+                authProvided = true;
+                optionIndex += 3;
+            } else if (option.equalsIgnoreCase("SETNAME") && optionIndex + 1 < cmd.length) {
+                clientName = cmd[optionIndex + 1];
+                if (!isValidClientName(clientName)) {
+                    writeResponse(client, INVALID_CLIENT_NAME_RESPONSE);
+                    return false;
+                }
+                clientNameProvided = true;
+                optionIndex += 2;
+            } else {
+                writeHelloSyntaxError(client, option);
+                return false;
+            }
+        }
+
+        if (clientNameProvided) {
+            forwarded.add("SETNAME");
+            forwarded.add(clientName);
+        }
+
+        if (authRequired() && !authProvided) {
+            writeResponse(client, HELLO_NOAUTH_RESPONSE);
+            return false;
+        }
+        if (authRequired() && !authenticate(username, password)) {
+            writeResponse(client, WRONGPASS_RESPONSE);
+            return false;
+        }
+
+        bridgeCommand(client, forwarded.toArray(String[]::new));
+        return true;
+    }
+
+    private static void writeHelloSyntaxError(Socket client, String option) throws IOException {
+        String sanitizedOption = option.replace('\r', ' ').replace('\n', ' ');
+        byte[] response = ("-ERR Syntax error in HELLO option '" + sanitizedOption + "'\r\n")
+                .getBytes(StandardCharsets.UTF_8);
+        writeResponse(client, response);
+    }
+
+    private static boolean isValidClientName(String clientName) {
+        for (int index = 0; index < clientName.length(); index++) {
+            char character = clientName.charAt(index);
+            if (character <= ' ' || character > '~') {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private void bridgeCommand(Socket client, String[] command) throws IOException {
         Socket backend = new Socket(backendHost, backendPort);
         backend.setTcpNoDelay(true);
+        if (command != null) {
+            resendCommand(command, backend.getOutputStream());
+        }
         bridge(client, backend);
+    }
+
+    private static void writeResponse(Socket client, byte[] response) throws IOException {
+        client.getOutputStream().write(response);
+        client.getOutputStream().flush();
     }
 
     /**

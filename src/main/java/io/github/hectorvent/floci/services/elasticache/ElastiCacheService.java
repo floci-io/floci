@@ -1584,7 +1584,7 @@ public class ElastiCacheService implements ResourceProvider {
             return false;
         }
 
-        if (username == null || username.isEmpty()) {
+        if (username == null || username.isEmpty() || "default".equals(username)) {
             // AUTH password form: check group-level authToken first
             if (group.getAuthToken() != null && password.equals(group.getAuthToken())) {
                 return true;
