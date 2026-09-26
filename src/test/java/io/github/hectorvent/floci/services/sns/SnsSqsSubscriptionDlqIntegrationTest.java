@@ -16,6 +16,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -87,7 +88,36 @@ class SnsSqsSubscriptionDlqIntegrationTest {
         Message deadLetter = deadLetterMessages.getFirst();
         JsonNode envelope = new ObjectMapper().readTree(deadLetter.getBody());
         assertEquals(publishMessageId, deadLetter.getMessageGroupId());
-        assertEquals(publishMessageId, deadLetter.getMessageDeduplicationId());
+        assertNotNull(deadLetter.getMessageDeduplicationId());
         assertEquals(publishMessageId, envelope.path("MessageId").asText());
+    }
+
+    @Test
+    void publish_keepsBothFailedSubscriptionsInSharedFifoDlq() throws Exception {
+        String dlqName = "shared-subscription-dlq.fifo";
+        String dlqArn = "arn:aws:sqs:" + REGION + ":" + ACCOUNT + ":" + dlqName;
+        String dlqUrl = BASE_URL + "/" + ACCOUNT + "/" + dlqName;
+        sqsService.createQueue(dlqName, Map.of("FifoQueue", "true"), REGION);
+
+        Topic topic = snsService.createTopic("shared-dlq-topic", null, null, REGION);
+        for (String endpoint : List.of("missing-subscription-a", "missing-subscription-b")) {
+            Subscription subscription = snsService.subscribe(topic.getTopicArn(), "sqs",
+                    "arn:aws:sqs:" + REGION + ":" + ACCOUNT + ":" + endpoint, REGION, Map.of());
+            snsService.setSubscriptionAttribute(subscription.getSubscriptionArn(), "RedrivePolicy",
+                    "{\"deadLetterTargetArn\":\"" + dlqArn + "\"}", REGION);
+        }
+
+        String publishMessageId = snsService.publish(topic.getTopicArn(), null, "payload", null, REGION);
+
+        List<Message> deadLetters = sqsService.receiveMessage(dlqUrl, 10, 30, 0, REGION);
+        assertEquals(2, deadLetters.size());
+        assertEquals(publishMessageId, deadLetters.get(0).getMessageGroupId());
+        assertEquals(publishMessageId, deadLetters.get(1).getMessageGroupId());
+        assertNotEquals(deadLetters.get(0).getMessageDeduplicationId(),
+                deadLetters.get(1).getMessageDeduplicationId());
+        ObjectMapper mapper = new ObjectMapper();
+        for (Message deadLetter : deadLetters) {
+            assertEquals(publishMessageId, mapper.readTree(deadLetter.getBody()).path("MessageId").asText());
+        }
     }
 }

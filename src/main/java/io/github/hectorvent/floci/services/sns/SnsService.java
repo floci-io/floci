@@ -1881,9 +1881,9 @@ public class SnsService implements Resettable, ResourceProvider {
                     if (deadLetterGroupId == null || deadLetterGroupId.isBlank()) {
                         deadLetterGroupId = messageId;
                     }
-                    if (deadLetterDeduplicationId == null || deadLetterDeduplicationId.isBlank()) {
-                        deadLetterDeduplicationId = messageId;
-                    }
+                    // Each failed subscription is a distinct DLQ delivery, even when
+                    // several subscriptions share this queue for the same publish.
+                    deadLetterDeduplicationId = sha256(messageId + "\0" + sub.getSubscriptionArn());
                 }
                 sqsService.sendMessage(sqsArnToUrl(deadLetterTargetArn), body, null,
                         deadLetterGroupId, deadLetterDeduplicationId, sqsAttributes, deadLetterRegion);
