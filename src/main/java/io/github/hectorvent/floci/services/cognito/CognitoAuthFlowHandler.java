@@ -17,6 +17,9 @@ import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
@@ -25,6 +28,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
 
 /**
  * Owns Cognito authentication-flow protocol logic: USER_PASSWORD_AUTH,
@@ -46,17 +50,26 @@ final class CognitoAuthFlowHandler {
     private static final String CUSTOM_MESSAGE_CODE_PARAMETER = "{####}";
     /** The message of a wrong password, which managed login also shows for an unknown user. */
     static final String INCORRECT_CREDENTIALS = "Incorrect username or password";
+    /**
+     * AWS default {@code AuthSessionValidity} (CreateUserPoolClient, valid range 3-15 minutes):
+     * the lifetime of a challenge session token before InitiateAuth/RespondToAuthChallenge reject
+     * it as expired. {@link UserPoolClient} does not yet store a per-client override, so every
+     * client uses the AWS default until that field exists.
+     */
+    private static final Duration AUTH_SESSION_VALIDITY = Duration.ofMinutes(3);
 
     private final CognitoService service;
     private final LambdaService lambdaService;
     private final RegionResolver regionResolver;
+    private final Clock clock;
     private final ConcurrentHashMap<String, SrpSession> srpSessions = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, CustomAuthSession> customAuthSessions = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, CustomAuthToken> customAuthSessions = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, UserAuthSession> userAuthSessions = new ConcurrentHashMap<>();
 
     private record SrpSession(String userPoolId, String username, String clientId,
                               String aHex, String bHex, String bPublicHex,
-                              String secretBlockBase64, Map<String, String> clientMetadata) {}
+                              String secretBlockBase64, Map<String, String> clientMetadata,
+                              Instant issuedAt) {}
 
     /**
      * Correlates a USER_AUTH challenge response back to the InitiateAuth/RespondToAuthChallenge
@@ -65,7 +78,8 @@ final class CognitoAuthFlowHandler {
      * factor answer with no session at all, bypassing handleUserAuth's tier gate and letting a
      * caller trigger an OTP send without ever starting a flow.
      */
-    private record UserAuthSession(String userPoolId, String username, String clientId, String challengeName) {}
+    private record UserAuthSession(String userPoolId, String username, String clientId, String challengeName,
+                                   Instant issuedAt) {}
 
     static final class CustomAuthSession {
         final String userPoolId;
@@ -83,10 +97,42 @@ final class CognitoAuthFlowHandler {
         }
     }
 
-    CognitoAuthFlowHandler(CognitoService service, LambdaService lambdaService, RegionResolver regionResolver) {
+    /**
+     * One issued CUSTOM_AUTH session token. The flow state is shared across rounds, but each token
+     * keeps the time it was minted, so issuing the next round's token never extends the old one.
+     */
+    private record CustomAuthToken(CustomAuthSession state, Instant issuedAt) {}
+
+    CognitoAuthFlowHandler(CognitoService service, LambdaService lambdaService, RegionResolver regionResolver,
+                           Clock clock) {
         this.service = service;
         this.lambdaService = lambdaService;
         this.regionResolver = regionResolver;
+        this.clock = clock;
+    }
+
+    /**
+     * True once {@code issuedAt} is older than {@link #AUTH_SESSION_VALIDITY}, matching the
+     * NotAuthorizedException AWS returns for an expired InitiateAuth/RespondToAuthChallenge session.
+     */
+    private boolean sessionExpired(Instant issuedAt) {
+        return clock.instant().isAfter(issuedAt.plus(AUTH_SESSION_VALIDITY));
+    }
+
+    private static AwsException sessionExpiredException() {
+        return new AwsException("NotAuthorizedException",
+                "Invalid session for the user, session is expired.", 400);
+    }
+
+    /** Stores a newly minted CUSTOM_AUTH token, stamped now, after dropping expired ones. */
+    private void issueCustomAuthToken(String sessionToken, CustomAuthSession state) {
+        purgeExpired(customAuthSessions, CustomAuthToken::issuedAt);
+        customAuthSessions.put(sessionToken, new CustomAuthToken(state, clock.instant()));
+    }
+
+    /** Drops already-expired entries so an abandoned challenge session doesn't linger forever. */
+    private <V> void purgeExpired(ConcurrentHashMap<String, V> sessions, Function<V, Instant> issuedAtOf) {
+        sessions.entrySet().removeIf(entry -> sessionExpired(issuedAtOf.apply(entry.getValue())));
     }
 
     // ──────────────────────────── Public entry points ────────────────────────────
@@ -493,10 +539,11 @@ final class CognitoAuthFlowHandler {
         new java.security.SecureRandom().nextBytes(secretBlock);
         String secretBlockBase64 = Base64.getEncoder().encodeToString(secretBlock);
 
+        purgeExpired(srpSessions, SrpSession::issuedAt);
         srpSessions.put(sessionToken, new SrpSession(
                 pool.getId(), user.getUsername(), client.getClientId(),
                 aHex, bHex, bPublicHex, secretBlockBase64,
-                clientMetadata == null ? Map.of() : clientMetadata));
+                clientMetadata == null ? Map.of() : clientMetadata, clock.instant()));
 
         Map<String, Object> result = new HashMap<>();
         result.put("ChallengeName", "PASSWORD_VERIFIER");
@@ -514,14 +561,23 @@ final class CognitoAuthFlowHandler {
     private Map<String, Object> handlePasswordVerifierChallenge(UserPool pool, UserPoolClient client,
                                                                  String session, Map<String, String> responses,
                                                                  Map<String, String> clientMetadata) {
-        CustomAuthSession customState =
+        CustomAuthToken customToken =
                 session == null ? null : customAuthSessions.get(session);
-        if (customState != null) {
-            return verifyPasswordWithinCustomAuth(pool, client, session, customState, responses, clientMetadata);
+        if (customToken != null) {
+            if (sessionExpired(customToken.issuedAt())) {
+                customAuthSessions.remove(session);
+                throw sessionExpiredException();
+            }
+            return verifyPasswordWithinCustomAuth(pool, client, session, customToken.state(), responses,
+                    clientMetadata);
         }
 
         SrpSession srp = srpSessions.get(session);
         if (srp == null) throw new AwsException("NotAuthorizedException", "Session not found", 400);
+        if (sessionExpired(srp.issuedAt())) {
+            srpSessions.remove(session);
+            throw sessionExpiredException();
+        }
 
         String username = responses.get("USERNAME");
         String claimSignature = responses.get("PASSWORD_CLAIM_SIGNATURE");
@@ -704,8 +760,10 @@ final class CognitoAuthFlowHandler {
                                                             String challengeName, List<String> available,
                                                             Map<String, String> challengeParameters) {
         String session = buildSessionToken(pool.getId(), user.getUsername(), client.getClientId());
+        purgeExpired(userAuthSessions, UserAuthSession::issuedAt);
         userAuthSessions.put(session,
-                new UserAuthSession(pool.getId(), user.getUsername(), client.getClientId(), challengeName));
+                new UserAuthSession(pool.getId(), user.getUsername(), client.getClientId(), challengeName,
+                        clock.instant()));
         Map<String, Object> result = new HashMap<>();
         result.put("ChallengeName", challengeName);
         result.put("Session", session);
@@ -726,6 +784,9 @@ final class CognitoAuthFlowHandler {
         UserAuthSession state = session == null ? null : userAuthSessions.remove(session);
         if (state == null || !expectedChallenge.equals(state.challengeName())) {
             throw new AwsException("NotAuthorizedException", "Session not found", 400);
+        }
+        if (sessionExpired(state.issuedAt())) {
+            throw sessionExpiredException();
         }
         if (!state.userPoolId().equals(pool.getId()) || !state.clientId().equals(client.getClientId())) {
             throw new AwsException("NotAuthorizedException", "Session does not match client", 400);
@@ -810,7 +871,7 @@ final class CognitoAuthFlowHandler {
                 createAuthChallenge(pool, client, user, state, challengeName), publicParams);
 
         String sessionToken = buildSessionToken(pool.getId(), user.getUsername(), client.getClientId());
-        customAuthSessions.put(sessionToken, state);
+        issueCustomAuthToken(sessionToken, state);
 
         Map<String, Object> result = new HashMap<>();
         result.put("ChallengeName", challengeName);
@@ -823,8 +884,15 @@ final class CognitoAuthFlowHandler {
                                                        String session, Map<String, String> responses,
                                                        Map<String, String> clientMetadata) {
         if (session == null) throw new AwsException("InvalidParameterException", "Session is required", 400);
-        CustomAuthSession state = customAuthSessions.get(session);
-        if (state == null) throw new AwsException("NotAuthorizedException", "Session not found", 400);
+        CustomAuthToken token = customAuthSessions.get(session);
+        if (token == null) {
+            throw new AwsException("NotAuthorizedException", "Session not found", 400);
+        }
+        if (sessionExpired(token.issuedAt())) {
+            customAuthSessions.remove(session);
+            throw sessionExpiredException();
+        }
+        CustomAuthSession state = token.state();
         if (!state.userPoolId.equals(pool.getId()) || !state.clientId.equals(client.getClientId())) {
             throw new AwsException("NotAuthorizedException", "Session does not match client", 400);
         }
@@ -873,7 +941,7 @@ final class CognitoAuthFlowHandler {
 
         String newSession = buildSessionToken(pool.getId(), state.username, client.getClientId());
         customAuthSessions.remove(session);
-        customAuthSessions.put(newSession, state);
+        issueCustomAuthToken(newSession, state);
 
         Map<String, Object> result = new HashMap<>();
         result.put("ChallengeName", nextChallenge);
@@ -933,7 +1001,7 @@ final class CognitoAuthFlowHandler {
 
         String newSession = buildSessionToken(pool.getId(), state.username, client.getClientId());
         customAuthSessions.remove(session);
-        customAuthSessions.put(newSession, state);
+        issueCustomAuthToken(newSession, state);
 
         Map<String, Object> result = new HashMap<>();
         result.put("ChallengeName", nextChallenge);

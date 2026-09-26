@@ -18,6 +18,7 @@ import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.ses.SesService;
 import io.github.hectorvent.floci.services.sns.SnsService;
+import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -28,6 +29,7 @@ import org.mockito.ArgumentCaptor;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
@@ -877,6 +879,82 @@ class CognitoLambdaTriggersTest {
 
         assertNotNull(((Map<String, Object>) tokens.get("AuthenticationResult")).get("AccessToken"));
         verify(lambdaService).invoke(anyString(), eq("arn:aws:lambda:::verify"), any(byte[].class), any());
+    }
+
+    private CognitoService serviceWithClock(MutableClock clock) {
+        return new CognitoService(
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                "http://localhost:4566", "cloudfront.net", regionResolver, lambdaService, mock(AcmService.class),
+                null, null, mock(TlsCertificateManager.class), clock);
+    }
+
+    private UserPoolClient customAuthClient(CognitoService clockedService) {
+        Map<String, Object> req = new HashMap<>();
+        req.put("PoolName", "trigger-pool");
+        req.put("LambdaConfig", Map.of(
+                "DefineAuthChallenge", "arn:aws:lambda:::define",
+                "CreateAuthChallenge", "arn:aws:lambda:::create",
+                "VerifyAuthChallengeResponse", "arn:aws:lambda:::verify"));
+        UserPool pool = clockedService.createUserPool(req, "us-east-1");
+        clockedService.adminCreateUser(pool.getId(), "alice", Map.of("email", "alice@example.com"), null);
+        clockedService.adminSetUserPassword(pool.getId(), "alice", "Perm1234!", true);
+        return clockedService.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of(),
+                null, List.of(), null, AUTH_FLOWS, null, null, List.of(), null, List.of(), null,
+                null, null, List.of(), null, null);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void customAuthSessionValidityStartsWhenTheSessionIsIssued() {
+        MutableClock clock = new MutableClock();
+        CognitoService clockedService = serviceWithClock(clock);
+        UserPoolClient client = customAuthClient(clockedService);
+
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::define"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of("challengeName", "CUSTOM_CHALLENGE")))
+                .thenReturn(ok(Map.of("issueTokens", true)));
+        // A slow CreateAuthChallenge trigger: two minutes pass before the session is handed out.
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::create"), any(byte[].class), any()))
+                .thenAnswer(invocation -> {
+                    clock.advance(Duration.ofMinutes(2));
+                    return ok(Map.of("privateChallengeParameters", Map.of("answer", "blue")));
+                });
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::verify"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of("answerCorrect", true)));
+
+        String session = (String) clockedService.initiateAuth(client.getClientId(), "CUSTOM_AUTH",
+                Map.of("USERNAME", "alice")).get("Session");
+        clock.advance(Duration.ofMinutes(2));
+
+        Map<String, Object> tokens = clockedService.respondToAuthChallenge(client.getClientId(),
+                "CUSTOM_CHALLENGE", session, Map.of("USERNAME", "alice", "ANSWER", "blue"));
+
+        assertNotNull(((Map<String, Object>) tokens.get("AuthenticationResult")).get("AccessToken"));
+    }
+
+    @Test
+    void customAuthSessionExpiresThreeMinutesAfterItIsIssued() {
+        MutableClock clock = new MutableClock();
+        CognitoService clockedService = serviceWithClock(clock);
+        UserPoolClient client = customAuthClient(clockedService);
+
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::define"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of("challengeName", "CUSTOM_CHALLENGE")));
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::create"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of("privateChallengeParameters", Map.of("answer", "blue"))));
+
+        String session = (String) clockedService.initiateAuth(client.getClientId(), "CUSTOM_AUTH",
+                Map.of("USERNAME", "alice")).get("Session");
+        clock.advance(Duration.ofMinutes(3).plusSeconds(1));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                clockedService.respondToAuthChallenge(client.getClientId(), "CUSTOM_CHALLENGE", session,
+                        Map.of("USERNAME", "alice", "ANSWER", "blue")));
+        assertEquals("NotAuthorizedException", ex.getErrorCode());
+        assertEquals("Invalid session for the user, session is expired.", ex.getMessage());
+        verify(lambdaService, never()).invoke(anyString(), eq("arn:aws:lambda:::verify"), any(byte[].class), any());
     }
 
     @Test
