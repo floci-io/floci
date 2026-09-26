@@ -47,7 +47,7 @@ class IamActionRegistryTest {
                 new MultivaluedHashMap<>(),
                 MediaType.APPLICATION_FORM_URLENCODED_TYPE,
                 "Operation=CreateUser&Version=2010-05-08&UserName=alice");
-        assertEquals("iam:CreateUser", registry.resolve("iam", ctx));
+        assertEquals("CreateUser", registry.queryAction(ctx));
     }
 
     @Test
@@ -57,7 +57,17 @@ class IamActionRegistryTest {
                 new MultivaluedHashMap<>(),
                 MediaType.APPLICATION_FORM_URLENCODED_TYPE,
                 "Action=ListUsers&Operation=CreateUser");
-        assertEquals("iam:ListUsers", registry.resolve("iam", ctx));
+        assertEquals("ListUsers", registry.queryAction(ctx));
+    }
+
+    @Test
+    void restActionIgnoresOperationFromFormBody() {
+        ContainerRequestContext ctx = mockCtx(
+                "PUT", "/bucket/key",
+                new MultivaluedHashMap<>(),
+                MediaType.APPLICATION_FORM_URLENCODED_TYPE,
+                "Operation=ListBucket");
+        assertEquals("s3:PutObject", registry.resolve("s3", ctx));
     }
 
     @Test

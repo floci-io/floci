@@ -110,6 +110,18 @@ class IamEnforcementFilterTest {
                 catalog, scpProvider, sessionAccountLookup);
     }
 
+    private IamEnforcementFilter newFilter(ResourceInfo resourceInfo) {
+        @SuppressWarnings("unchecked")
+        Instance<ScpProvider> scpProvider = mock(Instance.class);
+        when(scpProvider.isResolvable()).thenReturn(false);
+        return new IamEnforcementFilter(
+                config, accountResolver, iamService, evaluator, actionRegistry,
+                new AwsQueryServiceResolver(catalog), arnBuilder, requestContext,
+                conditionContextResolver, mock(CloudTrailService.class),
+                mock(io.quarkus.vertx.http.runtime.CurrentVertxRequest.class),
+                catalog, scpProvider, sessionAccountLookup, null, resourceInfo);
+    }
+
     @Test
     void filterBuildsResourceArnWithRequestContextAccount() {
         ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
@@ -256,8 +268,7 @@ class IamEnforcementFilterTest {
         when(actionRegistry.resolve("apigateway", containerRequest)).thenReturn("apigateway:POST");
         when(iamService.resolveCallerContext("AKIAUSER")).thenReturn(CallerContext.of(List.of()));
 
-        IamEnforcementFilter filter = newFilter();
-        filter.resourceInfo = resourceInfo(ApiGatewayController.class);
+        IamEnforcementFilter filter = newFilter(resourceInfo(ApiGatewayController.class));
         filter.filter(containerRequest);
 
         verify(actionRegistry).resolve("apigateway", containerRequest);
@@ -284,8 +295,7 @@ class IamEnforcementFilterTest {
         when(actionRegistry.resolve("s3", containerRequest)).thenReturn("s3:CreateBucket");
         when(iamService.resolveCallerContext("AKIAUSER")).thenReturn(CallerContext.of(List.of()));
 
-        IamEnforcementFilter filter = newFilter();
-        filter.resourceInfo = resourceInfo(S3Controller.class);
+        IamEnforcementFilter filter = newFilter(resourceInfo(S3Controller.class));
         filter.filter(containerRequest);
 
         verify(actionRegistry).resolve("s3", containerRequest);

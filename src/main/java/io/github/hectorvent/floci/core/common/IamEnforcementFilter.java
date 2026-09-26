@@ -93,9 +93,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     private final Instance<ScpProvider> scpProvider;
     private final SessionAccountLookup sessionAccountLookup;
     private final Instance<ResourcePolicyProvider> resourcePolicyProviders;
-
-    @Context
-    ResourceInfo resourceInfo;
+    private final ResourceInfo resourceInfo;
 
     @Inject
     public IamEnforcementFilter(EmulatorConfig config,
@@ -112,7 +110,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                                 ResolvedServiceCatalog catalog,
                                 Instance<ScpProvider> scpProvider,
                                 SessionAccountLookup sessionAccountLookup,
-                                Instance<ResourcePolicyProvider> resourcePolicyProviders) {
+                                Instance<ResourcePolicyProvider> resourcePolicyProviders,
+                                @Context ResourceInfo resourceInfo) {
         this.config = config;
         this.accountResolver = accountResolver;
         this.iamService = iamService;
@@ -128,6 +127,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         this.scpProvider = scpProvider;
         this.sessionAccountLookup = sessionAccountLookup;
         this.resourcePolicyProviders = resourcePolicyProviders;
+        this.resourceInfo = resourceInfo;
     }
 
     /** Package-private constructor for callers predating Query dispatch-aware enforcement. */
@@ -148,7 +148,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         this(config, accountResolver, iamService, evaluator, actionRegistry,
                 new AwsQueryServiceResolver(catalog), arnBuilder, requestContext,
                 conditionContextResolver, cloudTrailService, currentVertxRequest, catalog,
-                scpProvider, sessionAccountLookup, resourcePolicyProviders);
+                scpProvider, sessionAccountLookup, resourcePolicyProviders, null);
     }
 
     /** Package-private constructor for callers predating resourcePolicyProviders. */
@@ -168,7 +168,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         this(config, accountResolver, iamService, evaluator, actionRegistry,
                 new AwsQueryServiceResolver(catalog), arnBuilder, requestContext,
                 conditionContextResolver, cloudTrailService, currentVertxRequest, catalog,
-                scpProvider, sessionAccountLookup, null);
+                scpProvider, sessionAccountLookup, null, null);
     }
 
     @Override

@@ -105,11 +105,14 @@ public class IamActionRegistry {
      * Returns {@code null} when the action is unknown (caller treats this as ALLOW).
      */
     public String resolve(String credentialScope, ContainerRequestContext ctx) {
-        // Query-protocol: Action or Operation param → service:Action.
+        // Query-protocol: Action param → service:Action.
         // AWS SDKs send Query-protocol calls (IAM, STS, EC2, SQS, SNS, ...) as
         // POST with Action=... in the application/x-www-form-urlencoded body,
         // not the URL query string — so we look in both places.
-        String queryAction = queryAction(ctx);
+        String queryAction = ctx.getUriInfo().getQueryParameters().getFirst("Action");
+        if (queryAction == null || queryAction.isBlank()) {
+            queryAction = RequestBodyReader.formField(ctx, "Action");
+        }
         if (queryAction != null && !queryAction.isBlank()) {
             return credentialScope + ":" + queryAction;
         }
