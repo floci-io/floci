@@ -7,11 +7,13 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbStreamService;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbStreamsJsonHandler;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbTtlService;
 import io.github.hectorvent.floci.services.dynamodb.KinesisStreamingForwarder;
 import io.github.hectorvent.floci.services.dynamodb.NativeDynamoDbJsonHandler;
 import io.github.hectorvent.floci.services.dynamodb.NativeDynamoDbStreamsJsonHandler;
@@ -26,6 +28,7 @@ import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.InOrder;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -39,7 +42,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /** The native engine behind the DynamoDB seam, and the thin public handlers in front of it. */
@@ -51,20 +56,26 @@ class DynamoDbNativeBackendTest {
     private static final String TABLE = "orders";
 
     private final ObjectMapper mapper = new ObjectMapper();
+    private final List<StorageBackend<?, ?>> stores = new ArrayList<>();
+    private final KinesisStreamingForwarder forwarder = mock(KinesisStreamingForwarder.class);
+    private final DynamoDbTtlService ttl = mock(DynamoDbTtlService.class);
     private NativeDynamoDbBackend backend;
 
     @BeforeEach
     void setUp() {
         StorageFactory storageFactory = mock(StorageFactory.class);
-        when(storageFactory.create(anyString(), anyString(), any()))
-                .thenAnswer(invocation -> AccountAwareStorageBackend.inMemory(ACCOUNT));
+        when(storageFactory.create(anyString(), anyString(), any())).thenAnswer(invocation -> {
+            AccountAwareStorageBackend<Object> store = AccountAwareStorageBackend.inMemory(ACCOUNT);
+            stores.add(store);
+            return store;
+        });
         DynamoDbStreamService streams = new DynamoDbStreamService(mapper, storageFactory);
         DynamoDbService service = new DynamoDbService(storageFactory, new RegionResolver(REGION, ACCOUNT), streams,
-                mock(KinesisStreamingForwarder.class), null, mapper, mock(EmulatorConfig.class, RETURNS_DEEP_STUBS));
+                forwarder, null, mapper, mock(EmulatorConfig.class, RETURNS_DEEP_STUBS));
         NativeDynamoDbTableService tables = new NativeDynamoDbTableService(service, streams, mock(KinesisService.class));
         backend = new NativeDynamoDbBackend(new NativeDynamoDbJsonHandler(service, tables, mapper),
                 new NativeDynamoDbStreamsJsonHandler(streams, service, new RegionResolver(REGION, ACCOUNT), mapper),
-                service, mapper);
+                service, streams, ttl, mapper);
     }
 
     private Reply call(Api api, String action, JsonNode body) throws Exception {
@@ -82,6 +93,52 @@ class DynamoDbNativeBackendTest {
 
     private JsonNode json(String text) throws Exception {
         return mapper.readTree(text);
+    }
+
+    @Test
+    void lifecycleDrivesTheTtlSweep() {
+        backend.start();
+        verify(ttl).start();
+
+        backend.beforeReset();
+        verify(ttl).pause();
+
+        backend.afterReset();
+        verify(ttl).resume();
+
+        backend.stop();
+        verify(ttl).stop();
+    }
+
+    @Test
+    void stopEndsKinesisForwardingAfterTheTtlSweep() {
+        backend.stop();
+
+        InOrder order = inOrder(ttl, forwarder);
+        order.verify(ttl).stop();
+        order.verify(forwarder).clear();
+    }
+
+    @Test
+    void resetDropsTheEngineProcessState() throws Exception {
+        createTable(",\"StreamSpecification\":{\"StreamEnabled\":true,\"StreamViewType\":\"KEYS_ONLY\"}");
+        JsonNode transact = json("""
+                {"ClientRequestToken":"token-1",
+                 "TransactItems":[{"Put":{"TableName":"%s","Item":{"id":{"S":"a"}}}}]}
+                """.formatted(TABLE));
+        call(Api.DYNAMODB, "TransactWriteItems", transact);
+
+        // An emulator reset wipes Floci storage before it resets the engine.
+        stores.forEach(StorageBackend::clear);
+        backend.reset();
+        createTable("");
+        call(Api.DYNAMODB, "TransactWriteItems", transact);
+
+        Reply streams = call(Api.DYNAMODB_STREAMS, "ListStreams", mapper.createObjectNode());
+        assertEquals(0, streams.body().path("Streams").size());
+        JsonNode key = json("{\"id\":{\"S\":\"a\"}}");
+        assertEquals(key, backend.getItem(SCOPE, TABLE, key), "the reused token writes again");
+        verify(forwarder).clear();
     }
 
     @Test

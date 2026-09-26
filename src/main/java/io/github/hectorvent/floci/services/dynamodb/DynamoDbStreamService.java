@@ -146,6 +146,13 @@ public class DynamoDbStreamService {
         }
     }
 
+    /** Emulator reset: drops every stream and its records. Sequence numbers stay monotonic. */
+    public void clear() {
+        streams.clear();
+        records.clear();
+        streamRecordCounts.clear();
+    }
+
     public void captureEvent(String eventName, JsonNode oldItem, JsonNode newItem,
                              TableDefinition table, String region) {
         StreamDescription sd = streams.get(table.getTableArn());

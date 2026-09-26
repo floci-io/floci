@@ -3,9 +3,11 @@ package io.github.hectorvent.floci.services.redshift;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbStreamReader;
@@ -17,6 +19,8 @@ import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.redshift.model.Integration;
 import io.github.hectorvent.floci.services.redshiftdata.RedshiftZeroEtlWriter;
 import io.quarkus.test.junit.QuarkusTest;
+import io.vertx.core.Handler;
+import io.vertx.core.Vertx;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -27,19 +31,27 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 @QuarkusTest
@@ -258,6 +270,190 @@ class RedshiftDynamoDbZeroEtlConsumerTest {
                 .put("eventName", "MODIFY");
         awsRecord.putObject("dynamodb").put("SequenceNumber", sequenceNumber);
         return new DynamoDbStreamReader.Record(sequenceNumber, awsRecord);
+    }
+
+    @Test
+    void anEmulatorResetStopsEveryIntegrationTimer() {
+        Vertx vertx = mock(Vertx.class);
+        when(vertx.setPeriodic(anyLong(), any())).thenReturn(7L);
+        RedshiftDynamoDbZeroEtlConsumer consumer = new RedshiftDynamoDbZeroEtlConsumer(vertx,
+                new FakeStreamReader(CheckpointLifetime.PROCESS), dynamoDb, mock(RedshiftService.class),
+                mock(RedshiftZeroEtlWriter.class), MAPPER, mock(EmulatorConfig.class, RETURNS_DEEP_STUBS));
+        consumer.startPolling(streamingIntegration());
+        Resettable resettable = consumer;
+
+        resettable.clear();
+
+        verify(vertx).cancelTimer(7L);
+    }
+
+    @Test
+    void anEmulatorResetWaitsForTheWriteInProgressAndWritesNothingUntilItEnds() throws Exception {
+        FakeStreamReader streams = new FakeStreamReader(CheckpointLifetime.PROCESS);
+        RedshiftZeroEtlWriter writer = mock(RedshiftZeroEtlWriter.class);
+        CountDownLatch writing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            writing.countDown();
+            release.await(10, TimeUnit.SECONDS);
+            return null;
+        }).doNothing().when(writer).writeBatch(any(), any(), any(), any());
+        Integration integration = streamingIntegration();
+        List<DynamoDbStreamReader.Record> shard = streams.shard(SHARD_ID, null);
+        shard.add(streamRecord("s1"));
+        RedshiftDynamoDbZeroEtlConsumer consumer =
+                new RedshiftDynamoDbZeroEtlConsumer(streams, dynamoDb, mock(RedshiftService.class), writer);
+        Thread poll = new Thread(() -> consumer.pollOnce(integration));
+        poll.start();
+        assertTrue(writing.await(10, TimeUnit.SECONDS));
+
+        Thread reset = new Thread(consumer::beforeReset);
+        reset.start();
+        awaitWaiting(reset);
+        release.countDown();
+        reset.join(10_000);
+        poll.join(10_000);
+        assertEquals(Thread.State.TERMINATED, reset.getState());
+
+        DynamoDbStreamReader.Record second = streamRecord("s2");
+        shard.add(second);
+        consumer.pollOnce(integration);
+        verify(writer, times(1)).createLandingTable(any(), any(), any());
+        verify(writer, times(1)).writeBatch(any(), any(), any(), any());
+
+        consumer.afterReset();
+        consumer.pollOnce(integration);
+        verify(writer).writeBatch(integration.getAccountId(), "warehouse", "floci_zetl_orders",
+                List.of(second.awsRecord()));
+        assertEquals(Map.of(SHARD_ID, "s2"), integration.getShardSequenceNumbers());
+    }
+
+    @Test
+    void aPollSubmittedBeforeAResetIsSkippedEvenWhenItRunsAfterTheReset() {
+        FakeStreamReader streams = new FakeStreamReader(CheckpointLifetime.PROCESS);
+        RedshiftService redshiftService = mock(RedshiftService.class);
+        RedshiftZeroEtlWriter writer = mock(RedshiftZeroEtlWriter.class);
+        Integration integration = streamingIntegration();
+        DynamoDbStreamReader.Record first = streamRecord("s1");
+        streams.shard(SHARD_ID, null).add(first);
+        RedshiftDynamoDbZeroEtlConsumer consumer =
+                new RedshiftDynamoDbZeroEtlConsumer(streams, dynamoDb, redshiftService, writer);
+        Runnable submittedBeforeReset = consumer.pollTask(integration);
+
+        consumer.beforeReset();
+        consumer.clear();
+        consumer.afterReset();
+        submittedBeforeReset.run();
+
+        verifyNoInteractions(writer);
+        verify(redshiftService, never()).updateIntegrationRuntime(any(), any(), any(), anyBoolean(), any());
+
+        consumer.pollTask(integration).run();
+
+        verify(writer).writeBatch(integration.getAccountId(), "warehouse", "floci_zetl_orders",
+                List.of(first.awsRecord()));
+        verify(redshiftService).updateIntegrationRuntime(integration.getAccountId(), integration.getIntegrationArn(),
+                Map.of(SHARD_ID, "s1"), true, null);
+    }
+
+    @Test
+    void shutdownWaitsForThePollInProgressSoItsCheckpointIsSavedFirst() throws Exception {
+        FakeStreamReader streams = new FakeStreamReader(CheckpointLifetime.PROCESS);
+        RedshiftService redshiftService = mock(RedshiftService.class);
+        RedshiftZeroEtlWriter writer = mock(RedshiftZeroEtlWriter.class);
+        List<String> events = new CopyOnWriteArrayList<>();
+        CountDownLatch writing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            writing.countDown();
+            release.await(10, TimeUnit.SECONDS);
+            return null;
+        }).when(writer).writeBatch(any(), any(), any(), any());
+        doAnswer(invocation -> events.add("checkpoint saved"))
+                .when(redshiftService).updateIntegrationRuntime(any(), any(), any(), anyBoolean(), any());
+        Vertx vertx = mock(Vertx.class);
+        when(vertx.setPeriodic(anyLong(), any())).thenReturn(7L);
+        Integration integration = streamingIntegration();
+        streams.shard(SHARD_ID, null).add(streamRecord("s1"));
+        RedshiftDynamoDbZeroEtlConsumer consumer = new RedshiftDynamoDbZeroEtlConsumer(vertx, streams, dynamoDb,
+                redshiftService, writer, MAPPER, mock(EmulatorConfig.class, RETURNS_DEEP_STUBS));
+        consumer.startPolling(integration);
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Handler<Long>> tick = ArgumentCaptor.forClass(Handler.class);
+        verify(vertx).setPeriodic(anyLong(), tick.capture());
+        Thread shutdown = new Thread(() -> {
+            consumer.shutdown();
+            events.add("shutdown returned");
+        });
+
+        try {
+            tick.getValue().handle(7L);
+            assertTrue(writing.await(10, TimeUnit.SECONDS), "the tick hands the poll to the poll executor");
+            shutdown.start();
+            assertEquals(Thread.State.TIMED_WAITING, awaitTimedWaitingOrTerminated(shutdown),
+                    "shutdown() returned while a poll was still writing");
+            release.countDown();
+            shutdown.join(10_000);
+        } finally {
+            release.countDown();
+        }
+
+        assertEquals(List.of("checkpoint saved", "shutdown returned"), events);
+        verify(redshiftService).updateIntegrationRuntime(integration.getAccountId(), integration.getIntegrationArn(),
+                Map.of(SHARD_ID, "s1"), true, null);
+    }
+
+    @Test
+    void aTickFromATimerCanceledByAResetDoesNotPoll() {
+        FakeStreamReader streams = new FakeStreamReader(CheckpointLifetime.PROCESS);
+        RedshiftService redshiftService = mock(RedshiftService.class);
+        RedshiftZeroEtlWriter writer = mock(RedshiftZeroEtlWriter.class);
+        Vertx vertx = mock(Vertx.class);
+        when(vertx.setPeriodic(anyLong(), any())).thenReturn(7L);
+        Integration integration = streamingIntegration();
+        streams.shard(SHARD_ID, null).add(streamRecord("s1"));
+        RedshiftDynamoDbZeroEtlConsumer consumer = new RedshiftDynamoDbZeroEtlConsumer(vertx, streams, dynamoDb,
+                redshiftService, writer, MAPPER, mock(EmulatorConfig.class, RETURNS_DEEP_STUBS));
+        consumer.startPolling(integration);
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Handler<Long>> tick = ArgumentCaptor.forClass(Handler.class);
+        verify(vertx).setPeriodic(anyLong(), tick.capture());
+
+        consumer.beforeReset();
+        consumer.clear();
+        consumer.afterReset();
+        tick.getValue().handle(7L);
+        // shutdown() waits for every submitted poll to end, so anything the tick submitted has run.
+        consumer.shutdown();
+
+        assertTrue(streams.iteratorRequests.isEmpty(), "the stale tick read the stream");
+        verifyNoInteractions(writer);
+        verify(redshiftService, never()).updateIntegrationRuntime(any(), any(), any(), anyBoolean(), any());
+    }
+
+    /** Observes the thread park in a timed wait, or end, instead of sleeping to hope for either. */
+    private static Thread.State awaitTimedWaitingOrTerminated(Thread thread) {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        Thread.State state = thread.getState();
+        while (state != Thread.State.TIMED_WAITING && state != Thread.State.TERMINATED) {
+            if (System.nanoTime() > deadline) {
+                fail("the thread neither parked in a timed wait nor ended");
+            }
+            Thread.onSpinWait();
+            state = thread.getState();
+        }
+        return state;
+    }
+
+    /** Observes the reset thread park on the poll's lock instead of sleeping to hope for it. */
+    private static void awaitWaiting(Thread thread) {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (thread.getState() != Thread.State.WAITING) {
+            if (System.nanoTime() > deadline) {
+                fail("beforeReset() returned or never waited while a write was in progress");
+            }
+            Thread.onSpinWait();
+        }
     }
 
     private static Integration streamingIntegration() {

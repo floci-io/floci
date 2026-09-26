@@ -56,7 +56,7 @@ class IamConditionContextResolverTest {
     @BeforeEach
     void setUp() {
         dynamoDbService = mock(DynamoDbService.class);
-        NativeDynamoDbBackend dynamoDbBackend = new NativeDynamoDbBackend(null, null, dynamoDbService, mapper);
+        NativeDynamoDbBackend dynamoDbBackend = new NativeDynamoDbBackend(null, null, dynamoDbService, null, null, mapper);
         dynamoDbFacadeInstance = mock(Instance.class);
         when(dynamoDbFacadeInstance.isResolvable()).thenReturn(true);
         when(dynamoDbFacadeInstance.get()).thenReturn(new DynamoDbFacade(dynamoDbBackend, dynamoDbBackend,

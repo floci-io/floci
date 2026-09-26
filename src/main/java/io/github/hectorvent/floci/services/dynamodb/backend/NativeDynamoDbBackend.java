@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbStreamService;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbTtlService;
 import io.github.hectorvent.floci.services.dynamodb.NativeDynamoDbJsonHandler;
 import io.github.hectorvent.floci.services.dynamodb.NativeDynamoDbStreamsJsonHandler;
 import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
@@ -12,6 +14,7 @@ import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
+import io.quarkus.arc.ClientProxy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Typed;
 import jakarta.inject.Inject;
@@ -27,21 +30,64 @@ import java.util.Optional;
  */
 @ApplicationScoped
 @Typed(NativeDynamoDbBackend.class)
-public class NativeDynamoDbBackend implements DynamoDbOperations, DynamoDbItemAccess, DynamoDbTableAccess {
+public class NativeDynamoDbBackend implements DynamoDbOperations, DynamoDbItemAccess, DynamoDbTableAccess,
+        DynamoDbBackendLifecycle {
 
     private final NativeDynamoDbJsonHandler jsonHandler;
     private final NativeDynamoDbStreamsJsonHandler streamsHandler;
     private final DynamoDbService dynamoDbService;
+    private final DynamoDbStreamService streamService;
+    private final DynamoDbTtlService ttlService;
     private final ObjectMapper objectMapper;
 
     @Inject
     public NativeDynamoDbBackend(NativeDynamoDbJsonHandler jsonHandler,
                                  NativeDynamoDbStreamsJsonHandler streamsHandler,
-                                 DynamoDbService dynamoDbService, ObjectMapper objectMapper) {
+                                 DynamoDbService dynamoDbService, DynamoDbStreamService streamService,
+                                 DynamoDbTtlService ttlService, ObjectMapper objectMapper) {
         this.jsonHandler = jsonHandler;
         this.streamsHandler = streamsHandler;
         this.dynamoDbService = dynamoDbService;
+        this.streamService = streamService;
+        this.ttlService = ttlService;
         this.objectMapper = objectMapper;
+    }
+
+    /**
+     * Resolves the engine beans so their constructors load persisted items, recover interrupted
+     * jobs and rebuild stream buffers now, before any consumer reads, then schedules the TTL sweep.
+     */
+    @Override
+    public void start() {
+        ClientProxy.unwrap(dynamoDbService);
+        ClientProxy.unwrap(streamService);
+        ttlService.start();
+    }
+
+    /** A native reset is always allowed. */
+    @Override
+    public void checkReset() {
+    }
+
+    @Override
+    public void beforeReset() {
+        ttlService.pause();
+    }
+
+    @Override
+    public void reset() {
+        dynamoDbService.clearProcessState();
+    }
+
+    @Override
+    public void afterReset() {
+        ttlService.resume();
+    }
+
+    @Override
+    public void stop() {
+        ttlService.stop();
+        dynamoDbService.stopKinesisForwarding();
     }
 
     @Override

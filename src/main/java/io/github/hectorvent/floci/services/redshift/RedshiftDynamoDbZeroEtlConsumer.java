@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbItemAccess.ScanPage;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations.Scope;
@@ -16,11 +17,9 @@ import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import io.github.hectorvent.floci.services.redshift.model.Integration;
 import io.github.hectorvent.floci.services.redshiftdata.RedshiftZeroEtlWriter;
-import io.quarkus.runtime.StartupEvent;
 import io.vertx.core.Vertx;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
@@ -33,9 +32,11 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 @ApplicationScoped
-public class RedshiftDynamoDbZeroEtlConsumer {
+public class RedshiftDynamoDbZeroEtlConsumer implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(RedshiftDynamoDbZeroEtlConsumer.class);
     private static final int BATCH_SIZE = 100;
@@ -56,6 +57,11 @@ public class RedshiftDynamoDbZeroEtlConsumer {
         thread.setDaemon(true);
         return thread;
     });
+    /** Polls hold the read lock; a reset takes the write lock to wait them out. */
+    private final ReentrantReadWriteLock quiesceLock = new ReentrantReadWriteLock();
+    private volatile boolean quiesced;
+    /** Completed resets: a poll writes only while none is in progress and none completed since its submission. */
+    private volatile long resets;
 
     @Inject
     public RedshiftDynamoDbZeroEtlConsumer(Vertx vertx,
@@ -92,10 +98,6 @@ public class RedshiftDynamoDbZeroEtlConsumer {
         this.pollIntervalMs = pollIntervalMs;
     }
 
-    void onStart(@Observes StartupEvent event) {
-        startPersistedIntegrations();
-    }
-
     /**
      * Starts the persisted integrations, first discarding their stream progress when it lasts only
      * for the process: native stream history is volatile, so a sequence number saved by a previous
@@ -116,8 +118,8 @@ public class RedshiftDynamoDbZeroEtlConsumer {
         if (vertx == null || timerIds.containsKey(integration.getIntegrationArn())) {
             return;
         }
-        long timerId = vertx.setPeriodic(pollIntervalMs, ignored -> pollAnd(integration));
-        timerIds.put(integration.getIntegrationArn(), timerId);
+        timerIds.put(integration.getIntegrationArn(),
+                vertx.setPeriodic(pollIntervalMs, timerId -> pollAnd(integration, timerId)));
     }
 
     public void stopPolling(String integrationArn) {
@@ -130,6 +132,10 @@ public class RedshiftDynamoDbZeroEtlConsumer {
     }
 
     void pollOnce(Integration integration) {
+        unlessQuiesced(resets, () -> poll(integration));
+    }
+
+    private void poll(Integration integration) {
         writer.createLandingTable(integration.getAccountId(), integration.getTargetClusterIdentifier(),
                 integration.getLandingTableName());
         if (!integration.isBackfillCompleted()) {
@@ -261,7 +267,22 @@ public class RedshiftDynamoDbZeroEtlConsumer {
         }
     }
 
-    public void reset() {
+    /**
+     * Waits for the poll in progress, then keeps every poll from writing until {@link #afterReset()},
+     * and a poll submitted before that from writing at all.
+     */
+    @Override
+    public void beforeReset() {
+        quiesceLock.writeLock().lock();
+        try {
+            quiesced = true;
+        } finally {
+            quiesceLock.writeLock().unlock();
+        }
+    }
+
+    @Override
+    public void clear() {
         for (String integrationArn : timerIds.keySet()) {
             stopPolling(integrationArn);
         }
@@ -269,34 +290,86 @@ public class RedshiftDynamoDbZeroEtlConsumer {
         finishedShards.clear();
     }
 
-    @PreDestroy
-    void onStop() {
-        reset();
-        pollExecutor.shutdownNow();
+    /** Lets the polls submitted from now on write again. */
+    @Override
+    public void afterReset() {
+        quiesceLock.writeLock().lock();
+        try {
+            resets++;
+            quiesced = false;
+        } finally {
+            quiesceLock.writeLock().unlock();
+        }
     }
 
-    private void pollAnd(Integration integration) {
+    /**
+     * Stops every integration for good, waiting up to five seconds for a poll in progress so the storage
+     * flush that follows holds its checkpoint. Idempotent, so it may run again from {@code @PreDestroy}.
+     */
+    @PreDestroy
+    public void shutdown() {
+        clear();
+        pollExecutor.shutdown();
+        try {
+            if (!pollExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+                pollExecutor.shutdownNow();
+                LOG.warnv("A zero-ETL poll was still running at shutdown, so its last checkpoint may not be flushed");
+            }
+        } catch (InterruptedException e) {
+            pollExecutor.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /** Runs the section unless a reset is in progress or one completed since {@code submittedAt} was read. */
+    private void unlessQuiesced(long submittedAt, Runnable section) {
+        quiesceLock.readLock().lock();
+        try {
+            if (!quiesced && resets == submittedAt) {
+                section.run();
+            }
+        } finally {
+            quiesceLock.readLock().unlock();
+        }
+    }
+
+    /**
+     * Submits the tick's poll only while its timer is still registered, building the task first: {@code clear()}
+     * removes the timer before {@code afterReset()} counts the reset, both on the reset thread, so a task that
+     * read the new count sees its timer gone and one that read the old count is rejected by {@code unlessQuiesced}.
+     */
+    private void pollAnd(Integration integration, long timerId) {
+        Runnable task = pollTask(integration);
         String integrationArn = integration.getIntegrationArn();
+        if (!Long.valueOf(timerId).equals(timerIds.get(integrationArn))) {
+            return;
+        }
         if (activePolls.putIfAbsent(integrationArn, Boolean.TRUE) != null) {
             return;
         }
-        pollExecutor.submit(() -> {
-            try {
-                pollSafely(integration);
-            } finally {
-                activePolls.remove(integrationArn);
-            }
-        });
+        pollExecutor.submit(task);
     }
 
-    private void pollSafely(Integration integration) {
+    /** The poll {@code pollAnd} submits, bound to the resets completed at its submission. */
+    Runnable pollTask(Integration integration) {
+        long submittedAt = resets;
+        return () -> {
+            try {
+                pollSafely(integration, submittedAt);
+            } finally {
+                activePolls.remove(integration.getIntegrationArn());
+            }
+        };
+    }
+
+    private void pollSafely(Integration integration, long submittedAt) {
         try {
-            pollOnce(integration);
+            unlessQuiesced(submittedAt, () -> poll(integration));
         } catch (Exception e) {
             LOG.warnv(e, "Zero-ETL polling failed for integration {0}", integration.getIntegrationArn());
             try {
-                redshiftService.updateIntegrationRuntime(integration.getAccountId(), integration.getIntegrationArn(),
-                        integration.getShardSequenceNumbers(), false, e.getMessage());
+                unlessQuiesced(submittedAt, () -> redshiftService.updateIntegrationRuntime(integration.getAccountId(),
+                        integration.getIntegrationArn(), integration.getShardSequenceNumbers(), false, e.getMessage()));
             } catch (Exception updateError) {
                 LOG.warnv(updateError, "Could not persist zero-ETL failure for integration {0}",
                         integration.getIntegrationArn());
