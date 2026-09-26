@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.bedrockagentcorecontrol;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
+import io.github.hectorvent.floci.core.common.AwsEndpoints;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
@@ -66,7 +67,7 @@ public class BedrockAgentCoreGatewayService {
         gateway.setProtocolType("MCP");
         gateway.setStatus(STATUS_READY);
         gateway.setDescription(description);
-        gateway.setGatewayUrl("https://" + id + ".gateway.bedrock-agentcore." + region + ".amazonaws.com");
+        gateway.setGatewayUrl("https://" + id + ".gateway." + AwsEndpoints.host("bedrock-agentcore", region));
         gateway.setWorkloadIdentityArn(regionResolver.buildArn(ARN_SERVICE, region,
                 "workload-identity-directory/default/workload-identity/" + id));
         gateway.setCreatedAt(now);

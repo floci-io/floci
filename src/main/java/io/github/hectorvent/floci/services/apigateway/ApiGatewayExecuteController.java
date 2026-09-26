@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.apigateway;
 
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.AwsEndpoints;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -1282,7 +1283,7 @@ public class ApiGatewayExecuteController {
         }
 
         String arnRegion = region != null ? region : regionResolver.getDefaultRegion();
-        String domainName = apiId + ".execute-api." + arnRegion + ".amazonaws.com";
+        String domainName = AwsEndpoints.executeApiHost(apiId, arnRegion);
         long nowMillis = System.currentTimeMillis();
         String requestTime = java.time.format.DateTimeFormatter
                 .ofPattern("dd/MMM/yyyy:HH:mm:ss Z")
@@ -2975,7 +2976,7 @@ public class ApiGatewayExecuteController {
         String arnRegion = region != null ? region : regionResolver.getDefaultRegion();
         ctx.put("accountId", regionResolver.getAccountId());
         ctx.put("apiId", apiId);
-        ctx.put("domainName", apiId + ".execute-api." + arnRegion + ".amazonaws.com");
+        ctx.put("domainName", AwsEndpoints.executeApiHost(apiId, arnRegion));
         ctx.put("domainPrefix", apiId);
         ctx.put("requestId", UUID.randomUUID().toString());
         ctx.put("routeKey", routeKey != null ? routeKey : "$default");
@@ -3200,7 +3201,7 @@ public class ApiGatewayExecuteController {
         ObjectNode ctx = event.putObject("requestContext");
         ctx.put("accountId", regionResolver.getAccountId());
         ctx.put("apiId", apiId);
-        ctx.put("domainName", apiId + ".execute-api." + region + ".amazonaws.com");
+        ctx.put("domainName", AwsEndpoints.executeApiHost(apiId, region));
         ctx.put("domainPrefix", apiId);
         ctx.put("requestId", requestId);
         ctx.put("routeKey", routeKey != null ? routeKey : "$default");
@@ -3503,7 +3504,7 @@ public class ApiGatewayExecuteController {
         Map<String, Object> context = new LinkedHashMap<>();
         context.put("accountId", regionResolver.getAccountId());
         context.put("apiId", scope.apiId());
-        context.put("domainName", scope.apiId() + ".execute-api." + region + ".amazonaws.com");
+        context.put("domainName", AwsEndpoints.executeApiHost(scope.apiId(), region));
         context.put("domainPrefix", scope.apiId());
         context.put("extendedRequestId", requestId);
         context.put("httpMethod", scope.httpMethod());

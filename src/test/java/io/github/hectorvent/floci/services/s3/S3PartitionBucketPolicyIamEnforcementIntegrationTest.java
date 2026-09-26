@@ -131,7 +131,7 @@ class S3PartitionBucketPolicyIamEnforcementIntegrationTest {
                 .formParam("Action", action)
                 .header("Authorization", "AWS4-HMAC-SHA256 Credential=" + ACCOUNT
                         + "/20260629/us-east-1/iam/aws4_request, SignedHeaders=host, Signature=abc");
-        for (int i = 0; i < params.length; i += 2) {
+        for (int i = 0; i + 1 < params.length; i += 2) {
             request = request.formParam(params[i], params[i + 1]);
         }
         return request.when().post("/").then().statusCode(200).extract();

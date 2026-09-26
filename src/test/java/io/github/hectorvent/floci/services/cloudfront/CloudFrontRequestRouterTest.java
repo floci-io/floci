@@ -225,6 +225,14 @@ class CloudFrontRequestRouterTest {
         assertEquals("foo.s3-website-bar",
                 CloudFrontRequestRouter.bucketFromS3Domain(
                         "foo.s3-website-bar.s3.us-east-1.amazonaws.com"));
+        assertEquals("my-bucket",
+                CloudFrontRequestRouter.bucketFromS3Domain("my-bucket.s3.cn-north-1.amazonaws.com.cn"));
+        assertEquals("my-bucket",
+                CloudFrontRequestRouter.bucketFromS3Domain("my-bucket.s3.us-iso-east-1.c2s.ic.gov"));
+        assertEquals("my-bucket",
+                CloudFrontRequestRouter.bucketFromS3Domain("my-bucket.s3-fips.dualstack.us-gov-west-1.amazonaws.com"));
+        assertEquals("my-bucket",
+                CloudFrontRequestRouter.bucketFromS3Domain("my-bucket.s3-website.eusc-de-east-1.amazonaws.eu"));
         assertNull(CloudFrontRequestRouter.bucketFromS3Domain("sensitive.attacker.invalid"));
         assertNull(CloudFrontRequestRouter.bucketFromS3Domain("sensitive.s3.attacker.invalid"));
         assertNull(CloudFrontRequestRouter.bucketFromS3Domain("sensitive.s3-attacker.invalid"));

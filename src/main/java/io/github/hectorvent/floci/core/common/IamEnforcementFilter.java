@@ -644,19 +644,6 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     }
 
     /**
-     * Builds a 403 Access Denied response in the wire format the calling SDK
-     * expects. AWS SDKs hard-fail when they receive the wrong shape: an XML
-     * parser blows up on a leading {@code {}, and a JSON parser blows up on
-     * {@code <}. Pick the shape from request signals:
-     *
-     * <ul>
-     *   <li>S3 → S3-flavored XML {@code <Error>...</Error>}</li>
-     *   <li>{@code application/x-www-form-urlencoded} body → AWS Query
-     *       {@code <ErrorResponse>...</ErrorResponse>} (IAM/STS/EC2/SQS/SNS/...)</li>
-     *   <li>everything else (JSON 1.x, REST-JSON) → keep the historical JSON shape</li>
-     * </ul>
-     */
-    /**
      * The request's resource ARNs as the resources are actually named, so that a policy written
      * against a resource living in another partition than the request's still matches it.
      */
@@ -689,6 +676,19 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         return policies;
     }
 
+    /**
+     * Builds a 403 Access Denied response in the wire format the calling SDK
+     * expects. AWS SDKs hard-fail when they receive the wrong shape: an XML
+     * parser blows up on a leading {@code {}, and a JSON parser blows up on
+     * {@code <}. Pick the shape from request signals:
+     *
+     * <ul>
+     *   <li>S3 → S3-flavored XML {@code <Error>...</Error>}</li>
+     *   <li>{@code application/x-www-form-urlencoded} body → AWS Query
+     *       {@code <ErrorResponse>...</ErrorResponse>} (IAM/STS/EC2/SQS/SNS/...)</li>
+     *   <li>everything else (JSON 1.x, REST-JSON) → keep the historical JSON shape</li>
+     * </ul>
+     */
     // Package-private for unit testing.
     static Response accessDeniedResponse(String action, String credentialScope, MediaType requestMediaType) {
         return accessDeniedResponse(action, credentialScope, requestMediaType, null);
