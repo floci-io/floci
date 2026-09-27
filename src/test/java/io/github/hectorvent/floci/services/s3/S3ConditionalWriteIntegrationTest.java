@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.s3;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.xml.XmlPath;
 import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.Test;
 
@@ -408,7 +409,7 @@ class S3ConditionalWriteIntegrationTest {
             .statusCode(200)
             .extract().asString();
 
-        io.restassured.path.xml.XmlPath xml = io.restassured.path.xml.XmlPath.from(response);
+        XmlPath xml = XmlPath.from(response);
         assertEquals(List.of("matching.txt", "unconditional.txt"), xml.getList("DeleteResult.Deleted.Key"));
         assertEquals(List.of("stale.txt", "missing.txt"), xml.getList("DeleteResult.Error.Key"));
         assertEquals(List.of("PreconditionFailed", "NoSuchKey"), xml.getList("DeleteResult.Error.Code"));
