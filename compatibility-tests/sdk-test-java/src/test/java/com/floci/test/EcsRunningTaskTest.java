@@ -23,7 +23,6 @@ import software.amazon.awssdk.services.ecs.model.StopTaskRequest;
 
 import java.io.ByteArrayOutputStream;
 import java.net.URI;
-import java.net.http.HttpClient;
 import java.net.http.WebSocket;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -187,7 +186,7 @@ class EcsRunningTaskTest {
         }
 
         void open() throws Exception {
-            webSocket = HttpClient.newHttpClient().newWebSocketBuilder()
+            webSocket = TestFixtures.emulatorHttpClient().newWebSocketBuilder()
                     .buildAsync(URI.create(session.streamUrl()), this)
                     .get(20, TimeUnit.SECONDS);
             webSocket.sendText("{\"MessageSchemaVersion\":\"1.0\",\"RequestId\":\"" + UUID.randomUUID()
