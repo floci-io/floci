@@ -60,10 +60,14 @@ EOF
 chmod +x "${WORK}/root-bin/id" "${WORK}/root-bin/chroot" "${WORK}/root-bin/chown"
 
 # Runs the root phase with the given state dir and prints every path chown was asked to re-own.
+# A root phase that stops before the privilege drop prints a marker instead, so an empty result
+# can only mean chown was never called.
 chowned() {
     : > "${WORK}/chown.log"
-    PATH="${WORK}/root-bin:${PATH}" FLOCI_STORAGE_PERSISTENT_PATH="$1" LOCALSTACK_PARITY=false \
-        sh "${SCRIPT}" echo preserved >/dev/null 2>"${WORK}/chown.err"
+    if ! PATH="${WORK}/root-bin:${PATH}" FLOCI_STORAGE_PERSISTENT_PATH="$1" LOCALSTACK_PARITY=false \
+        sh "${SCRIPT}" echo preserved 2>"${WORK}/chown.err" | grep -q 'dropped privileges'; then
+        printf 'root phase did not reach the privilege drop\n'
+    fi
     cat "${WORK}/chown.log"
 }
 
