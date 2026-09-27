@@ -32,7 +32,9 @@ class S3ConditionalCopyIntegrationTest {
 
         copy(bucket, "src.txt", "dst.txt").header("If-None-Match", "*")
         .when().put("/" + bucket + "/dst.txt")
-        .then().statusCode(412).body("Error.Code", equalTo("PreconditionFailed"));
+        .then().statusCode(412)
+            .body("Error.Code", equalTo("PreconditionFailed"))
+            .body("Error.Condition", equalTo("If-None-Match"));
 
         assertObjectBody(bucket, "dst.txt", "destination");
     }
@@ -57,7 +59,9 @@ class S3ConditionalCopyIntegrationTest {
 
         copy(bucket, "src.txt", "dst.txt").header("If-Match", STALE_ETAG)
         .when().put("/" + bucket + "/dst.txt")
-        .then().statusCode(412).body("Error.Code", equalTo("PreconditionFailed"));
+        .then().statusCode(412)
+            .body("Error.Code", equalTo("PreconditionFailed"))
+            .body("Error.Condition", equalTo("If-Match"));
         assertObjectBody(bucket, "dst.txt", "destination");
 
         copy(bucket, "src.txt", "dst.txt").header("If-Match", destinationETag)
@@ -144,6 +148,8 @@ class S3ConditionalCopyIntegrationTest {
         String bucket = createBucket("copy-src-combo-match");
         String sourceETag = putObject(bucket, "src.txt", "source");
 
+        // Alone, the date condition fails; paired with a matching if-match it is not consulted.
+        assertCopySource(bucket, "x-amz-copy-source-if-unmodified-since", LONG_AGO, 412);
         copy(bucket, "src.txt", "dst.txt")
             .header("x-amz-copy-source-if-match", sourceETag)
             .header("x-amz-copy-source-if-unmodified-since", LONG_AGO)
@@ -156,6 +162,8 @@ class S3ConditionalCopyIntegrationTest {
         String bucket = createBucket("copy-src-combo-none");
         String sourceETag = putObject(bucket, "src.txt", "source");
 
+        // Alone, the date condition passes; a failing if-none-match still fails the pair.
+        assertCopySource(bucket, "x-amz-copy-source-if-modified-since", LONG_AGO, 200);
         copy(bucket, "src.txt", "dst.txt")
             .header("x-amz-copy-source-if-none-match", sourceETag)
             .header("x-amz-copy-source-if-modified-since", LONG_AGO)
