@@ -4,6 +4,8 @@ import io.github.hectorvent.floci.core.common.XmlParser;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
@@ -613,9 +615,13 @@ class CfnUnchangedResourceUpdateIntegrationTest {
                 .formParam("Action", "DescribeStackEvents").formParam("StackName", stackName)
                 .when().post("/").then().statusCode(200)
                 .extract().body().asString();
-        assertTrue(events.contains("<ResourceStatus>CREATE_COMPLETE</ResourceStatus>"));
-        // The only UPDATE_COMPLETE should be for the AWS::CloudFormation::Stack itself, not the Queue
-        assertFalse(events.contains("<LogicalResourceId>Queue</LogicalResourceId><PhysicalResourceId>" + queueName + "</PhysicalResourceId><ResourceType>AWS::SQS::Queue</ResourceType><ResourceStatus>UPDATE_COMPLETE</ResourceStatus>"));
+        List<String> queueStatuses = XmlParser.extractGroups(events, "member").stream()
+                .filter(member -> "Queue".equals(member.get("LogicalResourceId")))
+                .map(member -> member.get("ResourceStatus"))
+                .toList();
+        assertTrue(queueStatuses.contains("CREATE_COMPLETE"));
+        assertFalse(queueStatuses.contains("UPDATE_IN_PROGRESS"));
+        assertFalse(queueStatuses.contains("UPDATE_COMPLETE"));
 
         deleteStack(stackName);
     }
