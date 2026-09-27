@@ -191,7 +191,9 @@ jobs:
         # single call site of a very large method; inlined, the method outgrows the aarch64
         # conditional-branch range and the build dies with BranchTargetOutOfBoundsException.
         # The flag only exists on Mandrel, so it is passed here rather than in application.yml.
-        run: mvn clean package -Dnative -DskipTests -B -Dquarkus.native.additional-build-args-append="-Ob,-H:-AOTSingleCallsiteInline"
+        # maven.test.skip rather than skipTests: skipTests only stops surefire, so the build still
+        # compiled all of src/test (about 25s per arch) for a native image that never uses it.
+        run: mvn clean package -Dnative -Dmaven.test.skip=true -B -Dquarkus.native.additional-build-args-append="-Ob,-H:-AOTSingleCallsiteInline"
 
       # Quarkus always writes GraalVM's build-output JSON next to the native source jar. Surfacing
       # it here gives every PR a size record for both architectures: code area, image heap, total
