@@ -44,6 +44,70 @@ class SesListPagingTest {
     }
 
     @Test
+    void pageSize_sharedResourceDefaultsFollowTheProbe() {
+        assertEquals(25, SesListPaging.V2_LIST_EMAIL_IDENTITIES.pageSize(null));
+        assertEquals(1000, SesListPaging.V1_LIST_IDENTITIES.pageSize(null));
+        assertEquals(50, SesListPaging.V2_LIST_CONFIGURATION_SETS.pageSize(null));
+        assertEquals(50, SesListPaging.V1_LIST_CONFIGURATION_SETS.pageSize(null));
+        assertEquals(50, SesListPaging.V2_LIST_CUSTOM_VERIFICATION_EMAIL_TEMPLATES.pageSize(null));
+        assertEquals(50, SesListPaging.V1_LIST_CUSTOM_VERIFICATION_EMAIL_TEMPLATES.pageSize(null));
+    }
+
+    @Test
+    void pageSize_v1ConfigurationSetsAndCvetsServeFiftyForAnOutOfRangeValue() {
+        for (int size : new int[] {0, -1, 1001, Integer.MAX_VALUE}) {
+            assertEquals(50, SesListPaging.V1_LIST_CONFIGURATION_SETS.pageSize(size));
+            assertEquals(50, SesListPaging.V1_LIST_CUSTOM_VERIFICATION_EMAIL_TEMPLATES.pageSize(size));
+        }
+    }
+
+    @Test
+    void pageSize_sharedResourceOutOfRangeMessages() {
+        assertError("BadRequestException",
+                "Value 1001 for parameter PageSize is invalid. PageSize must be between 1 and 1000.",
+                () -> SesListPaging.V2_LIST_EMAIL_IDENTITIES.pageSize(1001));
+        assertError("InvalidParameterValue",
+                "Value 0 for parameter MaxItems is invalid. MaxItems must be between 1 and 1000.",
+                () -> SesListPaging.V1_LIST_IDENTITIES.pageSize(0));
+        assertError("BadRequestException", "The page size must be between 1 and 1000",
+                () -> SesListPaging.V2_LIST_CONFIGURATION_SETS.pageSize(0));
+        assertError("BadRequestException", "The page size must be between 1 and 50",
+                () -> SesListPaging.V2_LIST_CUSTOM_VERIFICATION_EMAIL_TEMPLATES.pageSize(51));
+    }
+
+    @Test
+    void sharedResourceTokens_crossBetweenV1AndV2ButNotBetweenKinds() {
+        String identityToken = page(SesListPaging.V1_LIST_IDENTITIES, 1, null).nextToken();
+        assertThat(page(SesListPaging.V2_LIST_EMAIL_IDENTITIES, 1, identityToken).items(), contains("b"));
+
+        String configSetToken = page(SesListPaging.V2_LIST_CONFIGURATION_SETS, 1, null).nextToken();
+        assertThat(page(SesListPaging.V1_LIST_CONFIGURATION_SETS, 1, configSetToken).items(), contains("b"));
+
+        String cvetToken = page(SesListPaging.V2_LIST_CUSTOM_VERIFICATION_EMAIL_TEMPLATES, 1, null).nextToken();
+        assertThat(page(SesListPaging.V1_LIST_CUSTOM_VERIFICATION_EMAIL_TEMPLATES, 1, cvetToken).items(),
+                contains("b"));
+
+        assertError("BadRequestException", "invalid nextToken " + identityToken,
+                () -> page(SesListPaging.V2_LIST_CONFIGURATION_SETS, 1, identityToken));
+        assertError("InvalidParameterValue", null,
+                () -> page(SesListPaging.V1_LIST_CONFIGURATION_SETS, 1, identityToken));
+    }
+
+    @Test
+    void invalidToken_sharedResourceMessages() {
+        assertError("BadRequestException", "Invalid NextToken <garbage>.",
+                () -> page(SesListPaging.V2_LIST_EMAIL_IDENTITIES, 1, "garbage"));
+        assertError("InvalidParameterValue", "Invalid NextToken <garbage>.",
+                () -> page(SesListPaging.V1_LIST_IDENTITIES, 1, "garbage"));
+        assertError("BadRequestException", "invalid nextToken garbage",
+                () -> page(SesListPaging.V2_LIST_CONFIGURATION_SETS, 1, "garbage"));
+        assertError("BadRequestException", "Invalid nextToken <garbage>.",
+                () -> page(SesListPaging.V2_LIST_CUSTOM_VERIFICATION_EMAIL_TEMPLATES, 1, "garbage"));
+        assertError("InvalidParameterValue", "Invalid nextToken <garbage>.",
+                () -> page(SesListPaging.V1_LIST_CUSTOM_VERIFICATION_EMAIL_TEMPLATES, 1, "garbage"));
+    }
+
+    @Test
     void templateTokens_areSharedBetweenV1AndV2AndRefusedByExportJobs() {
         String v1Token = page(SesListPaging.V1_LIST_TEMPLATES, 1, null).nextToken();
 
