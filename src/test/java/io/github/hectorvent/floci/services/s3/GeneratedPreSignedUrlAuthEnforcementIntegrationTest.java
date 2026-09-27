@@ -16,6 +16,7 @@ import java.util.UUID;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -85,6 +86,32 @@ class GeneratedPreSignedUrlAuthEnforcementIntegrationTest {
 
         given().filter(OWNER).when().delete("/" + bucket + "/" + key).then().statusCode(204);
         given().filter(OWNER).when().delete("/" + bucket).then().statusCode(204);
+    }
+
+    @Test
+    void generatedUrlRegistersFreshCredentialsAfterStoredSessionIsRemoved() {
+        String bucket = "generated-presign-reset-" + UUID.randomUUID().toString().substring(0, 8);
+        String baseUrl = "http://localhost:" + io.restassured.RestAssured.port;
+        URI oldUri = URI.create(presignGenerator.generatePresignedUrl(
+                baseUrl, bucket, "report.csv", "GET", 3600));
+        String oldAccessKeyId = queryParam(oldUri, "X-Amz-Credential").split("/", 2)[0];
+
+        // A state reset removes the persisted IAM session while this generator stays alive.
+        iamService.unregisterSession("000000000000", oldAccessKeyId);
+
+        given().filter(OWNER).when().put("/" + bucket).then().statusCode(200);
+        given().filter(OWNER).body("after reset").when().put("/" + bucket + "/report.csv")
+                .then().statusCode(200);
+
+        URI newUri = URI.create(presignGenerator.generatePresignedUrl(
+                baseUrl, bucket, "report.csv", "GET", 3600));
+        String newAccessKeyId = queryParam(newUri, "X-Amz-Credential").split("/", 2)[0];
+        assertNotEquals(oldAccessKeyId, newAccessKeyId);
+        assertTrue(iamService.findSecretKey(newAccessKeyId,
+                queryParam(newUri, "X-Amz-Security-Token")).isPresent());
+
+        given().urlEncodingEnabled(false).when().get(newUri.getRawPath() + "?" + newUri.getRawQuery())
+                .then().statusCode(200).body(equalTo("after reset"));
     }
 
     private static String queryParam(URI uri, String name) {

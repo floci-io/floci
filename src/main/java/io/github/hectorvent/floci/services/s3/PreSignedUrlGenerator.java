@@ -202,7 +202,9 @@ public class PreSignedUrlGenerator {
         Instant requiredExpiration = signedAt.plusSeconds(expiry);
         CredentialKey cacheKey = new CredentialKey(identity.accountId(), identity.region());
         return temporaryCredentials.compute(cacheKey, (ignored, existing) -> {
-            if (existing != null && !existing.expiration().isBefore(requiredExpiration)) {
+            if (existing != null && !existing.expiration().isBefore(requiredExpiration)
+                    && iamService.findSecretKey(existing.accessKeyId(), existing.sessionToken())
+                            .filter(existing.secretAccessKey()::equals).isPresent()) {
                 return existing;
             }
             Instant expiration = signedAt.plusSeconds(Math.max(expiry, MAX_PRESIGN_EXPIRY_SECONDS));
