@@ -194,6 +194,35 @@ class ElastiCacheServiceTest {
     }
 
     @Test
+    void validatePasswordAdmitsNoAuthUserWithAnyPassword() {
+        service.createReplicationGroup("grp-nopass", "test", AuthMode.IAM, null, "us-east-1");
+        service.createUser("nopass-user-id", "nopass-user", AuthMode.NO_AUTH,
+                List.of(), "on ~* +@all", null);
+        service.modifyReplicationGroup("grp-nopass", List.of("nopass-user-id"), null);
+
+        assertTrue(service.hasMembers("grp-nopass"));
+        assertEquals(AuthMode.NO_AUTH, service.memberAuthMode("grp-nopass", "nopass-user"));
+        assertTrue(service.validatePassword("grp-nopass", "nopass-user", "any-password"));
+        assertTrue(service.validatePassword("grp-nopass", "nopass-user", ""));
+    }
+
+    @Test
+    void memberAuthModeResolvesPasswordIamAndNoAuthUsers() {
+        service.createReplicationGroup("grp-mixed", "test", AuthMode.IAM, null, "us-east-1");
+        service.createUser("u-def", "default", AuthMode.PASSWORD, List.of("def-pass"), "on ~* +@all", null);
+        service.createUser("u-iam", "iam-user", AuthMode.IAM, List.of(), "on ~* +@all", null);
+        service.createUser("u-nopass", "nopass-user", AuthMode.NO_AUTH, List.of(), "on ~* +@all", null);
+        service.modifyReplicationGroup("grp-mixed", List.of("u-def", "u-iam", "u-nopass"), null);
+
+        assertTrue(service.hasMembers("grp-mixed"));
+        assertEquals(AuthMode.PASSWORD, service.memberAuthMode("grp-mixed", "default"));
+        assertEquals(AuthMode.PASSWORD, service.memberAuthMode("grp-mixed", null));
+        assertEquals(AuthMode.IAM, service.memberAuthMode("grp-mixed", "iam-user"));
+        assertEquals(AuthMode.NO_AUTH, service.memberAuthMode("grp-mixed", "nopass-user"));
+        assertNull(service.memberAuthMode("grp-mixed", "unknown-user"));
+    }
+
+    @Test
     void failedProvisioningRollsBackContainerAndReleasesProxyPort() {
         ElastiCacheContainerHandle handle =
                 new ElastiCacheContainerHandle("cid", "grp", "localhost", 6379);

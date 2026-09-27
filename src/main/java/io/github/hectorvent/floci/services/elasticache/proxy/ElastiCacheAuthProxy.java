@@ -33,13 +33,36 @@ public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
 
     @Override
     protected boolean authRequired() {
-        return authMode != AuthMode.NO_AUTH;
+        return authMode != AuthMode.NO_AUTH || passwordValidator.hasMembers();
     }
 
     @Override
     protected boolean authenticate(String username, String password) {
+        String effectiveUser = (username == null || username.isEmpty()) ? "default" : username;
+        if (passwordValidator.hasMembers()) {
+            if (username == null) {
+                if (passwordValidator.validatePassword(null, password)) {
+                    return true;
+                }
+                AuthMode defaultMode = passwordValidator.memberAuthMode("default");
+                if (defaultMode == AuthMode.IAM) {
+                    return sigV4Validator.validate(password, groupId, "default");
+                }
+                return false;
+            }
+
+            AuthMode userMode = passwordValidator.memberAuthMode(username);
+            if (userMode != null) {
+                return switch (userMode) {
+                    case IAM -> sigV4Validator.validate(password, groupId, effectiveUser);
+                    case PASSWORD, NO_AUTH -> passwordValidator.validatePassword(username, password);
+                };
+            }
+            return false;
+        }
+
         return switch (authMode) {
-            case IAM -> sigV4Validator.validate(password, groupId, username);
+            case IAM -> sigV4Validator.validate(password, groupId, effectiveUser);
             case PASSWORD -> passwordValidator.validatePassword(username, password);
             case NO_AUTH -> true; // unreachable: authRequired() is false for NO_AUTH
         };
@@ -62,10 +85,18 @@ public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
     }
 
     /**
-     * Callback interface for password validation, provided by ElastiCacheService.
+     * Callback interface for credential checks, provided by ElastiCacheService.
      */
     @FunctionalInterface
     public interface PasswordValidator {
         boolean validatePassword(String username, String password);
+
+        default boolean hasMembers() {
+            return false;
+        }
+
+        default AuthMode memberAuthMode(String username) {
+            return null;
+        }
     }
 }

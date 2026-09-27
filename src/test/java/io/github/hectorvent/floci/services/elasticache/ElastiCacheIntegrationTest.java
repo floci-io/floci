@@ -381,6 +381,116 @@ class ElastiCacheIntegrationTest {
                     equalTo(GROUP_ID + "-reused"));
     }
 
+    @Test
+    @Order(16)
+    void transitEncryptionReplicationGroupAuthenticatesPasswordAndNoAuthUsers() throws Exception {
+        String transitGroupId = "it-ec-transit-rbac";
+        String passUserId = "it-transit-pass-user";
+        String passUserName = "it-transit-pass-name";
+        String passUserPass = "secret-pass-123";
+        String noAuthUserId = "it-transit-noauth-user";
+        String noAuthUserName = "it-transit-noauth-name";
+
+        // Create replication group with TransitEncryptionEnabled=true and NO AuthToken -> AuthMode.IAM
+        int proxyPort =
+                given()
+                    .formParam("Action", "CreateReplicationGroup")
+                    .formParam("ReplicationGroupId", transitGroupId)
+                    .formParam("ReplicationGroupDescription", "Transit encryption RBAC test group")
+                    .formParam("TransitEncryptionEnabled", "true")
+                    .header("Authorization", AUTH_HEADER)
+                .when()
+                    .post("/")
+                .then()
+                    .statusCode(200)
+                    .extract()
+                    .xmlPath()
+                    .getInt("CreateReplicationGroupResponse.CreateReplicationGroupResult.ReplicationGroup.NodeGroups.NodeGroup.PrimaryEndpoint.Port");
+
+        try {
+            // Create a password user and a no-password user
+            given()
+                .formParam("Action", "CreateUser")
+                .formParam("UserId", passUserId)
+                .formParam("UserName", passUserName)
+                .formParam("AuthenticationMode.Type", "password")
+                .formParam("AuthenticationMode.Passwords.member.1", passUserPass)
+                .formParam("AccessString", "on ~* +@all")
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+
+            given()
+                .formParam("Action", "CreateUser")
+                .formParam("UserId", noAuthUserId)
+                .formParam("UserName", noAuthUserName)
+                .formParam("AuthenticationMode.Type", "no-password-required")
+                .formParam("AccessString", "on ~* +@all")
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+
+            // Associate users with the replication group
+            given()
+                .formParam("Action", "ModifyReplicationGroup")
+                .formParam("ReplicationGroupId", transitGroupId)
+                .formParam("UserGroupIdsToAdd.member.1", passUserId)
+                .formParam("UserGroupIdsToAdd.member.2", noAuthUserId)
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+
+            // 1. Password user authenticates with correct password
+            try (Socket socket = openSocket(proxyPort)) {
+                write(socket, respArray("AUTH", passUserName, passUserPass));
+                assertEquals("+OK\r\n", readLine(socket));
+
+                write(socket, respArray("PING"));
+                assertEquals("+PONG\r\n", readLine(socket));
+            }
+
+            // 2. Password user with wrong password is rejected
+            String wrongPassReply = sendCommand(proxyPort, respArray("AUTH", passUserName, "wrong-password"));
+            assertEquals("-ERR invalid username-password pair or user is disabled.\r\n", wrongPassReply);
+
+            // 3. No-password user is admitted with any password
+            try (Socket socket = openSocket(proxyPort)) {
+                write(socket, respArray("AUTH", noAuthUserName, "arbitrary-password"));
+                assertEquals("+OK\r\n", readLine(socket));
+
+                write(socket, respArray("PING"));
+                assertEquals("+PONG\r\n", readLine(socket));
+            }
+        } finally {
+            given()
+                .formParam("Action", "DeleteReplicationGroup")
+                .formParam("ReplicationGroupId", transitGroupId)
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/");
+
+            given()
+                .formParam("Action", "DeleteUser")
+                .formParam("UserId", passUserId)
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/");
+
+            given()
+                .formParam("Action", "DeleteUser")
+                .formParam("UserId", noAuthUserId)
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/");
+        }
+    }
+
     static boolean isDockerAvailable() {
         try {
             Process process = new ProcessBuilder("docker", "version", "--format", "{{.Server.Version}}")
