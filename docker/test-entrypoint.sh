@@ -60,12 +60,13 @@ EOF
 chmod +x "${WORK}/root-bin/id" "${WORK}/root-bin/chroot" "${WORK}/root-bin/chown"
 
 # Runs the root phase with the given state dir and prints every path chown was asked to re-own.
+# TEST_SH picks the shell that runs the entrypoint (default sh), so a case can pin bash.
 # A root phase that stops before the privilege drop prints a marker instead, so an empty result
 # can only mean chown was never called.
 chowned() {
     : > "${WORK}/chown.log"
     if ! PATH="${WORK}/root-bin:${PATH}" FLOCI_STORAGE_PERSISTENT_PATH="$1" LOCALSTACK_PARITY=false \
-        sh "${SCRIPT}" echo preserved 2>"${WORK}/chown.err" | grep -q 'dropped privileges'; then
+        "${TEST_SH:-sh}" "${SCRIPT}" echo preserved 2>"${WORK}/chown.err" | grep -q 'dropped privileges'; then
         printf 'root phase did not reach the privilege drop\n'
     fi
     cat "${WORK}/chown.log"
@@ -92,16 +93,16 @@ CUSTOM_DIR="${WORK}/custom-data"
 mkdir -p "${CUSTOM_DIR}"
 CUSTOM_DIR_PHYSICAL="$(cd -P "${CUSTOM_DIR}" && pwd -P)"
 assert_eq "root re-owns a custom FLOCI_STORAGE_PERSISTENT_PATH" \
-    "-R floci:root ${CUSTOM_DIR_PHYSICAL}" \
+    "--preserve-root -R floci:root ${CUSTOM_DIR_PHYSICAL}" \
     "$(chowned "${CUSTOM_DIR}")"
 
 assert_eq "root re-owns a relative path resolved against the working directory" \
-    "-R floci:root ${CUSTOM_DIR_PHYSICAL}" \
+    "--preserve-root -R floci:root ${CUSTOM_DIR_PHYSICAL}" \
     "$(cd "${WORK}" && chowned custom-data)"
 
 mkdir -p "${WORK}/elsewhere/custom-data"
 assert_eq "CDPATH does not redirect a relative path" \
-    "-R floci:root ${CUSTOM_DIR_PHYSICAL}" \
+    "--preserve-root -R floci:root ${CUSTOM_DIR_PHYSICAL}" \
     "$(cd "${WORK}" && CDPATH="${WORK}/elsewhere" chowned custom-data)"
 
 assert_eq "root skips a state dir that does not exist" \
@@ -111,6 +112,20 @@ assert_eq "root skips a state dir that does not exist" \
 assert_eq "root never re-owns /" \
     "" \
     "$(chowned /)"
+
+assert_eq "root never re-owns //" \
+    "" \
+    "$(chowned //)"
+
+# bash keeps a leading // through cd -P and pwd -P, which dash normalises to /, so only a bash
+# run can catch a guard that compares the path as a string. The native images run bash as sh.
+if command -v bash >/dev/null 2>&1; then
+    assert_eq "root never re-owns // under bash" \
+        "" \
+        "$(TEST_SH=bash chowned //)"
+else
+    printf '[SKIP] root never re-owns // under bash (bash not installed)\n'
+fi
 
 assert_eq "root never re-owns a path that resolves to /" \
     "" \
