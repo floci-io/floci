@@ -384,7 +384,13 @@ public class AppSyncResolverExecutor {
                 throw mappingTemplateError(
                         "VTL Lambda invocationType must be RequestResponse or Event");
             }
-            return request;
+            if (request.containsKey("payload")) {
+                return request;
+            }
+            Map<String, Object> normalized = new LinkedHashMap<>();
+            request.forEach((key, value) -> normalized.put((String) key, value));
+            normalized.put("payload", Map.of());
+            return normalized;
         }
 
         private Object prepareVtlRdsRequest(Map<?, ?> request) {

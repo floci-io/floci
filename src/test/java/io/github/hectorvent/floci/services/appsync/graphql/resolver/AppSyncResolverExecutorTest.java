@@ -603,6 +603,21 @@ class AppSyncResolverExecutorTest {
     }
 
     @Test
+    void vtlLambdaInvokeWithoutPayloadSendsAnEmptyObject() {
+        when(appSync.getDataSource(API_ID, "accountFunction"))
+                .thenReturn(dataSource("accountFunction", DataSourceType.AWS_LAMBDA));
+        Resolver resolver = resolver(ResolverKind.UNIT, null);
+        resolver.setDataSourceName("accountFunction");
+        resolver.setRequestMappingTemplate("{\"version\":\"2018-05-29\",\"operation\":\"Invoke\"}");
+        resolver.setResponseMappingTemplate("$util.toJson($ctx.result)");
+
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
+
+        assertTrue(result.errors().isEmpty());
+        assertEquals(Map.of(), ((Map<?, ?>) lambdaInvoker.requests.get(0)).get("payload"));
+    }
+
+    @Test
     void vtlRdsResolverUsesTheExistingDataSourceInvoker() {
         when(appSync.getDataSource(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
         invoker.answer = Map.of("sqlStatementResults", List.of(Map.of("numberOfRecordsUpdated", 1)));

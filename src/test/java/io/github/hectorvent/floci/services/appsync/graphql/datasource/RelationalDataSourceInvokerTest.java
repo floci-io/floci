@@ -10,17 +10,22 @@ import io.github.hectorvent.floci.services.appsync.model.DataSourceType;
 import io.github.hectorvent.floci.services.rdsdata.RdsDataService;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 
 import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -119,6 +124,46 @@ class RelationalDataSourceInvokerTest {
         // AppSync's own variableMap names its placeholders with a colon; the Data API does not.
         assertEquals("orgNo", sent.path("parameters").get(0).path("name").asText());
         assertEquals("556677", sent.path("parameters").get(0).path("value").path("stringValue").asText());
+    }
+
+    @Test
+    void twoVtlStatementsCommitOnlyAfterBothSucceed() {
+        answersOneRow();
+        when(rdsData.beginTransaction(any(), anyString())).thenReturn(
+                mapper.createObjectNode().put("transactionId", "tx-1"));
+
+        invoker.invoke(dataSource(), Map.of("version", "2018-05-29",
+                "statements", List.of("UPDATE t SET value = 1", "UPDATE t SET value = 2")), "eu-west-1");
+
+        InOrder order = inOrder(rdsData);
+        order.verify(rdsData).beginTransaction(any(), anyString());
+        ArgumentCaptor<JsonNode> statements = ArgumentCaptor.forClass(JsonNode.class);
+        order.verify(rdsData, times(2)).executeStatement(statements.capture(), anyString());
+        order.verify(rdsData).commitTransaction(any(), anyString());
+        assertEquals("tx-1", statements.getAllValues().get(0).path("transactionId").asText());
+        assertEquals("tx-1", statements.getAllValues().get(1).path("transactionId").asText());
+        verify(rdsData, never()).rollbackTransaction(any(), anyString());
+    }
+
+    @Test
+    void failedSecondVtlStatementRollsBackTheFirstWrite() {
+        answersOneRow();
+        when(rdsData.beginTransaction(any(), anyString())).thenReturn(
+                mapper.createObjectNode().put("transactionId", "tx-2"));
+        AwsException failure = new AwsException("DatabaseErrorException", "second statement failed", 400);
+        when(rdsData.executeStatement(any(), anyString()))
+                .thenReturn(mapper.createObjectNode())
+                .thenThrow(failure);
+
+        AwsException actual = assertThrows(AwsException.class, () -> invoker.invoke(dataSource(),
+                Map.of("version", "2018-05-29",
+                        "statements", List.of("UPDATE t SET value = 1", "BAD SQL")), "eu-west-1"));
+
+        assertSame(failure, actual);
+        ArgumentCaptor<JsonNode> rollback = ArgumentCaptor.forClass(JsonNode.class);
+        verify(rdsData).rollbackTransaction(rollback.capture(), anyString());
+        assertEquals("tx-2", rollback.getValue().path("transactionId").asText());
+        verify(rdsData, never()).commitTransaction(any(), anyString());
     }
 
     @Test

@@ -349,9 +349,11 @@ Supported request documents are:
 
 - `NONE`: `version` plus an optional `payload`, which is unwrapped into `ctx.result`.
 - DynamoDB: `GetItem`, `PutItem`, `UpdateItem`, `DeleteItem`, `Query`, and `Scan` requests.
-- Lambda: `Invoke` with synchronous `RequestResponse` invocation. VTL `BatchInvoke`
+- Lambda: `Invoke` with synchronous `RequestResponse` invocation. An omitted `payload`
+  sends an empty object to the function. VTL `BatchInvoke`
   requires batching field requests and is not implemented by the per-field resolver callback.
 - RDS: one or two `statements`, with optional `variableMap` and `variableTypeHintMap`.
+  Two-statement VTL requests use one RDS Data transaction, rolling back if either fails.
 
 A backing-service failure is exposed as `ctx.error` in the response template. The template may
 raise it, append it beside response data, or return a value and suppress it, matching the existing
