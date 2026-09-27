@@ -7,12 +7,9 @@ import io.restassured.config.HttpClientConfig;
 import io.restassured.config.RestAssuredConfig;
 import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
-import jakarta.inject.Inject;
 import org.awaitility.Awaitility;
-import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.TestInstance;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -42,11 +39,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * integrations returns an empty list rather than an error.
  */
 @QuarkusTest
-@TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class RedshiftIntegrationsIntegrationTest {
-
-    @Inject
-    RedshiftService service;
 
     private static String source;
     private static String otherSource;
@@ -85,13 +78,6 @@ class RedshiftIntegrationsIntegrationTest {
                 .then().statusCode(200);
         source = newSource;
         otherSource = newOtherSource;
-    }
-
-    @AfterAll
-    void deleteZeroEtlCluster() {
-        if (source != null) {
-            service.deleteCluster("zero-etl-cluster");
-        }
     }
 
     private static String createDynamoTable(String tableName) {
