@@ -1347,12 +1347,13 @@ public class S3Controller {
             }
             boolean bypass = "true".equalsIgnoreCase(
                     httpHeaders.getHeaderString("x-amz-bypass-governance-retention"));
+            String ifMatch = httpHeaders.getHeaderString("If-Match");
             s3Service.authorizeDeleteObject(bucket, key, versionId, authorization);
+            authorizeDeleteETagRead(bucket, key, ifMatch, authorization);
             if (bypass) {
                 s3Service.authorizeObjectWrite(bucket, key, "s3:BypassGovernanceRetention", authorization);
             }
-            S3Object result = s3Service.deleteObject(bucket, key, versionId, bypass,
-                    httpHeaders.getHeaderString("If-Match"));
+            S3Object result = s3Service.deleteObject(bucket, key, versionId, bypass, ifMatch);
             var resp = Response.noContent();
             if (result != null) {
                 if (result.isDeleteMarker()) {
@@ -1543,6 +1544,7 @@ public class S3Controller {
         for (XmlParser.KeyVersion entry : entries) {
             try {
                 s3Service.authorizeDeleteObject(bucket, entry.key(), entry.versionId(), authorization);
+                authorizeDeleteETagRead(bucket, entry.key(), entry.eTag(), authorization);
                 if (bypass && s3Service.isGovernanceRetentionActive(
                         bucket, entry.key(), entry.versionId())) {
                     s3Service.authorizeObjectWrite(bucket, entry.key(),
@@ -1590,6 +1592,20 @@ public class S3Controller {
         }
         builder.end("DeleteResult");
         return Response.ok(builder.build()).type(MediaType.APPLICATION_XML).build();
+    }
+
+    // A conditional delete against an ETag reveals whether the object still has it, so S3 requires
+    // s3:GetObject as well as s3:DeleteObject. The existence check (If-Match: *) needs only the delete.
+    private void authorizeDeleteETagRead(String bucket, String key, String ifMatch,
+                                         S3Service.RequestAuthorization authorization) {
+        if (ifMatch == null) {
+            return;
+        }
+        String value = ifMatch.trim();
+        if (value.equals("*") || value.equals("\"*\"")) {
+            return;
+        }
+        s3Service.authorizeGetObject(bucket, key, null, authorization);
     }
 
     private Response handleListParts(String bucket, String key, String uploadId,
