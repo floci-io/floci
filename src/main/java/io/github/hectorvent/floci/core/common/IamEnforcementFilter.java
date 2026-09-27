@@ -14,6 +14,8 @@ import io.github.hectorvent.floci.services.iam.ResourcePolicyProvider;
 import io.github.hectorvent.floci.services.iam.ScpProvider;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
+import io.vertx.core.http.HttpServerRequest;
+import io.vertx.ext.web.RoutingContext;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
@@ -238,7 +240,9 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             if ("s3".equals(credentialScope)) {
                 // UriInfo has normalized consecutive slashes. S3 and the SigV4 verifier use
                 // the wire path, where /bucket//key names the distinct object /key.
-                String rawUri = currentVertxRequest.getCurrent().request().uri();
+                RoutingContext routingContext = currentVertxRequest.getCurrent();
+                HttpServerRequest request = routingContext == null ? null : routingContext.request();
+                String rawUri = request == null ? null : request.uri();
                 if (rawUri == null || !rawUri.startsWith("/")) {
                     ctx.abortWith(accessDeniedResponse(action, credentialScope, ctx.getMediaType()));
                     return;

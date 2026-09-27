@@ -12,6 +12,8 @@ import io.github.hectorvent.floci.services.iam.ResourceArnBuilder;
 import io.github.hectorvent.floci.services.iam.ResourcePolicyProvider;
 import io.github.hectorvent.floci.services.iam.ScpProvider;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
+import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
+import io.vertx.ext.web.RoutingContext;
 import jakarta.enterprise.inject.Instance;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedHashMap;
@@ -94,6 +96,10 @@ class IamEnforcementFilterTest {
     }
 
     private IamEnforcementFilter newFilter() {
+        return newFilter(mock(CurrentVertxRequest.class));
+    }
+
+    private IamEnforcementFilter newFilter(CurrentVertxRequest currentVertxRequest) {
         @SuppressWarnings("unchecked")
         Instance<ScpProvider> scpProvider =
                 mock(Instance.class);
@@ -102,7 +108,7 @@ class IamEnforcementFilterTest {
                 config, accountResolver, iamService, evaluator, actionRegistry, arnBuilder,
                 requestContext, conditionContextResolver,
                 mock(CloudTrailService.class),
-                mock(io.quarkus.vertx.http.runtime.CurrentVertxRequest.class),
+                currentVertxRequest,
                 catalog, scpProvider, sessionAccountLookup);
     }
 
@@ -369,6 +375,40 @@ class IamEnforcementFilterTest {
         newFilter().filter(containerRequest);
 
         verify(containerRequest).abortWith(any());
+    }
+
+    @Test
+    void scopedPresignedRequestWithoutRoutingContextIsDenied() {
+        assertScopedPresignedRequestWithoutHttpRequestIsDenied(null);
+    }
+
+    @Test
+    void scopedPresignedRequestWithoutHttpRequestIsDenied() {
+        assertScopedPresignedRequestWithoutHttpRequestIsDenied(mock(RoutingContext.class));
+    }
+
+    private void assertScopedPresignedRequestWithoutHttpRequestIsDenied(RoutingContext routingContext) {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        CurrentVertxRequest currentVertxRequest = mock(CurrentVertxRequest.class);
+        String auth = "AWS4-HMAC-SHA256 Credential=ASIASCOPE/20260927/us-east-1/s3/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn("ASIASCOPE");
+        when(actionRegistry.resolve("s3", containerRequest)).thenReturn("s3:GetObject");
+        when(iamService.resolveCallerContext("ASIASCOPE"))
+                .thenReturn(CallerContext.of(List.of("{\"Version\":\"2012-10-17\",\"Statement\":[]}")));
+        when(iamService.presignedScope("ASIASCOPE"))
+                .thenReturn(Optional.of(new IamService.PresignedScope(
+                        "s3:GetObject", "arn:aws:s3:::bucket/key")));
+        if (routingContext != null) {
+            when(currentVertxRequest.getCurrent()).thenReturn(routingContext);
+        }
+
+        newFilter(currentVertxRequest).filter(containerRequest);
+
+        ArgumentCaptor<Response> response = ArgumentCaptor.forClass(Response.class);
+        verify(containerRequest).abortWith(response.capture());
+        assertEquals(403, response.getValue().getStatus());
     }
 
     @Test
