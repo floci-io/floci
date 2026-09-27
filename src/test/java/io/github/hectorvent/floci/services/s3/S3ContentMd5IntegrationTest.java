@@ -103,6 +103,28 @@ class S3ContentMd5IntegrationTest {
     }
 
     @Test
+    void putObject_awsChunkedBody_withTheDigestOfTheFramedBody_isBadDigest() throws Exception {
+        String bucket = createBucket("md5-chunked-framed");
+        String payload = "decoded-payload";
+        String chunked = Integer.toHexString(payload.length()) + "\r\n" + payload + "\r\n0\r\n\r\n";
+
+        // The digest is of the payload S3 stores, not of the chunk framing on the wire.
+        given()
+            .header("Content-Encoding", "aws-chunked")
+            .header("x-amz-content-sha256", "STREAMING-UNSIGNED-PAYLOAD-TRAILER")
+            .header("x-amz-decoded-content-length", String.valueOf(payload.length()))
+            .header("Content-MD5", md5(chunked))
+            .body(chunked)
+        .when()
+            .put("/" + bucket + "/object.txt")
+        .then()
+            .statusCode(400)
+            .body(containsString("<Code>BadDigest</Code>"));
+
+        assertObjectAbsent(bucket, "object.txt");
+    }
+
+    @Test
     void uploadPart_mismatchedContentMd5_isBadDigest() throws Exception {
         String bucket = createBucket("md5-part");
         String uploadId = given()
@@ -120,6 +142,14 @@ class S3ContentMd5IntegrationTest {
         .then()
             .statusCode(400)
             .body(containsString("<Code>BadDigest</Code>"));
+
+        // The rejected part was not stored.
+        given()
+        .when()
+            .get("/" + bucket + "/object.txt?uploadId=" + uploadId)
+        .then()
+            .statusCode(200)
+            .body(org.hamcrest.Matchers.not(containsString("<Part>")));
 
         given()
             .header("Content-MD5", md5("part"))
