@@ -24,6 +24,8 @@ import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.ext.Provider;
 import org.jboss.logging.Logger;
 
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -233,6 +235,26 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         Optional<PresignedScope> presignedScope = iamService.presignedScope(akid);
         if (presignedScope.isPresent()) {
             PresignedScope scope = presignedScope.get();
+            if ("s3".equals(credentialScope)) {
+                // UriInfo has normalized consecutive slashes. S3 and the SigV4 verifier use
+                // the wire path, where /bucket//key names the distinct object /key.
+                String rawUri = currentVertxRequest.getCurrent().request().uri();
+                if (rawUri == null || !rawUri.startsWith("/")) {
+                    ctx.abortWith(accessDeniedResponse(action, credentialScope, ctx.getMediaType()));
+                    return;
+                }
+                int queryStart = rawUri.indexOf('?');
+                String rawPath = rawUri.substring(0, queryStart < 0 ? rawUri.length() : queryStart);
+                String decodedPath;
+                try {
+                    decodedPath = URLDecoder.decode(rawPath.replace("+", "%2B"), StandardCharsets.UTF_8);
+                } catch (IllegalArgumentException invalidEncoding) {
+                    ctx.abortWith(accessDeniedResponse(action, credentialScope, ctx.getMediaType()));
+                    return;
+                }
+                resources = List.of(AwsArnUtils.Arn.global(AwsRegions.partitionFor(region),
+                        "s3", "", decodedPath.substring(1)).toString());
+            }
             // IAM's resource glob treats * and ? in object keys as patterns. An internal URL
             // credential is narrower: it may authorize only its literal object and action.
             if (!scope.action().equals(action) || resources.isEmpty()

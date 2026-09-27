@@ -13,6 +13,9 @@ import org.junit.jupiter.api.Test;
 
 import java.net.URI;
 import java.net.URLDecoder;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
 import java.util.Map;
@@ -148,6 +151,59 @@ class GeneratedPreSignedUrlAuthEnforcementIntegrationTest {
 
         given().urlEncodingEnabled(false).when().get(newUri.getRawPath() + "?" + newUri.getRawQuery())
                 .then().statusCode(200).body(equalTo("after reset"));
+    }
+
+    @Test
+    void generatedPutUrlCanReplaceObjectConditionallyUnderEnforcedIam() {
+        String bucket = "generated-presign-conditional-" + UUID.randomUUID().toString().substring(0, 8);
+        String key = "object.txt";
+        given().filter(OWNER).when().put("/" + bucket).then().statusCode(200);
+        String eTag = given().filter(OWNER).body("old").when().put("/" + bucket + "/" + key)
+                .then().statusCode(200).extract().header("ETag");
+
+        URI uri = URI.create(presignGenerator.generatePresignedUrl(
+                "http://localhost:" + RestAssured.port, bucket, key, "PUT", 60));
+        String accessKeyId = queryParam(uri, "X-Amz-Credential").split("/", 2)[0];
+        CallerContext caller = iamService.resolveCallerContext(accessKeyId);
+        String objectArn = "arn:aws:s3:::" + bucket + "/" + key;
+        assertEquals(IamPolicyEvaluator.SimulationDecision.ALLOWED,
+                policyEvaluator.simulatePrincipalPolicy(caller, "s3:GetObject", objectArn, Map.of()));
+        assertEquals(IamPolicyEvaluator.SimulationDecision.IMPLICIT_DENY,
+                policyEvaluator.simulatePrincipalPolicy(caller, "s3:GetObject",
+                        "arn:aws:s3:::" + bucket + "/other.txt", Map.of()));
+
+        given().urlEncodingEnabled(false).header("If-Match", eTag).body("new")
+                .when().put(uri.getRawPath() + "?" + uri.getRawQuery()).then().statusCode(200);
+        given().filter(OWNER).when().get("/" + bucket + "/" + key)
+                .then().statusCode(200).body(equalTo("new"));
+    }
+
+    @Test
+    void generatedUrlsKeepLeadingSlashKeysDistinctUnderEnforcedIam() throws Exception {
+        String bucket = "generated-presign-slash-" + UUID.randomUUID().toString().substring(0, 8);
+        String baseUrl = "http://localhost:" + RestAssured.port;
+        given().filter(OWNER).when().put("/" + bucket).then().statusCode(200);
+
+        URI putUri = URI.create(presignGenerator.generatePresignedUrl(
+                baseUrl, bucket, "/object.txt", "PUT", 60));
+        HttpClient client = HttpClient.newHttpClient();
+        HttpResponse<String> put = client.send(HttpRequest.newBuilder(putUri)
+                        .PUT(HttpRequest.BodyPublishers.ofString("leading slash")).build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, put.statusCode(), put.body());
+
+        URI getUri = URI.create(presignGenerator.generatePresignedUrl(
+                baseUrl, bucket, "/object.txt", "GET", 60));
+        HttpResponse<String> get = client.send(HttpRequest.newBuilder(getUri).GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, get.statusCode(), get.body());
+        assertEquals("leading slash", get.body());
+        given().filter(OWNER).when().get("/" + bucket + "/object.txt").then().statusCode(404);
+
+        URI alteredUri = URI.create(getUri.toString().replace("/" + bucket + "//", "/" + bucket + "/"));
+        HttpResponse<String> altered = client.send(HttpRequest.newBuilder(alteredUri).GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(403, altered.statusCode(), altered.body());
     }
 
     private static String queryParam(URI uri, String name) {

@@ -94,7 +94,7 @@ class PreSignedUrlGeneratorSessionTest {
         assertTrue(policies.getAllValues().get(0).contains("\"Action\":\"s3:GetObject\""));
         assertTrue(policies.getAllValues().get(0).contains("arn:aws:s3:::bucket/a"));
         assertTrue(policies.getAllValues().get(1).contains("arn:aws:s3:::bucket/b"));
-        assertTrue(policies.getAllValues().get(2).contains("\"Action\":\"s3:PutObject\""));
+        assertTrue(policies.getAllValues().get(2).contains("\"Action\":[\"s3:PutObject\",\"s3:GetObject\"]"));
         assertThrows(IllegalArgumentException.class, () -> generator.generatePresignedUrl(
                 "http://localhost:4566", "bucket", "a", "GET", 604801));
     }

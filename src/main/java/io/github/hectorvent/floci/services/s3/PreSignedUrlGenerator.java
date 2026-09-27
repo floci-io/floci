@@ -255,7 +255,7 @@ public class PreSignedUrlGenerator {
                     created.secretAccessKey(),
                     created.sessionToken(),
                     created.expiration(),
-                    scopedPolicy(action, resource), action, resource);
+                    scopedPolicy(method, action, resource), action, resource);
             if (existing != null) {
                 if (existing.expiration().isBefore(signedAt)) {
                     iamService.unregisterSession(identity.accountId(), existing.accessKeyId());
@@ -277,11 +277,15 @@ public class PreSignedUrlGenerator {
         };
     }
 
-    private static String scopedPolicy(String action, String resource) {
+    private static String scopedPolicy(String method, String action, String resource) {
         try {
+            // S3 also checks GetObject for a conditional PutObject with If-Match. The
+            // presigned scope still restricts the credential to the URL's PUT operation.
+            Object actions = "PUT".equals(method)
+                    ? List.of(action, "s3:GetObject") : action;
             return POLICY_MAPPER.writeValueAsString(Map.of(
                     "Version", "2012-10-17",
-                    "Statement", List.of(Map.of("Effect", "Allow", "Action", action, "Resource", resource))));
+                    "Statement", List.of(Map.of("Effect", "Allow", "Action", actions, "Resource", resource))));
         } catch (JsonProcessingException e) {
             throw new IllegalStateException("Failed to encode S3 presigned session policy", e);
         }
