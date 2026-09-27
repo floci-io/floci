@@ -681,6 +681,25 @@ class AppSyncResolverExecutorTest {
     }
 
     @Test
+    void batchLambdaInvocationDoesNotRunAsAnIndependentFieldCall() {
+        when(appSync.getDataSource(API_ID, "accountFunction"))
+                .thenReturn(dataSource("accountFunction", DataSourceType.AWS_LAMBDA));
+        Resolver resolver = resolver(ResolverKind.UNIT, null);
+        resolver.setDataSourceName("accountFunction");
+        resolver.setRequestMappingTemplate("""
+                {"version":"2018-05-29","operation":"BatchInvoke",
+                 "payload":[{"id":"42"}]}
+                """);
+        resolver.setResponseMappingTemplate("$util.toJson($ctx.result)");
+
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
+
+        assertEquals(1, result.errors().size());
+        assertEquals("UnsupportedOperation", result.errors().get(0).errorType());
+        assertTrue(lambdaInvoker.requests.isEmpty());
+    }
+
+    @Test
     void malformedVtlRdsStatementsFailAsAMappingTemplateError() {
         when(appSync.getDataSource(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
         Resolver resolver = resolver(ResolverKind.UNIT, null);

@@ -367,10 +367,10 @@ public class AppSyncResolverExecutor {
         private Object prepareVtlLambdaRequest(Map<?, ?> request) {
             validateVtlRequestMembers(request, LAMBDA_VTL_REQUEST_MEMBERS, "Lambda");
             String operation = requireVtlOperation(request, "Lambda");
-            if (!"Invoke".equals(operation) && !"BatchInvoke".equals(operation)) {
+            if (!"Invoke".equals(operation)) {
                 throw new AwsException("UnsupportedOperation",
                         "Floci's AppSync VTL Lambda data source does not implement the "
-                                + operation + " operation", 400);
+                                + operation + " operation yet", 400);
             }
             Object invocationType = request.get("invocationType");
             if (invocationType != null && !(invocationType instanceof String)) {
