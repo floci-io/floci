@@ -107,15 +107,8 @@ public class IamActionRegistry {
      * Returns {@code null} when the action is unknown (caller treats this as ALLOW).
      */
     public String resolve(String credentialScope, ContainerRequestContext ctx) {
-        // Match the Query protocol claim before accepting Action or Operation.
-        // REST requests with these fields still use their method and path rules.
-        String path = ctx.getUriInfo().getPath();
-        MediaType mediaType = ctx.getMediaType();
-        if ("POST".equalsIgnoreCase(ctx.getMethod())
-                && (path == null || path.isEmpty() || "/".equals(path))
-                && mediaType != null
-                && "application".equalsIgnoreCase(mediaType.getType())
-                && "x-www-form-urlencoded".equalsIgnoreCase(mediaType.getSubtype())) {
+        // REST requests with Action or Operation fields still use their method and path rules.
+        if (isQueryRequest(ctx)) {
             String queryAction = queryAction(ctx);
             if (queryAction != null && !queryAction.isBlank()) {
                 return credentialScope + ":" + queryAction;
@@ -131,7 +124,7 @@ public class IamActionRegistry {
 
         // REST-JSON: match against rule table
         String method = ctx.getMethod().toUpperCase();
-        path = ctx.getUriInfo().getPath();
+        String path = ctx.getUriInfo().getPath();
         if (!path.startsWith("/")) path = "/" + path;
 
         // S3 sub-resource override: the URL path alone doesn't distinguish
@@ -167,6 +160,19 @@ public class IamActionRegistry {
         return AwsQueryServiceResolver.action(
                 RequestBodyReader.formField(ctx, "Action"),
                 RequestBodyReader.formField(ctx, "Operation"));
+    }
+
+    /** The same form POST at the root that the Query controller dispatches. */
+    public static boolean isQueryRequest(ContainerRequestContext ctx) {
+        if (!"POST".equalsIgnoreCase(ctx.getMethod()) || ctx.getUriInfo() == null) {
+            return false;
+        }
+        String path = ctx.getUriInfo().getPath();
+        MediaType mediaType = ctx.getMediaType();
+        return (path == null || path.isEmpty() || "/".equals(path))
+                && mediaType != null
+                && "application".equalsIgnoreCase(mediaType.getType())
+                && "x-www-form-urlencoded".equalsIgnoreCase(mediaType.getSubtype());
     }
 
     /** One bucket sub-resource operation: the query parameter that selects it, and the IAM action. */

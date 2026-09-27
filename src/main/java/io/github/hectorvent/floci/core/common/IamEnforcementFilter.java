@@ -309,7 +309,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     private ResolvedAuthorization resolveAuthorization(String auth, String claimedScope,
                                                         ContainerRequestContext ctx) {
         Object claimValue = ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY);
-        if (claimValue instanceof ProtocolClaim claim && claim.protocol() == WireProtocol.AWS_QUERY) {
+        // Authorization must not depend on the pre-matching claim filter running first.
+        if (IamActionRegistry.isQueryRequest(ctx)) {
             String queryAction = actionRegistry.queryAction(ctx);
             if (queryAction == null || queryAction.isBlank()) {
                 return new ResolvedAuthorization(claimedScope, null);

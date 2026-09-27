@@ -312,6 +312,7 @@ class IamEnforcementFilterTest {
         requestContext.setRegion("us-east-1");
         when(accountResolver.extractAccessKeyId(auth)).thenReturn("AKIAUSER");
         when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
+        stubQueryRequest(containerRequest);
         when(containerRequest.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY))
                 .thenReturn(new ProtocolClaim(WireProtocol.AWS_QUERY, null, null, null));
         when(actionRegistry.queryAction(containerRequest)).thenReturn("CreateUser");
@@ -328,6 +329,40 @@ class IamEnforcementFilterTest {
         verify(arnBuilder).buildResources("iam", containerRequest,
                 "us-east-1", "000000000000");
         verify(conditionContextResolver).resolve("iam", "iam:CreateUser", containerRequest);
+    }
+
+    @Test
+    void queryActionUsesTheDispatchServiceWithoutAProtocolClaim() {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        String auth = "AWS4-HMAC-SHA256 Credential=AKIAUSER/20260924/us-east-1/lambda/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        requestContext.setAccountId("000000000000");
+        requestContext.setRegion("us-east-1");
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn("AKIAUSER");
+        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
+        stubQueryRequest(containerRequest);
+        when(actionRegistry.queryAction(containerRequest)).thenReturn("CreateUser");
+        when(catalog.byCredentialScope("lambda")).thenReturn(Optional.of(
+                descriptor("lambda", ServiceProtocol.REST_JSON, Set.of("lambda"), null)));
+        when(catalog.byExternalKey("iam")).thenReturn(Optional.of(
+                descriptor("iam", ServiceProtocol.QUERY, Set.of("iam"), null)));
+        when(iamService.resolveCallerContext("AKIAUSER")).thenReturn(CallerContext.of(List.of()));
+
+        newFilter().filter(containerRequest);
+
+        verify(actionRegistry).queryAction(containerRequest);
+        verify(actionRegistry, never()).resolve("lambda", containerRequest);
+        verify(arnBuilder).buildResources("iam", containerRequest,
+                "us-east-1", "000000000000");
+        verify(conditionContextResolver).resolve("iam", "iam:CreateUser", containerRequest);
+    }
+
+    private static void stubQueryRequest(ContainerRequestContext ctx) {
+        UriInfo uriInfo = mock(UriInfo.class);
+        when(ctx.getMethod()).thenReturn("POST");
+        when(ctx.getUriInfo()).thenReturn(uriInfo);
+        when(uriInfo.getPath()).thenReturn("");
+        when(ctx.getMediaType()).thenReturn(MediaType.APPLICATION_FORM_URLENCODED_TYPE);
     }
 
     private static void stubClaim(ContainerRequestContext ctx, WireProtocol protocol,
