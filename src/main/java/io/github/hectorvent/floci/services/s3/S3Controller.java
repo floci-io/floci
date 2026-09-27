@@ -48,12 +48,15 @@ import jakarta.ws.rs.core.UriInfo;
 import java.io.ByteArrayOutputStream;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -3002,7 +3005,7 @@ public class S3Controller {
         }
         byte[] expected;
         try {
-            expected = java.util.Base64.getDecoder().decode(contentMd5.trim());
+            expected = Base64.getDecoder().decode(contentMd5.trim());
         } catch (IllegalArgumentException e) {
             expected = null;
         }
@@ -3011,11 +3014,11 @@ public class S3Controller {
         }
         byte[] actual;
         try {
-            actual = java.security.MessageDigest.getInstance("MD5").digest(data);
-        } catch (java.security.NoSuchAlgorithmException e) {
+            actual = MessageDigest.getInstance("MD5").digest(data);
+        } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException("MD5 algorithm is not available", e);
         }
-        if (!java.security.MessageDigest.isEqual(expected, actual)) {
+        if (!MessageDigest.isEqual(expected, actual)) {
             throw new AwsException("BadDigest", "The Content-MD5 you specified did not match the payload.", 400);
         }
     }
@@ -3528,7 +3531,7 @@ public class S3Controller {
 
     private void validatePolicyExpiration(String policyBase64) {
         try {
-            byte[] decoded = java.util.Base64.getDecoder().decode(policyBase64);
+            byte[] decoded = Base64.getDecoder().decode(policyBase64);
             JsonNode policy = OBJECT_MAPPER.readTree(decoded);
             JsonNode expirationNode = policy.get("expiration");
             if (expirationNode == null || expirationNode.isNull()) {
@@ -3551,7 +3554,7 @@ public class S3Controller {
     private void validatePolicyConditions(String policyBase64, String bucket,
                                            Map<String, String> fields, int contentLength) {
         try {
-            byte[] decoded = java.util.Base64.getDecoder().decode(policyBase64);
+            byte[] decoded = Base64.getDecoder().decode(policyBase64);
             JsonNode policy = OBJECT_MAPPER.readTree(decoded);
             JsonNode conditions = policy.get("conditions");
             if (conditions == null || !conditions.isArray()) {

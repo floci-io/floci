@@ -11,6 +11,7 @@ import java.util.UUID;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.not;
 
 @QuarkusTest
 class S3ContentMd5IntegrationTest {
@@ -149,7 +150,7 @@ class S3ContentMd5IntegrationTest {
             .get("/" + bucket + "/object.txt?uploadId=" + uploadId)
         .then()
             .statusCode(200)
-            .body(org.hamcrest.Matchers.not(containsString("<Part>")));
+            .body(not(containsString("<Part>")));
 
         given()
             .header("Content-MD5", md5("part"))
