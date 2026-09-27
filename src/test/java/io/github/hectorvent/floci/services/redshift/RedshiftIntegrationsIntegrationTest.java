@@ -14,12 +14,15 @@ import org.awaitility.Awaitility;
 import io.restassured.RestAssured;
 import io.restassured.response.Response;
 import io.quarkus.test.junit.QuarkusTest;
+import jakarta.inject.Inject;
 import io.restassured.config.HttpClientConfig;
 import io.restassured.config.RestAssuredConfig;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.restassured.specification.RequestSpecification;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -38,7 +41,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * integrations returns an empty list rather than an error.
  */
 @QuarkusTest
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class RedshiftIntegrationsIntegrationTest {
+
+    @Inject
+    RedshiftService service;
 
     private static String source;
     private static String otherSource;
@@ -79,6 +86,13 @@ class RedshiftIntegrationsIntegrationTest {
         otherSource = newOtherSource;
     }
 
+    @AfterAll
+    void deleteZeroEtlCluster() {
+        if (source != null) {
+            service.deleteCluster("zero-etl-cluster");
+        }
+    }
+
     private static String createDynamoTable(String tableName) {
         Response response = given()
                 .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
@@ -94,11 +108,12 @@ class RedshiftIntegrationsIntegrationTest {
                         """.formatted(tableName))
                 .when().post("/");
         if (response.statusCode() != 200) {
-            response = given()
+            return given()
                     .header("X-Amz-Target", "DynamoDB_20120810.DescribeTable")
                     .contentType("application/x-amz-json-1.0")
                     .body("{\"TableName\":\"%s\"}".formatted(tableName))
-                    .when().post("/");
+                    .when().post("/")
+                    .then().statusCode(200).extract().path("Table.LatestStreamArn");
         }
         return response.then().statusCode(200).extract().path("TableDescription.LatestStreamArn");
     }

@@ -67,6 +67,7 @@ public class RedshiftContainerManager {
     public RedshiftContainerHandle start(String accountId, String clusterIdentifier, String masterUsername, String masterPassword) {
         String image = config.services().redshift().imageVersion();
         String containerName = containerName(accountId, clusterIdentifier);
+        ContainerStorageHelper.removeStaleContainer(config, lifecycleManager, containerName);
 
         List<String> envVars = List.of(
                 "POSTGRES_USER=" + masterUsername,
