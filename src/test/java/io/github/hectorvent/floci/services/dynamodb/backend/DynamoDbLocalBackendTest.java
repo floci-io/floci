@@ -445,6 +445,7 @@ class DynamoDbLocalBackendTest {
                    {"AttributeName":"l","KeyType":"RANGE"}],"Projection":{"ProjectionType":"KEYS_ONLY"}}]}
                 """), sent("CreateTable"));
         assertEquals(ORDERS_ARN, table.getTableArn());
+        assertEquals(List.of(REGION + "/orders"), List.copyOf(tags.keysForAccount(ACCOUNT)));
     }
 
     @Test
