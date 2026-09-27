@@ -137,10 +137,11 @@ region is rejected.
 - **Short names in batch replies.** Batch replies keyed by table always use the short table name,
   including when the request named the table by ARN.
 - **No tag validation.** Floci does not check tag counts or tag keys.
-- **Resource Explorer sees Floci's table records.** DynamoDB Local cannot list its namespaces, so
-  Resource Explorer searches the regions where Floci's storage holds a table record. It misses
-  tables created directly on DynamoDB Local, and tables whose records were lost with `memory`
-  storage.
+- **Resource Explorer searches regions Floci knows.** DynamoDB Local cannot list its namespaces,
+  so Resource Explorer lists every table in each region where Floci's storage holds at least one
+  table record, including tables created there directly on DynamoDB Local. A region with no such
+  record is not searched: one whose tables were all created directly on DynamoDB Local, or whose
+  records were lost with `memory` storage.
 - **No data migration.** Data does not move between `native` and `local`. After a switch, you see
   what that engine holds.
 - **DynamoDB Local sets the feature set.** Operations and features follow DynamoDB Local; see the

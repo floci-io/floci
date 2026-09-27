@@ -350,6 +350,43 @@ class DynamoDbLocalBackendTest {
     }
 
     @Test
+    void wireListTagsOfAMissingTableIsAccessDenied() throws Exception {
+        answer("DescribeTable", 400, "{\"__type\":\"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException\","
+                + "\"message\":\"Requested resource not found\"}");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> execute("ListTagsOfResource", "{\"ResourceArn\":\"" + ORDERS_ARN + "\"}"));
+
+        assertEquals("AccessDeniedException", error.getErrorCode());
+        assertEquals("User is not authorized to perform: dynamodb:ListTagsOfResource on resource: " + ORDERS_ARN,
+                error.getMessage());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
+    void tagArnOfAnUnknownPartitionIsValidation() throws Exception {
+        String arn = "arn:notaws:dynamodb:eu-west-1:123456789012:table/orders";
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> execute("TagResource", "{\"ResourceArn\":\"" + arn + "\",\"Tags\":[]}"));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        neverSent("DescribeTable");
+    }
+
+    @Test
+    void tagArnOfAnotherRegionOrPartitionIsNotFound() throws Exception {
+        for (String foreign : List.of("arn:aws:dynamodb:us-east-1:123456789012:table/orders",
+                "arn:aws-cn:dynamodb:cn-north-1:123456789012:table/orders")) {
+            AwsException error = assertThrows(AwsException.class,
+                    () -> execute("UntagResource", "{\"ResourceArn\":\"" + foreign + "\",\"TagKeys\":[]}"));
+
+            assertEquals("ResourceNotFoundException", error.getErrorCode());
+        }
+        neverSent("DescribeTable");
+    }
+
+    @Test
     void createTableRecordsRequestTags() throws Exception {
         answer("CreateTable", 200, "{\"TableDescription\":{\"TableName\":\"orders\",\"TableArn\":\"" + LOCAL
                 + "table/orders\"}}");

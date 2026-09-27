@@ -37,6 +37,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.regex.Pattern;
 
 /**
  * The DynamoDB engine backed by an external, official DynamoDB Local. Wire calls are forwarded
@@ -55,6 +56,7 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
     private static final Duration READINESS_BUDGET = Duration.ofSeconds(30);
     private static final Scope PROBE = new Scope("000000000000", "us-east-1"); // partition-literal: readiness probe namespace, Local accepts any region
     private static final String REPLICAS_UNSUPPORTED = "Replicas are not supported by the DynamoDB Local backend";
+    private static final Pattern PARTITION = Pattern.compile(AwsArnUtils.PARTITION_REGEX);
     private static final List<String> PUBLIC_ARN_FIELDS = List.of("TableArn", "IndexArn", "LatestStreamArn",
             "StreamArn", "LastEvaluatedStreamArn", "message", "Message");
 
@@ -130,10 +132,21 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
                 yield new Reply(200, objectMapper.createObjectNode(), Map.of());
             }
             case "ListTagsOfResource" -> {
+                String resourceArn = text(body, "ResourceArn");
+                Map<String, String> found;
+                try {
+                    found = listTagsOfResource(scope, resourceArn);
+                } catch (AwsException e) {
+                    if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
+                        throw e;
+                    }
+                    throw new AwsException("AccessDeniedException",
+                            "User is not authorized to perform: dynamodb:ListTagsOfResource on resource: "
+                                    + resourceArn, 400);
+                }
                 ObjectNode reply = objectMapper.createObjectNode();
                 ArrayNode tagList = reply.putArray("Tags");
-                listTagsOfResource(scope, text(body, "ResourceArn"))
-                        .forEach((key, value) -> tagList.addObject().put("Key", key).put("Value", value));
+                found.forEach((key, value) -> tagList.addObject().put("Key", key).put("Value", value));
                 yield new Reply(200, reply, Map.of());
             }
             case "UpdateTable" -> {
@@ -210,10 +223,19 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
         if (!value.startsWith("arn:")) {
             return value;
         }
-        String name = DynamoDbTableNames.resolveWithRegion(value, scope.region()).name();
-        if (!value.startsWith(publicPrefix(scope))) {
+        DynamoDbTableNames.resolveWithRegion(value, scope.region());
+        return ownTableName(scope, value);
+    }
+
+    // A well-formed table ARN of another account, region or partition names no table in this namespace.
+    private static String ownTableName(Scope scope, String arn) {
+        String name = DynamoDbTableNames.resolve(arn);
+        if (!PARTITION.matcher(AwsArnUtils.parse(arn).partition()).matches()) {
+            throw new AwsException("ValidationException", "Invalid table ARN: " + arn, 400);
+        }
+        if (!arn.startsWith(publicPrefix(scope))) {
             throw new AwsException("ResourceNotFoundException",
-                    "Requested resource not found: Table: " + value + " not found", 400);
+                    "Requested resource not found: Table: " + arn + " not found", 400);
         }
         return name;
     }
@@ -393,6 +415,8 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
     }
 
     // The seam's direct delete skips deletion protection, like native; the wire DeleteTable still enforces it.
+    // ponytail: a DeleteTable that fails after the UpdateTable leaves protection off; the stack delete that asked
+    // for removal reports DELETE_FAILED and a retry completes it.
     @Override
     public void deleteTable(Scope scope, String tableName) {
         if (describeTable(scope, tableName).isDeletionProtectionEnabled()) {
@@ -474,7 +498,7 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
         if (resourceArn == null || !resourceArn.startsWith("arn:")) {
             throw new AwsException("ValidationException", "Invalid TableArn", 400);
         }
-        String name = tableName(scope, resourceArn);
+        String name = ownTableName(scope, resourceArn);
         describeTable(scope, name);
         return key(scope.region(), name);
     }

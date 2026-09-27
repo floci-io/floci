@@ -143,6 +143,13 @@ class DynamoDbLocalBackendIntegrationTest {
     }
 
     @Test
+    void listingTagsOfAMissingTableIsAccessDenied() {
+        dynamoDb(B_EAST, "ListTagsOfResource", "{\"ResourceArn\": \"" + tableArn(B_EAST, tableName("absent")) + "\"}")
+            .statusCode(400)
+            .body("__type", endsWith("AccessDeniedException"));
+    }
+
+    @Test
     void streamRecordsCarryPublicArnsAndTheCallerRegion() {
         String table = tableName("stream");
         String streamArn = streamedTableWithOneItem(A_WEST, table);
