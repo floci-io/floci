@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.dns.DnsClientVpcSource;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
@@ -80,7 +81,8 @@ import java.util.stream.Collectors;
  * Not used when {@code floci.services.eks.mock=true}.
  */
 @ApplicationScoped
-public class EksClusterManager implements ClusterNodeInstanceProvider, VpcRouteTableListener {
+public class EksClusterManager
+        implements ClusterNodeInstanceProvider, VpcRouteTableListener, DnsClientVpcSource {
 
     private static final Logger LOG = Logger.getLogger(EksClusterManager.class);
     private static final int K3S_API_SERVER_PORT = 6443;
@@ -173,6 +175,45 @@ public class EksClusterManager implements ClusterNodeInstanceProvider, VpcRouteT
     }
 
     record ClusterNodeRecord(String accountId, String region, Instance instance) {}
+
+    /** The VPC a cluster's node container sits in, kept per Docker address the container answers on. */
+    record ClusterNodeVpc(String clusterResourceName, String vpcId) {}
+
+    private final Map<String, ClusterNodeVpc> clusterNodeVpcs = new ConcurrentHashMap<>();
+
+    /**
+     * A DNS query from a cluster container originates in the VPC the cluster was created with, so
+     * that is the VPC a Route 53 Resolver rule has to be associated with for the query to follow
+     * it. A cluster created without a resolvable VPC id claims no address: its queries resolve as
+     * they do without any rule rather than picking up another cluster's.
+     */
+    @Override
+    public Optional<String> vpcIdForClient(String clientAddress) {
+        if (clientAddress == null || clientAddress.isBlank()) {
+            return Optional.empty();
+        }
+        return Optional.ofNullable(clusterNodeVpcs.get(clientAddress.trim())).map(ClusterNodeVpc::vpcId);
+    }
+
+    private void registerClusterNodeVpc(Cluster cluster, Set<String> addresses) {
+        String clusterKey = clusterResourceName(cluster);
+        forgetClusterNodeVpcs(clusterKey);
+        String vpcId = cluster.getResourcesVpcConfig() != null
+                ? cluster.getResourcesVpcConfig().getVpcId() : null;
+        if (vpcId == null || vpcId.isBlank()) {
+            return;
+        }
+        for (String address : addresses) {
+            if (address != null && !address.isBlank()) {
+                clusterNodeVpcs.put(address, new ClusterNodeVpc(clusterKey, vpcId));
+            }
+        }
+    }
+
+    private void forgetClusterNodeVpcs(String clusterResourceName) {
+        clusterNodeVpcs.entrySet().removeIf(
+                entry -> clusterResourceName.equals(entry.getValue().clusterResourceName()));
+    }
 
     public EksClusterManager(ContainerBuilder containerBuilder,
                              ContainerLifecycleManager lifecycleManager,
@@ -1692,6 +1733,7 @@ public class EksClusterManager implements ClusterNodeInstanceProvider, VpcRouteT
             Instance nodeInstance = synthesizeClusterNodeInstance(cluster, containerIps.primaryIp(), region, accountId);
             nodeInstance.setDockerContainerId(containerId);
             clusterNodeInstances.put(clusterResourceName(cluster), new ClusterNodeRecord(accountId, region, nodeInstance));
+            registerClusterNodeVpc(cluster, containerIps.allIps());
             for (Consumer<Instance> listener : nodeRegistrationListeners) {
                 try {
                     listener.accept(nodeInstance);
@@ -1936,6 +1978,7 @@ public class EksClusterManager implements ClusterNodeInstanceProvider, VpcRouteT
             activeClusters.remove(clusterKey);
             programmedClusterRoutes.remove(clusterKey);
         }
+        forgetClusterNodeVpcs(clusterKey);
         ClusterNodeRecord record = clusterNodeInstances.remove(clusterKey);
         Instance nodeInstance = record != null ? record.instance() : null;
         if (metadataServer != null && nodeInstance != null) {

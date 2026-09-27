@@ -77,6 +77,48 @@ endpoint, the retry is reported as a conflict rather than compared on count alon
 nothing to compare against, sameness cannot be established, and a loud error is preferable
 to a success that may not match the request.
 
+## Resolver Rules and DNS Resolution
+
+Resolver rules steer the DNS resolution Floci performs for containers wired to its embedded DNS
+server, which is how cluster containers resolve (see
+[Route 53](route53.md#private-hosted-zone-dns-resolution)). What each rule type does:
+
+- **`FORWARD`** sends a matching query to the rule's `TargetIps` over UDP, each target on its own
+  `Port` (default 53), in a random order with the next target tried when one does not answer, as in
+  AWS. Only IPv4 targets are used, and a rule left with no usable target is ignored.
+- **`SYSTEM`** carries no targets and hands the query back to Floci's own resolution, which is how
+  AWS has it carve a subdomain out of a broader forwarding rule: a `FORWARD` rule for
+  `corp.internal` plus a `SYSTEM` rule for `acme.corp.internal` forwards everything under
+  `corp.internal` except that subtree.
+- **`RECURSIVE`** means the same thing here. In AWS it is the autodefined `Internet Resolver` rule
+  that resolves anything no other rule covers, which is what Floci resolving the name itself is.
+- **`DELEGATE`** is stored and returned by the API but does not affect resolution.
+
+**Matching** follows AWS: a rule matches a name that equals its `DomainName` or is a subdomain of it,
+on label boundaries, and `.` matches everything. Where several rules match, the one with the most
+labels in its domain name wins.
+
+**Association** is honoured, since a rule does nothing in AWS until it is associated with a VPC.
+Floci reads the querying VPC from the query's source address: a cluster container's address maps to
+the `resourcesVpcConfig.vpcId` of the cluster that launched it. An address no service claims, or a
+cluster created without a resolvable VPC id, belongs to no VPC, so no rule applies and resolution is
+unchanged.
+
+**Precedence over private hosted zones** matches AWS: when a private hosted zone and a resolver rule
+both match a name, the rule wins and the query is forwarded instead of answered from the zone's
+records. A name whose only match is the zone, or whose matching rule is not associated with the
+querying VPC, still resolves from the zone.
+
+**Names Floci owns are never forwarded.** The emulator's own suffixes (`localhost.floci.io`,
+`localhost.localstack.cloud`, `floci.hostname`, `floci.dns.extra-suffixes`) and `ip-*.ec2.internal`
+addresses resolve locally whatever the rules say, the way AWS autodefines system rules for its own
+internal domains so a rule for `.` cannot break the platform.
+
+**A rule whose targets are all unreachable fails that query with SERVFAIL** rather than falling back
+to the upstream resolvers, which would answer with the wrong address for a name the rule placed
+elsewhere. Every other name resolves as usual. This needs no switch of its own: it applies wherever
+cluster DNS does, governed by `floci.services.eks.embedded-dns`.
+
 ## Limitations
 
 - **All create/update operations complete synchronously.** Real AWS transitions a
@@ -95,7 +137,18 @@ to a success that may not match the request.
   credential's account id and custom resources *are* isolated per account: one account
   cannot read, update or delete another's endpoints, rules, associations or domain
   lists. Neither region nor VPC is part of the key, though, so a custom resource created
-  in one region is visible from every other, and `VPCId` on an association is stored but
-  never used to filter. The AWS-managed domain lists are the deliberate exception: they
+  in one region is visible from every other, and `VPCId` on an association does not filter
+  any API response. It does decide which rules steer DNS resolution, as above. The AWS-managed
+  domain lists are the deliberate exception: they
   are derived per region from the name list rather than stored, so they are region-scoped
   and visible to every caller, as they are in AWS.
+- **Inbound endpoints stay metadata.** An inbound endpoint exists so something outside the VPC can
+  query into it; Floci stores its direction and address count but binds no listener on its
+  addresses, so nothing resolves through one.
+- **A `FORWARD` rule's `ResolverEndpointId` is not used when forwarding.** AWS sends the query from
+  the outbound endpoint's addresses inside the VPC; Floci forwards it from itself, since there is no
+  separate VPC network path to send it over.
+- **Rules are matched across accounts.** A rule steers resolution for the VPCs it is associated
+  with whichever account created it, because the DNS server reads the stores off the packet path
+  where there is no caller to scope them to.
+- **DNS Firewall rule groups, query logging and DNSSEC validation do not affect resolution.**

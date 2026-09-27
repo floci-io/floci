@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -336,6 +337,30 @@ public class Route53ResolverService {
 
     public List<ObjectNode> listResolverRuleAssociations() {
         return ruleAssociationStore.scan(key -> true).stream().map(ObjectNode::deepCopy).toList();
+    }
+
+    /**
+     * Every stored resolver rule, from every account partition. The DNS server reads rules off the
+     * packet path, where there is no caller and so no account to scope the scan to, and a rule
+     * steers resolution for the VPCs it is associated with whichever account created it.
+     */
+    public List<ObjectNode> allResolverRules() {
+        return scanAllAccounts(ruleStore);
+    }
+
+    /** Every stored rule/VPC association, from every account partition. See {@link #allResolverRules}. */
+    public List<ObjectNode> allResolverRuleAssociations() {
+        return scanAllAccounts(ruleAssociationStore);
+    }
+
+    private static List<ObjectNode> scanAllAccounts(StorageBackend<String, ObjectNode> store) {
+        if (store instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<ObjectNode> accountAware =
+                    (AccountAwareStorageBackend<ObjectNode>) rawAccountAware;
+            return accountAware.scanAllAccounts().stream().map(ObjectNode::deepCopy).toList();
+        }
+        return store.scan(key -> true).stream().map(ObjectNode::deepCopy).toList();
     }
 
     /**

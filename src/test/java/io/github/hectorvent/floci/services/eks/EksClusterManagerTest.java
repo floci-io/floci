@@ -1000,6 +1000,34 @@ class EksClusterManagerTest {
         }
 
         @Test
+        void clusterNodeAddressesResolveToTheClustersVpcForResolverRules() {
+            Cluster cluster = new Cluster();
+            cluster.setName("dns-cluster");
+            ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
+            vpcConfig.setVpcId("vpc-12345678");
+            cluster.setResourcesVpcConfig(vpcConfig);
+
+            manager.registerClusterNodeInstance(cluster, "container-dns");
+
+            assertEquals(Optional.of("vpc-12345678"), manager.vpcIdForClient("172.17.0.2"));
+            assertTrue(manager.vpcIdForClient("172.17.0.99").isEmpty());
+            assertTrue(manager.vpcIdForClient(null).isEmpty());
+
+            manager.unregisterMetadataEndpoint(cluster);
+            assertTrue(manager.vpcIdForClient("172.17.0.2").isEmpty());
+        }
+
+        @Test
+        void aClusterWithoutAVpcClaimsNoAddress() {
+            Cluster cluster = new Cluster();
+            cluster.setName("no-vpc-cluster");
+
+            manager.registerClusterNodeInstance(cluster, "container-no-vpc");
+
+            assertTrue(manager.vpcIdForClient("172.17.0.2").isEmpty());
+        }
+
+        @Test
         void clusterNodeInstanceProviderFindsAndListsRegisteredInstances() {
             Cluster cluster = new Cluster();
             cluster.setName("prov-cluster");
