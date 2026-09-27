@@ -1351,7 +1351,8 @@ public class S3Controller {
             if (bypass) {
                 s3Service.authorizeObjectWrite(bucket, key, "s3:BypassGovernanceRetention", authorization);
             }
-            S3Object result = s3Service.deleteObject(bucket, key, versionId, bypass);
+            S3Object result = s3Service.deleteObject(bucket, key, versionId, bypass,
+                    httpHeaders.getHeaderString("If-Match"));
             var resp = Response.noContent();
             if (result != null) {
                 if (result.isDeleteMarker()) {
