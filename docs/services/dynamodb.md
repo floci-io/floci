@@ -100,6 +100,10 @@ services:
 
 Do not start DynamoDB Local with `-sharedDb`. It merges every account and region into one database.
 
+Floci is tested with DynamoDB Local 3.3.1 and does not check the version it connects to. It relies
+on DynamoDB Local's fixed `ddblocal` ARNs and on its separate database per access key and region.
+A version that changes either one breaks ARN translation or account and region isolation.
+
 At startup Floci waits up to 30 seconds for DynamoDB Local to answer, then fails. Any
 non-success answer to that probe fails startup at once. `GET /_floci/info` reports the active
 backend in `dynamodb_backend` (`native` or `local`).
