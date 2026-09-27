@@ -392,10 +392,12 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
         }
     }
 
-    // ponytail: Local's DeleteTable checks deletion protection. Typed creates never set it, and a table
-    // protected later through the API fails the stack delete, as on AWS.
+    // The seam's direct delete skips deletion protection, like native; the wire DeleteTable still enforces it.
     @Override
     public void deleteTable(Scope scope, String tableName) {
+        if (describeTable(scope, tableName).isDeletionProtectionEnabled()) {
+            call(scope, "UpdateTable", body(tableName, "DeletionProtectionEnabled", false));
+        }
         call(scope, "DeleteTable", body(tableName));
     }
 
@@ -542,7 +544,8 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
     private boolean ready(long deadline) {
         Reply reply;
         try {
-            reply = client.send(PROBE, Api.DYNAMODB, "ListTables", objectMapper.createObjectNode().put("Limit", 1));
+            reply = client.send(PROBE, Api.DYNAMODB, "ListTables", objectMapper.createObjectNode().put("Limit", 1),
+                    Duration.ofNanos(Math.max(1, deadline - System.nanoTime())));
         } catch (IOException e) {
             if (System.nanoTime() - deadline >= 0) {
                 throw new IllegalStateException("DynamoDB Local at " + client.endpoint() + " is not reachable after "

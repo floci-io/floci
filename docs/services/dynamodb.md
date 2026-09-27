@@ -100,8 +100,7 @@ services:
 
 Do not start DynamoDB Local with `-sharedDb`. It merges every account and region into one database.
 
-At startup Floci retries DynamoDB Local for 30 seconds, then fails. An attempt still running at
-that point can add up to the request timeout. Any
+At startup Floci waits up to 30 seconds for DynamoDB Local to answer, then fails. Any
 non-success answer to that probe fails startup at once. `GET /_floci/info` reports the active
 backend in `dynamodb_backend` (`native` or `local`).
 

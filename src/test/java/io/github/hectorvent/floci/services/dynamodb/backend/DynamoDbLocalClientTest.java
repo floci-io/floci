@@ -175,6 +175,28 @@ class DynamoDbLocalClientTest {
         assertEquals(1, hits.get());
     }
 
+    @Test
+    void aShorterBudgetCutsTheRequestTimeout() throws Exception {
+        start(exchange -> {
+            Thread.sleep(2000);
+            reply(exchange, 200, "{}");
+        }, Duration.ofSeconds(5));
+
+        assertThrows(HttpTimeoutException.class, () -> client.send(SCOPE, Api.DYNAMODB, "ListTables",
+                mapper.createObjectNode(), Duration.ofMillis(200)));
+    }
+
+    @Test
+    void aLongerBudgetKeepsTheRequestTimeout() throws Exception {
+        start(exchange -> {
+            Thread.sleep(2000);
+            reply(exchange, 200, "{}");
+        }, Duration.ofMillis(200));
+
+        assertThrows(HttpTimeoutException.class, () -> client.send(SCOPE, Api.DYNAMODB, "ListTables",
+                mapper.createObjectNode(), Duration.ofSeconds(5)));
+    }
+
     private void start(Responder responder) throws IOException {
         start(responder, Duration.ofSeconds(5));
     }

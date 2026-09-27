@@ -18,6 +18,7 @@ import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 
 import java.io.IOException;
 import java.net.ConnectException;
@@ -39,6 +40,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -369,6 +371,31 @@ class DynamoDbLocalBackendTest {
     }
 
     @Test
+    void directDeleteLiftsDeletionProtectionFirst() throws Exception {
+        answer("DescribeTable", 200, "{\"Table\":{\"TableName\":\"orders\",\"DeletionProtectionEnabled\":true}}");
+        answer("UpdateTable", 200, "{\"TableDescription\":{\"TableName\":\"orders\"}}");
+        answer("DeleteTable", 200, "{\"TableDescription\":{\"TableName\":\"orders\"}}");
+
+        backend.deleteTable(SCOPE, "orders");
+
+        InOrder order = inOrder(client);
+        order.verify(client).send(any(), eq(Api.DYNAMODB), eq("UpdateTable"),
+                eq(json("{\"TableName\":\"orders\",\"DeletionProtectionEnabled\":false}")));
+        order.verify(client).send(any(), eq(Api.DYNAMODB), eq("DeleteTable"), eq(json("{\"TableName\":\"orders\"}")));
+    }
+
+    @Test
+    void directDeleteOfAnUnprotectedTableSendsOnlyDeleteTable() throws Exception {
+        answer("DescribeTable", 200, "{\"Table\":{\"TableName\":\"orders\",\"DeletionProtectionEnabled\":false}}");
+        answer("DeleteTable", 200, "{\"TableDescription\":{\"TableName\":\"orders\"}}");
+
+        backend.deleteTable(SCOPE, "orders");
+
+        neverSent("UpdateTable");
+        assertEquals(json("{\"TableName\":\"orders\"}"), sent("DeleteTable"));
+    }
+
+    @Test
     void wireTagRoundTrip() throws Exception {
         answerOrdersTable();
 
@@ -615,31 +642,43 @@ class DynamoDbLocalBackendTest {
     @Test
     void startRetriesConnectionFailuresThenSucceeds() throws Exception {
         Scope probe = new Scope("000000000000", "us-east-1");
-        when(client.send(eq(probe), eq(Api.DYNAMODB), eq("ListTables"), any()))
+        when(client.send(eq(probe), eq(Api.DYNAMODB), eq("ListTables"), any(), any()))
                 .thenThrow(new ConnectException("refused"))
                 .thenReturn(new Reply(200, json("{\"TableNames\":[]}"), Map.of()));
 
         backend.start();
 
-        verify(client, times(2)).send(eq(probe), eq(Api.DYNAMODB), eq("ListTables"), eq(json("{\"Limit\":1}")));
+        verify(client, times(2)).send(eq(probe), eq(Api.DYNAMODB), eq("ListTables"), eq(json("{\"Limit\":1}")), any());
     }
 
     @Test
     void startRetriesAConnectionClosedWithoutAnswer() throws Exception {
         Scope probe = new Scope("000000000000", "us-east-1");
-        when(client.send(eq(probe), eq(Api.DYNAMODB), eq("ListTables"), any()))
+        when(client.send(eq(probe), eq(Api.DYNAMODB), eq("ListTables"), any(), any()))
                 .thenThrow(new IOException("HTTP/1.1 header parser received no bytes"))
                 .thenReturn(new Reply(200, json("{\"TableNames\":[]}"), Map.of()));
 
         backend.start();
 
-        verify(client, times(2)).send(eq(probe), eq(Api.DYNAMODB), eq("ListTables"), any());
+        verify(client, times(2)).send(eq(probe), eq(Api.DYNAMODB), eq("ListTables"), any(), any());
+    }
+
+    @Test
+    void startCapsEachProbeAtTheRemainingBudget() throws Exception {
+        ArgumentCaptor<Duration> budget = ArgumentCaptor.forClass(Duration.class);
+        when(client.send(any(), any(), any(), any(), budget.capture()))
+                .thenReturn(new Reply(200, json("{\"TableNames\":[]}"), Map.of()));
+
+        backend.start();
+
+        assertTrue(budget.getValue().isPositive());
+        assertTrue(budget.getValue().compareTo(Duration.ofSeconds(5)) <= 0);
     }
 
     @Test
     void startFailsWhenBudgetExpires() throws Exception {
         backend = new DynamoDbLocalBackend(client, tags, mapper, Duration.ZERO);
-        when(client.send(any(), any(), any(), any())).thenThrow(new ConnectException("refused"));
+        when(client.send(any(), any(), any(), any(), any())).thenThrow(new ConnectException("refused"));
 
         IllegalStateException error = assertThrows(IllegalStateException.class, backend::start);
 
@@ -648,7 +687,7 @@ class DynamoDbLocalBackendTest {
 
     @Test
     void startFailsOnNon2xx() throws Exception {
-        when(client.send(any(), any(), any(), any())).thenReturn(new Reply(500, json("{\"message\":\"x\"}"), Map.of()));
+        when(client.send(any(), any(), any(), any(), any())).thenReturn(new Reply(500, json("{\"message\":\"x\"}"), Map.of()));
 
         IllegalStateException error = assertThrows(IllegalStateException.class, backend::start);
 

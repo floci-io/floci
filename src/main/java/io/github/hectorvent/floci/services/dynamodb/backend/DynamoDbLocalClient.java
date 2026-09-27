@@ -52,11 +52,16 @@ class DynamoDbLocalClient implements AutoCloseable {
     }
 
     Reply send(Scope scope, Api api, String action, JsonNode body) throws IOException, InterruptedException {
+        return send(scope, api, action, body, requestTimeout);
+    }
+
+    Reply send(Scope scope, Api api, String action, JsonNode body, Duration budget)
+            throws IOException, InterruptedException {
         byte[] payload = mapper.writeValueAsBytes(body == null ? mapper.createObjectNode() : body);
         String target = (api == Api.DYNAMODB ? "DynamoDB_20120810." : "DynamoDBStreams_20120810.") + action;
         String amzDate = AMZ_DATE.format(ZonedDateTime.now(ZoneOffset.UTC));
         HttpRequest request = HttpRequest.newBuilder(endpoint.resolve(path))
-                .timeout(requestTimeout)
+                .timeout(budget.compareTo(requestTimeout) < 0 ? budget : requestTimeout)
                 .header("Content-Type", CONTENT_TYPE)
                 .header("X-Amz-Date", amzDate)
                 .header("X-Amz-Target", target)

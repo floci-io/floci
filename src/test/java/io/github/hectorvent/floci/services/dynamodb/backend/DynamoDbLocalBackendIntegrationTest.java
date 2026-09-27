@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.dynamodb.backend;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations.Scope;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbStreamReader.CheckpointLifetime;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbStreamReader.Cursor;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbStreamReader.Position;
@@ -71,6 +73,9 @@ class DynamoDbLocalBackendIntegrationTest {
 
     @Inject
     DynamoDbStreamReader streamReader;
+
+    @Inject
+    DynamoDbFacade dynamoDbFacade;
 
     private final List<CreatedTable> created = new ArrayList<>();
 
@@ -189,6 +194,20 @@ class DynamoDbLocalBackendIntegrationTest {
         assertEquals("eu-west-1", record.path("awsRegion").asText());
         assertEquals("streamed", record.path("dynamodb").path("Keys").path("pk").path("S").asText());
         assertEquals(CheckpointLifetime.STREAM, streamReader.checkpointLifetime());
+    }
+
+    @Test
+    void theDirectDeleteRemovesAProtectedTable() {
+        String table = tableName("protected");
+        createTable(A_WEST, table, ", \"DeletionProtectionEnabled\": true").statusCode(200);
+        dynamoDb(A_WEST, "DeleteTable", "{\"TableName\": \"" + table + "\"}").statusCode(400);
+
+        dynamoDbFacade.tables().deleteTable(new Scope(A_WEST.account(), A_WEST.region()), table);
+        created.clear();
+
+        dynamoDb(A_WEST, "DescribeTable", "{\"TableName\": \"" + table + "\"}")
+            .statusCode(400)
+            .body("__type", endsWith("ResourceNotFoundException"));
     }
 
     @Test
