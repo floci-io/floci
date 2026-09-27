@@ -79,6 +79,25 @@ class EcsLoadBalancersIntegrationTest {
     }
 
     @Test
+    void describeServicesReturnsHealthCheckGracePeriodWithLoadBalancers() {
+        seedClusterAndTaskDef("lb-cluster-7", "lb-td-7");
+        String tgArn = "arn:aws:elasticloadbalancing:us-east-1:000000000000:targetgroup/lbtg7/jkl012";
+        call("CreateService", "{\"cluster\":\"lb-cluster-7\",\"serviceName\":\"lb-svc-7\","
+                + "\"taskDefinition\":\"lb-td-7\",\"desiredCount\":1,"
+                + "\"healthCheckGracePeriodSeconds\":45,"
+                + "\"loadBalancers\":[{\"targetGroupArn\":\"" + tgArn + "\","
+                + "\"containerName\":\"web\",\"containerPort\":8080}]}");
+
+        given().contentType(CT).header("X-Amz-Target", TARGET + "DescribeServices")
+                .body("{\"cluster\":\"lb-cluster-7\",\"services\":[\"lb-svc-7\"]}")
+                .when().post("/")
+                .then().statusCode(200)
+                .body("services[0].healthCheckGracePeriodSeconds", equalTo(45))
+                .body("services[0].loadBalancers", hasSize(1))
+                .body("services[0].loadBalancers[0].targetGroupArn", equalTo(tgArn));
+    }
+
+    @Test
     void createServiceWithoutLoadBalancersOmitsField() {
         seedClusterAndTaskDef("lb-cluster-3", "lb-td-3");
         given().contentType(CT).header("X-Amz-Target", TARGET + "CreateService")

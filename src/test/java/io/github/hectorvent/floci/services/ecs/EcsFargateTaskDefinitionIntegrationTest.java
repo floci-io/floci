@@ -116,6 +116,38 @@ class EcsFargateTaskDefinitionIntegrationTest {
     }
 
     @Test
+    void registerTaskDefinitionRoundTripsSidecarMembersTogether() {
+        register("{\"family\":\"fargate-sidecar-members\",\"requiresCompatibilities\":[\"FARGATE\"],"
+                + "\"networkMode\":\"awsvpc\",\"cpu\":\"256\",\"memory\":\"1024\","
+                + "\"volumes\":[{\"name\":\"tmp\"}],"
+                + "\"containerDefinitions\":["
+                + "{\"name\":\"sidecar\",\"image\":\"busybox\",\"essential\":false,"
+                + "\"user\":\"1000\",\"readonlyRootFilesystem\":true},"
+                + "{\"name\":\"app\",\"image\":\"busybox\",\"essential\":true,"
+                + "\"user\":\"65532\",\"readonlyRootFilesystem\":true,"
+                + "\"mountPoints\":[{\"sourceVolume\":\"tmp\",\"containerPath\":\"/tmp\",\"readOnly\":false}],"
+                + "\"volumesFrom\":[{\"sourceContainer\":\"sidecar\",\"readOnly\":true}],"
+                + "\"dependsOn\":[{\"containerName\":\"sidecar\",\"condition\":\"START\"}],"
+                + "\"repositoryCredentials\":{\"credentialsParameter\":\"arn:aws:secretsmanager:us-east-1:"
+                + "000000000000:secret:dummy\"}}]}", 200);
+
+        call("DescribeTaskDefinition", "{\"taskDefinition\":\"fargate-sidecar-members\"}", 200)
+                .then()
+                .body("taskDefinition.containerDefinitions[0].user", equalTo("1000"))
+                .body("taskDefinition.containerDefinitions[0].readonlyRootFilesystem", equalTo(true))
+                .body("taskDefinition.containerDefinitions[1].user", equalTo("65532"))
+                .body("taskDefinition.containerDefinitions[1].readonlyRootFilesystem", equalTo(true))
+                .body("taskDefinition.containerDefinitions[1].mountPoints", hasSize(1))
+                .body("taskDefinition.containerDefinitions[1].volumesFrom", hasSize(1))
+                .body("taskDefinition.containerDefinitions[1].volumesFrom[0].sourceContainer", equalTo("sidecar"))
+                .body("taskDefinition.containerDefinitions[1].volumesFrom[0].readOnly", equalTo(true))
+                .body("taskDefinition.containerDefinitions[1].dependsOn[0].containerName", equalTo("sidecar"))
+                .body("taskDefinition.containerDefinitions[1].dependsOn[0].condition", equalTo("START"))
+                .body("taskDefinition.containerDefinitions[1].repositoryCredentials.credentialsParameter",
+                        containsString("secret:dummy"));
+    }
+
+    @Test
     void registerTaskDefinitionReportsRegistrationMetadata() {
         Response response = register(fargateTaskDefinition("fargate-registered-at", ""), 200);
         assertTrue(response.jsonPath().getDouble("taskDefinition.registeredAt") > 0,
