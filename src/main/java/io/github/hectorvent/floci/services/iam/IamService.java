@@ -2398,9 +2398,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     /** Removes expired temporary sessions, including those left in persistent storage after a restart. */
     public int sweepExpiredSessions(Instant now) {
-        List<SessionCredential> storedSessions = sessions instanceof AccountAwareStorageBackend<SessionCredential> aware
-                ? aware.scanAllAccounts()
-                : sessions.scan(key -> true);
+        if (sessions instanceof AccountAwareStorageBackend<SessionCredential> aware) {
+            return aware.deleteAllAccountsMatching(session ->
+                    session.getExpiration() != null && !session.getExpiration().isAfter(now));
+        }
+        List<SessionCredential> storedSessions = sessions.scan(key -> true);
         int removed = 0;
         for (SessionCredential session : storedSessions) {
             if (session.getExpiration() == null || session.getExpiration().isAfter(now)) {
