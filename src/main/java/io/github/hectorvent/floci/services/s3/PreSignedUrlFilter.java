@@ -124,37 +124,46 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
             return;
         }
 
-        // Verify signature: SigV4 when enforce-auth is enabled, custom when validateSignatures is enabled
-        if (s3Service.isAuthEnforced()) {
+        // Registered IAM credentials always carry standard SigV4. Account-shaped credentials
+        // from older Floci-generated URLs retain the custom validation path when enforcement is off.
+        boolean authEnforced = s3Service.isAuthEnforced();
+        if (authEnforced || presignGenerator.shouldValidateSignatures()) {
             String credential = queryParams.getFirst("X-Amz-Credential");
             String decodedCredential = URLDecoder.decode(credential, StandardCharsets.UTF_8);
             String[] credParts = decodedCredential.split("/");
             if (credParts.length < 5) {
+                if (authEnforced) {
+                    requestContext.abortWith(errorResponse(403, "InvalidAccessKeyId",
+                            "The AWS Access Key Id you provided does not exist in our records."));
+                    return;
+                }
+            } else {
+                String accessKeyId = credParts[0];
+                String secretKey = resolveSecretKey(accessKeyId, queryParams.getFirst("X-Amz-Security-Token"));
+                if (secretKey != null) {
+                    if (!verifySigV4Signature(requestContext, signature, secretKey)) {
+                        requestContext.abortWith(errorResponse(403, "SignatureDoesNotMatch",
+                                "The request signature we calculated does not match the signature you provided."));
+                        return;
+                    }
+
+                    List<String> unsignedChecksumHeaders = unsignedChecksumHeaders(
+                            requestContext.getHeaders().keySet(), queryParams.getFirst("X-Amz-SignedHeaders"));
+                    if (!unsignedChecksumHeaders.isEmpty()) {
+                        requestContext.abortWith(headersNotSignedResponse(unsignedChecksumHeaders));
+                    }
+                    return;
+                }
+            }
+
+            if (authEnforced) {
                 requestContext.abortWith(errorResponse(403, "InvalidAccessKeyId",
                         "The AWS Access Key Id you provided does not exist in our records."));
                 return;
             }
+        }
 
-            String accessKeyId = credParts[0];
-            String secretKey = resolveSecretKey(accessKeyId, queryParams.getFirst("X-Amz-Security-Token"));
-            if (secretKey == null) {
-                requestContext.abortWith(errorResponse(403, "InvalidAccessKeyId",
-                        "The AWS Access Key Id you provided does not exist in our records."));
-                return;
-            }
-
-            if (!verifySigV4Signature(requestContext, signature, secretKey)) {
-                requestContext.abortWith(errorResponse(403, "SignatureDoesNotMatch",
-                        "The request signature we calculated does not match the signature you provided."));
-                return;
-            }
-
-            List<String> unsignedChecksumHeaders = unsignedChecksumHeaders(
-                    requestContext.getHeaders().keySet(), queryParams.getFirst("X-Amz-SignedHeaders"));
-            if (!unsignedChecksumHeaders.isEmpty()) {
-                requestContext.abortWith(headersNotSignedResponse(unsignedChecksumHeaders));
-            }
-        } else if (presignGenerator.shouldValidateSignatures()) {
+        if (presignGenerator.shouldValidateSignatures()) {
             String path = requestContext.getUriInfo().getPath();
             String[] parts = path.split("/", 3);
             if (parts.length < 3) {
