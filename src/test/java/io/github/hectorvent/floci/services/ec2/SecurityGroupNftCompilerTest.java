@@ -73,7 +73,7 @@ class SecurityGroupNftCompilerTest {
     }
 
     @Test
-    void dnsServersStayReachableWhenTheGroupsAllowNoEgress() {
+    void vpcResolversStayReachableWhenTheGroupsAllowNoEgress() {
         SecurityGroup group = new SecurityGroup();
         group.setVpcId("vpc-1");
         group.setOwnerId("000000000000");
@@ -84,7 +84,7 @@ class SecurityGroupNftCompilerTest {
         assertTrue(nft.contains("egress ip daddr 172.18.0.2 udp dport 53 accept"));
         assertTrue(nft.contains("egress ip daddr 172.18.0.2 tcp dport 53 accept"));
         assertTrue(nft.contains("egress ip6 daddr fd00::53 udp dport 53 accept"));
-        assertFalse(nft.contains("daddr 172.18.0.2 accept"), "only DNS is allowed to the DNS server");
+        assertFalse(nft.contains("daddr 172.18.0.2 accept"), "only DNS is allowed to the resolver");
     }
 
     private static SecurityGroupNftCompiler.Endpoint endpoint(String eni, String logical,

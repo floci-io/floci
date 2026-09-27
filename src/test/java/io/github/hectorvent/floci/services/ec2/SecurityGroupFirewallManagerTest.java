@@ -1,8 +1,6 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import com.github.dockerjava.api.DockerClient;
-import com.github.dockerjava.api.command.InspectContainerResponse;
-import com.github.dockerjava.api.model.HostConfig;
 import com.github.dockerjava.api.model.Info;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
@@ -48,7 +46,8 @@ class SecurityGroupFirewallManagerTest {
         ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
         when(lifecycleManager.createAndStart(any())).thenThrow(new IllegalStateException("stop after the spec"));
         SecurityGroupFirewallManager manager = new SecurityGroupFirewallManager(dockerClient,
-                new ContainerBuilder(config, dockerHostResolver, embeddedDnsServer), lifecycleManager, config);
+                new ContainerBuilder(config, dockerHostResolver, embeddedDnsServer), lifecycleManager, config,
+                embeddedDnsServer);
 
         assertThrows(IllegalStateException.class, () -> manager.createNamespace("ec2", "i-1", "000000000000",
                 "us-east-1", Optional.empty(), Map.of()));
@@ -61,13 +60,17 @@ class SecurityGroupFirewallManagerTest {
     }
 
     @Test
-    void dnsServersComeFromTheHelpersOwnContainer() {
-        InspectContainerResponse helper = mock(InspectContainerResponse.class);
-        when(helper.getHostConfig()).thenReturn(new HostConfig().withDns("172.18.0.2", "8.8.8.8"));
-        InspectContainerResponse withoutDns = mock(InspectContainerResponse.class);
-        when(withoutDns.getHostConfig()).thenReturn(new HostConfig());
+    void onlyFlocisDnsIsExemptFromTheSecurityGroups() {
+        EmbeddedDnsServer embeddedDnsServer = mock(EmbeddedDnsServer.class);
+        when(embeddedDnsServer.getServerIp()).thenReturn(Optional.of("172.18.0.2"));
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.dns().containerFallbackServers()).thenReturn(List.of("8.8.8.8", "8.8.4.4"));
+        SecurityGroupFirewallManager manager = new SecurityGroupFirewallManager(mock(DockerClient.class),
+                mock(ContainerBuilder.class), mock(ContainerLifecycleManager.class), config, embeddedDnsServer);
 
-        assertEquals(List.of("172.18.0.2", "8.8.8.8"), SecurityGroupFirewallManager.dnsServersOf(helper));
-        assertEquals(List.of(), SecurityGroupFirewallManager.dnsServersOf(withoutDns));
+        assertEquals(List.of("172.18.0.2"), manager.vpcResolvers());
+
+        when(embeddedDnsServer.getServerIp()).thenReturn(Optional.empty());
+        assertEquals(List.of(), manager.vpcResolvers());
     }
 }

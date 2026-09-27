@@ -6,11 +6,11 @@ import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.Frame;
-import com.github.dockerjava.api.model.HostConfig;
 import com.github.dockerjava.api.model.Info;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
@@ -43,15 +43,18 @@ public class SecurityGroupFirewallManager {
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
     private final EmulatorConfig config;
+    private final EmbeddedDnsServer embeddedDnsServer;
     private final Map<String, ProtectedEndpoint> endpoints = new HashMap<>();
 
     @Inject
     public SecurityGroupFirewallManager(DockerClient dockerClient, ContainerBuilder containerBuilder,
-                                        ContainerLifecycleManager lifecycleManager, EmulatorConfig config) {
+                                        ContainerLifecycleManager lifecycleManager, EmulatorConfig config,
+                                        EmbeddedDnsServer embeddedDnsServer) {
         this.dockerClient = dockerClient;
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.config = config;
+        this.embeddedDnsServer = embeddedDnsServer;
     }
 
     public boolean enabled() {
@@ -195,13 +198,11 @@ public class SecurityGroupFirewallManager {
     }
 
     public synchronized void reconcileAll() {
-        Map<String, List<String>> dnsServers = new HashMap<>();
         for (Map.Entry<String, ProtectedEndpoint> entry : new ArrayList<>(endpoints.entrySet())) {
             boolean running;
             try {
-                InspectContainerResponse helper = dockerClient.inspectContainerCmd(entry.getValue().helperId()).exec();
-                running = Boolean.TRUE.equals(helper.getState().getRunning());
-                dnsServers.put(entry.getValue().helperId(), dnsServersOf(helper));
+                running = Boolean.TRUE.equals(dockerClient.inspectContainerCmd(entry.getValue().helperId())
+                        .exec().getState().getRunning());
             } catch (NotFoundException e) {
                 running = false;
             }
@@ -212,11 +213,11 @@ public class SecurityGroupFirewallManager {
         }
         List<SecurityGroupNftCompiler.Endpoint> peers = endpoints.values().stream()
                 .map(ProtectedEndpoint::endpoint).toList();
+        List<String> vpcResolvers = vpcResolvers();
         for (ProtectedEndpoint protectedEndpoint : new ArrayList<>(endpoints.values())) {
             try {
                 String rules = SecurityGroupNftCompiler.compile(protectedEndpoint.endpoint(), peers,
-                        protectedEndpoint.prefixLists(),
-                        dnsServers.getOrDefault(protectedEndpoint.helperId(), List.of()));
+                        protectedEndpoint.prefixLists(), vpcResolvers);
                 apply(protectedEndpoint.helperId(), rules);
             } catch (RuntimeException e) {
                 endpoints.values().forEach(endpoint -> quarantine(endpoint.helperId()));
@@ -248,10 +249,12 @@ public class SecurityGroupFirewallManager {
         reconcileAll();
     }
 
-    /** The resolvers Docker forwards to from the helper's network namespace. */
-    static List<String> dnsServersOf(InspectContainerResponse helper) {
-        HostConfig hostConfig = helper.getHostConfig();
-        return hostConfig == null || hostConfig.getDns() == null ? List.of() : List.of(hostConfig.getDns());
+    /**
+     * Floci's embedded DNS stands in for the VPC's Amazon DNS server, the one resolver security
+     * groups never filter on AWS. The fallback resolvers are ordinary internet destinations.
+     */
+    List<String> vpcResolvers() {
+        return embeddedDnsServer.getServerIp().map(List::of).orElse(List.of());
     }
 
     private void quarantine(String helperId) {

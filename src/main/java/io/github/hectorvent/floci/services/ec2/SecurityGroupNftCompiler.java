@@ -37,7 +37,7 @@ public final class SecurityGroupNftCompiler {
     }
 
     public static String compile(Endpoint target, Collection<Endpoint> peers,
-                                 Map<String, List<String>> prefixLists, List<String> dnsServers) {
+                                 Map<String, List<String>> prefixLists, List<String> vpcResolvers) {
         if (target == null || target.groups() == null || target.groups().isEmpty()) {
             throw new IllegalArgumentException("Protected endpoint needs at least one security group");
         }
@@ -48,10 +48,11 @@ public final class SecurityGroupNftCompiler {
                 .append("add rule inet floci_sg ingress ct state established,related accept\n")
                 .append("add rule inet floci_sg egress ct state established,related accept\n");
 
-        // Docker's embedded DNS listens on loopback but forwards from this namespace to the
-        // helper's DNS servers. Security groups never filter the VPC resolver on AWS. DHCP and
-        // the link-local metadata endpoint are the other local infrastructure exceptions.
-        for (String server : dnsServers) {
+        // Docker's embedded DNS listens on loopback but forwards from this namespace. Security
+        // groups never filter the VPC resolver on AWS. Only DNS is exempt, because the resolver
+        // address also serves Floci's API. DHCP and the link-local metadata endpoint are the
+        // other local infrastructure exceptions.
+        for (String server : vpcResolvers) {
             String family = server.contains(":") ? "ip6" : "ip";
             rules.append("add rule inet floci_sg egress ").append(family).append(" daddr ").append(server)
                     .append(" udp dport 53 accept\n")
