@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.Tag;
+import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -16,7 +17,6 @@ import org.junit.jupiter.params.ParameterizedTest;
 import java.security.SecureRandom;
 import java.time.Clock;
 import java.time.Instant;
-import java.time.ZoneOffset;
 import java.util.List;
 import java.util.stream.Stream;
 
@@ -105,16 +105,15 @@ class SesTemplateServiceTest {
 
     @Test
     void create_andUpdate_stampTheInjectedClock() {
-        Instant created = Instant.parse("2026-09-27T00:00:00Z");
-        SesTemplateService fixed = new SesTemplateService(new InMemoryStorage<>(), new ObjectMapper(),
-                new SecureRandom(), Clock.fixed(created, ZoneOffset.UTC));
+        SesTemplateService ticking = new SesTemplateService(new InMemoryStorage<>(), new ObjectMapper(),
+                new SecureRandom(), new MutableClock());
 
-        fixed.createTemplate(template("welcome"), REGION);
-        fixed.updateTemplate(template("welcome"), REGION);
+        Instant created = ticking.createTemplate(template("welcome"), REGION).getCreatedTimestamp();
+        ticking.updateTemplate(template("welcome"), REGION);
 
-        EmailTemplate stored = fixed.getTemplate("welcome", REGION);
+        EmailTemplate stored = ticking.getTemplate("welcome", REGION);
         assertEquals(created, stored.getCreatedTimestamp());
-        assertEquals(created, stored.getLastUpdatedTimestamp());
+        assertEquals(created.plusMillis(1), stored.getLastUpdatedTimestamp());
     }
 
     @Test
