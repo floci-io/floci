@@ -262,6 +262,15 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 ctx.abortWith(accessDeniedResponse(action, credentialScope, ctx.getMediaType()));
                 return;
             }
+            // A tagged PutObject additionally requires s3:PutObjectTagging. Generated URLs
+            // grant only their object operation (and GetObject for conditional writes), so
+            // an unsigned tagging header must not add permissions to the scoped session.
+            if ("s3:PutObject".equals(action)
+                    && (ctx.getHeaderString("x-amz-tagging") != null
+                    || ctx.getUriInfo().getQueryParameters().containsKey("x-amz-tagging"))) {
+                ctx.abortWith(accessDeniedResponse("s3:PutObjectTagging", credentialScope, ctx.getMediaType()));
+                return;
+            }
         }
 
         Map<String, List<String>> conditionContext = conditionContextResolver.resolve(credentialScope, action, ctx);

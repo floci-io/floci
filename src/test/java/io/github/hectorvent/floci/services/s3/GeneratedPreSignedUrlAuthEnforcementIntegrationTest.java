@@ -179,6 +179,24 @@ class GeneratedPreSignedUrlAuthEnforcementIntegrationTest {
     }
 
     @Test
+    void generatedPutUrlCannotAddTagsWithoutTaggingPermission() {
+        String bucket = "generated-presign-tags-" + UUID.randomUUID().toString().substring(0, 8);
+        given().filter(OWNER).when().put("/" + bucket).then().statusCode(200);
+
+        URI uri = URI.create(presignGenerator.generatePresignedUrl(
+                "http://localhost:" + RestAssured.port, bucket, "object.txt", "PUT", 60));
+        String pathAndQuery = uri.getRawPath() + "?" + uri.getRawQuery();
+
+        given().urlEncodingEnabled(false).header("x-amz-tagging", "team=eng").body("tagged")
+                .when().put(pathAndQuery)
+                .then().statusCode(403).body("Error.Code", equalTo("AccessDenied"));
+        given().urlEncodingEnabled(false).body("untagged")
+                .when().put(pathAndQuery).then().statusCode(200);
+        given().filter(OWNER).when().get("/" + bucket + "/object.txt")
+                .then().statusCode(200).body(equalTo("untagged"));
+    }
+
+    @Test
     void generatedUrlsKeepLeadingSlashKeysDistinctUnderEnforcedIam() throws Exception {
         String bucket = "generated-presign-slash-" + UUID.randomUUID().toString().substring(0, 8);
         String baseUrl = "http://localhost:" + RestAssured.port;
