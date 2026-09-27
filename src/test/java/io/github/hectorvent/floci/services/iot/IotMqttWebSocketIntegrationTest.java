@@ -271,10 +271,10 @@ public class IotMqttWebSocketIntegrationTest {
         String topic = "ws/fanout/" + System.nanoTime();
         byte[] payload = "to everyone".getBytes(StandardCharsets.UTF_8);
         int clients = 16;
-        List<WsClient> subscribers = new ArrayList<>();
+        List<WsClient> subscribers = new CopyOnWriteArrayList<>();
+        List<Thread> threads = new ArrayList<>();
         try {
             CountDownLatch connected = new CountDownLatch(clients);
-            List<Thread> threads = new ArrayList<>();
             List<Throwable> failures = new CopyOnWriteArrayList<>();
             for (int i = 0; i < clients; i++) {
                 String clientId = "ws-fanout-" + i + "-" + System.nanoTime();
@@ -282,9 +282,7 @@ public class IotMqttWebSocketIntegrationTest {
                     WsClient subscriber = null;
                     try {
                         subscriber = WsClient.connect(ws("/mqtt"), clientId, null, null);
-                        synchronized (subscribers) {
-                            subscribers.add(subscriber);
-                        }
+                        subscribers.add(subscriber);
                         subscriber.subscribe(topic);
                     } catch (Exception e) {
                         failures.add(e);
@@ -306,8 +304,23 @@ public class IotMqttWebSocketIntegrationTest {
                 assertArrayEquals(payload, subscriber.takePayload());
             }
         } finally {
+            for (Thread thread : threads) {
+                thread.interrupt();
+            }
+            for (Thread thread : threads) {
+                try {
+                    thread.join(1000);
+                } catch (InterruptedException ignored) {
+                    // Safe to ignore during teardown; restore interrupt status for the calling thread.
+                    Thread.currentThread().interrupt();
+                }
+            }
             for (WsClient subscriber : subscribers) {
-                subscriber.close();
+                try {
+                    subscriber.close();
+                } catch (Exception ignored) {
+                    // Safe to ignore teardown close errors on partially-connected or already closed clients.
+                }
             }
         }
     }
