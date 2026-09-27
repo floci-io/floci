@@ -70,6 +70,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private static final Logger LOG = Logger.getLogger(IamService.class);
     private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     private static final String TEMPORARY_ACCESS_KEY_PREFIX = "ASIA";
+    private static final String SCOPED_IDENTITY_SESSION_BASE_POLICY =
+            "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"*\",\"Resource\":\"*\"}]}";
     private static final String DEFAULT_DEPLOYER_USER = "floci-deployer";
     private static final String DEFAULT_DEPLOYER_ACCESS_KEY_ID = "floci";
     private static final String DEFAULT_DEPLOYER_SECRET_ACCESS_KEY = "floci";
@@ -2275,11 +2277,40 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         SessionCredential session = new SessionCredential(
                 sessionAccessKeyId, secretAccessKey, sessionToken, roleArn, expiration, sessionPolicyDocument,
                 accountId);
+        putSessionForAccount(accountId, sessionAccessKeyId, session);
+    }
+
+    /** An internal URL credential with both a session policy and an exact action/resource guard. */
+    public void registerPresignedUrlSession(String accountId, String accessKeyId, String secretAccessKey,
+                                            String sessionToken, Instant expiration, String policyDocument,
+                                            String action, String resourceArn) {
+        if (accountId == null || accountId.isBlank()) {
+            throw new IllegalArgumentException("Session account ID must not be blank");
+        }
+        SessionCredential session = new SessionCredential(
+                accessKeyId, secretAccessKey, sessionToken, null, expiration, policyDocument, accountId);
+        session.setPresignedAction(action);
+        session.setPresignedResourceArn(resourceArn);
+        putSessionForAccount(accountId, accessKeyId, session);
+    }
+
+    private void putSessionForAccount(String accountId, String sessionAccessKeyId, SessionCredential session) {
         if (sessions instanceof AccountAwareStorageBackend<SessionCredential> aware) {
             aware.putForAccount(accountId, sessionAccessKeyId, session);
         } else {
             sessions.put(sessionAccessKeyId, session);
         }
+    }
+
+    public record PresignedScope(String action, String resourceArn) {
+    }
+
+    public Optional<PresignedScope> presignedScope(String accessKeyId) {
+        return currentSession(accessKeyId)
+                .filter(session -> session.getPresignedAction() != null
+                        && session.getPresignedResourceArn() != null)
+                .map(session -> new PresignedScope(
+                        session.getPresignedAction(), session.getPresignedResourceArn()));
     }
 
     /**
@@ -2488,7 +2519,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             }
 
             if (session.getRoleArn() == null) {
-                return null; // identity session without mapped caller context — preserve historical bypass
+                // A locally minted identity session can carry a restrictive session policy.
+                // Unscoped GetSessionToken credentials retain the historical bypass.
+                return session.getPresignedAction() == null || session.getSessionPolicyDocument() == null ? null
+                        : new CallerContext(List.of(SCOPED_IDENTITY_SESSION_BASE_POLICY),
+                                session.getSessionPolicyDocument(), null);
             }
             List<String> identityPolicies = collectRolePolicies(session.getRoleArn());
             String boundaryDoc = resolveRoleBoundaryDocument(session.getRoleArn());

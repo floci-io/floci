@@ -1,6 +1,9 @@
 package io.github.hectorvent.floci.services.s3;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
 import io.github.hectorvent.floci.services.iam.IamService;
@@ -8,6 +11,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.context.ContextNotActiveException;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
+import jakarta.ws.rs.core.MultivaluedHashMap;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
@@ -17,10 +21,11 @@ import java.security.SecureRandom;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
 import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
 import java.util.Base64;
-import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -31,6 +36,7 @@ import java.util.stream.Collectors;
 public class PreSignedUrlGenerator {
 
     private static final int MAX_PRESIGN_EXPIRY_SECONDS = 604800;
+    private static final ObjectMapper POLICY_MAPPER = new ObjectMapper();
     private static final char[] ACCESS_KEY_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".toCharArray();
     private static final DateTimeFormatter AMZ_DATE_FORMAT =
             DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC);
@@ -135,6 +141,9 @@ public class PreSignedUrlGenerator {
     public String generatePresignedUrl(String baseUrl, String bucket, String key,
                                          String method, int expiresSeconds, String region) {
         int expiry = expiresSeconds > 0 ? expiresSeconds : defaultExpiry;
+        if (expiry < 1 || expiry > MAX_PRESIGN_EXPIRY_SECONDS) {
+            throw new IllegalArgumentException("Presigned URL expiry must be between 1 and 604800 seconds");
+        }
         Instant signedAt = clock.instant();
         String amzDate = AMZ_DATE_FORMAT.format(signedAt);
 
@@ -143,7 +152,7 @@ public class PreSignedUrlGenerator {
         }
 
         SigningIdentity identity = resolveSigningIdentity(region);
-        TemporaryCredential temporaryCredential = temporaryCredential(identity, signedAt, expiry);
+        TemporaryCredential temporaryCredential = temporaryCredential(identity, bucket, key, method, signedAt, expiry);
         String date = amzDate.substring(0, 8);
         String credentialScope = date + "/" + identity.region() + "/s3/aws4_request";
         String credential = temporaryCredential.accessKeyId() + "/" + credentialScope;
@@ -155,31 +164,20 @@ public class PreSignedUrlGenerator {
         }
 
         String path = "/" + PreSignedUrlFilter.awsUriEncode(bucket) + "/" + awsUriEncodePath(key);
-        Map<String, String> queryParams = new LinkedHashMap<>();
-        queryParams.put("X-Amz-Algorithm", "AWS4-HMAC-SHA256");
-        queryParams.put("X-Amz-Credential", credential);
-        queryParams.put("X-Amz-Date", amzDate);
-        queryParams.put("X-Amz-Expires", Integer.toString(expiry));
-        queryParams.put("X-Amz-Security-Token", temporaryCredential.sessionToken());
-        queryParams.put("X-Amz-SignedHeaders", "host");
-        String canonicalQuery = queryParams.entrySet().stream()
-                .map(entry -> PreSignedUrlFilter.awsUriEncode(entry.getKey())
-                        + "=" + PreSignedUrlFilter.awsUriEncode(entry.getValue()))
-                .sorted()
-                .collect(Collectors.joining("&"));
-
-        String canonicalRequest = method + "\n"
-                + path + "\n"
-                + canonicalQuery + "\n"
-                + "host:" + authority + "\n\n"
-                + "host\n"
-                + "UNSIGNED-PAYLOAD";
+        MultivaluedHashMap<String, String> queryParams = new MultivaluedHashMap<>();
+        queryParams.putSingle("X-Amz-Algorithm", "AWS4-HMAC-SHA256");
+        queryParams.putSingle("X-Amz-Credential", credential);
+        queryParams.putSingle("X-Amz-Date", amzDate);
+        queryParams.putSingle("X-Amz-Expires", Integer.toString(expiry));
+        queryParams.putSingle("X-Amz-Security-Token", temporaryCredential.sessionToken());
+        queryParams.putSingle("X-Amz-SignedHeaders", "host");
+        String canonicalQuery = PreSignedUrlFilter.buildCanonicalQueryString(queryParams);
+        String canonicalRequest = S3PresignedCanonicalRequest.build(
+                method, path, canonicalQuery, "host", header -> authority, "UNSIGNED-PAYLOAD");
         String signature;
         try {
-            String stringToSign = "AWS4-HMAC-SHA256\n"
-                    + amzDate + "\n"
-                    + credentialScope + "\n"
-                    + SigV4RequestValidator.sha256Hex(canonicalRequest);
+            String stringToSign = S3PresignedCanonicalRequest.stringToSign(
+                    amzDate, credentialScope, canonicalRequest);
             byte[] signingKey = SigV4RequestValidator.deriveSigningKey(
                     temporaryCredential.secretAccessKey(), date, identity.region(), "s3");
             signature = SigV4RequestValidator.hexEncode(
@@ -211,7 +209,8 @@ public class PreSignedUrlGenerator {
                 + "&X-Amz-Signature=" + signature;
     }
 
-    private TemporaryCredential temporaryCredential(SigningIdentity identity, Instant signedAt, int expiry) {
+    private TemporaryCredential temporaryCredential(SigningIdentity identity, String bucket, String key,
+                                                    String method, Instant signedAt, int expiry) {
         // The in-memory retirement list cannot survive a restart. Sweep persisted expired
         // sessions once on first use, then retire this process's replacements as they expire.
         if (expiredSessionsSwept.compareAndSet(false, true)) {
@@ -229,25 +228,34 @@ public class PreSignedUrlGenerator {
                 iamService.unregisterSession(retired.accountId(), accessKeyId);
             }
         });
-        Instant requiredExpiration = signedAt.plusSeconds(expiry);
-        CredentialKey cacheKey = new CredentialKey(identity.accountId(), identity.region());
+        temporaryCredentials.forEach((keyToRemove, credential) -> {
+            if (credential.expiration().isBefore(signedAt)
+                    && temporaryCredentials.remove(keyToRemove, credential)) {
+                iamService.unregisterSession(keyToRemove.accountId(), credential.accessKeyId());
+            }
+        });
+        // The signed timestamp is second-granular. Keep the credential until the URL's
+        // final second, but never for the old seven-day floor.
+        Instant requiredExpiration = signedAt.truncatedTo(ChronoUnit.SECONDS).plusSeconds(expiry + 1L);
+        CredentialKey cacheKey = new CredentialKey(identity.accountId(), identity.region(), method, bucket, key);
         return temporaryCredentials.compute(cacheKey, (ignored, existing) -> {
             if (existing != null && !existing.expiration().isBefore(requiredExpiration)
                     && iamService.findSecretKey(existing.accessKeyId(), existing.sessionToken())
                             .filter(existing.secretAccessKey()::equals).isPresent()) {
                 return existing;
             }
-            Instant expiration = signedAt.plusSeconds(Math.max(expiry, MAX_PRESIGN_EXPIRY_SECONDS));
             TemporaryCredential created = new TemporaryCredential(
-                    randomAccessKeyId(), randomUrlSafeValue(30), randomUrlSafeValue(48), expiration);
-            iamService.registerSessionForAccount(
+                    randomAccessKeyId(), randomUrlSafeValue(30), randomUrlSafeValue(48), requiredExpiration);
+            String action = presignedAction(method);
+            String resource = S3PublicAccessEvaluator.objectArn(
+                    AwsRegions.partitionFor(identity.region()), bucket, key);
+            iamService.registerPresignedUrlSession(
                     identity.accountId(),
                     created.accessKeyId(),
                     created.secretAccessKey(),
                     created.sessionToken(),
-                    null,
                     created.expiration(),
-                    null);
+                    scopedPolicy(action, resource), action, resource);
             if (existing != null) {
                 if (existing.expiration().isBefore(signedAt)) {
                     iamService.unregisterSession(identity.accountId(), existing.accessKeyId());
@@ -258,6 +266,25 @@ public class PreSignedUrlGenerator {
             }
             return created;
         });
+    }
+
+    private static String presignedAction(String method) {
+        return switch (method) {
+            case "GET", "HEAD" -> "s3:GetObject";
+            case "PUT" -> "s3:PutObject";
+            case "DELETE" -> "s3:DeleteObject";
+            default -> throw new IllegalArgumentException("Unsupported S3 presigned URL method: " + method);
+        };
+    }
+
+    private static String scopedPolicy(String action, String resource) {
+        try {
+            return POLICY_MAPPER.writeValueAsString(Map.of(
+                    "Version", "2012-10-17",
+                    "Statement", List.of(Map.of("Effect", "Allow", "Action", action, "Resource", resource))));
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Failed to encode S3 presigned session policy", e);
+        }
     }
 
     private String randomAccessKeyId() {
@@ -319,7 +346,7 @@ public class PreSignedUrlGenerator {
     private record SigningIdentity(String accountId, String region) {
     }
 
-    private record CredentialKey(String accountId, String region) {
+    private record CredentialKey(String accountId, String region, String method, String bucket, String key) {
     }
 
     private record TemporaryCredential(String accessKeyId, String secretAccessKey,

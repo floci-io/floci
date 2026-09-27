@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.s3;
 
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
+import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.testing.S3IamEnforcementProfile;
 import io.github.hectorvent.floci.testutil.S3RequestSigner;
 import io.quarkus.test.junit.QuarkusTest;
@@ -13,6 +15,7 @@ import java.net.URI;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
+import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -32,6 +35,9 @@ class GeneratedPreSignedUrlAuthEnforcementIntegrationTest {
 
     @Inject
     IamService iamService;
+
+    @Inject
+    IamPolicyEvaluator policyEvaluator;
 
     @Test
     void generatedUrlUsesRegisteredSigV4SessionUnderEnforcedAuth() {
@@ -66,6 +72,35 @@ class GeneratedPreSignedUrlAuthEnforcementIntegrationTest {
         assertNotNull(sessionToken);
         assertEquals("000000000000", iamService.resolveAccountId(accessKeyId).orElseThrow());
         assertTrue(iamService.findSecretKey(accessKeyId, sessionToken).isPresent());
+
+        CallerContext scopedCaller = iamService.resolveCallerContext(accessKeyId);
+        assertNotNull(scopedCaller);
+        String objectArn = "arn:aws:s3:::" + bucket + "/" + key;
+        assertEquals(IamPolicyEvaluator.SimulationDecision.ALLOWED,
+                policyEvaluator.simulatePrincipalPolicy(scopedCaller, "s3:GetObject", objectArn, Map.of()));
+        assertEquals(IamPolicyEvaluator.SimulationDecision.IMPLICIT_DENY,
+                policyEvaluator.simulatePrincipalPolicy(scopedCaller, "s3:PutObject", objectArn, Map.of()));
+        assertEquals(IamPolicyEvaluator.SimulationDecision.IMPLICIT_DENY,
+                policyEvaluator.simulatePrincipalPolicy(scopedCaller, "s3:GetObject",
+                        "arn:aws:s3:::" + bucket + "/other.csv", Map.of()));
+        assertEquals(IamPolicyEvaluator.SimulationDecision.IMPLICIT_DENY,
+                policyEvaluator.simulatePrincipalPolicy(scopedCaller, "sqs:SendMessage", "*", Map.of()));
+
+        S3RequestSigner scopedSigner = S3RequestSigner.signedAs(accessKeyId,
+                iamService.findSecretKey(accessKeyId, sessionToken).orElseThrow(), sessionToken);
+        given().filter(scopedSigner).when().get("/" + bucket + "/other.csv")
+                .then().statusCode(403).body("Error.Code", equalTo("AccessDenied"));
+        given().filter(scopedSigner).body("changed").when().put("/" + bucket + "/" + key)
+                .then().statusCode(403).body("Error.Code", equalTo("AccessDenied"));
+
+        URI wildcardUri = URI.create(presignGenerator.generatePresignedUrl(
+                "http://localhost:" + RestAssured.port, bucket, "wild*.csv", "GET", 60));
+        String wildcardKey = queryParam(wildcardUri, "X-Amz-Credential").split("/", 2)[0];
+        String wildcardToken = queryParam(wildcardUri, "X-Amz-Security-Token");
+        S3RequestSigner wildcardSigner = S3RequestSigner.signedAs(wildcardKey,
+                iamService.findSecretKey(wildcardKey, wildcardToken).orElseThrow(), wildcardToken);
+        given().filter(wildcardSigner).when().get("/" + bucket + "/wild-other.csv")
+                .then().statusCode(403).body("Error.Code", equalTo("AccessDenied"));
 
         given()
             .urlEncodingEnabled(false)

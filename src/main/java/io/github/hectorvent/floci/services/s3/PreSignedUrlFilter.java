@@ -127,12 +127,15 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
         // Registered IAM credentials always carry standard SigV4. Account-shaped credentials
         // from older Floci-generated URLs retain the custom validation path when enforcement is off.
         boolean authEnforced = s3Service.isAuthEnforced();
-        if (authEnforced || presignGenerator.shouldValidateSignatures()) {
+        String rawCredential = queryParams.getFirst("X-Amz-Credential");
+        String scopedAccessKey = URLDecoder.decode(rawCredential, StandardCharsets.UTF_8).split("/", 2)[0];
+        boolean generatedCredential = iamService != null && iamService.presignedScope(scopedAccessKey).isPresent();
+        if (authEnforced || presignGenerator.shouldValidateSignatures() || generatedCredential) {
             String credential = queryParams.getFirst("X-Amz-Credential");
             String decodedCredential = URLDecoder.decode(credential, StandardCharsets.UTF_8);
             String[] credParts = decodedCredential.split("/");
             if (credParts.length < 5) {
-                if (authEnforced) {
+                if (authEnforced || generatedCredential) {
                     requestContext.abortWith(errorResponse(403, "InvalidAccessKeyId",
                             "The AWS Access Key Id you provided does not exist in our records."));
                     return;
@@ -156,7 +159,7 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
                 }
             }
 
-            if (authEnforced) {
+            if (authEnforced || generatedCredential) {
                 requestContext.abortWith(errorResponse(403, "InvalidAccessKeyId",
                         "The AWS Access Key Id you provided does not exist in our records."));
                 return;
@@ -217,16 +220,6 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
             String authority = S3VirtualHostFilter.resolveHost(requestContext.getHeaderString("Host"),
                     requestContext.getHeaderString("X-Forwarded-Host"), requestUri);
 
-            StringBuilder canonicalHeaders = new StringBuilder();
-            for (String header : signedHeaders.split(";")) {
-                if ("host".equals(header)) {
-                    canonicalHeaders.append("host:").append(authority).append("\n");
-                } else {
-                    String canonicalValue = canonicalizeHeaderValue(requestContext.getHeaderString(header));
-                    canonicalHeaders.append(header).append(":").append(canonicalValue).append("\n");
-                }
-            }
-
             // Canonical request: the wire path, since a leading-slash key travels (and is
             // signed) as a double slash that JAX-RS would otherwise collapse.
             String path = S3HeaderSignatureFilter.signedPath(currentVertxRequest, requestUri);
@@ -238,18 +231,12 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
             if (payloadHash == null) {
                 payloadHash = "UNSIGNED-PAYLOAD";
             }
-            String canonicalRequest = requestContext.getMethod() + "\n"
-                    + path + "\n"
-                    + canonicalQueryString + "\n"
-                    + canonicalHeaders + "\n"
-                    + signedHeaders + "\n"
-                    + payloadHash;
-
-            // String to sign
-            String stringToSign = "AWS4-HMAC-SHA256\n"
-                    + amzDate + "\n"
-                    + credentialScope + "\n"
-                    + SigV4RequestValidator.sha256Hex(canonicalRequest);
+            String canonicalRequest = S3PresignedCanonicalRequest.build(
+                    requestContext.getMethod(), path, canonicalQueryString, signedHeaders,
+                    header -> "host".equals(header) ? authority : requestContext.getHeaderString(header),
+                    payloadHash);
+            String stringToSign = S3PresignedCanonicalRequest.stringToSign(
+                    amzDate, credentialScope, canonicalRequest);
 
             // Derive signing key and compute expected signature
             byte[] signingKey = SigV4RequestValidator.deriveSigningKey(secretKey, date, region, service);

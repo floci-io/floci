@@ -107,11 +107,15 @@ class PreSignedUrlIntegrationTest {
                 "The temporary credential must be registered for SigV4 validation");
 
         URI secondUri = URI.create(presignGenerator.generatePresignedUrl(
-                "http://localhost:8080", BUCKET, "second-file.txt", "GET", 300));
+                "http://localhost:8080", BUCKET, "file.txt", "GET", 300));
         String secondCredential = queryParam(secondUri, "X-Amz-Credential");
         assertEquals(accessKeyId, secondCredential.substring(0, secondCredential.indexOf('/')),
-                "Generated URLs should reuse the account and region credential while it is valid");
+                "Only URLs for the same object and method should reuse the scoped credential");
         assertEquals(sessionToken, queryParam(secondUri, "X-Amz-Security-Token"));
+
+        URI otherUri = URI.create(presignGenerator.generatePresignedUrl(
+                "http://localhost:8080", BUCKET, "second-file.txt", "GET", 300));
+        assertNotEquals(accessKeyId, queryParam(otherUri, "X-Amz-Credential").split("/", 2)[0]);
     }
 
     @Test

@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.Decision;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourceAccountRelationship;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourcePolicyDecision;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.IamService.PresignedScope;
 import io.github.hectorvent.floci.services.iam.ResourceArnBuilder;
 import io.github.hectorvent.floci.services.iam.ResourcePolicyProvider;
 import io.github.hectorvent.floci.services.iam.ScpProvider;
@@ -171,7 +172,11 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
 
         String action = actionRegistry.resolve(credentialScope, ctx);
         if (action == null) {
-            return; // unknown action → ALLOW (permissive)
+            if (!"OPTIONS".equalsIgnoreCase(ctx.getMethod())
+                    && iamService.presignedScope(akid).isPresent()) {
+                ctx.abortWith(accessDeniedResponse("Unknown", credentialScope, ctx.getMediaType()));
+            }
+            return; // unknown action → ALLOW for ordinary credentials (permissive)
         }
         if ("sts:GetCallerIdentity".equals(action)) {
             return; // AWS returns caller identity even when an identity policy explicitly denies it
@@ -224,6 +229,18 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
 
         List<String> resources = resolveResourceArns(credentialScope,
                 arnBuilder.buildResources(credentialScope, ctx, region, accountId));
+
+        Optional<PresignedScope> presignedScope = iamService.presignedScope(akid);
+        if (presignedScope.isPresent()) {
+            PresignedScope scope = presignedScope.get();
+            // IAM's resource glob treats * and ? in object keys as patterns. An internal URL
+            // credential is narrower: it may authorize only its literal object and action.
+            if (!scope.action().equals(action) || resources.isEmpty()
+                    || resources.stream().anyMatch(resource -> !scope.resourceArn().equals(resource))) {
+                ctx.abortWith(accessDeniedResponse(action, credentialScope, ctx.getMediaType()));
+                return;
+            }
+        }
 
         Map<String, List<String>> conditionContext = conditionContextResolver.resolve(credentialScope, action, ctx);
         // A request naming several resources is authorized once per resource, as on AWS, so a

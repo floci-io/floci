@@ -354,6 +354,24 @@ class IamEnforcementFilterTest {
     }
 
     @Test
+    void presignedCredentialCannotBypassAnUnmappedAction() {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        String auth = "AWS4-HMAC-SHA256 Credential=ASIASCOPE/20260927/us-east-1/s3/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
+        when(containerRequest.getMethod()).thenReturn("POST");
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn("ASIASCOPE");
+        when(actionRegistry.resolve("s3", containerRequest)).thenReturn(null);
+        when(iamService.presignedScope("ASIASCOPE"))
+                .thenReturn(Optional.of(new IamService.PresignedScope(
+                        "s3:GetObject", "arn:aws:s3:::bucket/key")));
+
+        newFilter().filter(containerRequest);
+
+        verify(containerRequest).abortWith(any());
+    }
+
+    @Test
     void bareAccountIdKeyWithNoScpCeilingStillPassesThrough() {
         ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
         String auth = "AWS4-HMAC-SHA256 Credential=000000000000/20260629/us-east-1/lambda/aws4_request, "
