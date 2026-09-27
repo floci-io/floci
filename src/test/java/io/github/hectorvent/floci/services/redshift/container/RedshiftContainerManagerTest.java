@@ -319,7 +319,7 @@ class RedshiftContainerManagerTest {
 
     @Test
     void startRemovesStaleContainerBeforeCreating() {
-        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
+        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
         ContainerInfo info = new ContainerInfo("cont-123", Map.of(5432, new EndpointInfo("localhost", 5432)));
         when(lifecycleManager.createAndStart(any())).thenReturn(info);
@@ -329,8 +329,9 @@ class RedshiftContainerManagerTest {
         // A container left under the fixed name by an earlier run would make createAndStart fail with a name conflict
         InOrder order = inOrder(lifecycleManager);
         order.verify(lifecycleManager).removeIfExists("floci-aws-redshift-" + ACCOUNT_ID + "-test-cluster");
-        order.verify(lifecycleManager).removeIfExists("floci-redshift-" + ACCOUNT_ID + "-test-cluster");
         order.verify(lifecycleManager).createAndStart(any());
+        // A legacy-named container may still hold a cluster's data, and no volume backs it
+        verify(lifecycleManager, never()).removeIfExists("floci-redshift-" + ACCOUNT_ID + "-test-cluster");
     }
 
     @Test
