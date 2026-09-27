@@ -2396,6 +2396,22 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return removed;
     }
 
+    /** Removes expired temporary sessions, including those left in persistent storage after a restart. */
+    public int sweepExpiredSessions(Instant now) {
+        List<SessionCredential> storedSessions = sessions instanceof AccountAwareStorageBackend<SessionCredential> aware
+                ? aware.scanAllAccounts()
+                : sessions.scan(key -> true);
+        int removed = 0;
+        for (SessionCredential session : storedSessions) {
+            if (session.getExpiration() == null || session.getExpiration().isAfter(now)) {
+                continue;
+            }
+            deleteSession(session.getAccessKeyId(), session);
+            removed++;
+        }
+        return removed;
+    }
+
     /**
      * Resolves the account an IAM or temporary access key belongs to. Long-term IAM access keys
      * resolve from their owning account namespace. Temporary credentials resolve from the account

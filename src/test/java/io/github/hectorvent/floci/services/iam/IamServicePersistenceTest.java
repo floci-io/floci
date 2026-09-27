@@ -108,6 +108,24 @@ class IamServicePersistenceTest {
         assertTrue(restarted.findSecretKey(accessKeyId, "legacy-session-token").isEmpty());
     }
 
+    @Test
+    void expiredTemporarySessionsAreRemovedAfterRestart(@TempDir Path dir) {
+        Instant now = Instant.now();
+        IamService first = newService(dir);
+        first.registerSessionForAccount("000000000000", "ASIAEXPIREDPRESIGN", "expired-secret",
+                "expired-token", null, now.minusSeconds(1), null);
+        first.registerSessionForAccount("000000000000", "ASIAVALIDPRESIGN", "valid-secret",
+                "valid-token", null, now.plusSeconds(3600), null);
+
+        IamService restarted = newService(dir);
+        assertEquals(1, restarted.sweepExpiredSessions(now));
+        assertEquals(0, restarted.sweepExpiredSessions(now));
+        assertEquals("valid-secret", restarted.findSecretKey("ASIAVALIDPRESIGN", "valid-token").orElseThrow());
+
+        IamService subsequentRestart = newService(dir);
+        assertEquals(0, subsequentRestart.sweepExpiredSessions(now));
+    }
+
     private IamService newService(Path dir) {
         return new IamService(
                 load(dir, "iam-users.json", new TypeReference<Map<String, IamUser>>() {}),

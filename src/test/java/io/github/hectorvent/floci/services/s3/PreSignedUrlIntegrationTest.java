@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.services.iam.IamService;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.RestAssured;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -58,7 +59,7 @@ class PreSignedUrlIntegrationTest {
     @Test
     @Order(2)
     void accessWithPresignedGetUrl() {
-        int port = io.restassured.RestAssured.port;
+        int port = RestAssured.port;
         String fullBaseUrl = "http://localhost:" + port;
 
         String presignedUrl = presignGenerator.generatePresignedUrl(
@@ -117,7 +118,7 @@ class PreSignedUrlIntegrationTest {
     @Order(4)
     void expiredPresignedUrlReturns403() {
         // Create a URL with expired date by constructing manually
-        int port = io.restassured.RestAssured.port;
+        int port = RestAssured.port;
 
         // Use an obviously expired date (year 2020)
         String expiredPath = "/" + BUCKET + "/secret-file.txt"
@@ -139,7 +140,7 @@ class PreSignedUrlIntegrationTest {
     @Test
     @Order(5)
     void presignedPutUrl() {
-        int port = io.restassured.RestAssured.port;
+        int port = RestAssured.port;
         String fullBaseUrl = "http://localhost:" + port;
         String url = presignGenerator.generatePresignedUrl(
                 fullBaseUrl, BUCKET, "uploaded-via-presign.txt", "PUT", 3600);
@@ -166,7 +167,7 @@ class PreSignedUrlIntegrationTest {
     @Test
     @Order(6)
     void tamperedPresignedUrlReturnsSignatureMismatch() {
-        int port = io.restassured.RestAssured.port;
+        int port = RestAssured.port;
         String url = presignGenerator.generatePresignedUrl(
                 "http://localhost:" + port, BUCKET, "secret-file.txt", "GET", 3600);
         URI uri = URI.create(url);

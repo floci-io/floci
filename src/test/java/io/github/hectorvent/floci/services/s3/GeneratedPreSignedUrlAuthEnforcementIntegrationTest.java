@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.testing.S3IamEnforcementProfile;
 import io.github.hectorvent.floci.testutil.S3RequestSigner;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.RestAssured;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
@@ -55,7 +56,7 @@ class GeneratedPreSignedUrlAuthEnforcementIntegrationTest {
             .statusCode(200);
 
         String url = presignGenerator.generatePresignedUrl(
-                "http://localhost:" + io.restassured.RestAssured.port, bucket, key, "GET", 3600);
+                "http://localhost:" + RestAssured.port, bucket, key, "GET", 3600);
         URI uri = URI.create(url);
         String credential = queryParam(uri, "X-Amz-Credential");
         String sessionToken = queryParam(uri, "X-Amz-Security-Token");
@@ -91,7 +92,7 @@ class GeneratedPreSignedUrlAuthEnforcementIntegrationTest {
     @Test
     void generatedUrlRegistersFreshCredentialsAfterStoredSessionIsRemoved() {
         String bucket = "generated-presign-reset-" + UUID.randomUUID().toString().substring(0, 8);
-        String baseUrl = "http://localhost:" + io.restassured.RestAssured.port;
+        String baseUrl = "http://localhost:" + RestAssured.port;
         URI oldUri = URI.create(presignGenerator.generatePresignedUrl(
                 baseUrl, bucket, "report.csv", "GET", 3600));
         String oldAccessKeyId = queryParam(oldUri, "X-Amz-Credential").split("/", 2)[0];

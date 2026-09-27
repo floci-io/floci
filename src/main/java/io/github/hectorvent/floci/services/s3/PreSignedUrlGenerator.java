@@ -14,6 +14,7 @@ import javax.crypto.spec.SecretKeySpec;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
+import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -23,6 +24,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
@@ -41,8 +43,11 @@ public class PreSignedUrlGenerator {
     private final IamService iamService;
     private final Instance<RequestContext> requestContextInstance;
     private final SecureRandom random;
+    private final Clock clock;
     private final ConcurrentMap<CredentialKey, TemporaryCredential> temporaryCredentials =
             new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, RetiredCredential> retiredCredentials = new ConcurrentHashMap<>();
+    private final AtomicBoolean expiredSessionsSwept = new AtomicBoolean();
 
     @Inject
     public PreSignedUrlGenerator(EmulatorConfig config, IamService iamService,
@@ -81,6 +86,13 @@ public class PreSignedUrlGenerator {
     PreSignedUrlGenerator(String secret, int defaultExpiry, boolean validateSignatures, String defaultRegion,
                           String defaultAccountId, IamService iamService,
                           Instance<RequestContext> requestContextInstance, SecureRandom random) {
+        this(secret, defaultExpiry, validateSignatures, defaultRegion, defaultAccountId,
+                iamService, requestContextInstance, random, Clock.systemUTC());
+    }
+
+    PreSignedUrlGenerator(String secret, int defaultExpiry, boolean validateSignatures, String defaultRegion,
+                          String defaultAccountId, IamService iamService,
+                          Instance<RequestContext> requestContextInstance, SecureRandom random, Clock clock) {
         this.secret = secret;
         this.defaultExpiry = defaultExpiry;
         this.validateSignatures = validateSignatures;
@@ -89,6 +101,7 @@ public class PreSignedUrlGenerator {
         this.iamService = iamService;
         this.requestContextInstance = requestContextInstance;
         this.random = random;
+        this.clock = clock;
     }
 
     private SigningIdentity resolveSigningIdentity(String region) {
@@ -122,7 +135,7 @@ public class PreSignedUrlGenerator {
     public String generatePresignedUrl(String baseUrl, String bucket, String key,
                                          String method, int expiresSeconds, String region) {
         int expiry = expiresSeconds > 0 ? expiresSeconds : defaultExpiry;
-        Instant signedAt = Instant.now();
+        Instant signedAt = clock.instant();
         String amzDate = AMZ_DATE_FORMAT.format(signedAt);
 
         if (iamService == null) {
@@ -199,6 +212,23 @@ public class PreSignedUrlGenerator {
     }
 
     private TemporaryCredential temporaryCredential(SigningIdentity identity, Instant signedAt, int expiry) {
+        // The in-memory retirement list cannot survive a restart. Sweep persisted expired
+        // sessions once on first use, then retire this process's replacements as they expire.
+        if (expiredSessionsSwept.compareAndSet(false, true)) {
+            try {
+                iamService.sweepExpiredSessions(signedAt);
+            } catch (RuntimeException failure) {
+                expiredSessionsSwept.set(false);
+                throw failure;
+            }
+        }
+        // Previously issued URLs can still use a replaced credential. Sweep it only after expiry.
+        retiredCredentials.forEach((accessKeyId, retired) -> {
+            if (retired.credential().expiration().isBefore(signedAt)
+                    && retiredCredentials.remove(accessKeyId, retired)) {
+                iamService.unregisterSession(retired.accountId(), accessKeyId);
+            }
+        });
         Instant requiredExpiration = signedAt.plusSeconds(expiry);
         CredentialKey cacheKey = new CredentialKey(identity.accountId(), identity.region());
         return temporaryCredentials.compute(cacheKey, (ignored, existing) -> {
@@ -218,6 +248,14 @@ public class PreSignedUrlGenerator {
                     null,
                     created.expiration(),
                     null);
+            if (existing != null) {
+                if (existing.expiration().isBefore(signedAt)) {
+                    iamService.unregisterSession(identity.accountId(), existing.accessKeyId());
+                } else {
+                    retiredCredentials.put(existing.accessKeyId(),
+                            new RetiredCredential(identity.accountId(), existing));
+                }
+            }
             return created;
         });
     }
@@ -286,5 +324,8 @@ public class PreSignedUrlGenerator {
 
     private record TemporaryCredential(String accessKeyId, String secretAccessKey,
                                        String sessionToken, Instant expiration) {
+    }
+
+    private record RetiredCredential(String accountId, TemporaryCredential credential) {
     }
 }
