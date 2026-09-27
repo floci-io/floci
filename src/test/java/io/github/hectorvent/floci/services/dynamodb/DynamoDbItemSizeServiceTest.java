@@ -12,6 +12,8 @@ import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.List;
 
@@ -42,6 +44,34 @@ class DynamoDbItemSizeServiceTest {
         handler = new NativeDynamoDbJsonHandler(service, null, null, new ObjectMapper());
         service.createTable(TABLE, List.of(new KeySchemaElement("pk", "HASH")),
                 List.of(new AttributeDefinition("pk", "S")), 5L, 5L, REGION);
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "0, 1", "-0, 1", "1, 2", "12, 2", "123, 3", "1234, 3", "123456, 4",
+            "12345678901234567890123456789012345678, 20",
+            "0042, 2", "100, 2", "110, 3", "1010, 3", "1100, 2", "11000, 3",
+            "0.1, 2", "0.15, 2", "0.015, 3", "0.0015, 2", "0.0000001, 2",
+            "1.5, 3", "1.05, 3", "1.200, 3", "3.14159, 5", "100.5, 4", "110.5, 4",
+            "1E125, 2", "1E-100, 2", "1.1E2, 3", "-42, 3", "-110, 4", "-0.015, 4"
+    })
+    void numberCostsOneBytePerDigitPairFromTheDecimalPoint(String number, int bytes) {
+        assertEquals(bytes, DynamoDbItemSize.numberSize(number));
+    }
+
+    @Test
+    void putItemMeasuresANumberByItsDigitPairs() {
+        ObjectNode item = key("a");
+        item.set("n", numberValue("3.14159"));
+        item.set("b", stringValue(padding("a", MAX_ITEM_SIZE, "n".length() + 5)));
+        service.putItem(TABLE, item, REGION);
+        assertEquals(MAX_ITEM_SIZE, storedBytes("a"));
+
+        ObjectNode over = key("b");
+        over.set("n", numberValue("3.14159"));
+        over.set("b", stringValue(padding("b", MAX_ITEM_SIZE + 1, "n".length() + 5)));
+        AwsException refused = assertThrows(AwsException.class, () -> service.putItem(TABLE, over, REGION));
+        assertEquals("Item size has exceeded the maximum allowed size", refused.getMessage());
     }
 
     @Test
@@ -76,10 +106,11 @@ class DynamoDbItemSizeServiceTest {
     void updateItemChargesNineteenBytesForAnAdd() {
         int ceiling = MAX_ITEM_SIZE + SHORT_KEY_BYTES - (UPDATE_COST + SET_OR_ADD_COST * 2);
         ObjectNode one = values(":one", numberValue("1"));
+        int numberBytes = "n".length() + 2;
 
-        update("a", "SET b = :pad ADD n :one", ceiling, 2, one);
+        update("a", "SET b = :pad ADD n :one", ceiling, numberBytes, one);
         assertEquals(ceiling, storedBytes("a"));
-        assertRefused(() -> update("b", "SET b = :pad ADD n :one", ceiling + 1, 2, one));
+        assertRefused(() -> update("b", "SET b = :pad ADD n :one", ceiling + 1, numberBytes, one));
     }
 
     @Test
