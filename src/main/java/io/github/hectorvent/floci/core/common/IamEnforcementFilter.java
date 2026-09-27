@@ -268,6 +268,22 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             abortIfDenied(ctx, caller, "s3:GetObject", credentialScope, resources,
                     withoutObjectTags(targetContexts), region, accountId, akid);
         }
+        // A DeleteObject conditioned on an ETag reveals whether the object still has it, and the
+        // conditional-deletes guide requires s3:GetObject for it; If-Match: * (existence only)
+        // needs just s3:DeleteObject. The read is checked the way the PutObject case above is.
+        if ("s3:DeleteObject".equals(action) && "DELETE".equalsIgnoreCase(ctx.getMethod())
+                && isETagCondition(ctx.getHeaderString("If-Match"))) {
+            abortIfDenied(ctx, caller, "s3:GetObject", credentialScope, resources,
+                    withoutObjectTags(targetContexts), region, accountId, akid);
+        }
+    }
+
+    private static boolean isETagCondition(String ifMatch) {
+        if (ifMatch == null) {
+            return false;
+        }
+        String value = ifMatch.trim();
+        return !value.equals("*") && !value.equals("\"*\"");
     }
 
     /**
