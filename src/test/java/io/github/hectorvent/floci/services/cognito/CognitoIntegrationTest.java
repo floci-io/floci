@@ -2967,6 +2967,62 @@ class CognitoIntegrationTest {
                 .body("__type", equalTo("InvalidParameterException"));
     }
 
+    @Test
+    @Order(111)
+    void preventUserExistenceErrorsHidesUnknownUserAuthUsersOverTheWire() throws Exception {
+        String userAuthPoolId = cognitoJson("CreateUserPool", """
+                {
+                  "PoolName": "HiddenUserAuthWirePool",
+                  "UsernameAttributes": ["phone_number"],
+                  "Policies": {
+                    "SignInPolicy": { "AllowedFirstAuthFactors": ["PASSWORD", "SMS_OTP"] }
+                  }
+                }
+                """).path("UserPool").path("Id").asText();
+        String userAuthClientId = cognitoJson("CreateUserPoolClient", """
+                {
+                  "UserPoolId": "%s",
+                  "ClientName": "hidden-user-auth-client",
+                  "ExplicitAuthFlows": ["ALLOW_USER_AUTH"],
+                  "PreventUserExistenceErrors": "ENABLED"
+                }
+                """.formatted(userAuthPoolId)).path("UserPoolClient").path("ClientId").asText();
+
+        JsonNode challengeResult = cognitoJson("InitiateAuth", """
+                {
+                  "ClientId": "%s",
+                  "AuthFlow": "USER_AUTH",
+                  "AuthParameters": {
+                    "USERNAME": "+5511900000000",
+                    "PREFERRED_CHALLENGE": "SMS_OTP"
+                  }
+                }
+                """.formatted(userAuthClientId));
+
+        String challenge = challengeResult.path("ChallengeName").asText();
+        assertTrue(List.of("PASSWORD", "SMS_OTP").contains(challenge),
+                "the simulated challenge must come from the configured first factors: " + challengeResult);
+        assertFalse(challengeResult.path("Session").asText().isBlank());
+        assertEquals(List.of("PASSWORD", "SMS_OTP"), textValues(challengeResult.path("AvailableChallenges")));
+
+        String answerName = "SMS_OTP".equals(challenge) ? "SMS_OTP_CODE" : "PASSWORD";
+        cognitoAction("RespondToAuthChallenge", """
+                {
+                  "ClientId": "%s",
+                  "ChallengeName": "%s",
+                  "Session": "%s",
+                  "ChallengeResponses": {
+                    "USERNAME": "+5511900000000",
+                    "%s": "invalid"
+                  }
+                }
+                """.formatted(userAuthClientId, challenge, challengeResult.path("Session").asText(), answerName))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("NotAuthorizedException"))
+                .body("message", equalTo("Incorrect username or password"));
+    }
+
     private static List<String> textValues(JsonNode array) {
         List<String> values = new ArrayList<>();
         for (JsonNode value : array) {
