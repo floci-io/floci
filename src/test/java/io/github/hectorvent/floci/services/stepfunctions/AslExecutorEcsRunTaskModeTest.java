@@ -35,8 +35,10 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -183,6 +185,10 @@ class AslExecutorEcsRunTaskModeTest {
                 .findFirst().orElseThrow(() -> new AssertionError("no TaskTimedOut event in " + history));
         assertEquals("ecs", timedOut.getDetails().get("resourceType"));
         assertEquals("States.Timeout", timedOut.getDetails().get("error"));
+        // AWS stops the task it was waiting on, with this exact stoppedReason (measured).
+        verify(ecsService).stopTask(any(), eq(task("RUNNING").getTaskArn()),
+                eq("The Task state in AWS Step Functions execution [" + execution.getExecutionArn()
+                        + "] which was managing this resource was aborted"), eq(REGION));
     }
 
     @Test
@@ -222,6 +228,7 @@ class AslExecutorEcsRunTaskModeTest {
 
         assertEquals("TIMED_OUT", execution.getStatus());
         assertNull(execution.getError());
+        verify(ecsService, never()).stopTask(any(), any(), any(), any());
         assertTrue(history.stream().noneMatch(event -> "TaskTimedOut".equals(event.getType())),
                 "the execution's budget writes nothing about the state it cut");
         assertTrue(history.stream().anyMatch(event -> "ExecutionTimedOut".equals(event.getType())));

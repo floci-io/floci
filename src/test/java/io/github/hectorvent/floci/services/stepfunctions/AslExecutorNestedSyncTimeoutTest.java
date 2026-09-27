@@ -27,7 +27,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -70,6 +74,10 @@ class AslExecutorNestedSyncTimeoutTest {
                 .filter(event -> "TaskTimedOut".equals(event.getType()))
                 .findFirst().orElseThrow(() -> new AssertionError("no TaskTimedOut event in " + history));
         assertEquals("states", timedOut.getDetails().get("resourceType"));
+        // AWS aborts the child it was waiting on: no error, this exact cause (measured).
+        verify(sfnService).stopExecution(eq(CHILD_ARN),
+                eq("The Task state in AWS Step Functions execution [" + execution.getExecutionArn()
+                        + "] which was managing this resource was aborted"), isNull());
     }
 
     @Test
@@ -89,6 +97,7 @@ class AslExecutorNestedSyncTimeoutTest {
 
         assertEquals("SUCCEEDED", execution.getStatus(), execution.getCause());
         assertEquals(700, polls.get());
+        verify(sfnService, never()).stopExecution(any(), any(), any());
         assertTrue(objectMapper.readTree(execution.getOutput()).path("output").asText().contains("42"));
     }
 
