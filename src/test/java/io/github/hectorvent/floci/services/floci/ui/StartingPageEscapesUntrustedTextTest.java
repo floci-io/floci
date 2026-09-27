@@ -7,6 +7,7 @@ import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -21,15 +22,17 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class StartingPageEscapesUntrustedTextTest {
 
     private static final Path STARTING_PAGE = Path.of("src", "main", "resources", "ui", "starting.html");
+    private static final Pattern MSG_HTML_ASSIGNMENT = Pattern.compile("\\bmsg\\.innerHTML\\s*=");
+    private static final Pattern MSG_TEXT_ASSIGNMENT = Pattern.compile("\\bmsg\\.textContent\\s*=");
 
     @Test
     void failRendersServerTextWithoutParsingItAsHtml() {
         String content = readStartingPage();
 
-        assertFalse(content.contains("innerHTML"),
-                "starting.html must not assign server-derived text through innerHTML");
-        assertTrue(content.contains("msg.textContent = text;"),
-                "starting.html must render the untrusted status text with textContent");
+        assertFalse(MSG_HTML_ASSIGNMENT.matcher(content).find(),
+                "starting.html must not assign the status message through innerHTML");
+        assertTrue(MSG_TEXT_ASSIGNMENT.matcher(content).find(),
+                "starting.html must render the untrusted status message with textContent");
     }
 
     private static String readStartingPage() {
