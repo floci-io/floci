@@ -420,6 +420,7 @@ public class IotMqttWebSocketIntegrationTest {
             MqttConnectOptions options = new MqttConnectOptions();
             options.setCleanSession(true);
             options.setConnectionTimeout(10);
+            options.setMqttVersion(MqttConnectOptions.MQTT_VERSION_3_1_1);
             if (url.startsWith("wss://")) {
                 options.setSocketFactory(trustOnlyFlociCa().getSocketFactory());
             }

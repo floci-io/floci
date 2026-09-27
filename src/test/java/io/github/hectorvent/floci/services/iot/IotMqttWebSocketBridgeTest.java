@@ -6,7 +6,10 @@ import io.vertx.core.net.NetSocket;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import static org.mockito.ArgumentMatchers.anyShort;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -31,5 +34,28 @@ class IotMqttWebSocketBridgeTest {
         exceptionCaptor.getValue().handle(new IllegalStateException("already closed"));
 
         verify(webSocket).close();
+        verify(webSocket, never()).close(anyShort(), anyString());
+    }
+
+    @Test
+    void brokerExceptionAndCloseCloseWebSocketOnlyOnce() {
+        ServerWebSocket webSocket = mock(ServerWebSocket.class);
+        NetSocket socket = mock(NetSocket.class);
+        when(webSocket.isClosed()).thenReturn(false);
+
+        IotMqttWebSocketBridge.BridgeSession session =
+                new IotMqttWebSocketBridge.BridgeSession(webSocket, socket);
+        session.start();
+
+        ArgumentCaptor<Handler<Void>> closeCaptor = ArgumentCaptor.forClass(Handler.class);
+        verify(socket).closeHandler(closeCaptor.capture());
+        ArgumentCaptor<Handler<Throwable>> exceptionCaptor = ArgumentCaptor.forClass(Handler.class);
+        verify(socket).exceptionHandler(exceptionCaptor.capture());
+
+        exceptionCaptor.getValue().handle(new IllegalStateException("already closed"));
+        closeCaptor.getValue().handle(null);
+
+        verify(webSocket).close(anyShort(), anyString());
+        verify(webSocket, never()).close();
     }
 }
