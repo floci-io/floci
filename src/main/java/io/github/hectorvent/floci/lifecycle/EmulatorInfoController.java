@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.ContainerTeardowns;
 import io.github.hectorvent.floci.core.common.ServiceRegistry;
 import io.github.hectorvent.floci.lifecycle.inithook.InitializationHook;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbBackendSelector;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.Path;
@@ -44,6 +45,7 @@ public class EmulatorInfoController {
     private final Instance<ContainerTeardown> containerTeardowns;
     private final FlociCertificateAuthority certificateAuthority;
     private final EmulatorConfig config;
+    private final DynamoDbBackendSelector dynamoDbBackendSelector;
 
     @Inject
     public EmulatorInfoController(ServiceRegistry serviceRegistry,
@@ -52,7 +54,8 @@ public class EmulatorInfoController {
                                   Instance<Resettable> resettables,
                                   Instance<ContainerTeardown> containerTeardowns,
                                   FlociCertificateAuthority certificateAuthority,
-                                  EmulatorConfig config) {
+                                  EmulatorConfig config,
+                                  DynamoDbBackendSelector dynamoDbBackendSelector) {
         this.serviceRegistry = serviceRegistry;
         this.initLifecycleState = initLifecycleState;
         this.storageFactory = storageFactory;
@@ -60,6 +63,7 @@ public class EmulatorInfoController {
         this.containerTeardowns = containerTeardowns;
         this.certificateAuthority = certificateAuthority;
         this.config = config;
+        this.dynamoDbBackendSelector = dynamoDbBackendSelector;
         this.version = resolveVersion();
     }
 
@@ -98,7 +102,8 @@ public class EmulatorInfoController {
     @GET
     @Path("/info")
     public Response info() {
-        return Response.ok(Map.of("version", version, "edition", "community", "original_edition", "floci-always-free")).build();
+        return Response.ok(Map.of("version", version, "edition", "community", "original_edition", "floci-always-free",
+                "dynamodb_backend", dynamoDbBackendSelector.selected())).build();
     }
 
     @GET
