@@ -31,6 +31,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 /** Owns the protected namespace and the Floci-only nftables table for each managed ENI. */
@@ -43,7 +44,7 @@ public class SecurityGroupFirewallManager {
     private final ContainerLifecycleManager lifecycleManager;
     private final EmulatorConfig config;
     private final Map<String, ProtectedEndpoint> endpoints = new HashMap<>();
-    private volatile List<String> helperDnsServers = List.of();
+    private final Map<String, List<String>> helperDnsServers = new ConcurrentHashMap<>();
 
     @Inject
     public SecurityGroupFirewallManager(DockerClient dockerClient, ContainerBuilder containerBuilder,
@@ -119,10 +120,10 @@ public class SecurityGroupFirewallManager {
             portBindings.forEach(builder::withPortBinding);
         }
         ContainerSpec spec = builder.build();
-        helperDnsServers = spec.dnsServers() == null ? List.of() : List.copyOf(spec.dnsServers());
         String helperId = null;
         try {
             helperId = lifecycleManager.createAndStart(spec).containerId();
+            helperDnsServers.put(helperId, spec.dnsServers() == null ? List.of() : List.copyOf(spec.dnsServers()));
             String ip = dockerClient.inspectContainerCmd(helperId).exec().getNetworkSettings()
                     .getNetworks().values().stream().map(n -> n.getIpAddress())
                     .filter(address -> address != null && !address.isBlank())
@@ -131,6 +132,7 @@ public class SecurityGroupFirewallManager {
             return new Namespace(helperId, ip);
         } catch (Exception e) {
             if (helperId != null) {
+                helperDnsServers.remove(helperId);
                 lifecycleManager.removeIfExists(helperId);
             }
             throw new IllegalStateException("Cannot prepare protected network namespace for " + resourceId, e);
@@ -162,6 +164,7 @@ public class SecurityGroupFirewallManager {
             } else {
                 endpoints.put(endpoint.eniId(), previous);
             }
+            helperDnsServers.remove(helperId);
             quarantine(helperId);
             throw e;
         }
@@ -170,6 +173,7 @@ public class SecurityGroupFirewallManager {
     public synchronized void unregister(String eniId) {
         ProtectedEndpoint removed = endpoints.remove(eniId);
         if (removed != null) {
+            helperDnsServers.remove(removed.helperId());
             lifecycleManager.removeIfExists(removed.helperId());
             reconcileAll();
         }
@@ -206,6 +210,7 @@ public class SecurityGroupFirewallManager {
             }
             if (!running) {
                 quarantine(entry.getValue().helperId());
+                helperDnsServers.remove(entry.getValue().helperId());
                 endpoints.remove(entry.getKey());
             }
         }
@@ -214,7 +219,8 @@ public class SecurityGroupFirewallManager {
         for (ProtectedEndpoint protectedEndpoint : new ArrayList<>(endpoints.values())) {
             try {
                 String rules = SecurityGroupNftCompiler.compile(protectedEndpoint.endpoint(), peers,
-                        protectedEndpoint.prefixLists(), helperDnsServers);
+                        protectedEndpoint.prefixLists(),
+                        helperDnsServers.getOrDefault(protectedEndpoint.helperId(), List.of()));
                 apply(protectedEndpoint.helperId(), rules);
             } catch (RuntimeException e) {
                 endpoints.values().forEach(endpoint -> quarantine(endpoint.helperId()));
