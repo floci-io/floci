@@ -132,7 +132,9 @@ final class DynamoDbItemSize {
         }
         if (attr.has("NS")) {
             int size = 0;
-            for (JsonNode e : attr.get("NS")) size += numberSize(e.asText()) + 1;
+            for (JsonNode e : attr.get("NS")) {
+                size += numberSize(e.asText());
+            }
             return size;
         }
         if (attr.has("BS")) {

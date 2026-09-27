@@ -85,6 +85,22 @@ class DynamoDbItemSizeServiceTest {
     }
 
     @Test
+    void putItemMeasuresANumberSetByItsMembersAlone() {
+        int setBytes = "n".length() + 2 + 3 + 3;
+        ObjectNode item = key("a");
+        item.set("n", numberSetValue("1", "110", "0.015"));
+        item.set("b", stringValue(padding("a", MAX_ITEM_SIZE, setBytes)));
+        service.putItem(TABLE, item, REGION);
+        assertEquals(MAX_ITEM_SIZE, storedBytes("a"));
+
+        ObjectNode over = key("b");
+        over.set("n", numberSetValue("1", "110", "0.015"));
+        over.set("b", stringValue(padding("b", MAX_ITEM_SIZE + 1, setBytes)));
+        AwsException refused = assertThrows(AwsException.class, () -> service.putItem(TABLE, over, REGION));
+        assertEquals("Item size has exceeded the maximum allowed size", refused.getMessage());
+    }
+
+    @Test
     void updateItemSitsBelowTheLimitAtAShortKey() {
         int ceiling = MAX_ITEM_SIZE + SHORT_KEY_BYTES - (UPDATE_COST + SET_OR_ADD_COST);
 
@@ -291,6 +307,15 @@ class DynamoDbItemSizeServiceTest {
 
     private ObjectNode numberValue(String number) {
         return JsonNodeFactory.instance.objectNode().put("N", number);
+    }
+
+    private ObjectNode numberSetValue(String... members) {
+        ObjectNode value = JsonNodeFactory.instance.objectNode();
+        ArrayNode set = value.putArray("NS");
+        for (String member : members) {
+            set.add(member);
+        }
+        return value;
     }
 
     private ObjectNode stringSetValue(String member) {
