@@ -52,10 +52,10 @@ cat > "${WORK}/root-bin/chroot" <<'EOF'
 #!/bin/sh
 printf 'dropped privileges\n'
 EOF
-# Record chown's target instead of changing ownership (the tests run unprivileged).
+# Record chown's arguments instead of changing ownership (the tests run unprivileged).
 cat > "${WORK}/root-bin/chown" <<EOF
 #!/bin/sh
-printf '%s\n' "\$3" >> "${WORK}/chown.log"
+printf '%s\n' "\$*" >> "${WORK}/chown.log"
 EOF
 chmod +x "${WORK}/root-bin/id" "${WORK}/root-bin/chroot" "${WORK}/root-bin/chown"
 
@@ -92,12 +92,17 @@ CUSTOM_DIR="${WORK}/custom-data"
 mkdir -p "${CUSTOM_DIR}"
 CUSTOM_DIR_PHYSICAL="$(cd -P "${CUSTOM_DIR}" && pwd -P)"
 assert_eq "root re-owns a custom FLOCI_STORAGE_PERSISTENT_PATH" \
-    "${CUSTOM_DIR_PHYSICAL}" \
+    "-R floci:root ${CUSTOM_DIR_PHYSICAL}" \
     "$(chowned "${CUSTOM_DIR}")"
 
 assert_eq "root re-owns a relative path resolved against the working directory" \
-    "${CUSTOM_DIR_PHYSICAL}" \
+    "-R floci:root ${CUSTOM_DIR_PHYSICAL}" \
     "$(cd "${WORK}" && chowned custom-data)"
+
+mkdir -p "${WORK}/elsewhere/custom-data"
+assert_eq "CDPATH does not redirect a relative path" \
+    "-R floci:root ${CUSTOM_DIR_PHYSICAL}" \
+    "$(cd "${WORK}" && CDPATH="${WORK}/elsewhere" chowned custom-data)"
 
 assert_eq "root skips a state dir that does not exist" \
     "" \

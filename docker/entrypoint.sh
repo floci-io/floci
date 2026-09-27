@@ -33,7 +33,8 @@ if [ "$(id -u)" = '0' ]; then
     # (read-only mounts, unusual filesystems) so the container still starts.
     state_dir="${FLOCI_STORAGE_PERSISTENT_PATH:-/app/data}"
     if [ -d "$state_dir" ]; then
-        state_dir_physical="$(cd -P -- "$state_dir" 2>/dev/null && pwd -P)" || state_dir_physical=''
+        # CDPATH is cleared so a relative path cannot be looked up elsewhere (and echoed).
+        state_dir_physical="$(CDPATH= cd -P -- "$state_dir" 2>/dev/null && pwd -P)" || state_dir_physical=''
         if [ "$state_dir_physical" = '/' ]; then
             echo "WARNING: not changing ownership of $state_dir, it resolves to /." >&2
         elif [ -n "$state_dir_physical" ]; then
