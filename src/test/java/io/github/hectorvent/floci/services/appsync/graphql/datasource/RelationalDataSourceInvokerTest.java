@@ -127,29 +127,27 @@ class RelationalDataSourceInvokerTest {
     }
 
     @Test
-    void twoVtlStatementsCommitOnlyAfterBothSucceed() {
+    void twoVtlStatementsRunSequentiallyWithoutATransaction() {
         answersOneRow();
-        when(rdsData.beginTransaction(any(), anyString())).thenReturn(
-                mapper.createObjectNode().put("transactionId", "tx-1"));
 
         invoker.invoke(dataSource(), Map.of("version", "2018-05-29",
                 "statements", List.of("UPDATE t SET value = 1", "UPDATE t SET value = 2")), "eu-west-1");
 
         InOrder order = inOrder(rdsData);
-        order.verify(rdsData).beginTransaction(any(), anyString());
         ArgumentCaptor<JsonNode> statements = ArgumentCaptor.forClass(JsonNode.class);
         order.verify(rdsData, times(2)).executeStatement(statements.capture(), anyString());
-        order.verify(rdsData).commitTransaction(any(), anyString());
-        assertEquals("tx-1", statements.getAllValues().get(0).path("transactionId").asText());
-        assertEquals("tx-1", statements.getAllValues().get(1).path("transactionId").asText());
+        assertEquals("UPDATE t SET value = 1", statements.getAllValues().get(0).path("sql").asText());
+        assertEquals("UPDATE t SET value = 2", statements.getAllValues().get(1).path("sql").asText());
+        assertFalse(statements.getAllValues().get(0).has("transactionId"));
+        assertFalse(statements.getAllValues().get(1).has("transactionId"));
+        verify(rdsData, never()).beginTransaction(any(), anyString());
+        verify(rdsData, never()).commitTransaction(any(), anyString());
         verify(rdsData, never()).rollbackTransaction(any(), anyString());
     }
 
     @Test
-    void failedSecondVtlStatementRollsBackTheFirstWrite() {
+    void failedSecondVtlStatementDoesNotRollBackTheFirstWrite() {
         answersOneRow();
-        when(rdsData.beginTransaction(any(), anyString())).thenReturn(
-                mapper.createObjectNode().put("transactionId", "tx-2"));
         AwsException failure = new AwsException("DatabaseErrorException", "second statement failed", 400);
         when(rdsData.executeStatement(any(), anyString()))
                 .thenReturn(mapper.createObjectNode())
@@ -160,10 +158,14 @@ class RelationalDataSourceInvokerTest {
                         "statements", List.of("UPDATE t SET value = 1", "BAD SQL")), "eu-west-1"));
 
         assertSame(failure, actual);
-        ArgumentCaptor<JsonNode> rollback = ArgumentCaptor.forClass(JsonNode.class);
-        verify(rdsData).rollbackTransaction(rollback.capture(), anyString());
-        assertEquals("tx-2", rollback.getValue().path("transactionId").asText());
+        ArgumentCaptor<JsonNode> statements = ArgumentCaptor.forClass(JsonNode.class);
+        InOrder order = inOrder(rdsData);
+        order.verify(rdsData, times(2)).executeStatement(statements.capture(), anyString());
+        assertEquals("UPDATE t SET value = 1", statements.getAllValues().get(0).path("sql").asText());
+        assertEquals("BAD SQL", statements.getAllValues().get(1).path("sql").asText());
+        verify(rdsData, never()).beginTransaction(any(), anyString());
         verify(rdsData, never()).commitTransaction(any(), anyString());
+        verify(rdsData, never()).rollbackTransaction(any(), anyString());
     }
 
     @Test

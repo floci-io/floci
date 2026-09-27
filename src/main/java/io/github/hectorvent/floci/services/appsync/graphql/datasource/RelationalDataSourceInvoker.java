@@ -71,53 +71,21 @@ public class RelationalDataSourceInvoker implements AppSyncDataSourceInvoker {
                     "The resolver produced no SQL statement for data source " + dataSource.getName(), 500);
         }
 
-        // Classic VTL allows two statements. They must share a transaction so a failure in
-        // the second does not leave the first write committed while the resolver reports error.
-        boolean transactional = request instanceof Map<?, ?> map
-                && "2018-05-29".equals(map.get("version")) && statements.size() == 2;
-        ObjectNode transactionRequest = objectMapper.createObjectNode();
-        String transactionId = null;
-        if (transactional) {
-            transactionRequest.put("resourceArn", resourceArn);
-            transactionRequest.put("secretArn", secretArn);
-            transactionRequest.put("database", database);
-            transactionId = rdsDataService.beginTransaction(transactionRequest, region)
-                    .path("transactionId").asText();
-        }
         ArrayNode results = objectMapper.createArrayNode();
-        try {
-            for (Statement statement : statements) {
-                ObjectNode rdsRequest = objectMapper.createObjectNode();
-                rdsRequest.put("resourceArn", resourceArn);
-                rdsRequest.put("secretArn", secretArn);
-                rdsRequest.put("database", database);
-                rdsRequest.put("sql", statement.sql());
-                if (transactionId != null) {
-                    rdsRequest.put("transactionId", transactionId);
-                }
-                // Column metadata is what turns records into keyed rows; toJsonObject cannot name a
-                // column without it.
-                rdsRequest.put("includeResultMetadata", true);
-                if (!statement.parameters().isEmpty()) {
-                    rdsRequest.set("parameters", parameterNodes(statement.parameters()));
-                }
-                ObjectNode response = rdsDataService.executeStatement(rdsRequest, region);
-                results.add(sqlStatementResult(response));
+        for (Statement statement : statements) {
+            ObjectNode rdsRequest = objectMapper.createObjectNode();
+            rdsRequest.put("resourceArn", resourceArn);
+            rdsRequest.put("secretArn", secretArn);
+            rdsRequest.put("database", database);
+            rdsRequest.put("sql", statement.sql());
+            // Column metadata is what turns records into keyed rows; toJsonObject cannot name a
+            // column without it.
+            rdsRequest.put("includeResultMetadata", true);
+            if (!statement.parameters().isEmpty()) {
+                rdsRequest.set("parameters", parameterNodes(statement.parameters()));
             }
-            if (transactionId != null) {
-                transactionRequest.put("transactionId", transactionId);
-                rdsDataService.commitTransaction(transactionRequest, region);
-            }
-        } catch (RuntimeException failure) {
-            if (transactionId != null) {
-                transactionRequest.put("transactionId", transactionId);
-                try {
-                    rdsDataService.rollbackTransaction(transactionRequest, region);
-                } catch (RuntimeException rollbackFailure) {
-                    failure.addSuppressed(rollbackFailure);
-                }
-            }
-            throw failure;
+            ObjectNode response = rdsDataService.executeStatement(rdsRequest, region);
+            results.add(sqlStatementResult(response));
         }
 
         ObjectNode wrapper = objectMapper.createObjectNode();
