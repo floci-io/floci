@@ -392,7 +392,8 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
         }
     }
 
-    // ponytail: Local's DeleteTable checks deletion protection; typed creates never set it.
+    // ponytail: Local's DeleteTable checks deletion protection. Typed creates never set it, and a table
+    // protected later through the API fails the stack delete, as on AWS.
     @Override
     public void deleteTable(Scope scope, String tableName) {
         call(scope, "DeleteTable", body(tableName));
