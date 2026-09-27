@@ -98,9 +98,8 @@ class IamActionRegistryTest {
     }
 
     @Test
-    void prefersUrlQueryActionOverFormBody() {
-        // Some clients (older AWS CLI, curl) send Query-protocol requests with
-        // Action in the URL query string; that path must keep working.
+    void formBodyActionTakesPrecedenceOverUrlQueryAction() {
+        // The controller dispatches the form body, even when the URL names another action.
         MultivaluedMap<String, String> query = new MultivaluedHashMap<>();
         query.add("Action", "ListUsers");
         ContainerRequestContext ctx = mockCtx(
@@ -108,7 +107,17 @@ class IamActionRegistryTest {
                 query,
                 MediaType.APPLICATION_FORM_URLENCODED_TYPE,
                 "Action=DeleteUser");
-        assertEquals("iam:ListUsers", registry.resolve("iam", ctx));
+        assertEquals("iam:DeleteUser", registry.resolve("iam", ctx));
+    }
+
+    @Test
+    void urlQueryActionDoesNotAuthorizeAnAbsentFormAction() {
+        MultivaluedMap<String, String> query = new MultivaluedHashMap<>();
+        query.add("Action", "ListUsers");
+        ContainerRequestContext ctx = mockCtx(
+                "POST", "/", query, MediaType.APPLICATION_FORM_URLENCODED_TYPE,
+                "Version=2010-05-08");
+        assertNull(registry.queryAction(ctx));
     }
 
     @Test

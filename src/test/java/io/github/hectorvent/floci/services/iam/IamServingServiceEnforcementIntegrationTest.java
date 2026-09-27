@@ -56,6 +56,32 @@ class IamServingServiceEnforcementIntegrationTest {
     }
 
     @Test
+    void queryRequestCannotBorrowGetUserPermissionFromUrlAction() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String caller = "query-url-action-" + suffix;
+        String attempted = "created-through-url-action-" + suffix;
+        String accessKeyId = createUserWithPolicy(caller, "GetUserOnly", """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"iam:GetUser","Resource":"*"}
+                ]}""");
+
+        given()
+                .header("Authorization", authorization(accessKeyId, "iam"))
+                .contentType("application/x-www-form-urlencoded")
+                .queryParam("Action", "GetUser")
+                .formParam("Action", "CreateUser")
+                .formParam("Version", "2010-05-08")
+                .formParam("UserName", attempted)
+        .when()
+                .post("/")
+        .then()
+                .statusCode(403)
+                .body(containsString("iam:CreateUser"));
+
+        adminIam("GetUser", Map.of("UserName", attempted)).statusCode(404);
+    }
+
+    @Test
     void restRequestCannotBypassApiGatewayPolicyWithIamScope() {
         String suffix = UUID.randomUUID().toString().substring(0, 8);
         String caller = "rest-scope-" + suffix;

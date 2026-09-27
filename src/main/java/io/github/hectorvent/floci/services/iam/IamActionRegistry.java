@@ -159,19 +159,14 @@ public class IamActionRegistry {
     }
 
     /**
-     * Returns the Query-protocol action from the URL or form body while preserving the entity
-     * stream for the controller. Form bodies use the same Action-first, Operation-second rule as
-     * the controller. Exposed so IAM enforcement can ask the shared Query dispatcher which service
-     * will actually handle the request.
+     * Returns the Query-protocol action from the form body while preserving the entity stream for
+     * the controller. The controller dispatches only the form body, using the same Action-first,
+     * Operation-second rule. A URL Action must not override the operation that will execute.
      */
     public String queryAction(ContainerRequestContext ctx) {
-        String queryAction = ctx.getUriInfo().getQueryParameters().getFirst("Action");
-        if (queryAction == null || queryAction.isBlank()) {
-            queryAction = AwsQueryServiceResolver.action(
-                    RequestBodyReader.formField(ctx, "Action"),
-                    RequestBodyReader.formField(ctx, "Operation"));
-        }
-        return queryAction;
+        return AwsQueryServiceResolver.action(
+                RequestBodyReader.formField(ctx, "Action"),
+                RequestBodyReader.formField(ctx, "Operation"));
     }
 
     /** One bucket sub-resource operation: the query parameter that selects it, and the IAM action. */
