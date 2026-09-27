@@ -43,6 +43,7 @@ public class SecurityGroupFirewallManager {
     private final ContainerLifecycleManager lifecycleManager;
     private final EmulatorConfig config;
     private final Map<String, ProtectedEndpoint> endpoints = new HashMap<>();
+    private volatile List<String> helperDnsServers = List.of();
 
     @Inject
     public SecurityGroupFirewallManager(DockerClient dockerClient, ContainerBuilder containerBuilder,
@@ -118,6 +119,7 @@ public class SecurityGroupFirewallManager {
             portBindings.forEach(builder::withPortBinding);
         }
         ContainerSpec spec = builder.build();
+        helperDnsServers = spec.dnsServers() == null ? List.of() : List.copyOf(spec.dnsServers());
         String helperId = null;
         try {
             helperId = lifecycleManager.createAndStart(spec).containerId();
@@ -212,7 +214,7 @@ public class SecurityGroupFirewallManager {
         for (ProtectedEndpoint protectedEndpoint : new ArrayList<>(endpoints.values())) {
             try {
                 String rules = SecurityGroupNftCompiler.compile(protectedEndpoint.endpoint(), peers,
-                        protectedEndpoint.prefixLists());
+                        protectedEndpoint.prefixLists(), helperDnsServers);
                 apply(protectedEndpoint.helperId(), rules);
             } catch (RuntimeException e) {
                 endpoints.values().forEach(endpoint -> quarantine(endpoint.helperId()));
