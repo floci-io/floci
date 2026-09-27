@@ -53,10 +53,20 @@ class DynamoDbItemSizeServiceTest {
             "0042, 2", "100, 2", "110, 3", "1010, 3", "1100, 2", "11000, 3",
             "0.1, 2", "0.15, 2", "0.015, 3", "0.0015, 2", "0.0000001, 2",
             "1.5, 3", "1.05, 3", "1.200, 3", "3.14159, 5", "100.5, 4", "110.5, 4",
-            "1E125, 2", "1E-100, 2", "1.1E2, 3", "-42, 3", "-110, 4", "-0.015, 4"
+            "1E125, 2", "1E-100, 2", "1.1E2, 3", "-42, 3", "-110, 4", "-0.015, 4",
+            "-12345678901234567890123456789012345678, 21",
+            "-1234567890123456789012345678901234567.8, 21",
+            "1234567890123456789012345678901234567.8, 21",
+            "-0.012345678901234567890123456789012345678, 21"
     })
     void numberCostsOneBytePerDigitPairFromTheDecimalPoint(String number, int bytes) {
         assertEquals(bytes, DynamoDbItemSize.numberSize(number));
+    }
+
+    @Test
+    void numberSizeSurvivesAnExponentAtTheEdgeOfTheScaleRange() {
+        assertEquals("100E2147483647".length(), DynamoDbItemSize.numberSize("100E2147483647"));
+        assertEquals(4, DynamoDbItemSize.numberSize("1234E2147483645"));
     }
 
     @Test

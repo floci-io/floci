@@ -26,6 +26,7 @@ final class DynamoDbItemSize {
     private static final int SET_OR_ADD_COST = 19;
     private static final int REMOVE_OR_DELETE_COST = 2;
     private static final int LIST_INDEX_COST = 1;
+    private static final int MAX_NUMBER_PAIRS = 20;
 
     private DynamoDbItemSize() {}
 
@@ -155,22 +156,22 @@ final class DynamoDbItemSize {
     }
 
     // DynamoDB stores a number as base-100 digits paired from the decimal point, plus one byte,
-    // plus one more for a negative value.
+    // plus one more for a negative value below the 20-pair maximum.
     static int numberSize(String number) {
         BigDecimal value;
         try {
             value = new BigDecimal(number).stripTrailingZeros();
-        } catch (NumberFormatException ignored) {
-            // A number that does not parse fails validation, so its size never matters.
+        } catch (NumberFormatException | ArithmeticException ignored) {
+            // A number BigDecimal cannot hold is never stored, so its size never matters.
             return number.length();
         }
         if (value.signum() == 0) {
             return 1;
         }
-        int lowestPower = -value.scale();
-        int highestPower = value.precision() + lowestPower - 1;
-        int pairs = Math.floorDiv(highestPower, 2) - Math.floorDiv(lowestPower, 2) + 1;
-        return 1 + pairs + (value.signum() < 0 ? 1 : 0);
+        long lowestPower = -(long) value.scale();
+        long highestPower = value.precision() + lowestPower - 1;
+        long pairs = Math.floorDiv(highestPower, 2) - Math.floorDiv(lowestPower, 2) + 1;
+        return (int) (1 + pairs + (value.signum() < 0 && pairs < MAX_NUMBER_PAIRS ? 1 : 0));
     }
 
     static int utf8Length(String s) {
