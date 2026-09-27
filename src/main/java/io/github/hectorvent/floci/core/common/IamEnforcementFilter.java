@@ -271,11 +271,18 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         // A DeleteObject conditioned on an ETag reveals whether the object still has it, and the
         // conditional-deletes guide requires s3:GetObject for it; If-Match: * (existence only)
         // needs just s3:DeleteObject. The read is checked the way the PutObject case above is.
-        if ("s3:DeleteObject".equals(action) && "DELETE".equalsIgnoreCase(ctx.getMethod())
+        if ("s3:DeleteObject".equals(action) && isPlainDeleteObject(ctx)
                 && isETagCondition(ctx.getHeaderString("If-Match"))) {
             abortIfDenied(ctx, caller, "s3:GetObject", credentialScope, resources,
                     withoutObjectTags(targetContexts), region, accountId, akid);
         }
+    }
+
+    // DELETE on an object key with a subresource (?uploadId= is AbortMultipartUpload, which the
+    // action registry also files under s3:DeleteObject) is not a DeleteObject and has no object ETag.
+    private static boolean isPlainDeleteObject(ContainerRequestContext ctx) {
+        return "DELETE".equalsIgnoreCase(ctx.getMethod())
+                && ctx.getUriInfo().getQueryParameters().keySet().stream().allMatch("versionId"::equals);
     }
 
     private static boolean isETagCondition(String ifMatch) {

@@ -42,6 +42,17 @@ class S3ConditionalDeleteIamEnforcementIntegrationTest {
         assertEquals(403, delete(accessKeyId, bucket, "etag.txt", eTag), "an ETag condition with no GetObject");
         assertEquals(204, delete(accessKeyId, bucket, "star.txt", "*"), "the existence check needs only DeleteObject");
 
+        // AbortMultipartUpload shares the DELETE verb and the s3:DeleteObject action here, but is not
+        // a conditional object delete, so an If-Match on it asks for no GetObject.
+        String uploadId = given().header("Authorization", auth(ADMIN, "s3"))
+                .when().post("/" + bucket + "/mpu.txt?uploads").then().statusCode(200)
+                .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+        policy(user, "{\"Effect\":\"Allow\",\"Action\":[\"s3:DeleteObject\",\"s3:AbortMultipartUpload\"],\"Resource\":\""
+                + objects + "\"}");
+        assertEquals(204, given().header("Authorization", auth(accessKeyId, "s3")).header("If-Match", eTag)
+                .when().delete("/" + bucket + "/mpu.txt?uploadId=" + uploadId).statusCode(),
+                "an abort carrying If-Match is not a conditional delete");
+
         policy(user, "{\"Effect\":\"Allow\",\"Action\":[\"s3:DeleteObject\",\"s3:GetObject\"],\"Resource\":\""
                 + objects + "\"}");
         assertEquals(204, delete(accessKeyId, bucket, "etag.txt", eTag), "with GetObject the condition is evaluated");
