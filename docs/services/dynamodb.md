@@ -70,6 +70,78 @@ epoch time in the past. Each deletion writes a `REMOVE` record to the table's st
 forwarded to an active Kinesis streaming destination. Between sweeps, reads already leave expired
 items out.
 
+## DynamoDB Local backend
+
+By default Floci stores tables in its own engine, the `native` backend. With
+`FLOCI_SERVICES_DYNAMODB_BACKEND=local`, Floci forwards DynamoDB calls to an
+[Amazon DynamoDB Local](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/DynamoDBLocal.html)
+instance that you run.
+
+Floci keeps serving the DynamoDB and DynamoDB Streams APIs on port 4566, in JSON and CBOR, with
+the same authentication, IAM enforcement and CRC32 checksums as the native backend. Each call is
+forwarded to DynamoDB Local over SigV4-signed HTTP/1.1. Floci never retries a forwarded request.
+Floci does not start DynamoDB Local. Run it yourself, for example as a container:
+
+```yaml
+services:
+  dynamodb-local:
+    image: amazon/dynamodb-local:3.3.1
+    command: ["-jar", "DynamoDBLocal.jar", "-inMemory"]
+  floci:
+    image: floci/floci:latest
+    ports:
+      - "4566:4566"
+    environment:
+      FLOCI_SERVICES_DYNAMODB_BACKEND: local
+      FLOCI_SERVICES_DYNAMODB_LOCAL_ENDPOINT: http://dynamodb-local:8000
+    depends_on:
+      - dynamodb-local
+```
+
+Do not start DynamoDB Local with `-sharedDb`. It merges every account and region into one database.
+
+At startup Floci waits up to 30 seconds for DynamoDB Local to accept connections, then fails. Any
+non-success answer to that probe fails startup at once. `GET /_floci/info` reports the active
+backend in `dynamodb_backend` (`native` or `local`).
+
+### Accounts, regions and ARNs
+
+Each account and region is a separate DynamoDB Local namespace. Floci signs forwarded calls with
+the access key `floci<account-id>` and the caller's region, and DynamoDB Local keeps one database
+per access key and region. A call from account `000000000000` in `eu-west-1` is signed with access
+key `floci000000000000` and region `eu-west-1`.
+
+Table, index and stream ARNs in replies are public ARNs for the caller's account and region, such
+as `arn:aws:dynamodb:eu-west-1:000000000000:table/Users`. Floci rewrites the `ddblocal` ARNs that
+DynamoDB Local returns. Stream records carry the caller's region. An ARN for another account or
+region is rejected.
+
+### What Floci adds
+
+- **Tags.** DynamoDB Local has no tagging, so Floci handles `TagResource`, `UntagResource`,
+  `ListTagsOfResource` and `Tags` on `CreateTable` itself. It keeps the tags in its DynamoDB
+  storage, in the file `dynamodb-local-tags.json`.
+- **Stream consumers.** Lambda event source mappings, EventBridge Pipes and other Floci stream
+  consumers read the DynamoDB Local streams through the Streams API.
+
+### Limits
+
+- **No emulator reset.** `POST /_floci/state/reset` is refused with HTTP 409. Reset the DynamoDB
+  Local instance instead.
+- **No replicas.** Replicas and global table replica updates (`UpdateTable` with `ReplicaUpdates`)
+  are refused with a `ValidationException`. A CloudFormation global table with no extra replica
+  regions deploys as a single table.
+- **No `TableId`.** DynamoDB Local returns none, so `DescribeTable` has no `TableId` and
+  CloudFormation `Fn::GetAtt` on `TableId` is empty.
+- **Short names in batch replies.** Batch replies keyed by table always use the short table name,
+  including when the request named the table by ARN.
+- **No tag validation.** Floci does not check tag counts or tag keys.
+- **No data migration.** Data does not move between `native` and `local`. After a switch, you see
+  what that engine holds.
+- **DynamoDB Local sets the feature set.** Operations and features follow DynamoDB Local; see the
+  [DynamoDB Local documentation](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/DynamoDBLocal.html)
+  for what it supports. The other sections of this page describe the native backend.
+
 ## Configuration
 
 | Variable | Default | Description |
@@ -79,6 +151,10 @@ items out.
 | `FLOCI_STORAGE_SERVICES_DYNAMODB_FLUSH_INTERVAL_MS` | `5000` | Flush interval for `hybrid`/`wal` storage modes (milliseconds) |
 | `FLOCI_SERVICES_DYNAMODB_VECTOR_INDEX_ALLOCATION_SECONDS` | `4` | Seconds a vector index added by `UpdateTable` spends in resource allocation |
 | `FLOCI_SERVICES_DYNAMODB_VECTOR_INDEX_BACKFILL_SECONDS` | `10` | Seconds that index then spends backfilling before it goes `ACTIVE` |
+| `FLOCI_SERVICES_DYNAMODB_BACKEND` | `native` | Engine behind the DynamoDB API: `native` or `local`, case-insensitive. Any other value fails startup. See [DynamoDB Local backend](#dynamodb-local-backend) |
+| `FLOCI_SERVICES_DYNAMODB_LOCAL_ENDPOINT` | *(none)* | Base URL of DynamoDB Local, for example `http://dynamodb-local:8000`. Required when the backend is `local`. Must be `http` or `https` with a host. AWS endpoints (hosts under `amazonaws.com`, `amazonaws.com.cn` or `api.aws`) are rejected |
+| `FLOCI_SERVICES_DYNAMODB_LOCAL_CONNECT_TIMEOUT_SECONDS` | `2` | Seconds to wait for a connection to DynamoDB Local |
+| `FLOCI_SERVICES_DYNAMODB_LOCAL_REQUEST_TIMEOUT_SECONDS` | `10` | Seconds to wait for DynamoDB Local to answer a forwarded request |
 
 ### Storage and Performance
 

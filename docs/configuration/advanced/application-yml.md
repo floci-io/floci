@@ -129,6 +129,10 @@ floci:
 
     dynamodb:
       enabled: true
+      backend: native                         # native | local (forward calls to DynamoDB Local)
+      # local-endpoint: http://dynamodb-local:8000  # DynamoDB Local base URL, required when backend is local
+      local-connect-timeout-seconds: 2        # Seconds to wait for a connection to DynamoDB Local
+      local-request-timeout-seconds: 10       # Seconds to wait for DynamoDB Local to answer a forwarded request
 
     sns:
       enabled: true
