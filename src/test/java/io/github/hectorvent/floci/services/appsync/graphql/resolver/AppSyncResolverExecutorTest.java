@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.appsync.AppSyncService;
 import io.github.hectorvent.floci.services.appsync.graphql.AppSyncVtlEngine;
 import io.github.hectorvent.floci.services.appsync.graphql.datasource.AppSyncDataSourceInvoker;
 import io.github.hectorvent.floci.services.appsync.graphql.datasource.AppSyncDataSourceInvokers;
+import io.github.hectorvent.floci.services.appsync.graphql.datasource.LambdaDataSourceInvoker;
 import io.github.hectorvent.floci.services.appsync.graphql.js.AppSyncJsRuntime;
 import io.github.hectorvent.floci.services.appsync.graphql.js.JsEvaluation;
 import io.github.hectorvent.floci.services.appsync.model.DataSource;
@@ -15,8 +16,13 @@ import io.github.hectorvent.floci.services.appsync.model.FunctionConfiguration;
 import io.github.hectorvent.floci.services.appsync.model.Resolver;
 import io.github.hectorvent.floci.services.appsync.model.ResolverKind;
 import io.github.hectorvent.floci.services.appsync.model.ResolverRuntimeName;
+import io.github.hectorvent.floci.services.lambda.LambdaService;
+import io.github.hectorvent.floci.services.lambda.model.InvocationType;
+import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -28,9 +34,12 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -603,7 +612,7 @@ class AppSyncResolverExecutorTest {
     }
 
     @Test
-    void vtlLambdaInvokeWithoutPayloadSendsAnEmptyObject() {
+    void vtlLambdaInvokeWithoutPayloadKeepsTheMemberAbsent() {
         when(appSync.getDataSource(API_ID, "accountFunction"))
                 .thenReturn(dataSource("accountFunction", DataSourceType.AWS_LAMBDA));
         Resolver resolver = resolver(ResolverKind.UNIT, null);
@@ -614,7 +623,40 @@ class AppSyncResolverExecutorTest {
         ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
 
         assertTrue(result.errors().isEmpty());
-        assertEquals(Map.of(), ((Map<?, ?>) lambdaInvoker.requests.get(0)).get("payload"));
+        Map<?, ?> request = (Map<?, ?>) lambdaInvoker.requests.get(0);
+        assertEquals("Invoke", request.get("operation"));
+        assertFalse(request.containsKey("payload"));
+    }
+
+    @Test
+    void vtlLambdaInvokeWithoutPayloadSendsTheDocumentToTheFunction() throws Exception {
+        String functionArn = "arn:aws:lambda:eu-west-1:000000000000:function:resolver-fn";
+        DataSource lambdaDataSource = dataSource("accountFunction", DataSourceType.AWS_LAMBDA);
+        lambdaDataSource.setLambdaConfig(Map.of("lambdaFunctionArn", functionArn));
+        when(appSync.getDataSource(API_ID, "accountFunction")).thenReturn(lambdaDataSource);
+        LambdaService lambdaService = mock(LambdaService.class);
+        when(lambdaService.invokeArn(eq(functionArn), any(byte[].class),
+                eq(InvocationType.RequestResponse)))
+                .thenReturn(new InvokeResult(200, null, "{}".getBytes(StandardCharsets.UTF_8),
+                        null, "request-id"));
+        AppSyncResolverExecutor lambdaExecutor = new AppSyncResolverExecutor(appSync, jsRuntime,
+                new AppSyncDataSourceInvokers(List.of(
+                        new LambdaDataSourceInvoker(lambdaService, objectMapper))),
+                vtlEngine(), objectMapper);
+        Resolver resolver = resolver(ResolverKind.UNIT, null);
+        resolver.setDataSourceName("accountFunction");
+        resolver.setRequestMappingTemplate("{\"version\":\"2018-05-29\",\"operation\":\"Invoke\"}");
+        resolver.setResponseMappingTemplate("$util.toJson($ctx.result)");
+
+        ResolverOutcome result = lambdaExecutor.execute(resolver, invocation(Map.of()));
+
+        assertTrue(result.errors().isEmpty());
+        assertEquals(Map.of(), result.data());
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(lambdaService).invokeArn(eq(functionArn), payload.capture(),
+                eq(InvocationType.RequestResponse));
+        assertEquals(Map.of("version", "2018-05-29", "operation", "Invoke"),
+                objectMapper.readValue(payload.getValue(), Map.class));
     }
 
     @Test

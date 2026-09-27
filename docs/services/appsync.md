@@ -349,9 +349,11 @@ Supported request documents are:
 
 - `NONE`: `version` plus an optional `payload`, which is unwrapped into `ctx.result`.
 - DynamoDB: `GetItem`, `PutItem`, `UpdateItem`, `DeleteItem`, `Query`, and `Scan` requests.
-- Lambda: `Invoke` with synchronous `RequestResponse` invocation. An omitted `payload`
-  sends an empty object to the function. This is a Floci fallback for an omitted payload,
-  not a claim of verified AWS behavior. VTL `BatchInvoke`
+- Lambda: `Invoke` with synchronous `RequestResponse` invocation. The entire resolved
+  VTL request document reaches the function, including `version` and `operation`.
+  When `payload` is omitted, it remains absent from that document, as shown by the
+  [AWS Lambda VTL mapping reference](https://docs.aws.amazon.com/appsync/latest/devguide/resolver-mapping-template-reference-lambda.html).
+  VTL `BatchInvoke`
   requires batching field requests and is not implemented by the per-field resolver callback.
 - RDS: one or two `statements`, with optional `variableMap` and `variableTypeHintMap`.
   Statements run sequentially without a transaction. If the second fails, the first
@@ -424,7 +426,7 @@ environment variables). `ctx.request.headers` is empty: the GraphQL context does
 | Type | Behaviour |
 |---|---|
 | `NONE` | The request is the result; a `payload` member is unwrapped, as on AWS. Supports APPSYNC_JS and `2018-05-29` VTL UNIT resolvers. |
-| `AWS_LAMBDA` | `Invoke` and `BatchInvoke`. Only `payload` reaches the function. A function error fails the field rather than resolving to the error object. Supports APPSYNC_JS and `2018-05-29` VTL UNIT resolvers. |
+| `AWS_LAMBDA` | `Invoke` and `BatchInvoke` for APPSYNC_JS, and `Invoke` for `2018-05-29` VTL UNIT resolvers. VTL sends the entire resolved request document to the function. The existing APPSYNC_JS path sends only `payload`, a Floci deviation from AWS that this VTL feature does not change. A function error fails the field rather than resolving to the error object. |
 | `RELATIONAL_DATABASE` | Statements run over the RDS Data API against `rdsHttpEndpointConfig`. Accepts `{statements, variableMap}`, the `{statement, parameters}` the `/rds` helpers build, a list of either, or a bare SQL string. `variableTypeHintMap` is honoured, without it a bound date binds as text and PostgreSQL refuses the comparison (`operator does not exist: timestamp with time zone >= character varying`), so a resolver's date filters need it. The result is wrapped as `{sqlStatementResults: […]}`, which is what `toJsonObject()` reads. Supports APPSYNC_JS and `2018-05-29` VTL UNIT resolvers. |
 | `AMAZON_DYNAMODB` | `GetItem`, `PutItem`, `UpdateItem`, `DeleteItem`, `Query`, `Scan`, through the native DynamoDB path so expressions, conditions and indexes all apply. Items come back as **plain JSON**, not attribute values, as AppSync returns them. `nextToken` is an opaque encoding of `LastEvaluatedKey`. `BatchGetItem`, `TransactWriteItems` and `Sync` are not implemented and say so. Supports APPSYNC_JS and `2018-05-29` VTL UNIT resolvers. |
 | `HTTP`, `AMAZON_EVENTBRIDGE`, `AMAZON_OPENSEARCH_SERVICE`, `AMAZON_BEDROCK_RUNTIME` | Not implemented; a resolver using one fails its field naming the type. |

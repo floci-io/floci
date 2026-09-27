@@ -41,6 +41,14 @@ public class AppSyncDataSourceInvokers {
      * mode this whole layer exists to remove.
      */
     public Object invoke(DataSource dataSource, Object request, String region) {
+        return invokerFor(dataSource).invoke(dataSource, request, region);
+    }
+
+    public Object invokeVtl(DataSource dataSource, Object request, String region) {
+        return invokerFor(dataSource).invokeVtl(dataSource, request, region);
+    }
+
+    private AppSyncDataSourceInvoker invokerFor(DataSource dataSource) {
         DataSourceType type = dataSource.getType();
         AppSyncDataSourceInvoker invoker = byType.get(type);
         if (invoker == null) {
@@ -48,7 +56,7 @@ public class AppSyncDataSourceInvokers {
                     "Floci cannot invoke AppSync data sources of type " + type
                             + " (data source " + dataSource.getName() + ")", 500);
         }
-        return invoker.invoke(dataSource, request, region);
+        return invoker;
     }
 
     public boolean supports(DataSourceType type) {

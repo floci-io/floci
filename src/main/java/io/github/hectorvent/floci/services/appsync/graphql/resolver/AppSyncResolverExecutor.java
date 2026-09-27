@@ -198,7 +198,7 @@ public class AppSyncResolverExecutor {
             }
             Invocation invocation = stage.vtl()
                     ? invokeDataSource(vtlDataSource,
-                            prepareVtlDataSourceRequest(vtlDataSource, request))
+                            prepareVtlDataSourceRequest(vtlDataSource, request), true)
                     : invokeDataSource(resolver.getDataSourceName(), request);
             Object response = callHandler(stage, RESPONSE,
                     invocation.result(), invocation.error(), invocation.result());
@@ -301,7 +301,7 @@ public class AppSyncResolverExecutor {
                 // the local functions AppSync allows: the request is the result.
                 return new Invocation(request, null);
             }
-            return invokeDataSource(dataSource(dataSourceName), request);
+            return invokeDataSource(dataSource(dataSourceName), request, false);
         }
 
         private DataSource dataSource(String dataSourceName) {
@@ -321,10 +321,12 @@ public class AppSyncResolverExecutor {
             return dataSource;
         }
 
-        private Invocation invokeDataSource(DataSource dataSource, Object request) {
+        private Invocation invokeDataSource(DataSource dataSource, Object request, boolean vtl) {
             try {
-                return new Invocation(dataSourceInvokers.invoke(dataSource, request, regionOf(dataSource)),
-                        null);
+                Object result = vtl
+                        ? dataSourceInvokers.invokeVtl(dataSource, request, regionOf(dataSource))
+                        : dataSourceInvokers.invoke(dataSource, request, regionOf(dataSource));
+                return new Invocation(result, null);
             } catch (AwsException e) {
                 // What the store or function answered: the resolver sees it as ctx.error and decides.
                 // Deliberately only AwsException: an unexpected RuntimeException is a defect in the
@@ -384,13 +386,7 @@ public class AppSyncResolverExecutor {
                 throw mappingTemplateError(
                         "VTL Lambda invocationType must be RequestResponse or Event");
             }
-            if (request.containsKey("payload")) {
-                return request;
-            }
-            Map<String, Object> normalized = new LinkedHashMap<>();
-            request.forEach((key, value) -> normalized.put((String) key, value));
-            normalized.put("payload", Map.of());
-            return normalized;
+            return request;
         }
 
         private Object prepareVtlRdsRequest(Map<?, ?> request) {
