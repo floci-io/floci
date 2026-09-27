@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.command.InspectContainerResponse;
+import com.github.dockerjava.api.model.HostConfig;
 import com.github.dockerjava.api.model.Info;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
@@ -11,9 +13,11 @@ import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -54,5 +58,16 @@ class SecurityGroupFirewallManagerTest {
         assertTrue(helper.getValue().dnsServers().contains("172.18.0.2"), "the helper uses Floci's DNS");
         assertTrue(helper.getValue().extraHosts().contains("host.docker.internal:host-gateway"),
                 "the helper resolves host.docker.internal");
+    }
+
+    @Test
+    void dnsServersComeFromTheHelpersOwnContainer() {
+        InspectContainerResponse helper = mock(InspectContainerResponse.class);
+        when(helper.getHostConfig()).thenReturn(new HostConfig().withDns("172.18.0.2", "8.8.8.8"));
+        InspectContainerResponse withoutDns = mock(InspectContainerResponse.class);
+        when(withoutDns.getHostConfig()).thenReturn(new HostConfig());
+
+        assertEquals(List.of("172.18.0.2", "8.8.8.8"), SecurityGroupFirewallManager.dnsServersOf(helper));
+        assertEquals(List.of(), SecurityGroupFirewallManager.dnsServersOf(withoutDns));
     }
 }

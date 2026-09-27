@@ -6,6 +6,7 @@ import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.Frame;
+import com.github.dockerjava.api.model.HostConfig;
 import com.github.dockerjava.api.model.Info;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
@@ -31,7 +32,6 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 /** Owns the protected namespace and the Floci-only nftables table for each managed ENI. */
@@ -44,7 +44,6 @@ public class SecurityGroupFirewallManager {
     private final ContainerLifecycleManager lifecycleManager;
     private final EmulatorConfig config;
     private final Map<String, ProtectedEndpoint> endpoints = new HashMap<>();
-    private final Map<String, List<String>> helperDnsServers = new ConcurrentHashMap<>();
 
     @Inject
     public SecurityGroupFirewallManager(DockerClient dockerClient, ContainerBuilder containerBuilder,
@@ -123,7 +122,6 @@ public class SecurityGroupFirewallManager {
         String helperId = null;
         try {
             helperId = lifecycleManager.createAndStart(spec).containerId();
-            helperDnsServers.put(helperId, spec.dnsServers() == null ? List.of() : List.copyOf(spec.dnsServers()));
             String ip = dockerClient.inspectContainerCmd(helperId).exec().getNetworkSettings()
                     .getNetworks().values().stream().map(n -> n.getIpAddress())
                     .filter(address -> address != null && !address.isBlank())
@@ -132,7 +130,6 @@ public class SecurityGroupFirewallManager {
             return new Namespace(helperId, ip);
         } catch (Exception e) {
             if (helperId != null) {
-                helperDnsServers.remove(helperId);
                 lifecycleManager.removeIfExists(helperId);
             }
             throw new IllegalStateException("Cannot prepare protected network namespace for " + resourceId, e);
@@ -164,7 +161,6 @@ public class SecurityGroupFirewallManager {
             } else {
                 endpoints.put(endpoint.eniId(), previous);
             }
-            helperDnsServers.remove(helperId);
             quarantine(helperId);
             throw e;
         }
@@ -173,7 +169,6 @@ public class SecurityGroupFirewallManager {
     public synchronized void unregister(String eniId) {
         ProtectedEndpoint removed = endpoints.remove(eniId);
         if (removed != null) {
-            helperDnsServers.remove(removed.helperId());
             lifecycleManager.removeIfExists(removed.helperId());
             reconcileAll();
         }
@@ -200,17 +195,18 @@ public class SecurityGroupFirewallManager {
     }
 
     public synchronized void reconcileAll() {
+        Map<String, List<String>> dnsServers = new HashMap<>();
         for (Map.Entry<String, ProtectedEndpoint> entry : new ArrayList<>(endpoints.entrySet())) {
             boolean running;
             try {
-                running = Boolean.TRUE.equals(dockerClient.inspectContainerCmd(entry.getValue().helperId())
-                        .exec().getState().getRunning());
+                InspectContainerResponse helper = dockerClient.inspectContainerCmd(entry.getValue().helperId()).exec();
+                running = Boolean.TRUE.equals(helper.getState().getRunning());
+                dnsServers.put(entry.getValue().helperId(), dnsServersOf(helper));
             } catch (NotFoundException e) {
                 running = false;
             }
             if (!running) {
                 quarantine(entry.getValue().helperId());
-                helperDnsServers.remove(entry.getValue().helperId());
                 endpoints.remove(entry.getKey());
             }
         }
@@ -220,7 +216,7 @@ public class SecurityGroupFirewallManager {
             try {
                 String rules = SecurityGroupNftCompiler.compile(protectedEndpoint.endpoint(), peers,
                         protectedEndpoint.prefixLists(),
-                        helperDnsServers.getOrDefault(protectedEndpoint.helperId(), List.of()));
+                        dnsServers.getOrDefault(protectedEndpoint.helperId(), List.of()));
                 apply(protectedEndpoint.helperId(), rules);
             } catch (RuntimeException e) {
                 endpoints.values().forEach(endpoint -> quarantine(endpoint.helperId()));
@@ -250,6 +246,12 @@ public class SecurityGroupFirewallManager {
                     Map.copyOf(prefixLists)));
         }
         reconcileAll();
+    }
+
+    /** The resolvers Docker forwards to from the helper's network namespace. */
+    static List<String> dnsServersOf(InspectContainerResponse helper) {
+        HostConfig hostConfig = helper.getHostConfig();
+        return hostConfig == null || hostConfig.getDns() == null ? List.of() : List.of(hostConfig.getDns());
     }
 
     private void quarantine(String helperId) {
