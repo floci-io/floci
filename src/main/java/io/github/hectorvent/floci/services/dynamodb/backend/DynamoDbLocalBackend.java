@@ -12,6 +12,7 @@ import com.fasterxml.jackson.databind.node.TextNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -27,16 +28,13 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
-import java.net.ConnectException;
 import java.net.URI;
 import java.net.URISyntaxException;
-import java.net.http.HttpConnectTimeoutException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 
@@ -52,14 +50,13 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
 
     private static final Logger LOG = Logger.getLogger(DynamoDbLocalBackend.class);
 
-    private static final String LOCAL_ARN_PREFIX = "arn:aws:dynamodb:ddblocal:000000000000:";
+    private static final String LOCAL_ARN_PREFIX = "arn:aws:dynamodb:ddblocal:000000000000:"; // partition-literal: DynamoDB Local's fixed ARN prefix
     private static final String LOCAL_REGION = "ddblocal";
     private static final Duration READINESS_BUDGET = Duration.ofSeconds(30);
     private static final Scope PROBE = new Scope("000000000000", "us-east-1");
     private static final String REPLICAS_UNSUPPORTED = "Replicas are not supported by the DynamoDB Local backend";
-    private static final List<String> AWS_HOST_SUFFIXES = List.of("amazonaws.com", "amazonaws.com.cn", "api.aws");
-    private static final List<String> PUBLIC_ARN_FIELDS =
-            List.of("TableArn", "IndexArn", "LatestStreamArn", "StreamArn", "message", "Message");
+    private static final List<String> PUBLIC_ARN_FIELDS = List.of("TableArn", "IndexArn", "LatestStreamArn",
+            "StreamArn", "LastEvaluatedStreamArn", "message", "Message");
 
     private final DynamoDbLocalClient client;
     private final AccountAwareStorageBackend<Map<String, String>> tags;
@@ -97,15 +94,13 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
         }
         String scheme = uri.getScheme();
         if (scheme == null || !(scheme.equalsIgnoreCase("http") || scheme.equalsIgnoreCase("https"))
-                || uri.getHost() == null) {
+                || uri.getHost() == null || uri.getRawUserInfo() != null) {
             throw invalidEndpoint(raw, null);
         }
-        String host = uri.getHost().toLowerCase(Locale.ROOT);
-        for (String suffix : AWS_HOST_SUFFIXES) {
-            if (host.equals(suffix) || host.endsWith("." + suffix)) {
-                throw new IllegalStateException("floci.services.dynamodb.local-endpoint '" + raw
-                        + "' must point at DynamoDB Local, not an AWS endpoint");
-            }
+        String host = uri.getHost().replaceFirst("\\.$", "");
+        if (AwsPartitions.isDnsSuffix(host) || AwsPartitions.stripKnownDnsSuffix(host).isPresent()) {
+            throw new IllegalStateException("floci.services.dynamodb.local-endpoint '" + raw
+                    + "' must point at DynamoDB Local, not an AWS endpoint");
         }
         return uri;
     }
@@ -192,7 +187,8 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
                 JsonNode value = field.getValue();
                 if (value.isTextual() && "TableName".equals(field.getKey())) {
                     field.setValue(TextNode.valueOf(tableName(scope, value.asText())));
-                } else if (value.isTextual() && "StreamArn".equals(field.getKey())) {
+                } else if (value.isTextual()
+                        && ("StreamArn".equals(field.getKey()) || "ExclusiveStartStreamArn".equals(field.getKey()))) {
                     field.setValue(TextNode.valueOf(localStreamArn(scope, value.asText())));
                 } else if (value.isContainerNode()) {
                     toLocal(scope, value);
@@ -442,19 +438,23 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
 
     // ponytail: no tag limits or tag-key validation; Floci records what callers send.
     @Override
-    public synchronized void tagResource(Scope scope, String resourceArn, Map<String, String> tagsToAdd) {
+    public void tagResource(Scope scope, String resourceArn, Map<String, String> tagsToAdd) {
         String key = existingTableKey(scope, resourceArn);
-        Map<String, String> current = new LinkedHashMap<>(tags.getForAccount(scope.accountId(), key).orElse(Map.of()));
-        current.putAll(tagsToAdd);
-        tags.putForAccount(scope.accountId(), key, current);
+        synchronized (tags) {
+            Map<String, String> current = new LinkedHashMap<>(tags.getForAccount(scope.accountId(), key).orElse(Map.of()));
+            current.putAll(tagsToAdd);
+            tags.putForAccount(scope.accountId(), key, current);
+        }
     }
 
     @Override
-    public synchronized void untagResource(Scope scope, String resourceArn, List<String> tagKeys) {
+    public void untagResource(Scope scope, String resourceArn, List<String> tagKeys) {
         String key = existingTableKey(scope, resourceArn);
-        Map<String, String> current = new LinkedHashMap<>(tags.getForAccount(scope.accountId(), key).orElse(Map.of()));
-        tagKeys.forEach(current::remove);
-        tags.putForAccount(scope.accountId(), key, current);
+        synchronized (tags) {
+            Map<String, String> current = new LinkedHashMap<>(tags.getForAccount(scope.accountId(), key).orElse(Map.of()));
+            tagKeys.forEach(current::remove);
+            tags.putForAccount(scope.accountId(), key, current);
+        }
     }
 
     private String existingTableKey(Scope scope, String resourceArn) {
@@ -478,8 +478,8 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
         return describeTable(scope, tableName);
     }
 
-    // ponytail: regions come from tables Floci created; a table made directly on Local in an unseen
-    // region is not listed.
+    // ponytail: Local cannot list its namespaces, so regions come from the tag store: a region Floci
+    // has no table record for (made directly on Local, or lost with memory storage) is not listed.
     @Override
     public List<ExplorerResource> resources(String accountId) {
         List<String> regions = tags.keysForAccount(accountId).stream()
@@ -532,14 +532,12 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
         Reply reply;
         try {
             reply = client.send(PROBE, Api.DYNAMODB, "ListTables", objectMapper.createObjectNode().put("Limit", 1));
-        } catch (ConnectException | HttpConnectTimeoutException e) {
+        } catch (IOException e) {
             if (System.nanoTime() - deadline >= 0) {
                 throw new IllegalStateException("DynamoDB Local at " + client.endpoint() + " is not reachable after "
                         + readiness.toSeconds() + "s", e);
             }
             return false;
-        } catch (IOException e) {
-            throw new IllegalStateException("DynamoDB Local at " + client.endpoint() + " did not answer ListTables", e);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("Interrupted while waiting for DynamoDB Local at " + client.endpoint(), e);

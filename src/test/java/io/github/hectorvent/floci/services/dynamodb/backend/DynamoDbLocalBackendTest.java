@@ -203,6 +203,19 @@ class DynamoDbLocalBackendTest {
     }
 
     @Test
+    void listStreamsPagesWithPublicStreamArns() throws Exception {
+        answer(Api.DYNAMODB_STREAMS, "ListStreams", 200,
+                "{\"LastEvaluatedStreamArn\":\"" + LOCAL + STREAM_RESOURCE + "\"}");
+
+        Reply reply = execute(Api.DYNAMODB_STREAMS, "ListStreams",
+                "{\"ExclusiveStartStreamArn\":\"" + PUBLIC + STREAM_RESOURCE + "\"}");
+
+        assertEquals(LOCAL + STREAM_RESOURCE,
+                sent(Api.DYNAMODB_STREAMS, "ListStreams").path("ExclusiveStartStreamArn").asText());
+        assertEquals(PUBLIC + STREAM_RESOURCE, reply.body().path("LastEvaluatedStreamArn").asText());
+    }
+
+    @Test
     void foreignStreamArnNotFound() throws Exception {
         for (String foreign : List.of("arn:aws:dynamodb:eu-west-1:999999999999:" + STREAM_RESOURCE,
                 "arn:aws:dynamodb:us-east-1:123456789012:" + STREAM_RESOURCE)) {
@@ -598,6 +611,18 @@ class DynamoDbLocalBackendTest {
     }
 
     @Test
+    void startRetriesAConnectionClosedWithoutAnswer() throws Exception {
+        Scope probe = new Scope("000000000000", "us-east-1");
+        when(client.send(eq(probe), eq(Api.DYNAMODB), eq("ListTables"), any()))
+                .thenThrow(new IOException("HTTP/1.1 header parser received no bytes"))
+                .thenReturn(new Reply(200, json("{\"TableNames\":[]}"), Map.of()));
+
+        backend.start();
+
+        verify(client, times(2)).send(eq(probe), eq(Api.DYNAMODB), eq("ListTables"), any());
+    }
+
+    @Test
     void startFailsWhenBudgetExpires() throws Exception {
         backend = new DynamoDbLocalBackend(client, tags, mapper, Duration.ZERO);
         when(client.send(any(), any(), any(), any())).thenThrow(new ConnectException("refused"));
@@ -643,6 +668,21 @@ class DynamoDbLocalBackendTest {
 
         assertTrue(error.getMessage().endsWith("must point at DynamoDB Local, not an AWS endpoint"),
                 error.getMessage());
+    }
+
+    @Test
+    void validatedEndpointAwsHostInAnyPartitionOrWithTrailingDot() {
+        for (String endpoint : List.of("https://dynamodb.us-east-1.amazonaws.com.",
+                "https://dynamodb.cn-north-1.amazonaws.com.cn", "https://dynamodb.eu-isoe-west-1.cloud.adc-e.uk")) {
+            assertThrows(IllegalStateException.class,
+                    () -> DynamoDbLocalBackend.validatedEndpoint(Optional.of(endpoint)), endpoint);
+        }
+    }
+
+    @Test
+    void validatedEndpointUserInfoRejected() {
+        assertThrows(IllegalStateException.class,
+                () -> DynamoDbLocalBackend.validatedEndpoint(Optional.of("http://user:secret@localhost:8000")));
     }
 
     @Test

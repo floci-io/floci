@@ -100,7 +100,7 @@ services:
 
 Do not start DynamoDB Local with `-sharedDb`. It merges every account and region into one database.
 
-At startup Floci waits up to 30 seconds for DynamoDB Local to accept connections, then fails. Any
+At startup Floci waits up to 30 seconds for DynamoDB Local to answer, then fails. Any
 non-success answer to that probe fails startup at once. `GET /_floci/info` reports the active
 backend in `dynamodb_backend` (`native` or `local`).
 
@@ -120,7 +120,8 @@ region is rejected.
 
 - **Tags.** DynamoDB Local has no tagging, so Floci handles `TagResource`, `UntagResource`,
   `ListTagsOfResource` and `Tags` on `CreateTable` itself. It keeps the tags in its DynamoDB
-  storage, in the file `dynamodb-local-tags.json`.
+  storage, in the file `dynamodb-local-tags.json`. The tags follow Floci's storage mode, so with
+  `memory` storage they are lost when Floci restarts while the tables stay in DynamoDB Local.
 - **Stream consumers.** Lambda event source mappings, EventBridge Pipes and other Floci stream
   consumers read the DynamoDB Local streams through the Streams API.
 
