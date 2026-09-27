@@ -40,6 +40,9 @@ class S3ConditionalDeleteIamEnforcementIntegrationTest {
 
         policy(user, "{\"Effect\":\"Allow\",\"Action\":\"s3:DeleteObject\",\"Resource\":\"" + objects + "\"}");
         assertEquals(403, delete(accessKeyId, bucket, "etag.txt", eTag), "an ETag condition with no GetObject");
+        assertEquals(403, given().header("Authorization", auth(accessKeyId, "s3")).header("If-Match", eTag)
+                .when().delete("/" + bucket + "/etag.txt?x-id=DeleteObject").statusCode(),
+                "an SDK's x-id query parameter does not skip the check");
         assertEquals(204, delete(accessKeyId, bucket, "star.txt", "*"), "the existence check needs only DeleteObject");
 
         // AbortMultipartUpload shares the DELETE verb and the s3:DeleteObject action here, but is not

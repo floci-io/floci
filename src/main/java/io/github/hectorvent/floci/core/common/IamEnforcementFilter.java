@@ -28,6 +28,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -278,11 +279,15 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         }
     }
 
-    // DELETE on an object key with a subresource (?uploadId= is AbortMultipartUpload, which the
-    // action registry also files under s3:DeleteObject) is not a DeleteObject and has no object ETag.
+    // The DELETE subresources S3Controller.deleteObject routes away from DeleteObject (?uploadId= is
+    // AbortMultipartUpload, which the action registry also files under s3:DeleteObject). Everything
+    // else, including the x-id and X-Amz-* parameters SDKs and presigned URLs add, is a DeleteObject.
+    private static final Set<String> NON_DELETE_OBJECT_SUBRESOURCES = Set.of("uploadId", "tagging", "annotation");
+
     private static boolean isPlainDeleteObject(ContainerRequestContext ctx) {
         return "DELETE".equalsIgnoreCase(ctx.getMethod())
-                && ctx.getUriInfo().getQueryParameters().keySet().stream().allMatch("versionId"::equals);
+                && ctx.getUriInfo().getQueryParameters().keySet().stream()
+                        .noneMatch(NON_DELETE_OBJECT_SUBRESOURCES::contains);
     }
 
     private static boolean isETagCondition(String ifMatch) {
