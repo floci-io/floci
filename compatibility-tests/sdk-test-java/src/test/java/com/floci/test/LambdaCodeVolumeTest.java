@@ -44,6 +44,7 @@ class LambdaCodeVolumeTest {
         try {
             lambda.deleteFunction(DeleteFunctionRequest.builder().functionName(FUNCTION_NAME).build());
         } catch (Exception ignored) {
+            // The function does not exist if the test failed before creating it. Cleanup must not hide the test's own result.
         }
         lambda.close();
     }

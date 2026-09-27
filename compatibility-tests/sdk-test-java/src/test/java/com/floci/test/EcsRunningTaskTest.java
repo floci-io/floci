@@ -89,11 +89,13 @@ class EcsRunningTaskTest {
             try {
                 ecs.stopTask(StopTaskRequest.builder().cluster(clusterName).task(taskArn).build());
             } catch (Exception ignored) {
+                // The task may already have stopped. Cleanup must not hide the test's own result.
             }
         }
         try {
             ecs.deleteCluster(DeleteClusterRequest.builder().cluster(clusterName).build());
         } catch (Exception ignored) {
+            // Cleanup must not hide the test's own result.
         }
         ecs.close();
         logs.close();
