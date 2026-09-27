@@ -28,6 +28,7 @@ import io.github.hectorvent.floci.services.s3.model.FilterRule;
 import io.github.hectorvent.floci.services.s3.model.NotificationConfiguration;
 import io.github.hectorvent.floci.services.s3.model.ObjectAttributeName;
 import io.github.hectorvent.floci.services.s3.model.CopyObjectOptions;
+import io.github.hectorvent.floci.services.s3.model.CopySourceConditions;
 import io.github.hectorvent.floci.services.s3.model.QueueNotification;
 import io.github.hectorvent.floci.services.s3.model.ObjectLockRetention;
 import io.github.hectorvent.floci.services.s3.model.Part;
@@ -2793,7 +2794,10 @@ public class S3Controller {
                         .withGrantWrite(httpHeaders.getHeaderString("x-amz-grant-write"))
                         .withGrantFullControl(httpHeaders.getHeaderString("x-amz-grant-full-control"))
                         .withGrantReadAcp(httpHeaders.getHeaderString("x-amz-grant-read-acp"))
-                        .withGrantWriteAcp(httpHeaders.getHeaderString("x-amz-grant-write-acp")));
+                        .withGrantWriteAcp(httpHeaders.getHeaderString("x-amz-grant-write-acp"))
+                        .withIfMatch(httpHeaders.getHeaderString("If-Match"))
+                        .withIfNoneMatch(httpHeaders.getHeaderString("If-None-Match"))
+                        .withCopySourceConditions(copySourceConditions(httpHeaders)));
         XmlBuilder xmlBuilder = new XmlBuilder()
                 .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                 .start("CopyObjectResult", AwsNamespaces.S3)
@@ -2830,7 +2834,8 @@ public class S3Controller {
         String eTag = s3Service.uploadPartCopy(destBucket, destKey, uploadId, partNumber,
                 sourceBucket, sourceObject.objectKey(), sourceObject.versionId(), copySourceRange,
                 copySourceSseCustomerHeaders(httpHeaders),
-                sseCustomerHeaders(httpHeaders));
+                sseCustomerHeaders(httpHeaders),
+                copySourceConditions(httpHeaders));
         // The destination multipart upload's own SSE settings (captured at
         // CreateMultipartUpload), not anything from this request's headers.
         // UploadPartCopy doesn't take server-side-encryption headers itself,
@@ -2854,6 +2859,16 @@ public class S3Controller {
                 httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-algorithm"),
                 httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5"));
         return response.build();
+    }
+
+    private CopySourceConditions copySourceConditions(HttpHeaders httpHeaders) {
+        String ifModifiedSince = httpHeaders.getHeaderString("x-amz-copy-source-if-modified-since");
+        String ifUnmodifiedSince = httpHeaders.getHeaderString("x-amz-copy-source-if-unmodified-since");
+        return new CopySourceConditions(
+                httpHeaders.getHeaderString("x-amz-copy-source-if-match"),
+                httpHeaders.getHeaderString("x-amz-copy-source-if-none-match"),
+                ifModifiedSince != null ? parseHttpDate(ifModifiedSince) : null,
+                ifUnmodifiedSince != null ? parseHttpDate(ifUnmodifiedSince) : null);
     }
 
     private S3Service.SseCustomerHeaders copySourceSseCustomerHeaders(HttpHeaders httpHeaders) {

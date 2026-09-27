@@ -54,6 +54,7 @@ import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -726,6 +727,36 @@ public class S3Service implements Resettable, ResourceProvider {
             }
         }
         return false;
+    }
+
+    /**
+     * Applies the {@code x-amz-copy-source-if-*} preconditions to the source of a copy. The pairing
+     * rules are the ones S3 documents for CopyObject: a matching {@code if-match} makes
+     * {@code if-unmodified-since} irrelevant, and a matching {@code if-none-match} fails whatever
+     * {@code if-modified-since} says. Unlike a conditional GET, every failure is a 412, never a 304.
+     * Dates compare at second precision, the resolution of an HTTP date and of Last-Modified. S3
+     * documents no {@code <Condition>} value for these, so the error carries none, as a failed
+     * conditional GET does here.
+     */
+    private void checkCopySourcePreconditions(S3Object source, CopySourceConditions conditions) {
+        if (conditions == null) {
+            return;
+        }
+        Instant lastModified = source.getLastModified().truncatedTo(ChronoUnit.SECONDS);
+        if (conditions.ifMatch() != null && !eTagMatches(conditions.ifMatch(), source.getETag())) {
+            throw new S3PreconditionFailedException(null);
+        }
+        if (conditions.ifUnmodifiedSince() != null && conditions.ifMatch() == null
+                && lastModified.isAfter(conditions.ifUnmodifiedSince())) {
+            throw new S3PreconditionFailedException(null);
+        }
+        if (conditions.ifNoneMatch() != null && eTagMatches(conditions.ifNoneMatch(), source.getETag())) {
+            throw new S3PreconditionFailedException(null);
+        }
+        if (conditions.ifModifiedSince() != null && conditions.ifNoneMatch() == null
+                && !lastModified.isAfter(conditions.ifModifiedSince())) {
+            throw new S3PreconditionFailedException(null);
+        }
     }
 
     private String normalizeEntityTag(String value) {
@@ -1948,6 +1979,7 @@ public class S3Service implements Resettable, ResourceProvider {
     {
         CopyObjectOptions effectiveOptions = options != null ? options : new CopyObjectOptions();
         S3Object source = getObject(sourceBucket, sourceKey, versionId);
+        checkCopySourcePreconditions(source, effectiveOptions.getCopySourceConditions());
         validateSseCustomerAccess(source,
                 effectiveOptions.getCopySourceSseCustomerAlgorithm(),
                 effectiveOptions.getCopySourceSseCustomerKey(),
@@ -1960,6 +1992,7 @@ public class S3Service implements Resettable, ResourceProvider {
                                String destBucket, String destKey, CopyObjectOptions options) {
         CopyObjectOptions effectiveOptions = options != null ? options : new CopyObjectOptions();
         S3Object source = getObject(sourceBucket, sourceKey);
+        checkCopySourcePreconditions(source, effectiveOptions.getCopySourceConditions());
         validateSseCustomerAccess(source,
                 effectiveOptions.getCopySourceSseCustomerAlgorithm(),
                 effectiveOptions.getCopySourceSseCustomerKey(),
@@ -3420,7 +3453,19 @@ public class S3Service implements Resettable, ResourceProvider {
                                   String copySourceRange,
                                   SseCustomerHeaders copySourceSseCustomerHeaders,
                                   SseCustomerHeaders sseCustomerHeaders) {
+        return uploadPartCopy(destBucket, destKey, uploadId, partNumber, sourceBucket, sourceKey,
+                sourceVersionId, copySourceRange, copySourceSseCustomerHeaders, sseCustomerHeaders,
+                CopySourceConditions.NONE);
+    }
+
+    public String uploadPartCopy(String destBucket, String destKey, String uploadId, int partNumber,
+                                  String sourceBucket, String sourceKey, String sourceVersionId,
+                                  String copySourceRange,
+                                  SseCustomerHeaders copySourceSseCustomerHeaders,
+                                  SseCustomerHeaders sseCustomerHeaders,
+                                  CopySourceConditions copySourceConditions) {
         S3Object source = getObject(sourceBucket, sourceKey, sourceVersionId);
+        checkCopySourcePreconditions(source, copySourceConditions);
         validateSseCustomerAccess(source,
                 copySourceSseCustomerHeaders.algorithm(),
                 copySourceSseCustomerHeaders.key(),
@@ -5674,7 +5719,9 @@ public class S3Service implements Resettable, ResourceProvider {
                         .withGrantReadAcp(effectiveOptions.getGrantReadAcp())
                         .withGrantWriteAcp(effectiveOptions.getGrantWriteAcp())
                         .withChecksumAlgorithm(copyChecksumAlgorithm != null ? copyChecksumAlgorithm.name() : null)
-                        .withTagging(effectiveTags));
+                        .withTagging(effectiveTags)
+                        .withIfMatch(effectiveOptions.getIfMatch())
+                        .withIfNoneMatch(effectiveOptions.getIfNoneMatch()));
     }
 
     private record AnnotationSnapshot(ObjectAnnotation metadata, byte[] payload) {}
