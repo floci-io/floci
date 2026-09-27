@@ -118,31 +118,34 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
         if (!"CreateTable".equals(action)) {
             toLocal(scope, body);
         }
-        if (call.api() == Api.DYNAMODB) {
-            switch (action) {
-                case "TagResource" -> {
-                    tagResource(scope, text(body, "ResourceArn"), tagsFrom(body.path("Tags")));
-                    return new Reply(200, objectMapper.createObjectNode(), Map.of());
-                }
-                case "UntagResource" -> {
-                    List<String> keys = new ArrayList<>();
-                    body.path("TagKeys").forEach(key -> keys.add(key.asText()));
-                    untagResource(scope, text(body, "ResourceArn"), keys);
-                    return new Reply(200, objectMapper.createObjectNode(), Map.of());
-                }
-                case "ListTagsOfResource" -> {
-                    ObjectNode reply = objectMapper.createObjectNode();
-                    ArrayNode tagList = reply.putArray("Tags");
-                    listTagsOfResource(scope, text(body, "ResourceArn"))
-                            .forEach((key, value) -> tagList.addObject().put("Key", key).put("Value", value));
-                    return new Reply(200, reply, Map.of());
-                }
-                case "UpdateTable" -> {
-                    if (body.has("ReplicaUpdates")) {
-                        throw new AwsException("ValidationException", REPLICAS_UNSUPPORTED, 400);
-                    }
-                }
+        Reply served = call.api() != Api.DYNAMODB ? null : switch (action) {
+            case "TagResource" -> {
+                tagResource(scope, text(body, "ResourceArn"), tagsFrom(body.path("Tags")));
+                yield new Reply(200, objectMapper.createObjectNode(), Map.of());
             }
+            case "UntagResource" -> {
+                List<String> keys = new ArrayList<>();
+                body.path("TagKeys").forEach(key -> keys.add(key.asText()));
+                untagResource(scope, text(body, "ResourceArn"), keys);
+                yield new Reply(200, objectMapper.createObjectNode(), Map.of());
+            }
+            case "ListTagsOfResource" -> {
+                ObjectNode reply = objectMapper.createObjectNode();
+                ArrayNode tagList = reply.putArray("Tags");
+                listTagsOfResource(scope, text(body, "ResourceArn"))
+                        .forEach((key, value) -> tagList.addObject().put("Key", key).put("Value", value));
+                yield new Reply(200, reply, Map.of());
+            }
+            case "UpdateTable" -> {
+                if (body.has("ReplicaUpdates")) {
+                    throw new AwsException("ValidationException", REPLICAS_UNSUPPORTED, 400);
+                }
+                yield null;
+            }
+            default -> null;
+        };
+        if (served != null) {
+            return served;
         }
         Reply reply = send(scope, call.api(), action, body);
         if (reply.status() >= 200 && reply.status() < 300 && call.api() == Api.DYNAMODB) {
@@ -179,7 +182,11 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
             if (object.get("RequestItems") instanceof ObjectNode requestItems) {
                 ObjectNode renamed = object.objectNode();
                 for (Map.Entry<String, JsonNode> entry : requestItems.properties()) {
-                    renamed.set(tableName(scope, entry.getKey()), entry.getValue());
+                    String name = tableName(scope, entry.getKey());
+                    if (renamed.replace(name, entry.getValue()) != null) {
+                        throw new AwsException("ValidationException",
+                                "Table " + name + " is named more than once in RequestItems", 400);
+                    }
                 }
                 object.set("RequestItems", renamed);
             }
@@ -203,13 +210,12 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
         if (!value.startsWith("arn:")) {
             return value;
         }
-        DynamoDbTableNames.ResolvedTableRef ref = DynamoDbTableNames.resolveWithRegion(value, scope.region());
-        String account = AwsArnUtils.parse(value).accountId();
-        if (!account.equals(scope.accountId())) {
-            throw new AwsException("ValidationException", "Account '" + account
-                    + "' in ARN does not match caller account '" + scope.accountId() + "'", 400);
+        String name = DynamoDbTableNames.resolveWithRegion(value, scope.region()).name();
+        if (!value.startsWith(publicPrefix(scope))) {
+            throw new AwsException("ResourceNotFoundException",
+                    "Requested resource not found: Table: " + value + " not found", 400);
         }
-        return ref.name();
+        return name;
     }
 
     static String localStreamArn(Scope scope, String value) {
@@ -220,16 +226,19 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
         if (!"dynamodb".equals(arn.service()) || !arn.resource().contains("/stream/")) {
             return value;
         }
-        if (!arn.region().equals(scope.region()) || !arn.accountId().equals(scope.accountId())) {
+        if (!value.startsWith(publicPrefix(scope))) {
             throw new AwsException("ResourceNotFoundException",
                     "Requested resource not found: Stream: " + value + " not found", 400);
         }
         return LOCAL_ARN_PREFIX + arn.resource();
     }
 
+    private static String publicPrefix(Scope scope) {
+        return AwsArnUtils.Arn.of("dynamodb", scope.region(), scope.accountId(), "").toString();
+    }
+
     static void toPublic(Scope scope, JsonNode node) {
-        toPublic(node, AwsArnUtils.Arn.of("dynamodb", scope.region(), scope.accountId(), "").toString(),
-                scope.region());
+        toPublic(node, publicPrefix(scope), scope.region());
     }
 
     private static void toPublic(JsonNode node, String prefix, String region) {
@@ -427,6 +436,7 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
         table.setStreamEnabled(spec.path("StreamEnabled").asBoolean(false));
         table.setStreamViewType(text(spec, "StreamViewType"));
         table.setStreamArn(table.isStreamEnabled() ? text(description, "LatestStreamArn") : null);
+        table.setTableId(description.path("TableId").asText());
         return table;
     }
 

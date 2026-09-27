@@ -162,14 +162,25 @@ class DynamoDbLocalBackendTest {
     }
 
     @Test
-    void foreignAccountArnRejected() throws Exception {
-        AwsException error = assertThrows(AwsException.class, () -> execute("GetItem",
-                "{\"TableName\":\"arn:aws:dynamodb:eu-west-1:999999999999:table/orders\",\"Key\":{}}"));
+    void foreignAccountOrPartitionArnNotFound() throws Exception {
+        for (String foreign : List.of("arn:aws:dynamodb:eu-west-1:999999999999:table/orders",
+                "arn:aws-cn:dynamodb:eu-west-1:123456789012:table/orders")) {
+            AwsException error = assertThrows(AwsException.class,
+                    () -> execute("GetItem", "{\"TableName\":\"" + foreign + "\",\"Key\":{}}"));
+
+            assertEquals("ResourceNotFoundException", error.getErrorCode());
+            assertEquals("Requested resource not found: Table: " + foreign + " not found", error.getMessage());
+        }
+        neverSent("GetItem");
+    }
+
+    @Test
+    void requestItemsNamingOneTableTwiceRejected() throws Exception {
+        AwsException error = assertThrows(AwsException.class, () -> execute("BatchWriteItem",
+                "{\"RequestItems\":{\"" + ORDERS_ARN + "\":[],\"orders\":[]}}"));
 
         assertEquals("ValidationException", error.getErrorCode());
-        assertEquals("Account '999999999999' in ARN does not match caller account '123456789012'",
-                error.getMessage());
-        neverSent("GetItem");
+        neverSent("BatchWriteItem");
     }
 
     @Test
@@ -218,7 +229,8 @@ class DynamoDbLocalBackendTest {
     @Test
     void foreignStreamArnNotFound() throws Exception {
         for (String foreign : List.of("arn:aws:dynamodb:eu-west-1:999999999999:" + STREAM_RESOURCE,
-                "arn:aws:dynamodb:us-east-1:123456789012:" + STREAM_RESOURCE)) {
+                "arn:aws:dynamodb:us-east-1:123456789012:" + STREAM_RESOURCE,
+                "arn:aws-cn:dynamodb:eu-west-1:123456789012:" + STREAM_RESOURCE)) {
             AwsException error = assertThrows(AwsException.class,
                     () -> execute(Api.DYNAMODB_STREAMS, "DescribeStream", "{\"StreamArn\":\"" + foreign + "\"}"));
 
@@ -400,6 +412,7 @@ class DynamoDbLocalBackendTest {
 
         assertEquals("orders", table.getTableName());
         assertEquals(ORDERS_ARN, table.getTableArn());
+        assertEquals("", table.getTableId());
     }
 
     @Test
