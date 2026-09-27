@@ -1342,6 +1342,21 @@ public interface EmulatorConfig {
          */
         @WithDefault("10")
         int vectorIndexBackfillSeconds();
+
+        /** The engine behind the DynamoDB API: {@code native} or {@code local}. Env: FLOCI_SERVICES_DYNAMODB_BACKEND. */
+        @WithDefault("native")
+        String backend();
+
+        /** The DynamoDB Local base URL, required when backend is local. Env: FLOCI_SERVICES_DYNAMODB_LOCAL_ENDPOINT. */
+        Optional<String> localEndpoint();
+
+        /** Env: FLOCI_SERVICES_DYNAMODB_LOCAL_CONNECT_TIMEOUT_SECONDS. */
+        @WithDefault("2")
+        int localConnectTimeoutSeconds();
+
+        /** Env: FLOCI_SERVICES_DYNAMODB_LOCAL_REQUEST_TIMEOUT_SECONDS. */
+        @WithDefault("10")
+        int localRequestTimeoutSeconds();
     }
 
     interface SnsServiceConfig {

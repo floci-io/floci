@@ -30,8 +30,7 @@ import java.util.Optional;
  */
 @ApplicationScoped
 @Typed(NativeDynamoDbBackend.class)
-public class NativeDynamoDbBackend implements DynamoDbOperations, DynamoDbItemAccess, DynamoDbTableAccess,
-        DynamoDbBackendLifecycle {
+public class NativeDynamoDbBackend implements DynamoDbBackend {
 
     private final NativeDynamoDbJsonHandler jsonHandler;
     private final NativeDynamoDbStreamsJsonHandler streamsHandler;
