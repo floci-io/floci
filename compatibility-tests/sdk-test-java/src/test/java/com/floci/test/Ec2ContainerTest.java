@@ -35,7 +35,8 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 @DisplayName("EC2 instances backed by containers")
 class Ec2ContainerTest {
 
-    private static final String AMI = "ami-0abcdef1234567890";
+    // The CI job runs on arm64, where an arm64 guest needs no emulation.
+    private static final String AMI = "ami-amazonlinux2023-arm64";
     private static final String MODE = System.getenv("FLOCI_EC2_CONTAINERS");
 
     private static Ec2Client ec2;
@@ -108,7 +109,7 @@ class Ec2ContainerTest {
     private static String runInstance(String subnetId) {
         return ec2.runInstances(RunInstancesRequest.builder()
                 .imageId(AMI)
-                .instanceType(InstanceType.T2_MICRO)
+                .instanceType(InstanceType.T4_G_MICRO)
                 .subnetId(subnetId)
                 .minCount(1)
                 .maxCount(1)
