@@ -20,6 +20,7 @@ import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -138,7 +139,7 @@ public class Route53ResolverService {
 
     public synchronized ObjectNode createFirewallDomainList(JsonNode request, String region, String accountId) {
         String name = requireText(request, "Name", VALIDATION);
-        java.util.Optional<ObjectNode> replay = replayOf(domainListStore, request, region);
+        Optional<ObjectNode> replay = replayOf(domainListStore, request, region);
         if (replay.isPresent()) {
             return replay.get();
         }
@@ -169,7 +170,7 @@ public class Route53ResolverService {
         return domainListStore.scan(key -> true).stream().map(ObjectNode::deepCopy).toList();
     }
 
-    public java.util.Optional<ObjectNode> getCustomFirewallDomainList(String id) {
+    public Optional<ObjectNode> getCustomFirewallDomainList(String id) {
         return domainListStore.get(id).map(ObjectNode::deepCopy);
     }
 
@@ -183,7 +184,7 @@ public class Route53ResolverService {
         if (!ipAddresses.isArray() || ipAddresses.isEmpty()) {
             throw new AwsException(INVALID_PARAMETER, "IpAddresses is required", 400);
         }
-        java.util.Optional<ObjectNode> replay = replayOf(endpointStore, request, region);
+        Optional<ObjectNode> replay = replayOf(endpointStore, request, region);
         if (replay.isPresent()) {
             ObjectNode existing = replay.get();
             requireReplayMatches(existing, request, "Name", "Direction", "SecurityGroupIds");
@@ -251,7 +252,7 @@ public class Route53ResolverService {
                     "TargetIps must contain at least one target address.", 400);
         }
         String domainName = text(request, "DomainName");
-        java.util.Optional<ObjectNode> replay = replayOf(ruleStore, request, region);
+        Optional<ObjectNode> replay = replayOf(ruleStore, request, region);
         if (replay.isPresent()) {
             requireReplayMatches(replay.get(), request,
                     "Name", "RuleType", "DomainName", "TargetIps", "ResolverEndpointId");
@@ -370,9 +371,9 @@ public class Route53ResolverService {
      * reads only the rules an association actually named. See
      * {@link #resolverRuleAssociationsForAccount}.
      */
-    public java.util.Optional<ObjectNode> resolverRuleForAccount(String accountId, String ruleId) {
+    public Optional<ObjectNode> resolverRuleForAccount(String accountId, String ruleId) {
         if (accountId == null || accountId.isBlank() || ruleId == null || ruleId.isBlank()) {
-            return java.util.Optional.empty();
+            return Optional.empty();
         }
         if (ruleStore instanceof AccountAwareStorageBackend<?> rawAccountAware) {
             @SuppressWarnings("unchecked")
@@ -418,11 +419,11 @@ public class Route53ResolverService {
      * shapes have no field for. Same intent as {@code FisService.idempotencyKey} and
      * {@code BedrockAgentCoreControlService.tokenKey}, which fold the region into the key.</p>
      */
-    private java.util.Optional<ObjectNode> replayOf(StorageBackend<String, ObjectNode> store, JsonNode request,
+    private Optional<ObjectNode> replayOf(StorageBackend<String, ObjectNode> store, JsonNode request,
                                                     String region) {
         String creatorRequestId = text(request, "CreatorRequestId");
         if (creatorRequestId == null || creatorRequestId.isBlank()) {
-            return java.util.Optional.empty();
+            return Optional.empty();
         }
         String regionPrefix = "arn:" + AwsRegions.partitionFor(region) + ":route53resolver:" + region + ":";
         return store.scan(key -> true).stream()
