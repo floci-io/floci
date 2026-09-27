@@ -53,7 +53,7 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
     private static final String LOCAL_ARN_PREFIX = "arn:aws:dynamodb:ddblocal:000000000000:"; // partition-literal: DynamoDB Local's fixed ARN prefix
     private static final String LOCAL_REGION = "ddblocal";
     private static final Duration READINESS_BUDGET = Duration.ofSeconds(30);
-    private static final Scope PROBE = new Scope("000000000000", "us-east-1");
+    private static final Scope PROBE = new Scope("000000000000", "us-east-1"); // partition-literal: readiness probe namespace, Local accepts any region
     private static final String REPLICAS_UNSUPPORTED = "Replicas are not supported by the DynamoDB Local backend";
     private static final List<String> PUBLIC_ARN_FIELDS = List.of("TableArn", "IndexArn", "LatestStreamArn",
             "StreamArn", "LastEvaluatedStreamArn", "message", "Message");
