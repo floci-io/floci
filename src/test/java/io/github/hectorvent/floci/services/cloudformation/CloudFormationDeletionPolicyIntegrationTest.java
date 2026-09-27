@@ -497,7 +497,7 @@ class CloudFormationDeletionPolicyIntegrationTest {
         """.formatted(templateUrl);
         String stackName = "parent-nested-keep-" + suffix;
 
-        given().header("Authorization", CUSTOM_AUTH)
+        given().header("Authorization", CUSTOM_AUTH).contentType("application/xml").body(EU_WEST_1_BUCKET)
                 .when().put("/" + bucketName).then().statusCode(200);
         given().header("Authorization", CUSTOM_AUTH)
                 .contentType("application/json").body(nestedLambdaTemplate(functionName, 3))
