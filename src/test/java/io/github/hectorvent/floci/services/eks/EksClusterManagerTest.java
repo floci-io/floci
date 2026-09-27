@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.dns.DnsClientVpcSource.ClientVpc;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
@@ -1009,12 +1010,13 @@ class EksClusterManagerTest {
 
             manager.registerClusterNodeInstance(cluster, "container-dns");
 
-            assertEquals(Optional.of("vpc-12345678"), manager.vpcIdForClient("172.17.0.2"));
-            assertTrue(manager.vpcIdForClient("172.17.0.99").isEmpty());
-            assertTrue(manager.vpcIdForClient(null).isEmpty());
+            assertEquals(Optional.of(new ClientVpc("000000000000", "vpc-12345678")),
+                    manager.vpcForClient("172.17.0.2"));
+            assertTrue(manager.vpcForClient("172.17.0.99").isEmpty());
+            assertTrue(manager.vpcForClient(null).isEmpty());
 
             manager.unregisterMetadataEndpoint(cluster);
-            assertTrue(manager.vpcIdForClient("172.17.0.2").isEmpty());
+            assertTrue(manager.vpcForClient("172.17.0.2").isEmpty());
         }
 
         @Test
@@ -1024,7 +1026,7 @@ class EksClusterManagerTest {
 
             manager.registerClusterNodeInstance(cluster, "container-no-vpc");
 
-            assertTrue(manager.vpcIdForClient("172.17.0.2").isEmpty());
+            assertTrue(manager.vpcForClient("172.17.0.2").isEmpty());
         }
 
         @Test

@@ -197,6 +197,7 @@ class EmbeddedDnsServerTest {
 
     private static final String CLIENT = "172.31.0.9";
     private static final String MY_IP = "172.31.0.2";
+    private static final String ACCOUNT = "000000000000";
 
     @Test
     void forwardingRuleMatchesOnlyItsDomainAndTheSubdomainsBeneathIt() {
@@ -240,6 +241,22 @@ class EmbeddedDnsServerTest {
 
         assertEquals(EmbeddedDnsServer.QueryPlan.UPSTREAM,
                 dns.planQuery("db.corp.internal", CLIENT, MY_IP, 1));
+    }
+
+    @Test
+    void planQuery_appliesNoRuleWhenTheQueryOriginHasNoAccountOrVpc() {
+        DnsForwardingRuleSource anyVpc = (accountId, vpcId) ->
+                List.of(forward("corp.internal", "10.1.0.53"));
+
+        for (DnsClientVpcSource.ClientVpc partial : List.of(
+                new DnsClientVpcSource.ClientVpc(ACCOUNT, ""),
+                new DnsClientVpcSource.ClientVpc("", "vpc-a"))) {
+            EmbeddedDnsServer dns = withRules(List.of(), anyVpc,
+                    clientAddress -> Optional.of(partial));
+
+            assertEquals(EmbeddedDnsServer.QueryPlan.UPSTREAM,
+                    dns.planQuery("db.corp.internal", CLIENT, MY_IP), partial.toString());
+        }
     }
 
     @Test
@@ -315,7 +332,9 @@ class EmbeddedDnsServerTest {
 
     @Test
     void planQuery_keepsResolvingWhenARuleSourceThrows() {
-        DnsForwardingRuleSource failing = vpcId -> { throw new IllegalStateException("storage is down"); };
+        DnsForwardingRuleSource failing = (accountId, vpcId) -> {
+            throw new IllegalStateException("storage is down");
+        };
         EmbeddedDnsServer dns = new EmbeddedDnsServer(List.of("localhost.floci.io"),
                 List.of(source("db.corp.internal", List.of("10.0.0.7"))),
                 List.of(failing), List.of(clientVpc("vpc-a")));
@@ -336,11 +355,13 @@ class EmbeddedDnsServerTest {
         List<DnsForwardingRule> ordered = Arrays.stream(rules)
                 .sorted(Comparator.comparingInt(DnsForwardingRule::specificity).reversed())
                 .toList();
-        return vpcId -> associatedVpcId.equals(vpcId) ? ordered : List.of();
+        return (accountId, vpcId) ->
+                ACCOUNT.equals(accountId) && associatedVpcId.equals(vpcId) ? ordered : List.of();
     }
 
     private static DnsClientVpcSource clientVpc(String vpcId) {
-        return clientAddress -> CLIENT.equals(clientAddress) ? Optional.of(vpcId) : Optional.empty();
+        return clientAddress -> CLIENT.equals(clientAddress)
+                ? Optional.of(new DnsClientVpcSource.ClientVpc(ACCOUNT, vpcId)) : Optional.empty();
     }
 
     private static DnsForwardingRule forward(String domainName, String... targets) {

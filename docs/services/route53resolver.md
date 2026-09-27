@@ -99,10 +99,14 @@ on label boundaries, and `.` matches everything. Where several rules match, the 
 labels in its domain name wins.
 
 **Association** is honoured, since a rule does nothing in AWS until it is associated with a VPC.
-Floci reads the querying VPC from the query's source address: a cluster container's address maps to
-the `resourcesVpcConfig.vpcId` of the cluster that launched it. An address no service claims, or a
-cluster created without a resolvable VPC id, belongs to no VPC, so no rule applies and resolution is
-unchanged.
+Floci reads the querying account and VPC from the query's source address: a cluster container's
+address maps to the account that owns the cluster and its `resourcesVpcConfig.vpcId`. Only that
+account's associations are consulted. `AssociateResolverRule` stores whatever `VPCId` the caller
+names without proving ownership of it, so scoping the lookup to the querying account's own
+partition is what stops one account redirecting another account's cluster DNS by naming its VPC.
+An address no service claims, or a cluster with no resolvable VPC id, belongs to no VPC, so no rule
+applies and resolution is unchanged; Floci logs a warning when it cannot determine a running
+cluster's container addresses, because rules then silently do not reach it.
 
 **Precedence over private hosted zones** matches AWS: when a private hosted zone and a resolver rule
 both match a name, the rule wins and the query is forwarded instead of answered from the zone's
@@ -148,7 +152,7 @@ cluster DNS does, governed by `floci.services.eks.embedded-dns`.
 - **A `FORWARD` rule's `ResolverEndpointId` is not used when forwarding.** AWS sends the query from
   the outbound endpoint's addresses inside the VPC; Floci forwards it from itself, since there is no
   separate VPC network path to send it over.
-- **Rules are matched across accounts.** A rule steers resolution for the VPCs it is associated
-  with whichever account created it, because the DNS server reads the stores off the packet path
-  where there is no caller to scope them to.
+- **Cross-account rule sharing is not modelled.** AWS lets an account associate a rule shared with
+  it through RAM; Floci reports every rule as `NOT_SHARED` and models no rule policy, so a rule and
+  its associations always live in one account and resolution only ever consults that account's own.
 - **DNS Firewall rule groups, query logging and DNSSEC validation do not affect resolution.**

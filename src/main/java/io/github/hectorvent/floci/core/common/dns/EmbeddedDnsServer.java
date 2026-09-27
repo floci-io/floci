@@ -284,14 +284,15 @@ public class EmbeddedDnsServer {
         if (forwardingRuleSources == null || name == null || name.isBlank()) {
             return Optional.empty();
         }
-        Optional<String> vpcId = vpcIdForClient(clientAddress);
-        if (vpcId.isEmpty()) {
+        Optional<DnsClientVpcSource.ClientVpc> clientVpc = vpcForClient(clientAddress);
+        if (clientVpc.isEmpty()) {
             return Optional.empty();
         }
+        DnsClientVpcSource.ClientVpc origin = clientVpc.orElseThrow();
         DnsForwardingRule best = null;
         for (DnsForwardingRuleSource source : forwardingRuleSources) {
             try {
-                for (DnsForwardingRule rule : source.rulesForVpc(vpcId.orElseThrow())) {
+                for (DnsForwardingRule rule : source.rulesFor(origin.accountId(), origin.vpcId())) {
                     if (rule == null || !rule.matches(name)) {
                         continue;
                     }
@@ -307,15 +308,16 @@ public class EmbeddedDnsServer {
         return Optional.ofNullable(best);
     }
 
-    private Optional<String> vpcIdForClient(String clientAddress) {
+    private Optional<DnsClientVpcSource.ClientVpc> vpcForClient(String clientAddress) {
         if (clientVpcSources == null || clientAddress == null || clientAddress.isBlank()) {
             return Optional.empty();
         }
         for (DnsClientVpcSource source : clientVpcSources) {
             try {
-                Optional<String> vpcId = source.vpcIdForClient(clientAddress.trim());
-                if (vpcId != null && vpcId.isPresent() && !vpcId.orElseThrow().isBlank()) {
-                    return vpcId;
+                Optional<DnsClientVpcSource.ClientVpc> clientVpc =
+                        source.vpcForClient(clientAddress.trim());
+                if (clientVpc != null && clientVpc.isPresent() && isUsableOrigin(clientVpc.orElseThrow())) {
+                    return clientVpc;
                 }
             } catch (Exception e) {
                 LOG.debugv("DNS client VPC source {0} failed for {1}: {2}",
@@ -323,6 +325,11 @@ public class EmbeddedDnsServer {
             }
         }
         return Optional.empty();
+    }
+
+    private static boolean isUsableOrigin(DnsClientVpcSource.ClientVpc clientVpc) {
+        return clientVpc.accountId() != null && !clientVpc.accountId().isBlank()
+                && clientVpc.vpcId() != null && !clientVpc.vpcId().isBlank();
     }
 
     /**
@@ -349,10 +356,25 @@ public class EmbeddedDnsServer {
     }
 
     byte[] buildEmptyResponse(byte[] query, short txId, int questionOffset, int questionEnd, int responseCode) {
+        return buildAnswerlessResponse(query, txId, questionOffset, questionEnd,
+                (short) (0x8580 | responseCode));
+    }
+
+    /**
+     * The failure answer for a query a forwarding rule claimed and no target answered. Not
+     * authoritative, unlike {@link #buildEmptyResponse}: Floci is not the authority for a name a
+     * rule sends elsewhere, it only failed to reach the resolver that is.
+     */
+    byte[] buildServerFailureResponse(byte[] query, short txId, int questionOffset, int questionEnd) {
+        return buildAnswerlessResponse(query, txId, questionOffset, questionEnd, (short) 0x8182);
+    }
+
+    private static byte[] buildAnswerlessResponse(byte[] query, short txId, int questionOffset,
+                                                  int questionEnd, short flags) {
         UdpPayload payload = udpPayload(query, questionEnd);
         ByteBuffer response = ByteBuffer.allocate(12 + questionEnd - questionOffset + (payload.edns() ? 11 : 0));
         response.putShort(txId);
-        response.putShort((short) (0x8580 | responseCode));
+        response.putShort(flags);
         response.putShort((short) 1);
         response.putShort((short) 0);
         response.putShort((short) 0);
@@ -544,7 +566,7 @@ public class EmbeddedDnsServer {
                     LOG.warnv("Resolver rule forwarding for {0} failed on every target {1}: {2}",
                             qname, targets, e.getMessage());
                     socket.send(Buffer.buffer(
-                                    buildEmptyResponse(query, txId, questionOffset, questionEnd, 2)),
+                                    buildServerFailureResponse(query, txId, questionOffset, questionEnd)),
                             senderPort, senderHost, v -> {});
                 });
     }

@@ -31,6 +31,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 class ResolverRuleDnsPacketTest {
 
     private static final String CLIENT = "127.0.0.1";
+    private static final String ACCOUNT = "000000000000";
     private static final String VPC_ID = "vpc-0dns0000";
 
     @Inject
@@ -59,6 +60,8 @@ class ResolverRuleDnsPacketTest {
 
         byte[] failed = query(dns, buildQuery("db.corp.internal"));
         assertEquals(2, ByteBuffer.wrap(failed).getShort(2) & 0x000F, "SERVFAIL for the rule's name");
+        assertEquals(0, ByteBuffer.wrap(failed).getShort(2) & 0x0400,
+                "Floci is not the authority for a name a rule sends elsewhere");
 
         byte[] request = buildQuery("api.sapphire.internal");
         byte[] resolved = query(dns, request);
@@ -74,8 +77,10 @@ class ResolverRuleDnsPacketTest {
         DnsRecordSource records = name -> "api.sapphire.internal".equals(name)
                 ? Optional.of(DnsAnswer.records(List.of("172.31.0.6"), 60)) : Optional.empty();
         return new EmbeddedDnsServer(List.of(), List.of(records),
-                List.of(vpcId -> VPC_ID.equals(vpcId) ? List.of(rule) : List.of()),
-                List.of(clientAddress -> Optional.of(VPC_ID)));
+                List.of((accountId, vpcId) ->
+                        ACCOUNT.equals(accountId) && VPC_ID.equals(vpcId) ? List.of(rule) : List.of()),
+                List.of(clientAddress ->
+                        Optional.of(new DnsClientVpcSource.ClientVpc(ACCOUNT, VPC_ID))));
     }
 
     /** Answers the first datagram with {@code payload}, on a daemon thread. */

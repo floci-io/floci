@@ -340,27 +340,47 @@ public class Route53ResolverService {
     }
 
     /**
-     * Every stored resolver rule, from every account partition. The DNS server reads rules off the
-     * packet path, where there is no caller and so no account to scope the scan to, and a rule
-     * steers resolution for the VPCs it is associated with whichever account created it.
+     * One account's rule/VPC associations. The DNS server reads them off the packet path, where
+     * there is no caller, so the account comes from the resource the query originated on rather
+     * than from a request context.
+     *
+     * <p>Scoped to that one account deliberately. A {@code VPCId} is not proof of ownership:
+     * {@code AssociateResolverRule} stores whatever VPC id the caller names, so an association made
+     * by another account naming this account's VPC must not steer its queries. Restricting the
+     * lookup to the querying account's partition is the boundary, and it costs nothing because
+     * {@code AssociateResolverRule} can only reference a rule that exists in the caller's own
+     * partition, so an association and its rule always share an account.
      */
-    public List<ObjectNode> allResolverRules() {
-        return scanAllAccounts(ruleStore);
-    }
-
-    /** Every stored rule/VPC association, from every account partition. See {@link #allResolverRules}. */
-    public List<ObjectNode> allResolverRuleAssociations() {
-        return scanAllAccounts(ruleAssociationStore);
-    }
-
-    private static List<ObjectNode> scanAllAccounts(StorageBackend<String, ObjectNode> store) {
-        if (store instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+    public List<ObjectNode> resolverRuleAssociationsForAccount(String accountId) {
+        if (accountId == null || accountId.isBlank()) {
+            return List.of();
+        }
+        if (ruleAssociationStore instanceof AccountAwareStorageBackend<?> rawAccountAware) {
             @SuppressWarnings("unchecked")
             AccountAwareStorageBackend<ObjectNode> accountAware =
                     (AccountAwareStorageBackend<ObjectNode>) rawAccountAware;
-            return accountAware.scanAllAccounts().stream().map(ObjectNode::deepCopy).toList();
+            return accountAware.scanForAccount(accountId, key -> true).stream()
+                    .map(ObjectNode::deepCopy).toList();
         }
-        return store.scan(key -> true).stream().map(ObjectNode::deepCopy).toList();
+        return ruleAssociationStore.scan(key -> true).stream().map(ObjectNode::deepCopy).toList();
+    }
+
+    /**
+     * One of an account's resolver rules by id, fetched rather than scanned for so the DNS path
+     * reads only the rules an association actually named. See
+     * {@link #resolverRuleAssociationsForAccount}.
+     */
+    public java.util.Optional<ObjectNode> resolverRuleForAccount(String accountId, String ruleId) {
+        if (accountId == null || accountId.isBlank() || ruleId == null || ruleId.isBlank()) {
+            return java.util.Optional.empty();
+        }
+        if (ruleStore instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<ObjectNode> accountAware =
+                    (AccountAwareStorageBackend<ObjectNode>) rawAccountAware;
+            return accountAware.getForAccount(accountId, ruleId).map(ObjectNode::deepCopy);
+        }
+        return ruleStore.get(ruleId).map(ObjectNode::deepCopy);
     }
 
     /**

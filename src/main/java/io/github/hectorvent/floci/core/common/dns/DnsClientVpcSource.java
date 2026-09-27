@@ -13,9 +13,17 @@ import java.util.Optional;
 public interface DnsClientVpcSource {
 
     /**
-     * The VPC id of the resource reachable at {@code clientAddress}, or empty when this source
-     * launched nothing there. Empty is not an error: a query no one claims has no VPC, so no rules
-     * apply to it.
+     * Where a query came from. The account is part of it because a VPC id alone is not an identity:
+     * any account can associate a resolver rule with any VPC id it cares to name, so a rule may only
+     * steer queries from a resource its own account owns.
      */
-    Optional<String> vpcIdForClient(String clientAddress);
+    record ClientVpc(String accountId, String vpcId) {
+    }
+
+    /**
+     * The account and VPC of the resource reachable at {@code clientAddress}, or empty when this
+     * source launched nothing there. Empty is not an error: a query no one claims has no VPC, so no
+     * rules apply to it.
+     */
+    Optional<ClientVpc> vpcForClient(String clientAddress);
 }
