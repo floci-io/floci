@@ -532,6 +532,9 @@ public class AslExecutor {
         } catch (ExecutionTimedOutException e) {
             timeOutExecution(exec, chain);
             onUpdate.accept(exec, history);
+        } catch (ExecutionAbortedException e) {
+            // StopExecution already wrote ABORTED and sealed the history; the worker only stops.
+            onUpdate.accept(exec, history);
         } catch (Exception e) {
             LOG.warnv("ASL execution failed for {0}: {1}", exec.getExecutionArn(), e.getMessage());
             // This path previously set only the status, leaving error and cause null forever on an
@@ -797,10 +800,12 @@ public class AslExecutor {
         var tokenFuture = needsToken ? sfnService.get().registerPendingToken(taskToken) : null;
         var profile = taskEventProfile(resource, isActivity);
         JsonNode taskResult;
+        // Read before the scheduled event is built, so a large input or a slow history callback
+        // does not extend the Task's own TimeoutSeconds.
+        long taskDeadlineNanos = taskDeadlineNanos(stateDef);
         try {
             addTaskScheduledEvent(chain, profile, stateDef, effectiveInput, sm);
             addTaskStartedEvent(chain, profile);
-            long taskDeadlineNanos = taskDeadlineNanos(stateDef);
             try {
                 taskResult = mockedInvocation != null
                         ? mockedTaskResult(mockedInvocation.steps(), stateName, mockedInvocation.responseIndex())
@@ -820,6 +825,10 @@ public class AslExecutor {
                 throw e;
             } catch (TaskTimedOutException e) {
                 addTaskTimedOutEvent(chain, profile);
+                throw e;
+            } catch (ExecutionAbortedException e) {
+                // StopExecution ended the execution while this task waited on its job. The history
+                // was sealed by the abort; nothing more is written about the state.
                 throw e;
             } catch (InterruptedException e) {
                 // The task of a branch that was cut. AWS records nothing for it.
@@ -1697,7 +1706,8 @@ public class AslExecutor {
         // .sync or .sync:2 — poll until terminal, or until one of the two clocks runs out: the parent
         // execution's TimeoutSeconds budget ends the parent as TIMED_OUT and leaves the child running;
         // the Task's own TimeoutSeconds fails the state with States.Timeout and aborts the child, the
-        // way AWS does (measured: child ABORTED, no error, the cause below).
+        // way AWS does (measured: child ABORTED, no error, the cause below). A StopExecution on the
+        // parent ends the wait the same way, so a stopped execution does not keep a polling worker.
         while (true) {
             try {
                 sleepOrTimeOutTask(TimeUnit.MILLISECONDS.toNanos(SYNC_POLL_INTERVAL_MS),
@@ -1705,6 +1715,10 @@ public class AslExecutor {
             } catch (TaskTimedOutException e) {
                 abortChildExecution(execArn, executionArn);
                 throw e;
+            }
+            if (abortedByCaller(executionArn)) {
+                abortChildExecution(execArn, executionArn);
+                throw new ExecutionAbortedException();
             }
             io.github.hectorvent.floci.services.stepfunctions.model.Execution current =
                     sfnService.get().describeExecution(execArn);
@@ -1826,7 +1840,8 @@ public class AslExecutor {
         // fail the state, otherwise tasks beyond the first would run unmonitored. The wait is bounded
         // by the Task's TimeoutSeconds and by the execution's budget, never by a poll count of its own.
         // The Task's clock also stops the tasks it launched, the way AWS does (measured: the ECS task
-        // reads stopCode UserInitiated with the cause below).
+        // reads stopCode UserInitiated with the cause below), and so does a StopExecution on the
+        // execution, which otherwise would leave this worker polling until a clock ran out.
         List<String> taskArns = launched.stream().map(EcsTask::getTaskArn).toList();
         while (true) {
             try {
@@ -1835,6 +1850,10 @@ public class AslExecutor {
             } catch (TaskTimedOutException e) {
                 stopEcsTasks(cluster, taskArns, executionArn, region);
                 throw e;
+            }
+            if (abortedByCaller(executionArn)) {
+                stopEcsTasks(cluster, taskArns, executionArn, region);
+                throw new ExecutionAbortedException();
             }
             List<EcsTask> described = ecsService.describeTasks(cluster, taskArns, region);
             boolean allStopped = described.size() == taskArns.size()
@@ -2445,7 +2464,9 @@ public class AslExecutor {
             return;
         }
         sleeper.sleep(Math.max(remainingNanos, 0));
-        if (executionDeadlineNanos <= taskDeadlineNanos) {
+        // The execution's budget wins when it is the clock that was parked on, and also when a late
+        // wake finds it spent: the execution ends TIMED_OUT and the Task's own timeout never applies.
+        if (executionDeadlineNanos <= taskDeadlineNanos || System.nanoTime() >= executionDeadlineNanos) {
             throw new ExecutionTimedOutException();
         }
         throw new TaskTimedOutException("States.Timeout");
@@ -5470,6 +5491,24 @@ public class AslExecutor {
         }
     }
 
+    /**
+     * The same read for a wait that has only the execution's ARN: a {@code .sync} poll loop. An
+     * execution the store no longer holds is treated as stopped, since nothing is waiting for the
+     * result either way.
+     */
+    private boolean abortedByCaller(String executionArn) {
+        if (executionArn == null) {
+            return false;
+        }
+        try {
+            return abortedByCaller(sfnService.get().describeExecution(executionArn));
+        } catch (AwsException e) {
+            LOG.warnv("Execution {0} vanished while a .sync task was waiting on its job; ending the wait ({1})",
+                    executionArn, e.getMessage());
+            return true;
+        }
+    }
+
     private StateResult handleCatch(JsonNode stateDef, JsonNode input, FailStateException failure,
                                     boolean jsonata, JsonNode context, ObjectNode variables) throws Exception {
         JsonNode catchers = stateDef.path("Catch");
@@ -5569,6 +5608,17 @@ public class AslExecutor {
     static class ExecutionTimedOutException extends RuntimeException {
         ExecutionTimedOutException() {
             super("States.Timeout");
+        }
+    }
+
+    /**
+     * Thrown when a wait finds that StopExecution has already ended the execution. Not a
+     * {@link FailStateException}: no Catch sees it, no Retry re-runs the state, and nothing is
+     * written, because the abort sealed the history and ABORTED is the status that stands.
+     */
+    static class ExecutionAbortedException extends RuntimeException {
+        ExecutionAbortedException() {
+            super("Execution aborted by StopExecution");
         }
     }
 

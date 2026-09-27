@@ -262,7 +262,8 @@ the earlier clock fires. The default of 300 seconds applies here too when the st
 When the `Task`'s own clock fires, the job it was waiting on is stopped the way AWS stops it: the
 ECS task reads `stopCode: UserInitiated`, the child execution reads `ABORTED` with no error, and
 both carry the cause `The Task state in AWS Step Functions execution [<arn>] which was managing
-this resource was aborted`. When the execution's budget fires instead, the job is left running.
+this resource was aborted`. A `StopExecution` that lands while the state waits ends the wait and
+stops the job with the same cause. When the execution's budget fires instead, the job is left running.
 
 One deviation. AWS starts the `TimeoutSeconds` clock when a worker picks the task up, the instant
 it emits `ActivityStarted`. Floci emits `ActivityStarted` at schedule time, so both clocks start

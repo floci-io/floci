@@ -63,19 +63,26 @@ class AslExecutorEcsRunTaskModeTest {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private EcsService ecsService;
+    private StepFunctionsService sfnService;
     private AslExecutor executor;
     private List<HistoryEvent> history;
 
     @BeforeEach
     void setUp() {
         ecsService = mock(EcsService.class);
+        // The .sync wait reads the execution back to notice a StopExecution; RUNNING unless a test says otherwise.
+        sfnService = mock(StepFunctionsService.class);
+        when(sfnService.describeExecution(any())).thenAnswer(invocation -> parent(invocation.getArgument(0), "RUNNING"));
         executor = newExecutor(TimeUnit.NANOSECONDS::sleep);
     }
 
+    @SuppressWarnings("unchecked")
     private AslExecutor newExecutor(AslExecutor.Sleeper sleeper) {
         // A real handler so parseNetworkConfiguration / parseContainerOverrides actually run.
         EcsJsonHandler ecsJsonHandler = new EcsJsonHandler(ecsService, objectMapper,
                 new HostVolumePolicy(mock(EmulatorConfig.class, RETURNS_DEEP_STUBS)));
+        Instance<StepFunctionsService> instance = mock(Instance.class);
+        when(instance.get()).thenReturn(sfnService);
 
         return new AslExecutor(
                 mock(LambdaExecutorService.class),
@@ -93,7 +100,7 @@ class AslExecutorEcsRunTaskModeTest {
                 mock(io.github.hectorvent.floci.services.scheduler.SchedulerController.class),
                 objectMapper,
                 new JsonataEvaluator(objectMapper),
-                mock(Instance.class),
+                instance,
                 mock(EmulatorConfig.class),
                 null,
                 null,
@@ -232,6 +239,39 @@ class AslExecutorEcsRunTaskModeTest {
         assertTrue(history.stream().noneMatch(event -> "TaskTimedOut".equals(event.getType())),
                 "the execution's budget writes nothing about the state it cut");
         assertTrue(history.stream().anyMatch(event -> "ExecutionTimedOut".equals(event.getType())));
+    }
+
+    @Test
+    void stopExecutionEndsTheSyncWaitAndStopsTheTask() throws Exception {
+        executor = newExecutor(nanos -> { });
+        launchOneTask();
+        AtomicInteger parentReads = new AtomicInteger();
+        when(sfnService.describeExecution(any()))
+                .thenAnswer(invocation -> parent(invocation.getArgument(0), parentReads.incrementAndGet() < 3 ? "RUNNING" : "ABORTED"));
+        AtomicInteger polls = new AtomicInteger();
+        when(ecsService.describeTasks(any(), any(), any())).thenAnswer(invocation -> {
+            polls.incrementAndGet();
+            return List.of(task("RUNNING"));
+        });
+
+        Execution execution = run("arn:aws:states:::ecs:runTask.sync",
+                "{\"TaskDefinition\":\"my-task-def\"}");
+
+        assertEquals(2, polls.get(), "polling stops as soon as the execution reads ABORTED");
+        verify(ecsService).stopTask(any(), eq(task("RUNNING").getTaskArn()),
+                eq("The Task state in AWS Step Functions execution [" + execution.getExecutionArn()
+                        + "] which was managing this resource was aborted"), eq(REGION));
+        List<String> types = history.stream().map(HistoryEvent::getType).toList();
+        assertTrue(types.stream().noneMatch(type -> type.equals("TaskTimedOut") || type.equals("TaskFailed")
+                || type.equals("ExecutionFailed") || type.equals("ExecutionSucceeded")),
+                "an aborted execution gets no terminal event from the worker: " + types);
+    }
+
+    private static Execution parent(String executionArn, String status) {
+        Execution parent = new Execution();
+        parent.setExecutionArn(executionArn);
+        parent.setStatus(status);
+        return parent;
     }
 
     private void launchOneTask() {
