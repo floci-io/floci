@@ -344,22 +344,13 @@ class ResourceGroupsTaggingDiscoveryIntegrationTest {
     }
 
     @Test
-    void apiKeySegmentNestedUnderRestApiArnDoesNotTagTheApiKey() {
+    void apiKeySegmentNestedUnderRestApiArnIsRejected() {
         String marker = unique();
         String apiId = createRestApi(marker);
         String keyId = createApiKey(marker);
         String arn = APIGATEWAY_ARN_PREFIX + "/restapis/" + apiId + "/apikeys/" + keyId;
 
-        given()
-            .pathParam("arn", arn)
-            .contentType("application/json")
-            .body("""
-                {"tags": {"nested": "yes"}}
-                """)
-        .when()
-            .put("/tags/{arn}")
-        .then()
-            .statusCode(204);
+        putNestedTagIsRejected(arn);
         given()
         .when()
             .get("/apikeys/" + keyId)
@@ -367,8 +358,20 @@ class ResourceGroupsTaggingDiscoveryIntegrationTest {
             .statusCode(200)
             .body("tags.rsid", equalTo(marker))
             .body("tags", not(hasKey("nested")));
+        restApiTagsAreUnchanged(apiId, marker);
 
         deleteApiKey(keyId);
+        given().when().delete("/restapis/" + apiId).then().statusCode(202);
+    }
+
+    @Test
+    void deploymentArnIsRejectedByTheTagsPath() {
+        String marker = unique();
+        String apiId = createRestApi(marker);
+
+        putNestedTagIsRejected(APIGATEWAY_ARN_PREFIX + "/restapis/" + apiId + "/deployments/d1");
+        restApiTagsAreUnchanged(apiId, marker);
+
         given().when().delete("/restapis/" + apiId).then().statusCode(202);
     }
 
@@ -612,6 +615,32 @@ class ResourceGroupsTaggingDiscoveryIntegrationTest {
         .then()
             .statusCode(201)
             .extract().path("id");
+    }
+
+    private static void putNestedTagIsRejected(String arn) {
+        given()
+            .pathParam("arn", arn)
+            .contentType("application/json")
+            .body("""
+                {"tags": {"nested": "yes"}}
+                """)
+        .when()
+            .put("/tags/{arn}")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo("Invalid ARN specified in the request"));
+    }
+
+    private static void restApiTagsAreUnchanged(String apiId, String marker) {
+        given()
+            .pathParam("arn", APIGATEWAY_ARN_PREFIX + "/restapis/" + apiId)
+        .when()
+            .get("/tags/{arn}")
+        .then()
+            .statusCode(200)
+            .body("tags.fd", equalTo(marker))
+            .body("tags", not(hasKey("nested")));
     }
 
     private static ValidatableResponse mskTags(String arn) {

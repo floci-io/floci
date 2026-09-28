@@ -24,6 +24,7 @@ public class ApiGatewayTagHandler implements TagHandler {
 
     private static final String API_KEYS = "/apikeys/";
     private static final String DOMAIN_NAMES = "/domainnames/";
+    private static final String REST_APIS = "/restapis/";
     private static final String STAGES = "/stages/";
     private static final String USAGE_PLANS = "/usageplans/";
 
@@ -61,7 +62,7 @@ public class ApiGatewayTagHandler implements TagHandler {
         String stageName = stageNameFromArn(arn);
         return stageName != null
                 ? service.getStageTags(region, apiIdFromArn(arn), stageName)
-                : service.getTags(region, apiIdFromArn(arn));
+                : service.getTags(region, restApiIdFromArn(arn));
     }
 
     @Override
@@ -79,7 +80,7 @@ public class ApiGatewayTagHandler implements TagHandler {
         } else if (stageName != null) {
             service.tagStage(region, apiIdFromArn(arn), stageName, tags);
         } else {
-            service.tagResource(region, apiIdFromArn(arn), tags);
+            service.tagResource(region, restApiIdFromArn(arn), tags);
         }
     }
 
@@ -98,7 +99,7 @@ public class ApiGatewayTagHandler implements TagHandler {
         } else if (stageName != null) {
             service.untagStage(region, apiIdFromArn(arn), stageName, tagKeys);
         } else {
-            service.untagResource(region, apiIdFromArn(arn), tagKeys);
+            service.untagResource(region, restApiIdFromArn(arn), tagKeys);
         }
     }
 
@@ -108,6 +109,18 @@ public class ApiGatewayTagHandler implements TagHandler {
             throw new AwsException("BadRequestException", "Invalid resource ARN: " + arn, 400);
         }
         return parts[1].split("/")[0];
+    }
+
+    /**
+     * The id a {@code /restapis/<apiId>} ARN names. Any other ARN, such as a deployment or resource
+     * nested under a REST API, is rejected as AWS rejects it rather than tagging the REST API.
+     */
+    private static String restApiIdFromArn(String arn) {
+        String apiId = topLevelIdFromArn(arn, REST_APIS);
+        if (apiId == null) {
+            throw new AwsException("BadRequestException", "Invalid ARN specified in the request", 400);
+        }
+        return apiId;
     }
 
     /**
