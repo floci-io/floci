@@ -739,12 +739,13 @@ public class EksService implements TagHandler, ResourceProvider {
 
         Object capacityLock = nodeGroupCapacityLocks.computeIfAbsent(accountId + "/" + clusterName,
                 ignored -> new Object());
+        Cluster currentCluster;
         synchronized (capacityLock) {
             if (nodeGroupStorage.get(storageKey).isPresent()) {
                 throw new AwsException("ResourceInUseException",
                         "Nodegroup already exists: " + nodegroupName, 409);
             }
-            Cluster currentCluster = describeCluster(clusterName);
+            currentCluster = describeCluster(clusterName);
             boolean firstGroup = firstNodeGroup(clusterName, accountId).isEmpty();
             if (firstGroup && !config.services().eks().mock() && clusterManager != null) {
                 String requestedType = nodeGroup.getInstanceTypes().isEmpty()
@@ -788,11 +789,27 @@ public class EksService implements TagHandler, ResourceProvider {
                 }
             }
 
-            if (nodeGroup.getStatus() == NodegroupStatus.ACTIVE && launchTemplateData != null
-                    && launchTemplateData.getUserData() != null && !launchTemplateData.getUserData().isBlank()) {
-                applyNodeGroupUserData(currentCluster, nodegroupName, launchTemplateData.getUserData(), nodeGroup);
-            }
             nodeGroupStorage.put(storageKey, nodeGroup);
+        }
+        if (nodeGroup.getStatus() == NodegroupStatus.ACTIVE && launchTemplateData != null
+                && launchTemplateData.getUserData() != null && !launchTemplateData.getUserData().isBlank()) {
+            try {
+                applyNodeGroupUserData(currentCluster, nodegroupName, launchTemplateData.getUserData(), nodeGroup);
+            } catch (RuntimeException e) {
+                synchronized (capacityLock) {
+                    if (nodeGroupStorage.get(storageKey)
+                            .filter(saved -> arn.equals(saved.getNodegroupArn())).isPresent()) {
+                        nodeGroupStorage.delete(storageKey);
+                    }
+                }
+                throw e;
+            }
+            synchronized (capacityLock) {
+                if (nodeGroupStorage.get(storageKey)
+                        .filter(saved -> arn.equals(saved.getNodegroupArn())).isPresent()) {
+                    nodeGroupStorage.put(storageKey, nodeGroup);
+                }
+            }
         }
         return nodeGroup;
     }
