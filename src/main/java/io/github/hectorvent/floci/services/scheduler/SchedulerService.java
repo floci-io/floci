@@ -19,6 +19,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.time.DateTimeException;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -31,6 +32,8 @@ public class SchedulerService {
 
     // AWS EventBridge Scheduler name constraints: [0-9a-zA-Z-_.]+, 1-64 chars.
     private static final Pattern NAME_PATTERN = Pattern.compile("[0-9a-zA-Z\\-_.]{1,64}");
+    private static final Pattern ROLE_ARN_PATTERN = Pattern.compile(
+            "arn:(?:" + AwsArnUtils.PARTITION_REGEX + "):iam::\\d{12}:role/[\\w+=,.@/-]+");
     private static final String DEFAULT_GROUP = "default";
     // FAIL_ON_TRAILING_TOKENS matters here: without it an Input of "{} garbage" parses as the
     // leading object and the rest is silently dropped, so a value AWS rejects would be stored.
@@ -344,6 +347,16 @@ public class SchedulerService {
             throw new AwsException("ValidationException",
                     "1 validation error detected: Value null at 'scheduleExpression' failed to satisfy constraint: Member must not be null", 400);
         }
+        if (req.getScheduleExpression().length() > 256) {
+            throw new AwsException("ValidationException",
+                    "ScheduleExpression must be 256 characters or fewer.", 400);
+        }
+        try {
+            SchedulerExpressionParser.validate(req.getScheduleExpression(), req.getScheduleExpressionTimezone());
+        } catch (IllegalArgumentException | DateTimeException | ArithmeticException e) {
+            throw new AwsException("ValidationException",
+                    "Invalid ScheduleExpression: " + e.getMessage(), 400);
+        }
         if (req.getFlexibleTimeWindow() == null) {
             throw new AwsException("ValidationException",
                     "1 validation error detected: Value null at 'flexibleTimeWindow' failed to satisfy constraint: Member must not be null", 400);
@@ -379,6 +392,11 @@ public class SchedulerService {
         if (req.getTarget().getRoleArn() == null || req.getTarget().getRoleArn().isBlank()) {
             throw new AwsException("ValidationException",
                     "1 validation error detected: Value null at 'target.roleArn' failed to satisfy constraint: Member must not be null", 400);
+        }
+        if (req.getTarget().getRoleArn().length() > 1600
+                || !ROLE_ARN_PATTERN.matcher(req.getTarget().getRoleArn()).matches()) {
+            throw new AwsException("ValidationException",
+                    "Target.RoleArn must be an IAM role ARN.", 400);
         }
         if (req.getTarget().getDeadLetterConfig() != null
                 && (req.getTarget().getDeadLetterConfig().getArn() == null
