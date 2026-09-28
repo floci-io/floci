@@ -9,6 +9,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -74,6 +75,10 @@ class EksNodeCapacityTest {
         CatalogInstanceType type = catalog.find("m5.large").orElseThrow();
         assertNull(EksNodeCapacity.calculate(type, 1024 * MIB, 2, 0, 0));
         assertNull(EksNodeCapacity.calculate(type, 0, 0, 0, 0));
-        assertNull(EksNodeCapacity.calculate(type, 8192 * MIB, 2, 512, 0));
+        EksNodeCapacity.Limits capped = EksNodeCapacity.calculate(type, 8192 * MIB, 2, 512, 0);
+        assertNotNull(capped);
+        assertEquals(512 * MIB, capped.memoryBytes());
+        assertTrue(capped.kubeMemoryMib() + capped.systemMemoryMib()
+                + 100 < capped.memoryBytes() / MIB);
     }
 }

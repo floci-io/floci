@@ -67,6 +67,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -89,6 +90,7 @@ public class EksClusterManager
     private static final Logger LOG = Logger.getLogger(EksClusterManager.class);
     private static final int K3S_API_SERVER_PORT = 6443;
     static final String DEFAULT_NODE_INSTANCE_TYPE = "m5.large";
+    private static final String NODE_CAPACITY_LABEL = "io.floci.eks.node-capacity";
 
     private static final String WEBHOOK_CONFIG_DIR = "/etc";
     private static final String WEBHOOK_CONFIG_FILE = "token-webhook.yaml";
@@ -418,22 +420,9 @@ public class EksClusterManager
 
         List<String> serverArgs = buildServerArgs(config.services().eks().disableCni(), serviceCidr, clusterCidr);
 
-        EksNodeCapacity.Limits nodeLimits = null;
-        try {
-            Info host = lifecycleManager.getDockerClient().infoCmd().exec();
-            CatalogInstanceType type = instanceTypeCatalog.find(nodeInstanceType(cluster)).orElseThrow();
-            nodeLimits = EksNodeCapacity.calculate(type, host.getMemTotal(), host.getNCPU(),
-                    config.services().eks().maxMemoryMib(), config.services().eks().maxVcpus());
-            if (nodeLimits == null) {
-                LOG.warnv("EKS cluster {0} cannot fit node type {1} and its kubelet reservations"
-                        + " within the Docker host or configured cap; starting without resource limits",
-                        cluster.getName(), type.instanceType);
-            } else {
-                nodeLimits.addKubeletArgs(serverArgs);
-            }
-        } catch (Exception e) {
-            LOG.warnv("EKS cluster {0} resource limits unavailable ({1}); starting without limits",
-                    cluster.getName(), e.getMessage());
+        EksNodeCapacity.Limits nodeLimits = resolveNodeCapacity(cluster);
+        if (nodeLimits != null) {
+            nodeLimits.addKubeletArgs(serverArgs);
         }
 
         try {
@@ -459,6 +448,9 @@ public class EksClusterManager
         // The account label comes from the cluster record when set (restore runs with no request
         // context); regionResolver is the fallback for the create path.
         String labelAccountId = resolveClusterAccountId(cluster);
+        Map<String, String> labels = new LinkedHashMap<>(ContainerStorageHelper.resourceIdentityLabels(
+                "eks", cluster.getName(), labelAccountId, clusterRegion(cluster)));
+        labels.put(NODE_CAPACITY_LABEL, capacityLabel(cluster, nodeLimits));
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                 .withName(containerName)
                 .withEnv("K3S_KUBECONFIG_MODE", "644")
@@ -467,12 +459,15 @@ public class EksClusterManager
                 .withDockerNetwork(config.services().eks().dockerNetwork())
                 .withPrivileged(true)
                 .withLogRotation()
-                .withLabels(ContainerStorageHelper.resourceIdentityLabels(
-                        "eks", cluster.getName(), labelAccountId, clusterRegion(cluster)));
+                .withLabels(labels);
 
         if (nodeLimits != null) {
-            specBuilder.withMemoryBytes(nodeLimits.memoryBytes());
-            specBuilder.withCpuUnits(nodeLimits.vcpus() * 1024);
+            if (nodeLimits.memoryBytes() > 0) {
+                specBuilder.withMemoryBytes(nodeLimits.memoryBytes());
+            }
+            if (nodeLimits.vcpus() > 0) {
+                specBuilder.withCpuUnits(nodeLimits.vcpus() * 1024);
+            }
         }
 
         if (config.services().eks().embeddedDns()) {
@@ -596,6 +591,14 @@ public class EksClusterManager
         if (existing.isEmpty()) {
             LOG.infov("No surviving k3s container for EKS cluster {0}; recreating it "
                     + "(a surviving data volume is reused)", cluster.getName());
+            startCluster(cluster);
+            return;
+        }
+
+        String desiredCapacity = capacityLabel(cluster, resolveNodeCapacity(cluster));
+        Map<String, String> existingLabels = existing.get().getLabels();
+        if (existingLabels == null || !desiredCapacity.equals(existingLabels.get(NODE_CAPACITY_LABEL))) {
+            LOG.infov("Recreating EKS cluster {0} to apply current node capacity limits", cluster.getName());
             startCluster(cluster);
             return;
         }
@@ -746,22 +749,93 @@ public class EksClusterManager
         return DEFAULT_NODE_INSTANCE_TYPE;
     }
 
+    private EksNodeCapacity.Limits resolveNodeCapacity(Cluster cluster) {
+        try {
+            Info host = lifecycleManager.getDockerClient().infoCmd().exec();
+            CatalogInstanceType type = instanceTypeCatalog.find(nodeInstanceType(cluster)).orElseThrow();
+            EksNodeCapacity.Limits limits = EksNodeCapacity.calculate(type, host.getMemTotal(), host.getNCPU(),
+                    config.services().eks().maxMemoryMib(), config.services().eks().maxVcpus());
+            if (limits == null) {
+                EksNodeCapacity.Limits configured = explicitCeilingWithoutHostInfo(cluster);
+                if (configured != null) {
+                    return configured;
+                }
+                LOG.warnv("EKS cluster {0} cannot fit node type {1} and its kubelet reservations"
+                        + " within the Docker host; starting without resource limits",
+                        cluster.getName(), type.instanceType);
+            } else if (limits.reducedReservations()) {
+                LOG.warnv("EKS cluster {0} memory ceiling reduces kubelet memory reservations below"
+                        + " the EKS AMI defaults", cluster.getName());
+            }
+            return limits;
+        } catch (Exception e) {
+            LOG.warnv("EKS cluster {0} Docker host capacity unavailable: {1}",
+                    cluster.getName(), e.getMessage());
+            return explicitCeilingWithoutHostInfo(cluster);
+        }
+    }
+
+    private EksNodeCapacity.Limits explicitCeilingWithoutHostInfo(Cluster cluster) {
+        int maxMemoryMib = config.services().eks().maxMemoryMib();
+        int maxVcpus = config.services().eks().maxVcpus();
+        if (maxMemoryMib <= 0 && maxVcpus <= 0) {
+            return null;
+        }
+        int vcpus = instanceTypeCatalog.find(nodeInstanceType(cluster))
+                .map(type -> maxVcpus > 0 ? Math.min(type.vcpu, maxVcpus) : 0)
+                .orElse(maxVcpus);
+        LOG.warnv("Applying explicit EKS cluster {0} ceiling without kubelet reservations"
+                + " because Docker host capacity is unavailable", cluster.getName());
+        return EksNodeCapacity.explicitCeilingWithoutHostInfo(maxMemoryMib, vcpus);
+    }
+
+    private static String capacityLabel(Cluster cluster, EksNodeCapacity.Limits limits) {
+        if (limits == null) {
+            return nodeInstanceType(cluster) + ":unbounded";
+        }
+        return nodeInstanceType(cluster) + ":" + limits.memoryBytes() + ":" + limits.vcpus()
+                + ":" + limits.systemMemoryMib() + ":" + limits.kubeMemoryMib()
+                + ":" + limits.evictionMemoryMib() + ":" + limits.systemCpuMilli()
+                + ":" + limits.kubeCpuMilli() + ":" + limits.reducedReservations()
+                + ":" + limits.kubeletArgsEnabled();
+    }
+
     static String nodeInstanceType(Cluster cluster) {
         return cluster != null && cluster.getNodeInstanceType() != null
                 ? cluster.getNodeInstanceType() : DEFAULT_NODE_INSTANCE_TYPE;
     }
 
-    /** Recreate the shared node with its named data volume intact when its first node group arrives. */
-    void restartForNodeCapacity(Cluster cluster) {
+    /** Recreate the shared node with its named data volume intact, restoring its old type on failure. */
+    boolean restartForNodeCapacity(Cluster cluster, String previousType) {
         if (cluster.getContainerId() == null) {
-            return;
+            return true;
         }
-        unregisterMetadataEndpoint(cluster);
-        Closeable logStream = clusterLogHandles.remove(clusterResourceName(cluster));
-        lifecycleManager.stopAndRemove(cluster.getContainerId(), logStream);
-        portAllocator.release(cluster.getHostPort());
-        cluster.setContainerId(null);
-        startCluster(cluster);
+        int oldPort = cluster.getHostPort();
+        try {
+            unregisterMetadataEndpoint(cluster);
+            Closeable logStream = clusterLogHandles.remove(clusterResourceName(cluster));
+            lifecycleManager.stopAndRemove(cluster.getContainerId(), logStream);
+            portAllocator.release(oldPort);
+            cluster.setContainerId(null);
+            startCluster(cluster);
+            return true;
+        } catch (RuntimeException e) {
+            LOG.warnv("Could not apply new node capacity to EKS cluster {0}: {1}; restoring prior type {2}",
+                    cluster.getName(), e.getMessage(), previousType);
+            cluster.setNodeInstanceType(previousType);
+            try {
+                lifecycleManager.removeIfExists(cluster.getDockerName());
+                portAllocator.release(oldPort);
+                portAllocator.release(cluster.getHostPort());
+                cluster.setContainerId(null);
+                startCluster(cluster);
+                return false;
+            } catch (RuntimeException rollback) {
+                cluster.setContainerId(null);
+                throw new IllegalStateException("Could not restore EKS cluster " + cluster.getName()
+                        + " after node capacity change failed", rollback);
+            }
+        }
     }
 
     /**

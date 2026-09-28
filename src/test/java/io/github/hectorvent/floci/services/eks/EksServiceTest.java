@@ -52,14 +52,21 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -906,6 +913,7 @@ class EksServiceTest {
         EksClusterManager clusterManager = mock(EksClusterManager.class);
         when(clusterManager.tryStartCluster(any())).thenReturn(true);
         when(clusterManager.selectNodeInstanceType("t3.medium")).thenReturn("t3.medium");
+        when(clusterManager.restartForNodeCapacity(any(), anyString())).thenReturn(true);
         EksService service = newService(clusterManager, false);
         CreateClusterRequest request = new CreateClusterRequest();
         request.setName("capacity-cluster");
@@ -915,10 +923,52 @@ class EksServiceTest {
 
         service.createNodeGroup("capacity-cluster", nodeGroupRequest("first"));
         assertEquals("t3.medium", cluster.getNodeInstanceType());
-        verify(clusterManager).restartForNodeCapacity(cluster);
+        verify(clusterManager).restartForNodeCapacity(cluster, "m5.large");
 
         service.createNodeGroup("capacity-cluster", nodeGroupRequest("second"));
-        verify(clusterManager).restartForNodeCapacity(cluster);
+        verify(clusterManager).restartForNodeCapacity(cluster, "m5.large");
+    }
+
+    @Test
+    void concurrentFirstNodeGroupsChooseOnlyOneCapacity() throws Exception {
+        EksClusterManager clusterManager = mock(EksClusterManager.class);
+        when(clusterManager.tryStartCluster(any())).thenReturn(true);
+        when(clusterManager.selectNodeInstanceType("t3.medium")).thenReturn("t3.medium");
+        CountDownLatch restartEntered = new CountDownLatch(1);
+        CountDownLatch releaseRestart = new CountDownLatch(1);
+        when(clusterManager.restartForNodeCapacity(any(), anyString())).thenAnswer(invocation -> {
+            restartEntered.countDown();
+            if (!releaseRestart.await(10, TimeUnit.SECONDS)) {
+                throw new IllegalStateException("Timed out waiting to finish the first restart");
+            }
+            return true;
+        });
+        EksService service = newService(clusterManager, false);
+        CreateClusterRequest request = new CreateClusterRequest();
+        request.setName("concurrent-capacity");
+        request.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        Cluster cluster = service.createCluster(request);
+        cluster.setContainerId("existing-container");
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<Nodegroup> first = executor.submit(() -> service.createNodeGroup(
+                    "concurrent-capacity", nodeGroupRequest("first")));
+            assertTrue(restartEntered.await(10, TimeUnit.SECONDS));
+            CreateNodeGroupRequest secondRequest = nodeGroupRequest("second");
+            secondRequest.setInstanceTypes(List.of("m5.large"));
+            Future<Nodegroup> second = executor.submit(() -> service.createNodeGroup(
+                    "concurrent-capacity", secondRequest));
+            releaseRestart.countDown();
+            first.get(10, TimeUnit.SECONDS);
+            second.get(10, TimeUnit.SECONDS);
+
+            assertEquals("t3.medium", cluster.getNodeInstanceType());
+            verify(clusterManager, times(1)).restartForNodeCapacity(cluster, "m5.large");
+        } finally {
+            releaseRestart.countDown();
+            executor.shutdownNow();
+        }
     }
 
     @Test

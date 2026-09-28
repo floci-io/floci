@@ -11,8 +11,12 @@ final class EksNodeCapacity {
     private EksNodeCapacity() {}
 
     record Limits(long memoryBytes, int vcpus, long systemMemoryMib, long kubeMemoryMib,
-                  long evictionMemoryMib, int systemCpuMilli, int kubeCpuMilli) {
+                  long evictionMemoryMib, int systemCpuMilli, int kubeCpuMilli,
+                  boolean reducedReservations, boolean kubeletArgsEnabled) {
         void addKubeletArgs(List<String> args) {
+            if (!kubeletArgsEnabled) {
+                return;
+            }
             args.add("--kubelet-arg=system-reserved=cpu=" + systemCpuMilli + "m,memory="
                     + systemMemoryMib + "Mi");
             args.add("--kubelet-arg=kube-reserved=cpu=" + kubeCpuMilli + "m,memory="
@@ -20,6 +24,11 @@ final class EksNodeCapacity {
             args.add("--kubelet-arg=eviction-hard=memory.available<" + evictionMemoryMib
                     + "Mi,nodefs.available<10%,nodefs.inodesFree<5%");
         }
+    }
+
+    static Limits explicitCeilingWithoutHostInfo(int maxMemoryMib, int vcpus) {
+        return new Limits((long) Math.max(0, maxMemoryMib) * MIB, vcpus,
+                0, 0, 0, 0, 0, false, false);
     }
 
     /**
@@ -36,7 +45,8 @@ final class EksNodeCapacity {
         }
         long hostMib = hostMemoryBytes / MIB;
         long requestedMib = type.memoryMib + Math.max(128L, type.memoryMib / 10L);
-        long memoryMib = Math.min(requestedMib, hostMib * 4 / 5);
+        long hostLimitMib = Math.min(requestedMib, hostMib * 4 / 5);
+        long memoryMib = hostLimitMib;
         if (maxMemoryMib > 0) {
             memoryMib = Math.min(memoryMib, maxMemoryMib);
         }
@@ -59,17 +69,27 @@ final class EksNodeCapacity {
                 ? Math.min(podCap, interfaces * (addresses - 1) + 2) : podCap;
         long kubeMemoryMib = 11L * maxPods + 255;
         long systemMemoryMib = Math.max(128, memoryMib / 10);
-        long evictionBufferMib = 100;
-        // A tiny host or a restrictive user cap cannot run k3s with this reservation. The caller
-        // leaves the container unbounded so creating a cluster remains possible on such hosts.
-        if (memoryMib < kubeMemoryMib + systemMemoryMib + evictionBufferMib + 256) {
+        long evictionBufferMib = Math.min(100, memoryMib / 4);
+        // Only an undersized host with no explicit ceiling falls back to the old unbounded mode.
+        // An operator's ceiling must remain a hard bound, even if it leaves few resources for pods.
+        if (maxMemoryMib == 0 && memoryMib < kubeMemoryMib + systemMemoryMib + evictionBufferMib + 256) {
             return null;
+        }
+        if (memoryMib <= 0) {
+            return null;
+        }
+        boolean reducedReservations = maxMemoryMib > 0
+                && memoryMib < kubeMemoryMib + systemMemoryMib + evictionBufferMib + 256;
+        if (reducedReservations) {
+            long reservableMib = Math.max(0, memoryMib - evictionBufferMib - 1);
+            kubeMemoryMib = Math.min(kubeMemoryMib, reservableMib / 2);
+            systemMemoryMib = Math.min(systemMemoryMib, reservableMib - kubeMemoryMib);
         }
         int kubeCpuMilli = cpuReservationMilli(vcpus);
         int systemCpuMilli = (hostCpus - vcpus) * 1000;
         long evictionMemoryMib = hostMib - memoryMib + evictionBufferMib;
         return new Limits(memoryMib * MIB, vcpus, systemMemoryMib, kubeMemoryMib,
-                evictionMemoryMib, systemCpuMilli, kubeCpuMilli);
+                evictionMemoryMib, systemCpuMilli, kubeCpuMilli, reducedReservations, true);
     }
 
     private static int cpuReservationMilli(int vcpus) {

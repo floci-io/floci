@@ -377,6 +377,9 @@ group's first `instanceTypes` entry. If that changes the type, Floci recreates t
 keeps its named k3s data volume. Later
 node groups share this node and cannot change its type. An unknown type falls back to `m5.large`
 with a warning. The synthesized EC2 instance reports the selected type.
+First-group selection is serialized per cluster. If the replacement fails, Floci recreates the
+previous node, marks that node group `CREATE_FAILED`, and keeps its data volume. If recovery also
+fails, the cluster becomes `FAILED` instead of waiting indefinitely for readiness.
 
 The container receives a hard CPU quota equal to the selected type's vCPUs and a memory limit
 equal to its catalog memory plus 10% headroom (at least 128 MiB). Both are capped by Docker's host
@@ -397,12 +400,18 @@ The EKS node filesystem eviction defaults remain at 10% available space and 5% f
 The pod-density calculation uses EKS managed node group caps of 110 pods up to 30 vCPUs and
 250 pods above 30 vCPUs; it does not change k3s `maxPods`.
 
-If Docker cannot report host capacity, or the host or configured ceiling is too small to leave
-256 MiB for pods after reservations, Floci warns and launches the cluster without resource limits
-or these kubelet arguments. This preserves startup on small hosts. A larger Docker memory allowance
-or a smaller node type enables the bounded behavior.
+If Docker cannot report host capacity, or the host is too small to leave 256 MiB for pods after
+reservations, Floci warns and launches the cluster without the derived limits or kubelet arguments.
+This preserves startup on small hosts. An explicit memory or CPU ceiling remains a hard bound even
+when Docker host information is unavailable; in that case Floci cannot calculate kubelet arguments.
+When an explicit memory ceiling is smaller than the default reservation budget, Floci reduces the
+memory reservations to leave some room for pods and warns that they no longer match the EKS AMI
+amount.
 
 The reservation formulas follow the [EKS AMI nodeadm source](https://github.com/awslabs/amazon-eks-ami/blob/main/nodeadm/internal/kubelet/config.go) and [AWS's node memory calculation](https://docs.aws.amazon.com/batch/latest/userguide/memory-cpu-batch-eks.html).
+On restore, a surviving container whose capacity label differs from the current calculation is
+recreated against the retained data volume. This also upgrades containers started before resource
+limits were available.
 
 #### Cluster node provider ID and topology labels
 
