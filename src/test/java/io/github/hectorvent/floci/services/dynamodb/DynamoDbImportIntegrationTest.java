@@ -351,6 +351,24 @@ class DynamoDbImportIntegrationTest {
     }
 
     @Test
+    void importTable_invalidBillingMode_returnsValidationException() {
+        String request = importRequest("ImportBadBilling", BUCKET_NAME, "plain/", "DYNAMODB_JSON", "NONE")
+                .replace("\"PAY_PER_REQUEST\"", "\"INVALID_MODE\"");
+        dynamo("ImportTable", request)
+            .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("1 validation error detected: Value 'INVALID_MODE' at "
+                    + "'tableCreationParameters.billingMode' failed to satisfy constraint: "
+                    + "Member must satisfy enum value set: [PROVISIONED, PAY_PER_REQUEST]"));
+
+        dynamo("DescribeTable", "{\"TableName\": \"ImportBadBilling\"}")
+            .then()
+            .statusCode(400)
+            .body("__type", containsString("ResourceNotFoundException"));
+    }
+
+    @Test
     void importTable_zstdCompression_returnsValidationException() {
         dynamo("ImportTable", importRequest("ImportZstd", BUCKET_NAME, "plain/", "DYNAMODB_JSON", "ZSTD"))
             .then()
