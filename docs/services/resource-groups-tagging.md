@@ -22,7 +22,9 @@ well, and its tags are kept in the tagging store.
 | `GetTagValues` | Lists distinct values for a requested tag key in the current region |
 
 `TagResources` and `UntagResources` return an empty `FailedResourcesMap` on
-success. `GetResources`, `GetTagKeys`, and `GetTagValues` support pagination
+success. An ARN the owning service rejected is listed there with its
+`StatusCode`, `ErrorCode` and `ErrorMessage`, and the call still returns
+HTTP 200. `GetResources`, `GetTagKeys`, and `GetTagValues` support pagination
 tokens for multi-page responses; a token past the last result returns an empty
 page.
 
@@ -35,28 +37,34 @@ Reads merge two sources for the request's region and account:
   including SQS, Lambda, CloudWatch Logs, S3 and API Gateway (REST APIs,
   stages, API keys, usage plans and custom domain names). Only resources that
   carry at least one tag are listed.
-- The tagging store, which holds tags written through `TagResources` that no
-  owning service took, and the copies EventBridge and Glue keep there.
+- The tagging store, which holds tags written through `TagResources` that were
+  not forwarded to an owning service, and the copies EventBridge and Glue keep
+  there.
 
 When both hold the same ARN, the result is one mapping, and for the same key
 the owning service's value wins. CloudWatch Logs log group ARNs are returned
 without the trailing `:*`.
 
-`TagResources` forwards the tags to the owning service when that service
-serves a REST `/tags/{arn}` endpoint, such as API Gateway, EventBridge
-Scheduler, EKS and Pipes. If that service is also one of the indexed services
-above for the resource type, the tags live only there, so `GetApiKey` shows a
-tag set through `TagResources`. Otherwise, or when the owning service rejects
-the ARN, the tags are kept in the tagging store. `UntagResources` removes the
-keys from the owning service where it forwards, and always from the tagging
-store.
+`TagResources` forwards the tags to the owning service only when that service
+registers a shared tag handler, such as API Gateway, and currently lists the
+exact ARN as one of its resources. The tags then live only in the owning
+service, so `GetApiKey` shows a tag set through `TagResources`, and nothing is
+written to the tagging store. When the owning service rejects the tags, for
+example a reserved `floci:` key on an API key, the ARN appears in
+`FailedResourcesMap` and no tags are stored for it. Every other ARN, including
+one the owning service does not list such as an API Gateway deployment ARN,
+goes to the tagging store and the owning service is not called.
+`UntagResources` routes the same way, and also removes the keys from the
+tagging store for every ARN the owning service did not reject.
 
 ### Known limitations
 
-SQS, Lambda and CloudWatch Logs have no REST `/tags/{arn}` endpoint, so tags
-set on their resources through `TagResources` stay in the tagging store. They
-appear in `GetResources`, `GetTagKeys` and `GetTagValues`, but not in
-`ListQueueTags`, Lambda `ListTags`, or CloudWatch Logs `ListTagsForResource`.
+No shared tag handler is registered for SQS, Lambda or CloudWatch Logs, so the
+tagging API cannot forward to them, although Lambda serves its own REST
+`/tags/{arn}` API. Tags set on their resources through `TagResources` stay in
+the tagging store. They appear in `GetResources`, `GetTagKeys` and
+`GetTagValues`, but not in `ListQueueTags`, Lambda `ListTags`, or CloudWatch
+Logs `ListTagsForResource`.
 Tag those resources through their own service to see the tags in both places.
 
 ## Filtering
@@ -78,10 +86,13 @@ leading `/` dropped, cut at the first `/` or `:`. So `lambda:function`,
 
 A resource is visible in the region its ARN names. When the ARN has no region,
 such as an S3 bucket ARN, the owning service's region for the resource
-decides; IAM users and roles, and region-less ARNs known only to the tagging
-store, are visible in every region. A resource is visible to the account its
-ARN names, and an ARN with no account, such as an API Gateway ARN, is visible
-to every account.
+decides, also for tags the tagging store holds for that ARN, so an
+`eu-west-1` bucket tagged through `TagResources` is not listed from
+`us-east-1`. IAM users and roles, and region-less ARNs known only to the
+tagging store, are visible in every region. Every store is per account, so
+results are scoped to the calling account. An ARN with an empty account
+segment, such as an API Gateway ARN, only leaves the account out of the ARN;
+the resource is still listed for the account that owns it.
 
 ## Configuration
 
@@ -140,5 +151,5 @@ print(resources["ResourceTagMappingList"])
 ## Out of Scope
 
 - Validation that a `TagResources` ARN names an existing resource: an ARN that
-  no emulated service owns is accepted and kept in the tagging store.
+  no emulated service lists is accepted and kept in the tagging store.
 - AWS Organizations tag policy enforcement.

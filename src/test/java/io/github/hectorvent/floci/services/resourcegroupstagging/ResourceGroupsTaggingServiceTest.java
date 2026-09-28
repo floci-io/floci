@@ -136,6 +136,20 @@ class ResourceGroupsTaggingServiceTest {
     }
 
     @Test
+    void storeCopyOfProviderResourceInAnotherRegionIsHidden() {
+        String bucketArn = "arn:aws:s3:::b";
+        ResourceGroupsTaggingService service = service(List.of(provider(new ExplorerResource(
+                bucketArn, "s3:bucket", "s3", "eu-west-1", ACCOUNT, Instant.EPOCH, Map.of("k", "v")))), List.of());
+        service.tagResources(List.of(bucketArn), Map.of("team", "a"), REGION);
+
+        List<ResourceTagMapping> west = resourcesIn(service, "eu-west-1");
+
+        assertTrue(resourcesIn(service, REGION).isEmpty());
+        assertEquals(List.of(bucketArn), arns(west));
+        assertEquals(Map.of("team", "a", "k", "v"), west.getFirst().getTags());
+    }
+
+    @Test
     void globalProviderResourceIsVisibleInEveryRegion() {
         String roleArn = "arn:aws:iam::000000000000:role/r";
         ResourceGroupsTaggingService service = service(List.of(provider(new ExplorerResource(
@@ -241,35 +255,53 @@ class ResourceGroupsTaggingServiceTest {
     }
 
     @Test
-    void applyTagsToProviderOwnedTypeSkipsStore() {
+    void listedArnWithHandlerIsForwardedAndNotStored() {
         RecordingTagHandler handler = new RecordingTagHandler("apigateway", false);
         ResourceGroupsTaggingService service = service(List.of(
-                provider(Set.of(new SupportedResourceType("apigateway:apikeys", "apigateway", true)))),
-                List.of(handler));
+                provider(resource(API_KEY_ARN, "apigateway:apikeys", Map.of()))), List.of(handler));
 
-        service.applyTags(List.of(API_KEY_ARN), Map.of("cid", "c2"), "eu-west-1");
+        Map<String, AwsException> failures = service.applyTags(List.of(API_KEY_ARN), Map.of("cid", "c2"), "eu-west-1");
 
+        assertTrue(failures.isEmpty());
         assertEquals(Map.of("cid", "c2"), handler.tagged.get(API_KEY_ARN));
         assertEquals(List.of("us-east-1"), handler.regions);
         assertTrue(service.getTagsForResource("eu-west-1", API_KEY_ARN).isEmpty());
     }
 
     @Test
-    void applyTagsToNonProviderTypeAlsoWritesStore() {
-        RecordingTagHandler handler = new RecordingTagHandler("iot", false);
-        ResourceGroupsTaggingService service = service(List.of(), List.of(handler));
+    void listedArnMatchesWithoutWildcardSuffix() {
+        String logGroupArn = "arn:aws:logs:us-east-1:000000000000:log-group:/a";
+        RecordingTagHandler handler = new RecordingTagHandler("logs", false);
+        ResourceGroupsTaggingService service = service(List.of(
+                provider(resource(logGroupArn + ":*", "logs:log-group", Map.of()))), List.of(handler));
 
-        service.applyTags(List.of(IOT_ARN), Map.of("k", "v"), REGION);
+        service.applyTags(List.of(logGroupArn), Map.of("k", "v"), REGION);
 
-        assertEquals(Map.of("k", "v"), handler.tagged.get(IOT_ARN));
-        assertEquals(Map.of("k", "v"), service.getTagsForResource(REGION, IOT_ARN));
+        assertEquals(Map.of("k", "v"), handler.tagged.get(logGroupArn));
+        assertTrue(service.getTagsForResource(REGION, logGroupArn).isEmpty());
+    }
+
+    @Test
+    void unlistedArnWithHandlerGoesToStoreWithoutCallingHandler() {
+        String deploymentArn = "arn:aws:apigateway:us-east-1::/restapis/abc/deployments/d1";
+        RecordingTagHandler handler = new RecordingTagHandler("apigateway", false);
+        ResourceGroupsTaggingService service = service(List.of(provider(resource(
+                "arn:aws:apigateway:us-east-1::/restapis/abc", "apigateway:restapis", Map.of()))),
+                List.of(handler));
+
+        Map<String, AwsException> failures = service.applyTags(List.of(deploymentArn), Map.of("k", "v"), REGION);
+
+        assertTrue(failures.isEmpty());
+        assertTrue(handler.tagged.isEmpty());
+        assertEquals(Map.of("k", "v"), service.getTagsForResource(REGION, deploymentArn));
     }
 
     @Test
     void applyTagsPassesRequestRegionWhenArnHasNone() {
         String userArn = "arn:aws:iam::000000000000:user/u1";
         RecordingTagHandler handler = new RecordingTagHandler("iam", false);
-        ResourceGroupsTaggingService service = service(List.of(), List.of(handler));
+        ResourceGroupsTaggingService service = service(List.of(
+                provider(resource(userArn, "iam:user", Map.of()))), List.of(handler));
 
         service.applyTags(List.of(userArn), Map.of("k", "v"), "eu-west-1");
 
@@ -277,36 +309,68 @@ class ResourceGroupsTaggingServiceTest {
     }
 
     @Test
-    void applyTagsFallsBackToStoreWhenHandlerRejects() {
+    void handlerRejectionIsReturnedAndNotStored() {
         RecordingTagHandler handler = new RecordingTagHandler("apigateway", true);
         ResourceGroupsTaggingService service = service(List.of(
-                provider(Set.of(new SupportedResourceType("apigateway:apikeys", "apigateway", true)))),
-                List.of(handler));
+                provider(resource(API_KEY_ARN, "apigateway:apikeys", Map.of()))), List.of(handler));
 
-        service.applyTags(List.of(API_KEY_ARN), Map.of("cid", "c2"), REGION);
+        Map<String, AwsException> failures = service.applyTags(
+                List.of(API_KEY_ARN, QUEUE_ARN), Map.of("cid", "c2"), REGION);
 
-        assertEquals(Map.of("cid", "c2"), service.getTagsForResource(REGION, API_KEY_ARN));
+        assertEquals(List.of(API_KEY_ARN), List.copyOf(failures.keySet()));
+        assertEquals("NotFoundException", failures.get(API_KEY_ARN).getErrorCode());
+        assertTrue(service.getTagsForResource(REGION, API_KEY_ARN).isEmpty());
+        assertEquals(Map.of("cid", "c2"), service.getTagsForResource(REGION, QUEUE_ARN));
     }
 
     @Test
     void applyTagsWithoutHandlerWritesStore() {
         ResourceGroupsTaggingService service = service(List.of(), List.of(new RecordingTagHandler("iot", false)));
 
-        service.applyTags(List.of(QUEUE_ARN), Map.of("k", "v"), REGION);
+        Map<String, AwsException> failures = service.applyTags(List.of(QUEUE_ARN), Map.of("k", "v"), REGION);
 
+        assertTrue(failures.isEmpty());
         assertEquals(Map.of("k", "v"), service.getTagsForResource(REGION, QUEUE_ARN));
     }
 
     @Test
     void removeTagsCallsHandlerAndUntagsStore() {
         RecordingTagHandler handler = new RecordingTagHandler("iot", false);
+        ResourceGroupsTaggingService service = service(List.of(
+                provider(resource(IOT_ARN, "iot:thing", Map.of()))), List.of(handler));
+        service.tagResources(List.of(IOT_ARN), Map.of("a", "1", "b", "2"), REGION);
+
+        Map<String, AwsException> failures = service.removeTags(List.of(IOT_ARN), List.of("a"), REGION);
+
+        assertTrue(failures.isEmpty());
+        assertEquals(List.of("a"), handler.untagged.get(IOT_ARN));
+        assertEquals(Map.of("b", "2"), service.getTagsForResource(REGION, IOT_ARN));
+    }
+
+    @Test
+    void removeTagsForUnlistedArnSkipsHandlerAndUntagsStore() {
+        RecordingTagHandler handler = new RecordingTagHandler("iot", false);
         ResourceGroupsTaggingService service = service(List.of(), List.of(handler));
         service.tagResources(List.of(IOT_ARN), Map.of("a", "1", "b", "2"), REGION);
 
         service.removeTags(List.of(IOT_ARN), List.of("a"), REGION);
 
-        assertEquals(List.of("a"), handler.untagged.get(IOT_ARN));
+        assertTrue(handler.untagged.isEmpty());
         assertEquals(Map.of("b", "2"), service.getTagsForResource(REGION, IOT_ARN));
+    }
+
+    @Test
+    void removeTagsFailureIsReportedAndStoreKeptForThatArn() {
+        RecordingTagHandler handler = new RecordingTagHandler("apigateway", true);
+        ResourceGroupsTaggingService service = service(List.of(
+                provider(resource(API_KEY_ARN, "apigateway:apikeys", Map.of()))), List.of(handler));
+        service.tagResources(List.of(API_KEY_ARN, QUEUE_ARN), Map.of("a", "1", "b", "2"), REGION);
+
+        Map<String, AwsException> failures = service.removeTags(List.of(API_KEY_ARN, QUEUE_ARN), List.of("a"), REGION);
+
+        assertEquals(List.of(API_KEY_ARN), List.copyOf(failures.keySet()));
+        assertEquals(Map.of("a", "1", "b", "2"), service.getTagsForResource(REGION, API_KEY_ARN));
+        assertEquals(Map.of("b", "2"), service.getTagsForResource(REGION, QUEUE_ARN));
     }
 
     @Test
@@ -351,10 +415,6 @@ class ResourceGroupsTaggingServiceTest {
             types.add(new SupportedResourceType(resource.resourceType(), resource.service(), true));
         }
         return new FakeProvider(List.of(resources), types);
-    }
-
-    private static ResourceProvider provider(Set<SupportedResourceType> types) {
-        return new FakeProvider(List.of(), types);
     }
 
     private record FakeProvider(List<ExplorerResource> resources, Set<SupportedResourceType> types)

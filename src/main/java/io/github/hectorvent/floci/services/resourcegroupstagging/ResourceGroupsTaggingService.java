@@ -8,7 +8,6 @@ import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.TagHandler;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
-import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.resourcegroupstagging.model.ResourceTagMapping;
@@ -24,6 +23,7 @@ import java.util.Base64;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -137,49 +137,77 @@ public class ResourceGroupsTaggingService implements Resettable {
     // ─── Write-through for the tagging API ────────────────────────────────────
 
     /**
-     * TagResources from the tagging API: the owning service's {@link TagHandler} gets the tags
-     * first, and the store keeps a copy unless a {@link ResourceProvider} declares the
-     * resource's type, in which case the owning service holds the only copy.
-     * {@link #tagResources} stays store-only for services that dual-write, so they can never
-     * recurse through their own handler.
+     * TagResources from the tagging API. An ARN that a {@link ResourceProvider} currently lists
+     * goes to its owning service's {@link TagHandler} only, so the owner holds the one copy; any
+     * other ARN goes to the tagging store. {@link #tagResources} stays store-only for services
+     * that dual-write, so they can never recurse through their own handler.
+     *
+     * @return the owning service's rejection per ARN, empty when every ARN was tagged
      */
-    public void applyTags(List<String> resourceArns, Map<String, String> tags, String region) {
+    public Map<String, AwsException> applyTags(List<String> resourceArns, Map<String, String> tags, String region) {
+        Map<String, AwsException> failures = new LinkedHashMap<>();
+        Map<String, TagHandler> owners = listedOwners(resourceArns);
         for (String arn : resourceArns) {
-            if (!tagThroughOwner(arn, tags, region)) {
+            TagHandler owner = owners.get(arn);
+            if (owner == null) {
                 tagResources(List.of(arn), tags, region);
+                continue;
+            }
+            try {
+                owner.tagResource(AwsArnUtils.regionOrDefault(arn, region), arn, tags);
+            } catch (AwsException e) {
+                failures.put(arn, e);
             }
         }
+        return failures;
     }
 
-    public void removeTags(List<String> resourceArns, List<String> tagKeys, String region) {
+    /**
+     * UntagResources from the tagging API, routed as {@link #applyTags} routes. The keys also
+     * leave the tagging store for every ARN whose owning service did not reject them.
+     *
+     * @return the owning service's rejection per ARN, empty when every ARN was untagged
+     */
+    public Map<String, AwsException> removeTags(List<String> resourceArns, List<String> tagKeys, String region) {
+        Map<String, AwsException> failures = new LinkedHashMap<>();
+        Map<String, TagHandler> owners = listedOwners(resourceArns);
+        List<String> untagged = new ArrayList<>();
+        for (String arn : resourceArns) {
+            TagHandler owner = owners.get(arn);
+            if (owner != null) {
+                try {
+                    owner.untagResource(AwsArnUtils.regionOrDefault(arn, region), arn, tagKeys);
+                } catch (AwsException e) {
+                    failures.put(arn, e);
+                    continue;
+                }
+            }
+            untagged.add(arn);
+        }
+        untagResources(untagged, tagKeys, region);
+        return failures;
+    }
+
+    // Providers are only read when some ARN has a handler, so a store-only request stays cheap.
+    private Map<String, TagHandler> listedOwners(List<String> resourceArns) {
+        Map<String, TagHandler> owners = new HashMap<>();
+        Set<String> listed = null;
         for (String arn : resourceArns) {
             TagHandler handler = ownerHandler(arn);
             if (handler == null) {
                 continue;
             }
-            try {
-                handler.untagResource(AwsArnUtils.regionOrDefault(arn, region), arn, tagKeys);
-            } catch (AwsException e) {
-                LOG.debugv("{0} rejected untagging {1} ({2}); removing the keys from the tagging store only",
-                        handler.serviceKey(), arn, e.getErrorCode());
+            if (listed == null) {
+                listed = new HashSet<>();
+                for (ExplorerResource resource : providerResources()) {
+                    listed.add(withoutWildcard(resource.arn()));
+                }
+            }
+            if (listed.contains(withoutWildcard(arn))) {
+                owners.put(arn, handler);
             }
         }
-        untagResources(resourceArns, tagKeys, region);
-    }
-
-    private boolean tagThroughOwner(String arn, Map<String, String> tags, String region) {
-        TagHandler handler = ownerHandler(arn);
-        if (handler == null) {
-            return false;
-        }
-        try {
-            handler.tagResource(AwsArnUtils.regionOrDefault(arn, region), arn, tags);
-        } catch (AwsException e) {
-            LOG.debugv("{0} rejected tags for {1} ({2}); keeping them in the tagging store",
-                    handler.serviceKey(), arn, e.getErrorCode());
-            return false;
-        }
-        return isProviderOwned(AwsArnUtils.parse(arn));
+        return owners;
     }
 
     private TagHandler ownerHandler(String arn) {
@@ -195,19 +223,8 @@ public class ResourceGroupsTaggingService implements Resettable {
         return null;
     }
 
-    private boolean isProviderOwned(AwsArnUtils.Arn arn) {
-        String type = parsedType(arn.resource());
-        for (ResourceProvider provider : providers) {
-            for (SupportedResourceType supported : provider.getSupportedResourceTypes()) {
-                String declared = typeSuffix(supported.resourceType());
-                int slash = declared.indexOf('/');
-                String firstSegment = slash < 0 ? declared : declared.substring(0, slash);
-                if (supported.service().equals(arn.service()) && firstSegment.equals(type)) {
-                    return true;
-                }
-            }
-        }
-        return false;
+    private static String withoutWildcard(String arn) {
+        return arn.endsWith(WILDCARD_SUFFIX) ? arn.substring(0, arn.length() - WILDCARD_SUFFIX.length()) : arn;
     }
 
     // ─── GetResources ──────────────────────────────────────────────────────────
@@ -319,12 +336,15 @@ public class ResourceGroupsTaggingService implements Resettable {
             }
         }
         for (ExplorerResource resource : providerResources()) {
-            String arn = resource.arn().endsWith(WILDCARD_SUFFIX)
-                    ? resource.arn().substring(0, resource.arn().length() - WILDCARD_SUFFIX.length())
-                    : resource.arn();
+            String arn = withoutWildcard(resource.arn());
+            // The owner's region decides, so a store copy of a region-less ARN must not surface elsewhere.
+            if (!isVisible(arn, resource.region(), region, accountId)) {
+                byArn.remove(arn);
+                continue;
+            }
             ViewEntry entry = byArn.get(arn);
             if (entry == null) {
-                if (resource.tags().isEmpty() || !isVisible(arn, resource.region(), region, accountId)) {
+                if (resource.tags().isEmpty()) {
                     continue;
                 }
                 entry = ViewEntry.of(arn);

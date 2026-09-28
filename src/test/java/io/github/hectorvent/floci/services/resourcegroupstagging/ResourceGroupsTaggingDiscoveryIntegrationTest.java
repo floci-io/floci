@@ -244,6 +244,64 @@ class ResourceGroupsTaggingDiscoveryIntegrationTest {
     }
 
     @Test
+    void apiKeyRejectionOfReservedTagIsReportedInFailedResourcesMap() {
+        String marker = unique();
+        String id = createApiKey(marker);
+        String arn = APIGATEWAY_ARN_PREFIX + "/apikeys/" + id;
+
+        tagging("TagResources", """
+                {"ResourceARNList": ["%s"], "Tags": {"floci:override-id": "x%s"}}
+                """.formatted(arn, marker))
+            .then()
+            .statusCode(200)
+            .body("FailedResourcesMap", hasKey(arn))
+            .body("FailedResourcesMap['%s'].StatusCode".formatted(arn), equalTo(400))
+            .body("FailedResourcesMap['%s'].ErrorCode".formatted(arn), equalTo("InvalidParameterException"))
+            .body("FailedResourcesMap['%s'].ErrorMessage".formatted(arn), containsString("floci:override-id"));
+
+        getResources(rsidFilter("apigateway:apikeys", marker))
+            .body("ResourceTagMappingList.ResourceARN", contains(arn))
+            .body("ResourceTagMappingList[0].Tags.Key", not(hasItem("floci:override-id")));
+        given()
+        .when()
+            .get("/apikeys/" + id)
+        .then()
+            .statusCode(200)
+            .body("tags", not(hasKey("floci:override-id")));
+
+        deleteApiKey(id);
+    }
+
+    @Test
+    void deploymentArnDoesNotRetagTheRestApi() {
+        String marker = unique();
+        String apiId = createRestApi(marker);
+        String restApiArn = APIGATEWAY_ARN_PREFIX + "/restapis/" + apiId;
+        String deploymentArn = restApiArn + "/deployments/d1";
+
+        tagging("TagResources", """
+                {"ResourceARNList": ["%s"], "Tags": {"leak": "yes"}}
+                """.formatted(deploymentArn))
+            .then()
+            .statusCode(200)
+            .body("FailedResourcesMap", anEmptyMap());
+
+        given()
+            .pathParam("arn", restApiArn)
+        .when()
+            .get("/tags/{arn}")
+        .then()
+            .statusCode(200)
+            .body("tags.fd", equalTo(marker))
+            .body("tags", not(hasKey("leak")));
+
+        tagging("UntagResources", """
+                {"ResourceARNList": ["%s"], "TagKeys": ["leak"]}
+                """.formatted(deploymentArn)).then().statusCode(200);
+        given().when().delete("/restapis/" + apiId).then().statusCode(202);
+    }
+
+    @Test
     void restTagsPathReadsAndWritesApiKeyTags() {
         String marker = unique();
         String id = createApiKey(marker);
